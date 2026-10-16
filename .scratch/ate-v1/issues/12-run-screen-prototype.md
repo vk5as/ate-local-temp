@@ -1,0 +1,11 @@
+# Run screen, input forms, log pane and debug window
+
+Type: prototype
+Status: open
+Blocked by: 04, 10
+
+## Question
+
+How should the Run screen look and behave: entering Project, UUT name and serial, choosing a Test Schedule, enabling and disabling individual Test Steps before the run starts, showing live step progress, step input forms (text boxes, radio buttons), the log pane, and the separate debug window?
+
+Inputs: "Test Step structure and outcome model" (04) fixes the layout. The screen is a vertical list of every step, with each step's inputs always visible under it. A blocking input is enabled only while its `ATE.input(n)` call waits, and a `POLL` only while its step runs.
