@@ -23,7 +23,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
   - `ATE.open(DeviceType.X, params [, onError])` takes a plain table of connection details and returns an opaque device object, the first argument to `read`/`write`/`close`. Driver complexity stays in Python. v1 Device Types are `SERIAL`, `TCP`, `UDP` and `VISA`; ATE buffers incoming data until `ATE.read`.
   - `ATE.log(Log.X, ...)` has levels; everything above debug shows in the main UI, and a separate debug window shows all levels.
   - Auxiliary Lua files load only through ATE's replacement `require`, restricted to files listed in a Test Definition or its dependencies; it warns on checksum mismatch. Each Test Run records the expected and computed checksum of every file used.
-  - An application config JSON is read at launch; it includes the directories searched for Test Definitions.
+  - An application config JSON is read at launch; defined in `assets/app-config-format.md`.
   - v1 is one Station with a local database. Operator is a free-text name. Lua is trusted.
   - Reports cover a single Test Run, as HTML with PDF rendered from it, generated at run end or later from the database.
   - GUI v1: Run screen and History screen; configuration is edited by hand.
@@ -41,6 +41,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - [Device connection details and v1 connection types](issues/06-device-connection-info.md): `SERIAL`, `TCP`, `UDP`, `VISA`, raw bytes, all `open` fields required with defaults supplied by builders in the bundled `ate.devices` module, optional per-call overrides, uniform `{data, count, partial}` read results with partial reads not an error, background buffering until `read`, and Device tracing as an off-by-default setting.
 - [Test Step structure and outcome model](issues/04-test-step-structure.md): v1 steps keep only Step Number, enable, inputs and action, with every Step Input type supported. `ATE.input(n)` return values are fixed per type, and a schedule with a duplicate Step Number fails to load. A new `Result.ERROR` covers Lua errors, and a run fails on any `FAIL` or `ERROR`.
 - [Test Definition format](issues/07-test-definition-format.md): a JSON `.atedef` file with `format`, `mediaNumber` (unique identity, not a version), `name`, semver `version`, and a `files` list of `.tslua` and `.lua` files with raw-byte SHA-256 checksums. `depends` takes name plus semver range and resolves transitively. Mismatches warn, while missing files, bad entries and duplicates make the release broken. There is no Project in the definition; Project is per Test Run. The Operator picks from one flat list of every visible schedule. Defined in `assets/test-definition-format.md`.
+- [Application config file](issues/08-app-config-file.md): a machine-wide `config.json` (`%PROGRAMDATA%\ATE`, `/etc/ate`), read at launch. A missing file prompts to create defaults or abort; an invalid file stops startup. It holds `station.name` and a generated `station.uuid` that is written back to the file, data-directory default paths, a per-launch application log that is never rotated or deleted, Device tracing, `defaultProject` and `ui.theme`. Defined in `assets/app-config-format.md`.
 
 ## Not yet specified
 

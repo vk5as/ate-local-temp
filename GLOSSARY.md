@@ -13,7 +13,7 @@ The person conducting a Test Run, identified by free-text name.
 _Avoid_: User, tester, technician
 
 **Station**:
-One installation of ATE on one computer; its identity is recorded on every Test Run.
+One installation of ATE on one computer, identified by a generated unique ID and carrying a name; its identity is recorded on every Test Run.
 _Avoid_: Rig, bench, tester
 
 **Device**:
