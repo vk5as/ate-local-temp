@@ -13,7 +13,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - Settled during charting:
   - Test Step order is the position in the returned array; Python orchestrates execution, sequentially for now.
   - Each Test Step holds a Lua function that Python calls.
-  - Target **Lua 5.5**.
+  - Target **Lua 5.5**, through the stock `lupa` wheels (`lupa.lua55`), on 64-bit CPython 3.13 and 3.14; CI runs Windows and Linux on both.
   - A step reports via `ATE.report(passFail, msg, actual, expected)`; `passFail` is `Result.PASS`, `Result.FAIL`, `Result.ERROR`, `Result.SKIPPED`, `Result.NOTRUN`, `Result.FORCED_NOTRUN` or `Result.NOREPORT`. `SKIPPED`, `NOTRUN` and `FORCED_NOTRUN` are used at the test writer's discretion. `actual` and `expected` are stored as text; the schedule does its own comparison and chooses `passFail`. Every call is logged, but only the last counts. A step that never reports records `NOREPORT` and logs a warning.
   - A Test Run's result is `PASS` or `FAIL`; it fails if any step is `FAIL` or `ERROR`. The Test Report's summary cover page shows a count of steps for each `Result` value. The Post-test Action receives only `passFail`.
   - Before a run starts, the Operator can enable or disable individual Test Steps; `setEnable` only sets the default. A step disabled at start records `Result.NOTRUN`.
@@ -39,6 +39,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 
 - [The ATE Lua API](issues/05-ate-lua-api.md): `ATE.report(passFail, msg, actual, expected)` with the `Result` enum, `ATE.log(Log.X, ...)`, `ATE.sleep`, a read-only `ATE.run`, and `ATE.open(DeviceType.X, params [, onError])` with plain params tables and a shipped builder utility. A non-`nil` return from `onError` lets the script continue; otherwise the failure raises and the step records `ERROR`. Defined in `assets/ate-table-reference.md`.
 - [Device connection details and v1 connection types](issues/06-device-connection-info.md): `SERIAL`, `TCP`, `UDP`, `VISA`, raw bytes, all `open` fields required with defaults supplied by builders in the bundled `ate.devices` module, optional per-call overrides, uniform `{data, count, partial}` read results with partial reads not an error, background buffering until `read`, and Device tracing as an off-by-default setting.
+- [Choose the Lua runtime](issues/09-choose-lua-runtime.md): stock lupa wheels pinned to `lupa.lua55`, one `QThread` worker and a fresh `LuaRuntime` per Test Run or load, abort via blocking calls plus a count hook, `xpcall` tracebacks for `ERROR`, loading locked down (no `dofile`/`loadfile`/`load`/`python.*`), `VISA` reads on demand, CPython 3.13 and 3.14 in CI. A Windows prototype (16) checks it.
 - [Test Step structure and outcome model](issues/04-test-step-structure.md): v1 steps keep only Step Number, enable, inputs and action, with every Step Input type supported. `ATE.input(n)` return values are fixed per type, and a schedule with a duplicate Step Number fails to load. A new `Result.ERROR` covers Lua errors, and a run fails on any `FAIL` or `ERROR`.
 - [Test Definition format](issues/07-test-definition-format.md): a JSON `.atedef` file with `format`, `mediaNumber` (unique identity, not a version), `name`, semver `version`, and a `files` list of `.tslua` and `.lua` files with raw-byte SHA-256 checksums. `depends` takes name plus semver range and resolves transitively. Mismatches warn, while missing files, bad entries and duplicates make the release broken. There is no Project in the definition; Project is per Test Run. The Operator picks from one flat list of every visible schedule. Defined in `assets/test-definition-format.md`.
 - [Application config file](issues/08-app-config-file.md): a machine-wide `config.json` (`%PROGRAMDATA%\ATE`, `/etc/ate`), read at launch. A missing file prompts to create defaults or abort; an invalid file stops startup. It holds `station.name` and a generated `station.uuid` that is written back to the file, data-directory default paths, a per-launch application log that is never rotated or deleted, Device tracing, `defaultProject` and `ui.theme`. Defined in `assets/app-config-format.md`.
@@ -46,11 +47,11 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 ## Not yet specified
 
 - What the History screen does beyond browsing Test Runs and regenerating reports.
-- Threading model for Lua execution vs the GUI; depends on the runtime chosen in "Choose the Lua runtime".
 - How a Device failing mid-run is handled.
 - The Device receive buffer: its size limit, what happens on overflow, and whether a schedule can discard buffered data before a command.
 - Recording instrument identity and calibration on a Test Run.
 - Packaging and installers, especially for Windows.
+- A custom Lua build for lupa (patched `luaconf.h`, extra C libraries, Lua C modules); possible but means building our own wheels. See `research/lupa-custom-lua.md` on branch `research/lupa-custom-lua`.
 
 ## Out of scope
 

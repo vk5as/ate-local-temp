@@ -60,7 +60,9 @@ A field the Device Type doesn't know (a typo such as `buad`), a missing required
 
 ### Buffering incoming data
 
-A schedule isn't reactive to incoming data; it only sees data when it calls `ATE.read`. So from `open` until `close`, ATE reads each Device in the background and buffers everything that arrives. `ATE.read` takes from that buffer first and waits only for what isn't there yet, so a response that arrives before the schedule asks for it isn't lost. For `UDP` the buffer is a queue of whole datagrams.
+A schedule isn't reactive to incoming data; it only sees data when it calls `ATE.read`. So from `open` until `close`, ATE reads each `SERIAL`, `TCP` and `UDP` Device in the background and buffers everything that arrives. `ATE.read` takes from that buffer first and waits only for what isn't there yet, so a response that arrives before the schedule asks for it isn't lost. For `UDP` the buffer is a queue of whole datagrams.
+
+`VISA` is the exception: it has no background reader, and `ATE.read` reads on demand. A VISA instrument only speaks when queried, and polling it with reads that have nothing pending makes SCPI instruments log *Query UNTERMINATED* (-420) and ties up the bus. The result shape is the same.
 
 ### Results
 
@@ -156,4 +158,4 @@ There is no `ATE.gc`: schedules that need a collection call the standard `collec
 
 ## Loading auxiliary code
 
-Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). Module names starting with `ate.` resolve to modules bundled with ATE, such as `ate.devices`. The standard library is otherwise complete, except that `dofile` and `loadfile` are removed.
+Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). Module names starting with `ate.` resolve to modules bundled with ATE, such as `ate.devices`. The standard library is otherwise complete, except that `dofile`, `loadfile` and `load` are removed.

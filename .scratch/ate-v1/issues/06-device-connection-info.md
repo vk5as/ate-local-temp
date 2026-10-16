@@ -23,3 +23,9 @@ Full definition: the Devices section of `assets/ate-table-reference.md`.
 - **Results**: a complete read returns `{data, count, partial = false}`. A timeout after some bytes is not an error: it returns `partial = true` and logs a warning. A timeout with no bytes, or any other failure, sets `err` and goes through `onError`. `write` returns `{ok, count}`. Shapes are uniform across types where the types allow; `UDP` reads are partial only when truncated by `size`.
 - **Builders** are in the bundled module `ate.devices` (`require` reserves the `ate.` namespace): `Serial(port)`, `Tcp(host, port)`, `Udp(host, port)`, `Visa(resource)`, `Read()`, `Write(data)`, with defaults (9600 8N1, no flow control, 1 s timeout, `"\n"` terminators) and chained setters. The builder is itself the params table.
 - **Device tracing** at `Log.DEBUG` is an application config setting, off by default.
+
+## Comments
+
+### From "Choose the Lua runtime" (09), 2026-10-17
+
+Background buffering applies to `SERIAL`, `TCP` and `UDP` only. `VISA` reads on demand in `ATE.read`, because background reads of an instrument with nothing pending cause SCPI *Query UNTERMINATED* (-420) errors and tie up the bus. The result shape is unchanged. Recorded in `assets/ate-table-reference.md`.
