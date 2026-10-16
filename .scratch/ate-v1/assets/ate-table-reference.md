@@ -146,7 +146,7 @@ There is no `ATE.gc`: schedules that need a collection call the standard `collec
 
 ## Run information
 
-`ATE.run` is a read-only table describing the current Test Run: the UUT serial number, the Operator, the Station, the Test Schedule name and the Media Release. Writing to it raises an error.
+`ATE.run` is a read-only table describing the current Test Run: the UUT serial number, the Operator, the Station, the Project, the Test Schedule name and the Media Release (media number, name and version). Writing to it raises an error.
 
 ## Where each call is allowed
 

@@ -95,7 +95,7 @@ return ScheduleParams("Power board functional", "Basic rails and LEDs")
 
 Test Schedules share code through ordinary Lua modules loaded with the standard `require`. ATE replaces `require` so that a run stays traceable:
 
-- `require("lib.psu")` resolves the module name against the files listed in the Test Definition, never against `package.path`. Asking for a module the Test Definition does not list is an error.
+- `require("lib.psu")` resolves the module name against the files listed in the Test Definition and then its dependencies, never against `package.path`. Asking for a module none of them lists is an error. Module naming and resolution order are defined in `test-definition-format.md`.
 - ATE computes the checksum of each file it loads and compares it with the Test Definition. A mismatch logs a warning but still loads the file. The Test Run records the expected and computed checksum of every file used.
 - As in normal Lua, a module runs once per Test Run, and later calls return the cached value.
 - The `ate.` namespace is reserved: `require("ate.devices")` resolves to a module bundled with ATE, never to the Test Definition, and a Test Definition may not list files under `ate.`. The Test Run records the ATE version and the checksum of every bundled module it used.

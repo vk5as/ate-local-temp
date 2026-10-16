@@ -5,7 +5,7 @@ ATE (Automated Test Execution) runs scripted tests against units, mostly hardwar
 ## Language
 
 **Project**:
-The product or programme a UUT belongs to; Test Schedules are grouped under it.
+The product or programme a Test Run is for, named by the Operator when the run starts; it is not a property of a Test Schedule or Media Release.
 _Avoid_: Product, programme, job
 
 **Operator**:
@@ -29,8 +29,12 @@ A file that names a Media Release and lists every Lua file belonging to it (Test
 _Avoid_: Manifest, package
 
 **Media Release**:
-A numbered, named, released set of Lua files, as identified by a Test Definition.
-_Avoid_: Version, bundle
+An installed, released set of Lua files described by one Test Definition, identified by its media number and carrying a name and version; it may contain only helper code, and may depend on other Media Releases.
+_Avoid_: Bundle, package
+
+**Media Number**:
+The configured artifact-storage number that uniquely identifies a Media Release; not a version.
+_Avoid_: Release number, version
 
 **UUT**:
 Unit Under Test: the single physical item (or occasionally software artefact) being tested, identified by its serial number.
