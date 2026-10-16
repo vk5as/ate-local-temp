@@ -20,7 +20,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
   - Test Schedules' own use of Lua coroutines need not be supported.
   - `PROMPT` Step Inputs block until the Operator clicks continue. `POLL` Step Inputs are non-blocking: `nil` until a button is clicked, then the button's text (sticky; reset at run and step start), and clickable at any time while the step runs.
   - `ATE.input(n)` pauses the running step function while the GUI collects the value for the step's n-th declared input (text box or radio buttons).
-  - `ATE.open(DeviceType.X, params [, onError])` takes a plain table of connection details and returns an opaque device object, the first argument to `read`/`write`/`close`. Driver complexity stays in Python.
+  - `ATE.open(DeviceType.X, params [, onError])` takes a plain table of connection details and returns an opaque device object, the first argument to `read`/`write`/`close`. Driver complexity stays in Python. v1 Device Types are `SERIAL`, `TCP`, `UDP` and `VISA`; ATE buffers incoming data until `ATE.read`.
   - `ATE.log(Log.X, ...)` has levels; everything above debug shows in the main UI, and a separate debug window shows all levels.
   - Auxiliary Lua files load only through ATE's replacement `require`, restricted to files listed in a Test Definition; it warns on checksum mismatch. Each Test Run records the expected and computed checksum of every file used.
   - An application config JSON is read at launch; it includes the directories searched for Test Definitions.
@@ -38,6 +38,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - [Options for turning HTML reports into PDF on Windows and Linux](issues/03-html-pdf-options.md): Qt QTextDocument is free but has weak CSS; QWebEngine and Playwright have full CSS but a heavy footprint; WeasyPrint is strong but hard to install on Windows; xhtml2pdf is easy but unproven.
 
 - [The ATE Lua API](issues/05-ate-lua-api.md): `ATE.report(passFail, msg, actual, expected)` with the `Result` enum, `ATE.log(Log.X, ...)`, `ATE.sleep`, a read-only `ATE.run`, and `ATE.open(DeviceType.X, params [, onError])` with plain params tables and a shipped builder utility. A non-`nil` return from `onError` lets the script continue; otherwise the failure raises and the step records `ERROR`. Defined in `assets/ate-table-reference.md`.
+- [Device connection details and v1 connection types](issues/06-device-connection-info.md): `SERIAL`, `TCP`, `UDP`, `VISA`, raw bytes, all `open` fields required with defaults supplied by builders in the bundled `ate.devices` module, optional per-call overrides, uniform `{data, count, partial}` read results with partial reads not an error, background buffering until `read`, and Device tracing as an off-by-default setting.
 - [Test Step structure and outcome model](issues/04-test-step-structure.md): v1 steps keep only Step Number, enable, inputs and action, with every Step Input type supported. `ATE.input(n)` return values are fixed per type, and a schedule with a duplicate Step Number fails to load. A new `Result.ERROR` covers Lua errors, and a run fails on any `FAIL` or `ERROR`.
 
 ## Not yet specified
@@ -45,6 +46,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - What the History screen does beyond browsing Test Runs and regenerating reports.
 - Threading model for Lua execution vs the GUI; depends on the runtime chosen in "Choose the Lua runtime".
 - How a Device failing mid-run is handled.
+- The Device receive buffer: its size limit, what happens on overflow, and whether a schedule can discard buffered data before a command.
 - Recording instrument identity and calibration on a Test Run.
 - Packaging and installers, especially for Windows.
 - Whether Media Release and Test Definition are distinct concepts (may settle in "Test Definition format").

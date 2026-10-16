@@ -13,15 +13,91 @@ ATE's definition of the `ATE` table that Test Schedules call, settled in "The AT
 | Call | Returns | Meaning |
 | --- | --- | --- |
 | `ATE.open(deviceType, params [, onError])` | device object | Opens a Device of the given Device Type |
-| `ATE.read(dev, params [, onError])` | `{data = <string>}` | Reads from an open Device |
-| `ATE.write(dev, params [, onError])` | `{ok = true}` | Writes to an open Device |
-| `ATE.close(dev, params [, onError])` | `{ok = true}` | Closes a Device and releases it |
+| `ATE.read(dev [, params] [, onError])` | read result | Reads from an open Device |
+| `ATE.write(dev, params [, onError])` | write result | Writes to an open Device |
+| `ATE.close(dev [, params] [, onError])` | `{ok = true}` | Closes a Device and releases it |
 
-- `deviceType` is a value of the `DeviceType` enum, whose values are the string keys of every Device Type ATE supports (e.g. `DeviceType.SERIAL`). Which types v1 supports is settled in "Device connection details and v1 connection types".
-- `params` is a plain Lua table whose fields depend on the Device Type. For `open` it holds the connection details (for serial: COM port, baud rate, data bits, stop bits, parity and so on); for `read`, `write` and `close` it holds the details of that operation.
-- ATE ships a utility Lua file of builder objects that construct these tables, in the same chained-setter style as `ScheduleParams`. The calls accept any table with the right fields, so the builders are a convenience, not a requirement.
 - The device object is a Lua table holding a host handle in `_handle`. Schedules treat it as opaque and only pass it back to `read`, `write` and `close`.
-- On failure, `read` returns `{data = nil, err = <message>}`, and `write` and `close` return `{ok = false, err = <message>}`. These shapes can gain fields later as needs arise.
+- Data is raw bytes in both directions: Lua strings, binary-safe, with no encoding or decoding. Schedules convert with `string.byte`/`string.pack` when they need to.
+- ATE has no Device discovery (listing COM ports or VISA resources) in v1. A schedule names its Devices.
+
+### Device Types
+
+`DeviceType` has these values in v1:
+
+| Value | Meaning |
+| --- | --- |
+| `DeviceType.SERIAL` | RS-232 or USB serial, through pyserial |
+| `DeviceType.TCP` | A raw socket stream, e.g. a LAN instrument taking SCPI on port 5025, or a UUT debug port |
+| `DeviceType.UDP` | Datagrams; one datagram is one message |
+| `DeviceType.VISA` | GPIB, USBTMC and VXI-11 instruments through pyvisa, addressed by a VISA resource string. It uses whatever backend pyvisa finds; ATE doesn't ship NI-VISA |
+
+### `open` params
+
+Every field is required: `open` has no defaults, and a missing field raises. The builders below supply defaults.
+
+| Type | Fields |
+| --- | --- |
+| `SERIAL` | `port`, `baud`, `dataBits` (5–8), `stopBits` (1, 1.5, 2), `parity`, `flowControl`, `timeout`, `readTerm`, `writeTerm` |
+| `TCP` | `host`, `port`, `timeout`, `readTerm`, `writeTerm` |
+| `UDP` | `host`, `port` (remote), `localPort` (0 = any), `timeout`. No terminators, because one datagram is one message |
+| `VISA` | `resource` (e.g. `"GPIB0::5::INSTR"`), `timeout`, `readTerm`, `writeTerm` |
+
+- `timeout` is in seconds. `readTerm` and `writeTerm` are byte strings; `""` means none, for binary protocols.
+- `parity` is a `Parity` enum value: `Parity.NONE`, `EVEN`, `ODD`, `MARK`, `SPACE`.
+- `flowControl` is a `FlowControl` enum value: `FlowControl.NONE`, `RTSCTS`, `XONXOFF`, `DSRDTR`.
+- The `open` values are the Device's configuration for the rest of the run.
+
+### `read`, `write` and `close` params
+
+Every field is optional; an absent field uses the Device's `open` configuration.
+
+- `read`: `size` (a byte limit; with none, the read ends on the terminator or the timeout), `timeout`, `readTerm`.
+- `write`: `data` (required), `writeTerm`. `writeTerm` is appended to `data`.
+- `close`: no fields, and `params` may be omitted.
+
+A field the Device Type doesn't know (a typo such as `buad`), a missing required field, or a value of the wrong type is a schedule bug, not a Device failure. It always raises, names the field, and never goes through `onError`.
+
+### Buffering incoming data
+
+A schedule isn't reactive to incoming data; it only sees data when it calls `ATE.read`. So from `open` until `close`, ATE reads each Device in the background and buffers everything that arrives. `ATE.read` takes from that buffer first and waits only for what isn't there yet, so a response that arrives before the schedule asks for it isn't lost. For `UDP` the buffer is a queue of whole datagrams.
+
+### Results
+
+The shapes are the same for every Device Type, as far as the types allow:
+
+| Outcome | Result | Through `onError`? |
+| --- | --- | --- |
+| `read` complete (terminator seen or `size` reached) | `{data = <bytes>, count = n, partial = false}` | no |
+| `read` timed out after some bytes | `{data = <bytes>, count = n, partial = true}`, and a `Log.WARNING` | no |
+| `read` timed out with no bytes | `{data = nil, count = 0, partial = false, err = "timeout"}` | yes |
+| `read` other failure (port gone, connection reset) | `{data = nil, count = 0, partial = false, err = <message>}` | yes |
+| `write` success / failure | `{ok = true, count = n}` / `{ok = false, count = 0, err = <message>}` | on failure |
+| `close` success / failure | `{ok = true}` / `{ok = false, err = <message>}` | on failure |
+
+- The read terminator is stripped from `data`, and `count` is `#data` after stripping.
+- A `write` `count` includes the terminator.
+- A `UDP` read never times out partway: a datagram arrives whole or not at all. A datagram longer than `size` is truncated and returned with `partial = true`.
+
+### Builders (`ate.devices`)
+
+ATE ships the builders as a module in the reserved `ate.` namespace (see "Loading auxiliary code"):
+
+```lua
+local devices = require("ate.devices")
+local psu = ATE.open(DeviceType.SERIAL,
+  devices.Serial("COM3"):setBaud(115200):setParity(Parity.EVEN))
+local r = ATE.read(psu, devices.Read():setTimeout(5))
+ATE.write(psu, devices.Write("*IDN?"))
+```
+
+- Constructors take the fields that identify a Device or call: `Serial(port)`, `Tcp(host, port)`, `Udp(host, port)`, `Visa(resource)`, `Read()` and `Write(data)`.
+- Every other field starts from a default and is changed with a chained `setX` setter, as with `ScheduleParams`. Defaults: 9600 baud, 8 data bits, no parity, 1 stop bit, `FlowControl.NONE`, `timeout = 1.0`, `readTerm = writeTerm = "\n"`, `localPort = 0`.
+- The builder is the params table itself: its fields are plain fields and its setters live in a metatable, so it passes straight to `ATE.open` with no `:build()` step and passes the unknown-field check.
+
+### Tracing
+
+When Device tracing is turned on in the application config (off by default), ATE logs every `open`, `read`, `write` and `close` at `Log.DEBUG`, with the Device, the bytes (escaped, and truncated past a set length) and the timing. Trace lines show in the debug window and are recorded with the Test Run.
 
 ### Errors and `onError`
 
@@ -74,10 +150,10 @@ There is no `ATE.gc`: schedules that need a collection call the standard `collec
 
 ## Where each call is allowed
 
-- **While the `.tslua` file loads** (top level): the builders, `require`, `ATE.log` and the enums. Everything else raises an error, because loading happens before a Test Run exists.
+- **While the `.tslua` file loads** (top level): the builders (including `ate.devices`), `require`, `ATE.log` and the enums. Everything else raises an error, because loading happens before a Test Run exists.
 - **In the Pre-test and Post-test Actions**: everything except `ATE.input` and `ATE.report`, which belong to steps.
 - **In a step action**: everything.
 
 ## Loading auxiliary code
 
-Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). The standard library is otherwise complete, except that `dofile` and `loadfile` are removed.
+Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). Module names starting with `ate.` resolve to modules bundled with ATE, such as `ate.devices`. The standard library is otherwise complete, except that `dofile` and `loadfile` are removed.

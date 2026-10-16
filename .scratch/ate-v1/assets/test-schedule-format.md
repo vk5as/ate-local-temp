@@ -98,6 +98,7 @@ Test Schedules share code through ordinary Lua modules loaded with the standard 
 - `require("lib.psu")` resolves the module name against the files listed in the Test Definition, never against `package.path`. Asking for a module the Test Definition does not list is an error.
 - ATE computes the checksum of each file it loads and compares it with the Test Definition. A mismatch logs a warning but still loads the file. The Test Run records the expected and computed checksum of every file used.
 - As in normal Lua, a module runs once per Test Run, and later calls return the cached value.
+- The `ate.` namespace is reserved: `require("ate.devices")` resolves to a module bundled with ATE, never to the Test Definition, and a Test Definition may not list files under `ate.`. The Test Run records the ATE version and the checksum of every bundled module it used.
 - `dofile` and `loadfile` are removed, so `require` is the only intended way to run another file. Lua is trusted, so this is about traceability, not security; `io` and `load` on strings remain.
 
 This is unrelated to the step setter `:setInclude(file, keyvals)`, which pulls in a Sub-schedule. ATE has no function named `include`.
