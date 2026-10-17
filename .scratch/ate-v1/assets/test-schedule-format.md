@@ -144,4 +144,4 @@ return ScheduleParams("Channel check", "One output channel")
 
 ## The `ATE` table
 
-The functions schedules call (`open`, `read`, `write`, `close`, `sleep`, `input`, `log`, `report`, `addEquipment`, `run`) are defined in `ate-table-reference.md`.
+The functions schedules call (`open`, `read`, `write`, `close`, `flush`, `sleep`, `input`, `log`, `report`, `addEquipment`, `run`) are defined in `ate-table-reference.md`.

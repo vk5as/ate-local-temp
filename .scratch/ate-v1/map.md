@@ -26,13 +26,14 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
   - An application config JSON is read at launch; defined in `assets/app-config-format.md`.
   - v1 is one Station with a local database. Operator is a free-text name. Lua is trusted.
   - Reports cover a single Test Run, as HTML with PDF rendered from it, generated at run end or later from the database.
-  - GUI v1: Run screen and History screen; configuration is edited by hand. The Run screen has two layouts, staged and three-pane (`assets/run-screen.md`).
+  - GUI v1: Run screen and History screen (`assets/history-screen.md`); configuration is edited by hand. The Run screen has two layouts, staged and three-pane (`assets/run-screen.md`).
   - Architectural rule: the engine and the run session never import widgets, and layouts hold no run logic, so layouts are interchangeable and the engine is testable without a GUI.
   - Windows and Linux both supported; Windows primary.
 - Grilling tickets: use the `grilling` and `domain-modeling` skills.
 
 ## Decisions so far
 
+- [Settle the remaining Not yet specified items](issues/19-remaining-fog.md): History is a flat, filterable table with per-run actions and no delete (`assets/history-screen.md`); a failing Device is logged and marked failed, with no automatic reconnect; the receive buffer is capped and drops the oldest data, and `ATE.flush` empties it; a supported Windows installer plus best-effort `.tar.gz`, Debian `.deb` and wheel, all prepared by `ate setup` (`assets/packaging.md`); a custom Lua build is out of scope.
 - [Run screen, input forms, log pane and debug window](issues/12-run-screen-prototype.md): two layouts on one UI-free run session, staged (default; setup stages UUT and Operator, Test Schedule, Steps and options; a focus run view) and three-pane (step table, inline failure prompt), chosen by `ui.layout` with an optional View menu switch; Operator is required; run-start confirmation only on a checksum mismatch; New run clears nothing. Defined in `assets/run-screen.md`.
 - [Draft the ATE table](issues/15-ate-table-reference.md): a first draft of the `ATE` table: `open`/`read`/`write`/`close` with `onError` handlers, plus timing, `input`, logging and `report`. Its conflicts with earlier decisions went to "The ATE Lua API".
 - [Draft the Lua schedule format](issues/01-lua-schedule-spec.md): `.tslua` files return a `ScheduleParams` builder (report doc fields, Pre-test and Post-test Actions, array of `StepParams` steps with Step Number, enable, Step Inputs, action, Sub-schedule include); written up in `assets/test-schedule-format.md`.
@@ -55,11 +56,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 
 ## Not yet specified
 
-- What the History screen does beyond browsing Test Runs, regenerating reports (optionally without the Run log) and exporting a Run log: how runs are found (search, filters, sort), and whether anything else happens there (deleting runs, re-running a UUT).
-- How a Device failing mid-run is handled.
-- The Device receive buffer: its size limit, what happens on overflow, and whether a schedule can discard buffered data before a command.
-- Packaging and installers, especially for Windows.
-- A custom Lua build for lupa (patched `luaconf.h`, extra C libraries, Lua C modules); possible but means building our own wheels. See `research/lupa-custom-lua.md` on branch `research/lupa-custom-lua`.
+Nothing. Every item was settled in "Settle the remaining Not yet specified items".
 
 ## Out of scope
 
@@ -70,6 +67,7 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - Logins and roles.
 - A GUI for editing configuration.
 - Lua sandboxing.
+- A custom Lua build for lupa (patched `luaconf.h`, extra C libraries, Lua C modules); possible but means building our own wheels. See `research/lupa-custom-lua.md` on branch `research/lupa-custom-lua`.
 - Report generators scripted in Lua, and user-supplied report templates.
 - Cryptographically signing Test Reports to authenticate them, including PDF signature fields (v2).
 - Linking Equipment to the Devices a schedule opens (for example by VISA `*IDN?`).

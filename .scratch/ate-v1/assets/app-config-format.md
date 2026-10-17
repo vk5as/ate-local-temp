@@ -35,8 +35,9 @@ The config describes the Station, so it is machine-wide:
   "database": { "type": "sqlite", "path": "ate.db", "storeMismatchedFiles": "ask" },
   "reports": { "directory": "reports", "organisation": "", "logo": null, "paperSize": "A4" },
   "log": { "directory": "logs", "level": "info" },
+  "devices": { "receiveBufferBytes": 16777216 },
   "deviceTrace": { "enabled": false, "maxBytes": 256 },
-  "ui": { "theme": "system", "layout": "staged", "allowLayoutSwitch": true }
+  "ui": { "theme": "system", "layout": "staged", "allowLayoutSwitch": true, "allowHistoryDuringRun": true }
 }
 ```
 
@@ -60,11 +61,13 @@ Keys are camelCase, grouped in sections.
 | `reports.paperSize` | `A4` | `A4` or `Letter` |
 | `log.directory` | `<data>/logs` | Where the application log is written |
 | `log.level` | `info` | Application log level |
+| `devices.receiveBufferBytes` | `16777216` (16 MiB) | Receive buffer limit per Device; overflow drops the oldest data (see `ate-table-reference.md`) |
 | `deviceTrace.enabled` | `false` | Device tracing at `Log.DEBUG` (see `ate-table-reference.md`) |
 | `deviceTrace.maxBytes` | `256` | Length past which traced bytes are truncated |
 | `ui.theme` | `system` | `system`, `light` or `dark` |
 | `ui.layout` | `staged` | Default Run screen layout: `staged` or `threePane` (see `run-screen.md`) |
 | `ui.allowLayoutSwitch` | `true` | Whether the View menu can switch the layout for the session |
+| `ui.allowHistoryDuringRun` | `true` | Whether the History screen can be used while a Test Run is in progress |
 
 ## Station identity
 

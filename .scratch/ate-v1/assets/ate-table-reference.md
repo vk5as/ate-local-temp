@@ -16,6 +16,7 @@ ATE's definition of the `ATE` table that Test Schedules call, settled in "The AT
 | `ATE.read(dev [, params] [, onError])` | read result | Reads from an open Device |
 | `ATE.write(dev, params [, onError])` | write result | Writes to an open Device |
 | `ATE.close(dev [, params] [, onError])` | `{ok = true}` | Closes a Device and releases it |
+| `ATE.flush(dev)` | `{ok = true, count = n}` | Discards everything in the Device's receive buffer; `count` is the bytes discarded |
 
 - The device object is a Lua table holding a host handle in `_handle`. Schedules treat it as opaque and only pass it back to `read`, `write` and `close`.
 - Data is raw bytes in both directions: Lua strings, binary-safe, with no encoding or decoding. Schedules convert with `string.byte`/`string.pack` when they need to.
@@ -53,7 +54,7 @@ Every field is required: `open` has no defaults, and a missing field raises. The
 Every field is optional; an absent field uses the Device's `open` configuration.
 
 - `read`: `size` (a byte limit; with none, the read ends on the terminator or the timeout), `timeout`, `readTerm`.
-- `write`: `data` (required), `writeTerm`. `writeTerm` is appended to `data`.
+- `write`: `data` (required), `writeTerm`, `timeout`. `writeTerm` is appended to `data`. A write that can't send everything within `timeout` fails with `err = "timeout"`.
 - `close`: no fields, and `params` may be omitted.
 
 A field the Device Type doesn't know (a typo such as `buad`), a missing required field, or a value of the wrong type is a schedule bug, not a Device failure. It always raises, names the field, and never goes through `onError`.
@@ -61,6 +62,12 @@ A field the Device Type doesn't know (a typo such as `buad`), a missing required
 ### Buffering incoming data
 
 A schedule isn't reactive to incoming data; it only sees data when it calls `ATE.read`. So from `open` until `close`, ATE reads each `SERIAL`, `TCP` and `UDP` Device in the background and buffers everything that arrives. `ATE.read` takes from that buffer first and waits only for what isn't there yet, so a response that arrives before the schedule asks for it isn't lost. For `UDP` the buffer is a queue of whole datagrams.
+
+**Size limit.** Each Device's buffer holds at most `devices.receiveBufferBytes` (app config, default 16 MiB); for `UDP` the limit is the total bytes of queued datagrams. On overflow ATE drops the **oldest** data, so the reply to the latest command survives, logs one `WARNING` per overflow, and the next `read` result carries `overflow = true`.
+
+**Discarding.** `ATE.flush(dev)` empties the buffer, typically just before sending a command, and returns `{ok = true, count = n}`. On `VISA` it does nothing and returns `count = 0`; it never sends an instrument clear.
+
+**Background failures.** If the background reader hits an error between `ATE` calls (a USB-serial adapter unplugged, a TCP connection reset), ATE logs a `WARNING` (source `device`) at once and marks the Device failed. Data already buffered can still be read; after that, the next `read` or `write` returns the failure with that error and goes through `onError`. ATE never reconnects on its own: a schedule recovers by calling `ATE.close` and then `ATE.open` with the same params, which gives a new device object.
 
 `VISA` is the exception: it has no background reader, and `ATE.read` reads on demand. A VISA instrument only speaks when queried, and polling it with reads that have nothing pending makes SCPI instruments log *Query UNTERMINATED* (-420) and ties up the bus. The result shape is the same.
 
@@ -74,10 +81,11 @@ The shapes are the same for every Device Type, as far as the types allow:
 | `read` timed out after some bytes | `{data = <bytes>, count = n, partial = true}`, and a `Log.WARNING` | no |
 | `read` timed out with no bytes | `{data = nil, count = 0, partial = false, err = "timeout"}` | yes |
 | `read` other failure (port gone, connection reset) | `{data = nil, count = 0, partial = false, err = <message>}` | yes |
-| `write` success / failure | `{ok = true, count = n}` / `{ok = false, count = 0, err = <message>}` | on failure |
+| `write` success / failure | `{ok = true, count = n}` / `{ok = false, count = n, err = <message>}` (`count` = bytes actually sent, e.g. before a timeout) | on failure |
 | `close` success / failure | `{ok = true}` / `{ok = false, err = <message>}` | on failure |
 
 - The read terminator is stripped from `data`, and `count` is `#data` after stripping.
+- A `read` result also carries `overflow = true` when the buffer overflowed since the previous read.
 - A `write` `count` includes the terminator.
 - A `UDP` read never times out partway: a datagram arrives whole or not at all. A datagram longer than `size` is truncated and returned with `partial = true`.
 
