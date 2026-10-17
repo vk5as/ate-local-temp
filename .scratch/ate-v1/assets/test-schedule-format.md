@@ -17,8 +17,9 @@ Created with `ScheduleParams(name, description)`; `name` is required.
 | `:setDocTitle(s)` | string | Title of the Test Report |
 | `:setDocId(s)` | string | Document identifier shown on the Test Report |
 | `:setDocRev(s)` | string | Revision of the Test Schedule |
-| `:setPreTestAction(fn)` | function | Runs once before the first Test Step (setup, calibration) |
-| `:setPostTestAction(fn)` | function | Runs once after the steps; called as `fn(passFail)` with the Test Run's overall result |
+| `:setPreTestAction(fn)` | function | Runs once before the first Test Step (setup, calibration). With Sub-schedules, every Pre-test Action runs before the first step, depth first, parent first |
+| `:setPostTestAction(fn)` | function | Runs once after the steps, in the reverse of the Pre-test order; called as `fn(passFail)` with the Test Run's overall result. Runs even after a stop, a Pre-test failure or an abort |
+| `:setStopOnFail(b)` | boolean | Default for the Test Run's stop-on-fail setting, which the Operator can change before the run starts. Defaults to `true` when not set |
 | `:setSchedule(list)` | array of step objects | The Test Steps, in execution order (required) |
 
 ## Step object
@@ -102,6 +103,18 @@ Test Schedules share code through ordinary Lua modules loaded with the standard 
 - `dofile`, `loadfile` and `load` are removed, so nothing can run Lua source that skipped the checksum check. Lua is trusted, so this is about traceability, not security; `io` and `os` remain.
 
 This is unrelated to the step setter `:setInclude(file, keyvals)`, which pulls in a Sub-schedule. ATE has no function named `include`.
+
+## Flow control
+
+Defined in "Flow control":
+
+- **Stop on fail** (default): when a step ends `FAIL` or `ERROR`, the run pauses and the Operator chooses Continue, Retry or Abort. With continue on fail, the run never pauses and retry isn't offered.
+- **Retry** runs the step's action again from the start, with `POLL` reset and blocking inputs cleared. Every Attempt is recorded; the step's result is the last Attempt's.
+- **Abort** is whole-run. The running step records `ERROR` "Aborted by Operator"; steps that never ran record `NOTRUN`.
+- **Pre-test Action failure** aborts the run automatically: every step records `NOTRUN`.
+- **Pre-test and Post-test order**: all Pre-test Actions run before the first step, depth first through the Sub-schedule tree (parent first, each include in step order). All Post-test Actions run after the last step in exactly the reverse order. A Sub-schedule whose steps are all disabled has its actions skipped. After a Pre-test failure, only schedules whose Pre-test Action started get their Post-test Action.
+- **Post-test Actions always run**. ATE clears the abort flag before them; a second abort ends only the current one, and an error in one is logged, fails the run, and the rest still run.
+- **End reason**: `COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL` or `ABORTED`, recorded alongside `PASS`/`FAIL`.
 
 ## The `ATE` table
 

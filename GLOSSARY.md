@@ -61,16 +61,28 @@ A Test Schedule whose Test Steps are pulled into another Test Schedule at a give
 _Avoid_: Include, child schedule, nested schedule
 
 **Pre-test Action**:
-Logic a Test Schedule runs once before its first Test Step.
+Logic a Test Schedule runs once before the first Test Step of the Test Run. With Sub-schedules, every Pre-test Action runs up front, parent first.
 _Avoid_: Setup, init
 
 **Post-test Action**:
-Logic a Test Schedule runs once after its Test Steps, told the Test Run's overall result.
+Logic a Test Schedule runs once after the last Test Step of the Test Run, in reverse Pre-test order, told the Test Run's overall result. It runs even after an abort.
 _Avoid_: Teardown, cleanup
 
 **Test Run**:
 One execution of one Test Schedule against one UUT at one point in time.
 _Avoid_: Execution, session, test
+
+**Stop on Fail**:
+The Test Run setting under which a failed Test Step pauses the run for the Operator to Continue, Retry or Abort. With it off, failures never pause the run.
+_Avoid_: Halt on error, break on fail
+
+**Attempt**:
+One execution of a Test Step's action within a Test Run. A Retry adds an Attempt; the step's result is its last Attempt's.
+_Avoid_: Try, iteration
+
+**End Reason**:
+How a Test Run ended (`COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL` or `ABORTED`), recorded alongside its pass/fail result.
+_Avoid_: Exit status, termination
 
 **Test Report**:
 A document describing the outcome of exactly one Test Run, generated from stored results.
