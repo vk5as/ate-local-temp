@@ -292,8 +292,8 @@ The Run screen comes in two layouts, staged (default) and three-pane, both built
   - **History screen:** `history-screen`
   - **Packaging:** `packaging`
 
-  All of these are under the map's `assets` directory. Domain vocabulary is in the glossary.
-- The decisions behind each area, including the reasons for them, are in the resolved tickets linked from the map's "Decisions so far".
+  All of these are in `.scratch/ate-v1-wayfinding/assets/`. Domain vocabulary is in the glossary.
+- The decisions behind each area, including the reasons for them, are in the resolved wayfinding tickets linked from "Decisions so far" in `.scratch/ate-v1-wayfinding/map.md`. Implementation tickets for this spec go in `.scratch/ate-v1/issues/`.
 - The Windows prototype found five refinements to the Lua host that are easy to miss:
   - re-raise `"aborted"` from `pcall` and `xpcall`;
   - never let a Python exception reach Lua;

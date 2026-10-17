@@ -10,7 +10,7 @@ Provide a first draft of the Lua Test Schedule format: the returned data structu
 
 ## Answer
 
-Drafted by the user and written up as `.scratch/ate-v1/assets/test-schedule-format.md`.
+Drafted by the user and written up as `assets/test-schedule-format.md`.
 
 - A `.tslua` file returns `ScheduleParams(name, desc)` with chained setters: doc title, id and revision for the report; Pre-test and Post-test Actions (`post(passFail)`); and the step array.
 - Each step is a `StepParams` with Step Number (string), enable flag, Step Inputs keyed `1..n`, an action function, or `setInclude(file, keyvals)` plus `setPrefix` to splice in a Sub-schedule.
