@@ -108,6 +108,8 @@ When Device tracing is turned on in the application config (off by default), ATE
 - If `onError` returns a value other than `nil`, the schedule continues and the failed call returns that value.
 - If `onError` returns `nil`, or there is no `onError` at all, the call raises a Lua error. Unless the schedule catches it, the step records `Result.ERROR`. Schedules are not expected to use `pcall`.
 - Errors that aren't Device failures always raise: a wrong argument type, `ATE.input(n)` with an undeclared `n`, or a call made where it isn't allowed. Every error message names the function, and for Device calls the Device's connection details.
+- An error raised by an `ATE` function is a string that starts with the schedule's own `file:line` of the call, then the function: `psu48/final_atp.tslua:42: ATE.read: …`.
+- **An abort can't be caught.** Once the Operator aborts, `ATE` calls raise `"aborted"`, a running Lua loop is stopped, and `pcall` and `xpcall` raise `"aborted"` again instead of returning, so a schedule can't keep running.
 
 ### Device lifetime
 
@@ -169,4 +171,4 @@ There is no `ATE.gc`: schedules that need a collection call the standard `collec
 
 ## Loading auxiliary code
 
-Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). Module names starting with `ate.` resolve to modules bundled with ATE, such as `ate.devices`. The standard library is otherwise complete, except that `dofile`, `loadfile` and `load` are removed.
+Not part of the `ATE` table: auxiliary Lua files load through ATE's replacement `require` (see `test-schedule-format.md`). Module names starting with `ate.` resolve to modules bundled with ATE, such as `ate.devices`. The standard library is otherwise complete, except that `dofile`, `loadfile` and `load` are removed, there is no `python` table, and only source text loads (no precompiled bytecode).
