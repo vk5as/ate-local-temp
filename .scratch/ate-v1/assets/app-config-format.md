@@ -32,7 +32,7 @@ The config describes the Station, so it is machine-wide:
   "testDefinitions": {
     "directories": ["definitions", "D:/releases"]
   },
-  "database": { "path": "ate.db" },
+  "database": { "type": "sqlite", "path": "ate.db", "storeMismatchedFiles": "ask" },
   "reports": { "directory": "reports" },
   "log": { "directory": "logs", "level": "info" },
   "deviceTrace": { "enabled": false, "maxBytes": 256 },
@@ -51,7 +51,9 @@ Keys are camelCase, grouped in sections.
 | `station.uuid` | generated | The Station's stable identity, recorded on every Test Run |
 | `defaultProject` | `""` | Prefills the Project on the Run screen. A Test Run cannot start with an empty Project |
 | `testDefinitions.directories` | `["<data>/definitions"]` | Directories searched recursively for `.atedef` files |
-| `database.path` | `<data>/ate.db` | The local database |
+| `database.type` | `sqlite` | Database backend. v1 accepts only `sqlite`; any other value stops startup |
+| `database.path` | `<data>/ate.db` | The SQLite database file. Created only by `ate db migrate` (see `test-run-record.md`) |
+| `database.storeMismatchedFiles` | `ask` | `ask`, `always` or `never`: whether the raw bytes of a Lua file with a checksum mismatch are stored with the Test Run |
 | `reports.directory` | `<data>/reports` | Where Test Reports are written |
 | `log.directory` | `<data>/logs` | Where the application log is written |
 | `log.level` | `info` | Application log level |
@@ -79,5 +81,5 @@ The application log records ATE's own activity (startup, scans, crashes). It is 
 
 ## Decided elsewhere
 
-- The database engine: database design.
+- The database schema, migrations and the `ate db` CLI: `test-run-record.md`.
 - Whether Test Reports are saved automatically at run end, and how they are named: "Test Report content and format".

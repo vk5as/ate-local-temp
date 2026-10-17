@@ -37,8 +37,12 @@ The configured artifact-storage number that uniquely identifies a Media Release;
 _Avoid_: Release number, version
 
 **UUT**:
-Unit Under Test: the single physical item (or occasionally software artefact) being tested, identified by its serial number.
+Unit Under Test: the single physical item (or occasionally software artefact) being tested, identified by its UUT Type and serial number.
 _Avoid_: DUT, device, board
+
+**UUT Type**:
+What kind of unit a UUT is, entered by the Operator for each Test Run alongside the serial number; distinct from the Project.
+_Avoid_: Part number, model, product, UUT name
 
 **Test Schedule**:
 A Lua script that, when loaded, returns the ordered set of Test Steps to execute.
@@ -85,7 +89,7 @@ One execution of a Test Step's action within a Test Run. A Retry adds an Attempt
 _Avoid_: Try, iteration
 
 **End Reason**:
-How a Test Run ended (`COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL` or `ABORTED`), recorded alongside its pass/fail result.
+How a Test Run ended (`COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL`, `ABORTED`, or `INTERRUPTED` when ATE stopped before the run could end), recorded alongside its pass/fail result.
 _Avoid_: Exit status, termination
 
 **Test Report**:

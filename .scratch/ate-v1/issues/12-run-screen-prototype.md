@@ -26,3 +26,5 @@ Also from "Sub-schedules" (14):
 - An include step shows as a header row with its own Step Name and optional Step Number, followed by the Sub-schedule's steps. It has no result of its own; it may show a roll-up of the steps beneath it.
 - Toggling a header before the run sets every step beneath it, nested ones included. Steps beneath can still be toggled one by one, and a header over mixed states shows a tri-state mark.
 - Every step shows its optional Step Name.
+
+Also from "What a Test Run records" (11): UUT Type and serial are required free text on the Run screen. With `database.storeMismatchedFiles` = `ask`, the run-start confirmation lists checksum-mismatched files with a "Store mismatched files with this Test Run" checkbox, ticked by default.
