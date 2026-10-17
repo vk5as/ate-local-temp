@@ -167,7 +167,7 @@ def build(n_steps=40, n_logs=200, seed=1):
 
 def render(ctx, furniture):
     env = Environment(loader=FileSystemLoader(HERE), autoescape=True, trim_blocks=True, lstrip_blocks=True)
-    return env.get_template("report.html.j2").render(furniture=furniture, font_dir=(HERE / "fonts").as_posix(), **ctx)
+    return env.get_template("report.html.j2").render(furniture=furniture, font_dir="fonts", **ctx)  # relative to cwd: Windows drive paths confuse xhtml2pdf
 
 
 if __name__ == "__main__":

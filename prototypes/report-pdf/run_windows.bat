@@ -1,5 +1,6 @@
 @echo off
 rem PROTOTYPE, throwaway. Run from this folder on 64-bit Windows with CPython 3.13 or 3.14 on PATH as "py".
+pushd "%~dp0"
 py -m venv .venv || exit /b 1
 .venv\Scripts\pip install -q PyQt6 PyQt6-WebEngine xhtml2pdf jinja2 pypdf || exit /b 1
 if not exist out mkdir out
