@@ -1,0 +1,716 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throw away. Answers "Run screen, input forms, log pane and debug window"
+  (.scratch/ate-v1/issues/12-run-screen-prototype.md).
+
+  Three structurally different variants of the Run screen, switchable via ?variant=A|B|C
+  (or the floating bar / arrow keys). HTML stands in for the PyQt6 window: the question is
+  layout and behaviour, not widget styling. The Test Schedule and its run are simulated in JS.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE: ATE Run screen</title>
+<style>
+:root { font: 13px/1.35 "Segoe UI", system-ui, sans-serif; color: #1d1d1f; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #6b7280; height: 100vh; min-height: 760px; overflow: hidden; }
+button { font: inherit; padding: 3px 10px; border: 1px solid #a9a9a9; border-radius: 3px; background: linear-gradient(#fdfdfd, #e6e6e6); cursor: pointer; }
+button:disabled { color: #9a9a9a; cursor: default; background: #f0f0f0; }
+button.primary:not(:disabled) { background: #0a64d6; color: #fff; border-color: #0850ad; }
+button.danger:not(:disabled) { background: #c62828; color: #fff; border-color: #8e1c1c; }
+button.big { padding: 7px 18px; font-size: 14px; }
+input[type=text], select { font: inherit; padding: 3px 5px; border: 1px solid #a9a9a9; border-radius: 2px; background: #fff; }
+input:disabled, select:disabled { background: #f2f2f2; color: #666; }
+fieldset { border: 1px solid #c8c8c8; border-radius: 3px; padding: 2px 8px 6px; margin: 0; }
+legend { color: #555; font-size: 11px; }
+.muted { color: #777; font-size: 12px; }
+.err { color: #b71c1c; font-size: 12px; }
+.grow { flex: 1; }
+.frame { position: absolute; inset: 10px 10px 58px 10px; background: #f3f3f3; border: 1px solid #444; box-shadow: 0 6px 24px #0005; display: flex; flex-direction: column; overflow: hidden; }
+.titlebar { background: #2b2f36; color: #ddd; padding: 4px 10px; display: flex; gap: 14px; align-items: center; font-size: 12px; }
+.titlebar .tab { padding: 2px 10px; border-radius: 3px; }
+.titlebar .tab.on { background: #4b5563; color: #fff; }
+.titlebar .tab.off { color: #888; }
+.statusbar { display: flex; gap: 18px; padding: 3px 10px; border-top: 1px solid #c4c4c4; background: #e4e4e4; font-size: 12px; white-space: nowrap; }
+.statusbar b { font-weight: 600; }
+.res { display: inline-block; min-width: 66px; text-align: center; padding: 1px 6px; border-radius: 3px; font-weight: 600; font-size: 11px; }
+.res-PASS { background: #d6efda; color: #17642a; }
+.res-FAIL { background: #fbd5d5; color: #a61b1b; }
+.res-ERROR { background: #5b1010; color: #fff; }
+.res-SKIPPED, .res-NOTRUN, .res-FORCED_NOTRUN { background: #e2e2e2; color: #555; }
+.res-NOREPORT { background: #fde7b0; color: #7a5200; }
+.res-RUNNING { background: #cfe2ff; color: #0b4aa8; }
+.res-WAITING { background: #ffe9a8; color: #6b4b00; }
+.attempts { font-size: 11px; color: #6b4b00; background: #fff3cd; border-radius: 3px; padding: 0 5px; }
+.flag { background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px; font-size: 12px; }
+.flag.bad { background: #fde2e2; border-color: #d33; color: #7a1010; }
+.inputs { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 2px 26px; }
+.inp { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 2px 6px; border-left: 3px solid transparent; border-radius: 2px; }
+.inp.vert .inp-w { flex-direction: column; align-items: flex-start; }
+.inp-w { display: flex; gap: 6px; align-items: center; }
+.inp-desc { color: #444; min-width: 150px; }
+.inp.inp-on { background: #fff6cc; border-left-color: #e0a800; }
+.inp input[type=text] { width: 140px; }
+.loglines { font: 12px/1.35 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; }
+.ll-DEBUG { color: #888; } .ll-WARNING { color: #8a5a00; } .ll-ERROR { color: #b71c1c; font-weight: 600; }
+.modal-back { position: fixed; inset: 0; background: #0006; display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { background: #f6f6f6; border: 1px solid #444; box-shadow: 0 8px 30px #0008; min-width: 420px; max-width: 560px; }
+.modal h3 { margin: 0; padding: 6px 10px; background: #2b2f36; color: #eee; font-size: 13px; font-weight: 600; }
+.modal .body { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.modal .btns { display: flex; gap: 8px; justify-content: flex-end; padding: 8px 14px 12px; }
+.banner { padding: 8px 12px; font-size: 15px; font-weight: 600; display: flex; gap: 14px; align-items: center; }
+.banner.PASS { background: #d6efda; color: #17642a; } .banner.FAIL { background: #fbd5d5; color: #a61b1b; }
+.dbg { position: fixed; width: 560px; height: 300px; background: #1e1e1e; color: #ddd; border: 1px solid #000; box-shadow: 0 8px 30px #000a; display: flex; flex-direction: column; z-index: 40; }
+.dbg .t { background: #333; padding: 4px 8px; cursor: move; display: flex; font-size: 12px; }
+.dbg .loglines { flex: 1; overflow: auto; padding: 4px 8px; }
+.dbg .ll-DEBUG { color: #8fa1b3; } .dbg .ll-INFO { color: #ddd; } .dbg .ll-WARNING { color: #e5c07b; } .dbg .ll-ERROR { color: #ff7b72; }
+#switcher { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: #111; color: #fff; border-radius: 999px; padding: 6px 10px; display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 16px #0008; z-index: 100; font-size: 13px; }
+#switcher button { background: #333; color: #fff; border: none; border-radius: 999px; width: 28px; height: 28px; padding: 0; }
+#switcher .lbl { min-width: 280px; text-align: center; }
+
+/* Variant A: classic single column */
+.a-top { display: flex; gap: 16px; padding: 8px 10px; border-bottom: 1px solid #ccc; align-items: flex-start; }
+.a-grid { display: grid; grid-template-columns: auto 220px auto 220px; gap: 4px 8px; align-items: center; }
+.a-grid label { text-align: right; color: #444; }
+.a-grid .wide { grid-column: 2 / 5; display: flex; gap: 6px; }
+.a-grid .wide select { flex: 1; }
+.a-opts { display: flex; flex-direction: column; gap: 6px; margin-left: auto; align-items: flex-end; }
+.a-steps { flex: 1; overflow: auto; background: #fff; }
+.a-log { height: 150px; overflow: auto; border-top: 3px double #bbb; padding: 4px 8px; background: #fafafa; }
+.row { border-bottom: 1px solid #eee; padding: 4px 10px 4px 0; }
+.row-line { display: flex; gap: 8px; align-items: center; }
+.row .no { font-family: Consolas, monospace; min-width: 44px; color: #333; }
+.row.hdr { background: #eef1f5; }
+.row.running { background: #eef5ff; box-shadow: inset 3px 0 #0a64d6; }
+.row.failed-hl { background: #fff0f0; box-shadow: inset 3px 0 #c62828; }
+.row.off .name, .row.off .no { color: #aaa; text-decoration: line-through; }
+.row-detail { margin-left: 74px; font-size: 12px; color: #444; }
+.row-detail span + span::before { content: " · "; color: #aaa; }
+
+/* Variant B: three-pane */
+.b-body { flex: 1; display: grid; grid-template-columns: 300px 1fr 340px; min-height: 0; }
+.b-left { border-right: 1px solid #c8c8c8; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.b-sched { border: 1px solid #bbb; background: #fff; max-height: 230px; overflow: auto; }
+.b-sched .it { padding: 4px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
+.b-sched .it.sel { background: #0a64d6; color: #fff; } .b-sched .it.sel .muted { color: #dbe7ff; }
+.b-sched .it.broken { cursor: not-allowed; background: #fff5f5; }
+.b-form { display: grid; grid-template-columns: 80px 1fr; gap: 4px 6px; align-items: center; }
+.b-form label { color: #444; }
+.b-counts { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; }
+.b-mid { display: flex; flex-direction: column; min-width: 0; background: #fff; }
+.b-thead, .b-tr { display: grid; grid-template-columns: 26px 54px minmax(140px,1.3fr) 82px 34px 90px 90px 1.4fr; gap: 6px; align-items: center; padding: 3px 8px; }
+.b-thead { background: #e6e6e6; border-bottom: 1px solid #c8c8c8; font-weight: 600; font-size: 12px; }
+.b-rows { flex: 1; overflow: auto; }
+.b-row { border-bottom: 1px solid #eee; }
+.b-row.hdr { background: #eef1f5; font-weight: 600; }
+.b-row.running { background: #eef5ff; }
+.b-row.failed-hl { background: #fff0f0; }
+.b-row.off { color: #aaa; }
+.b-row .mono { font-family: Consolas, monospace; font-size: 12px; }
+.b-row .cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.b-inline-prompt { margin: 4px 8px 8px 34px; border: 2px solid #c62828; background: #fff; padding: 8px; display: flex; gap: 8px; align-items: center; }
+.b-sticky { background: #c62828; color: #fff; padding: 5px 10px; font-weight: 600; }
+.b-right { border-left: 1px solid #c8c8c8; display: flex; flex-direction: column; min-height: 0; }
+.b-right .hd { padding: 4px 8px; background: #e6e6e6; border-bottom: 1px solid #c8c8c8; display: flex; font-weight: 600; font-size: 12px; }
+.b-right .loglines { flex: 1; overflow: auto; padding: 4px 8px; background: #fafafa; }
+
+/* Variant C: staged setup, focus run view */
+.c-stages { display: flex; gap: 0; border-bottom: 1px solid #ccc; background: #e9e9e9; }
+.c-stages div { padding: 8px 18px; color: #777; }
+.c-stages div.on { color: #000; font-weight: 600; box-shadow: inset 0 -3px #0a64d6; background: #f8f8f8; }
+.c-stages div.done { color: #17642a; }
+.c-page { flex: 1; overflow: auto; padding: 16px 24px; }
+.c-table { width: 100%; border-collapse: collapse; background: #fff; }
+.c-table td, .c-table th { border-bottom: 1px solid #e3e3e3; padding: 7px 8px; text-align: left; }
+.c-table tr.pick { cursor: pointer; } .c-table tr.pick:hover { background: #eef5ff; }
+.c-table tr.sel { background: #dbe8ff; }
+.c-big { display: grid; grid-template-columns: 140px 320px; gap: 10px 12px; align-items: center; font-size: 15px; }
+.c-big input { font-size: 15px; padding: 6px 8px; }
+.c-nav { display: flex; gap: 8px; padding: 10px 24px; border-top: 1px solid #ccc; background: #ececec; }
+.c-tree .row { border-bottom: 1px solid #eee; background: #fff; }
+.c-head { display: flex; gap: 20px; align-items: center; padding: 10px 16px; background: #2f3a4a; color: #fff; }
+.c-head .state { font-size: 20px; font-weight: 700; padding: 4px 14px; border-radius: 4px; background: #44546a; }
+.c-head .state.PASS { background: #2e7d32; } .c-head .state.FAIL { background: #c62828; } .c-head .state.RUN { background: #0a64d6; }
+.c-head .meta { font-size: 12px; color: #cfd6df; }
+.c-head .timer { font-family: Consolas, monospace; font-size: 18px; }
+.c-list { flex: 1; overflow: auto; background: #fff; }
+.c-list .row { padding: 2px 10px 2px 0; }
+.c-list .row .inputs { opacity: .8; }
+.c-list .row.current { padding: 10px 10px 12px 0; background: #eef5ff; box-shadow: inset 4px 0 #0a64d6; }
+.c-list .row.current .name { font-size: 17px; font-weight: 600; }
+.c-list .row.current .inputs { opacity: 1; font-size: 15px; margin-top: 8px; }
+.c-list .row.current .inp input[type=text] { font-size: 15px; width: 180px; }
+.c-list .row.current button { font-size: 15px; padding: 5px 14px; }
+.c-list .row.failed-hl { background: #fff0f0; box-shadow: inset 4px 0 #c62828; }
+.c-bottom { height: 160px; display: flex; flex-direction: column; border-top: 1px solid #bbb; }
+.c-tabs { display: flex; background: #e4e4e4; }
+.c-tabs div { padding: 4px 14px; cursor: pointer; font-size: 12px; }
+.c-tabs div.on { background: #fafafa; font-weight: 600; }
+.c-bottom .pane { flex: 1; overflow: auto; padding: 4px 8px; background: #fafafa; }
+.c-failbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: #c62828; color: #fff; font-size: 15px; }
+.c-failbar button { font-size: 15px; padding: 6px 18px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="dbg-host"></div>
+<div id="switcher"><button id="prev">&larr;</button><span class="lbl" id="vlabel"></span><button id="next">&rarr;</button></div>
+<script>
+// ---------- mock data ----------
+const STATION = 'BENCH-03';
+const SCHEDULES = [
+  { id: 'func', name: 'PSU-200 Functional Test', release: 'MR-10422 · PSU-200 Tests 2.3.0', stopOnFail: true,
+    mismatches: [{ file: 'psu_common.lua', expected: '3f9a0c…e1', computed: '77c1b2…09' }] },
+  { id: 'burn', name: 'PSU-200 Burn-in', release: 'MR-10422 · PSU-200 Tests 2.3.0', stopOnFail: false,
+    mismatches: [{ file: 'psu_common.lua', expected: '3f9a0c…e1', computed: '77c1b2…09' }] },
+  { id: 'rf', name: 'RF Board Alignment', release: 'MR-10510 · RF Board 1.0.4', broken: 'rf_align.tslua: duplicate Step Number "3.1"' },
+  { id: 'cal', name: 'Fixture Self-check', release: 'MR-10377 · Fixture Utilities 1.2.0', stopOnFail: true, mismatches: [] },
+  { id: 'legacy', name: '(Test Definition broken)', release: 'MR-10611 · Legacy Fixtures 0.9.0', broken: 'missing file fixture_io.lua' },
+];
+const PRE = ['PSU-200 Functional Test: Pre-test', 'channel.tslua (3.): Pre-test'];
+
+const TREE = [
+  { no: '1.', name: 'Visual inspection',
+    inputs: [{ desc: 'LED colour', type: 'ENUM', input: 'RADIOBUT', enum: ['Green', 'Red', 'Off'], orient: 'HORIZ', tooltip: 'Colour of the POWER LED' }],
+    action: async a => { const c = await a.input(0); a.report(c === 'Green' ? 'PASS' : 'FAIL', 'POWER LED is ' + c, c, 'Green'); } },
+  { no: '2.', name: 'Rail voltage',
+    action: async a => {
+      a.log('INFO', 'Measuring 5V rail');
+      a.log('DEBUG', 'VISA DMM1 write "MEAS:VOLT:DC?\\n"'); await a.sleep(1200);
+      a.log('DEBUG', 'VISA DMM1 read "+5.0120E+00\\n" (14 bytes, 38 ms)');
+      a.report('PASS', 'Within limits', '5.012 V', '4.90 to 5.10 V');
+    } },
+  { kind: 'header', no: '3.', name: 'Channel checks (channel 1)', children: [
+    { no: '3.1', name: 'Probe fitted',
+      inputs: [{ desc: 'Is the probe fitted to CH1?', type: 'ENUM', input: 'PUSHBUT', enum: ['Yes', 'No'] }],
+      action: async a => { const v = await a.input(0); a.report(v === 'Yes' ? 'PASS' : 'FAIL', 'Probe ' + (v === 'Yes' ? 'fitted' : 'not fitted'), v, 'Yes'); } },
+    { no: '3.2', name: 'Channel ripple',
+      action: async a => {
+        a.log('DEBUG', 'TCP scope 10.0.0.12:5025 write "MEAS:VPP? CH1"'); await a.sleep(1000);
+        if (a.attempt === 1) { a.log('DEBUG', 'TCP scope read "0.048"'); a.report('FAIL', 'Ripple too high', '48 mV', '< 20 mV'); }
+        else { a.log('DEBUG', 'TCP scope read "0.012"'); a.report('PASS', 'Ripple OK', '12 mV', '< 20 mV'); }
+      } },
+  ] },
+  { no: '4.', name: 'Label serial check',
+    inputs: [{ desc: 'Serial on label', type: 'STRING', pattern: '^PSU-\\d{5}$', tooltip: 'Format PSU-12345' }],
+    action: async a => { const v = await a.input(0); a.report(v === S.serial ? 'PASS' : 'FAIL', v === S.serial ? 'Label matches' : 'Label does not match UUT serial', v, S.serial); } },
+  { no: '5.', name: 'Front panel button',
+    inputs: [{ desc: 'Press the button on the UUT, then click', type: 'POLL', prompt: ['Pressed', 'Not working'] }],
+    action: async a => {
+      a.log('INFO', 'Waiting up to 20 s for the front panel button');
+      const end = Date.now() + 20000;
+      while (Date.now() < end) {
+        const v = a.poll(0);
+        if (v === 'Pressed') return a.report('PASS', 'Button detected', 'pressed', 'pressed');
+        if (v === 'Not working') return a.report('FAIL', 'Operator reported fault', 'not working', 'pressed');
+        await a.sleep(200);
+      }
+      a.report('FAIL', 'Timed out', 'no press', 'pressed');
+    } },
+  { no: '6.', name: 'Trim gain',
+    inputs: [{ desc: 'Gain setting', type: 'FLOAT', range: [0.5, 2.0], tooltip: 'Enter > 1.8 to see a Lua error' },
+             { desc: 'Fan modes fitted', type: 'ENUM', input: 'CHECKBOX', enum: ['Low', 'Med', 'High'], orient: 'HORIZ' }],
+    action: async a => {
+      const g = await a.input(0);
+      const fans = await a.input(1);
+      if (g > 1.8) throw new Error('psu_200.tslua:88: attempt to compare number with nil');
+      await a.sleep(600);
+      a.report('PASS', 'Gain trimmed, fans: ' + (fans.join(', ') || 'none'), String(g), '0.5 to 1.8');
+    } },
+  { no: '7.', name: 'Disconnect probe',
+    inputs: [{ desc: 'Remove the probe from TP3', type: 'PROMPT', prompt: 'Done' }],
+    action: async a => { await a.input(0); a.report('PASS', 'Probe removed'); } },
+  { no: '8.', name: 'Extended soak (optional)', enabled: false,
+    inputs: [{ desc: 'Soak minutes', type: 'INTEGER', range: [1, 60] }],
+    action: async a => { const m = await a.input(0); await a.sleep(1500); a.report('PASS', 'Soaked ' + m + ' min'); } },
+  { no: '9.', name: 'Final current draw',
+    action: async a => { await a.sleep(800); a.log('INFO', 'Measured 412 mA'); } }, // never reports: NOREPORT
+];
+
+function buildRows() {
+  const rows = []; let id = 0;
+  (function walk(list, depth, parent) {
+    for (const n of list) {
+      const r = { id: id++, kind: n.kind || 'step', no: n.no, name: n.name, depth, parent, enabled: n.enabled !== false,
+        inputs: (n.inputs || []).map(d => ({ d, draft: '', checked: [], value: null, active: false, err: '', poll: null })),
+        action: n.action, status: 'idle', result: null, msg: '', actual: '', expected: '', attempts: [] };
+      rows.push(r);
+      if (n.children) walk(n.children, depth + 1, r.id);
+    }
+  })(TREE, 0, null);
+  return rows;
+}
+
+function freshState(keep = {}) {
+  return { phase: 'setup', project: keep.project ?? 'PSU-200 Production', operator: keep.operator ?? '', uutType: keep.uutType ?? '', serial: '',
+    scheduleId: keep.scheduleId ?? null, stopOnFail: true, storeMismatched: true, rows: buildRows(), log: keep.log ?? [],
+    prompt: null, confirm: false, formErr: '', runStart: 0, curStart: 0, curLabel: '', pre: [0, 0], post: [0, 0],
+    result: null, endReason: null, aborting: false, cStage: keep.scheduleId ? 1 : 0, filter: '', debugOpen: keep.debugOpen ?? false,
+    tab: 'log', lastCurrent: null };
+}
+let S = freshState();
+if (S.scheduleId) S.stopOnFail = sel().stopOnFail;
+
+// ---------- engine ----------
+const ABORT = { abort: true };
+let pending = null, promptRes = null;
+const sel = () => SCHEDULES.find(s => s.id === S.scheduleId);
+const steps = () => S.rows.filter(r => r.kind === 'step');
+const isDesc = (r, hid) => { let p = r.parent; while (p != null) { if (p === hid) return true; p = S.rows[p].parent; } return false; };
+const descSteps = hid => S.rows.filter(r => r.kind === 'step' && isDesc(r, hid));
+const currentRow = () => S.rows.find(r => r.status === 'running') || (S.prompt && S.rows[S.prompt.rowId]);
+
+function log(level, msg) { S.log.push({ t: S.runStart ? Date.now() - S.runStart : 0, level, msg }); render(); }
+async function sleep(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (S.aborting) throw ABORT; await new Promise(r => setTimeout(r, 50)); }
+  if (S.aborting) throw ABORT;
+}
+function setCur(label) { S.curLabel = label; S.curStart = Date.now(); render(); }
+
+async function startRun() {
+  const sch = sel();
+  S.confirm = false; S.phase = 'running'; S.runStart = Date.now(); S.log = []; S.aborting = false; S.result = null; S.endReason = null;
+  S.rows.forEach(r => { r.status = 'idle'; r.result = null; r.attempts = []; r.msg = r.actual = r.expected = '';
+    r.inputs.forEach(i => { i.value = null; i.poll = null; i.draft = ''; i.checked = []; i.err = ''; i.active = false; }); });
+  log('INFO', `Test Run started: ${sch.name} (${sch.release}), UUT ${S.uutType} s/n ${S.serial}, Project ${S.project}, Operator ${S.operator}, ${S.stopOnFail ? 'stop on fail' : 'continue on fail'}`);
+  for (const m of sch.mismatches) log('WARNING', `Checksum mismatch: ${m.file} expected ${m.expected}, computed ${m.computed}${S.storeMismatched ? ' (file stored with this Test Run)' : ''}`);
+  const chanHdr = S.rows.find(r => r.kind === 'header');
+  const pres = PRE.filter((p, i) => i === 0 || descSteps(chanHdr.id).some(r => r.enabled));
+  S.pre = [0, pres.length]; S.post = [0, pres.length];
+  const started = []; let endReason = null;
+
+  for (const p of pres) {
+    setCur(p); started.push(p);
+    try { await sleep(700); log('INFO', p + ' done'); S.pre[0]++; }
+    catch (e) { endReason = 'ABORTED'; log('WARNING', 'Aborted by Operator during ' + p); break; }
+  }
+
+  for (const r of steps()) {
+    if (!r.enabled || endReason) { r.result = 'NOTRUN'; r.status = 'done'; continue; }
+    let att = 0;
+    while (true) {
+      att++;
+      r.status = 'running'; r.result = null; r.msg = '';
+      r.inputs.forEach(i => { i.poll = null; i.value = null; i.draft = ''; i.checked = []; i.err = ''; });
+      setCur(`Step ${r.no} ${r.name}` + (att > 1 ? ` (Attempt ${att})` : ''));
+      let rep = null;
+      const api = {
+        attempt: att, sleep,
+        poll: n => r.inputs[n].poll,
+        log: (l, m) => log(l, `[${r.no}] ${m}`),
+        report: (pf, msg, act, exp) => { rep = { pf, msg, act: act ?? '', exp: exp ?? '' }; log('INFO', `[${r.no}] ATE.report ${pf}: ${msg}`); },
+        input: async n => {
+          if (S.aborting) throw ABORT;
+          const inp = r.inputs[n];
+          inp.active = true; inp.value = null; render(); focusActive();
+          try { return await new Promise((res, rej) => { pending = { res, rej }; }); }
+          finally { inp.active = false; pending = null; render(); }
+        },
+      };
+      try {
+        await r.action(api);
+        if (!rep) { rep = { pf: 'NOREPORT', msg: 'Step never called ATE.report', act: '', exp: '' }; log('WARNING', `[${r.no}] step never reported; recorded NOREPORT`); }
+      } catch (e) {
+        if (e === ABORT) { rep = { pf: 'ERROR', msg: 'Aborted by Operator', act: '', exp: '' }; endReason = 'ABORTED'; log('WARNING', `[${r.no}] Aborted by Operator`); }
+        else { rep = { pf: 'ERROR', msg: e.message, act: '', exp: '' }; log('ERROR', `[${r.no}] ${e.message}\nstack traceback:\n\tpsu_200.tslua:88: in function <psu_200.tslua:80>`); }
+      }
+      r.attempts.push({ n: att, ...rep });
+      r.result = rep.pf; r.msg = rep.msg; r.actual = rep.act; r.expected = rep.exp; r.status = 'done'; render();
+      if (!endReason && (rep.pf === 'FAIL' || rep.pf === 'ERROR') && S.stopOnFail) {
+        S.prompt = { rowId: r.id }; setCur(`Waiting for Operator: step ${r.no} ${rep.pf}`);
+        const ch = await new Promise(res => { promptRes = res; });
+        S.prompt = null; promptRes = null;
+        if (ch === 'retry') { log('INFO', `Operator chose Retry on ${r.no}`); continue; }
+        if (ch === 'abort') { endReason = 'STOPPED_ON_FAIL'; log('WARNING', `Operator chose Abort at the failure prompt on ${r.no}`); }
+        else log('INFO', `Operator chose Continue on ${r.no}`);
+      }
+      break;
+    }
+  }
+
+  S.aborting = false;
+  const pf = steps().some(r => r.result === 'FAIL' || r.result === 'ERROR') ? 'FAIL' : 'PASS';
+  S.phase = 'post';
+  for (const p of started.slice().reverse()) {
+    const name = p.replace('Pre-test', 'Post-test');
+    setCur(name);
+    try { await sleep(700); log('INFO', `${name} done (passFail = ${pf})`); }
+    catch (e) { log('WARNING', `${name} ended by a second abort`); S.aborting = false; }
+    S.post[0]++;
+  }
+  S.result = pf; S.endReason = endReason || 'COMPLETED'; S.phase = 'done'; S.curLabel = '';
+  log('INFO', `Test Run ended: ${pf} (${S.endReason}). Report written: PSU-200_${S.serial}_${new Date().toISOString().slice(0, 10)}_${pf}.html / .pdf`);
+}
+
+function abort() {
+  if (S.prompt && promptRes) return promptRes('abort');
+  if (S.phase !== 'running' && S.phase !== 'post') return;
+  S.aborting = true;
+  log('WARNING', 'Abort pressed');
+  if (pending) pending.rej(ABORT);
+}
+
+function submitInput(r, n, raw) {
+  const inp = r.inputs[n], d = inp.d;
+  let v = raw;
+  if (d.type === 'INTEGER' || d.type === 'FLOAT') {
+    const s = String(raw).trim();
+    const ok = d.type === 'INTEGER' ? /^-?\d+$/.test(s) : /^-?\d+(\.\d+)?$/.test(s);
+    v = Number(s);
+    if (!ok) { inp.err = d.type === 'INTEGER' ? 'Enter a whole number' : 'Enter a number'; return render(); }
+    if (d.range && (v < d.range[0] || v > d.range[1])) { inp.err = `Must be ${d.range[0]} to ${d.range[1]}`; return render(); }
+  } else if (d.type === 'STRING') {
+    if (d.pattern && !new RegExp(d.pattern).test(raw)) { inp.err = `Must match ${d.pattern}`; return render(); }
+  } else if (d.type === 'ENUM' && d.input === 'RADIOBUT' && !raw) { inp.err = 'Choose one'; return render(); }
+  inp.err = ''; inp.value = v;
+  log('INFO', `[${r.no}] input ${n + 1} "${d.desc}" = ${fmt(v)}`);
+  pending && pending.res(v);
+}
+
+// ---------- shared rendering ----------
+const h = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = v => Array.isArray(v) ? '{' + v.map(x => '"' + x + '"').join(', ') + '}' : String(v);
+const dur = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+const running = () => S.phase === 'running' || S.phase === 'post';
+const setup = () => S.phase === 'setup';
+const D = c => c ? '' : 'disabled';
+
+function badge(r) {
+  if (S.prompt && S.prompt.rowId === r.id) return `<span class="res res-WAITING">${r.result}?</span>`;
+  if (r.status === 'running') return `<span class="res res-RUNNING">RUNNING</span>`;
+  return r.result ? `<span class="res res-${r.result}">${r.result}</span>` : '';
+}
+function attemptsBadge(r) { return r.attempts.length > 1 ? `<span class="attempts" title="${h(r.attempts.map(a => `Attempt ${a.n}: ${a.pf} ${a.msg}`).join('\n'))}">${r.attempts.length} Attempts</span>` : ''; }
+function attemptsList(r) { return r.attempts.length > 1 ? `<div class="row-detail muted">${r.attempts.slice(0, -1).map(a => `Attempt ${a.n}: ${a.pf}, ${h(a.msg)}${a.act ? ` (${h(a.act)})` : ''}`).join('<br>')}</div>` : ''; }
+function detail(r) { return r.msg ? `<div class="row-detail"><span>${h(r.msg)}</span>${r.actual ? `<span>Actual: <b>${h(r.actual)}</b></span>` : ''}${r.expected ? `<span>Expected: ${h(r.expected)}</span>` : ''}</div>` : ''; }
+function rollup(hid) {
+  const ds = descSteps(hid), done = ds.filter(r => r.result);
+  if (!done.length) return '';
+  const bad = done.filter(r => r.result === 'FAIL' || r.result === 'ERROR').length;
+  return `${done.length}/${ds.length} done${bad ? `, <span class="err">${bad} failed</span>` : ''}`;
+}
+function enableBox(r) {
+  if (r.kind === 'header') {
+    const ds = descSteps(r.id), on = ds.filter(x => x.enabled).length;
+    return `<input type="checkbox" data-act="enable" data-r="${r.id}" ${on === ds.length ? 'checked' : ''} ${on && on < ds.length ? 'data-indet="1"' : ''} ${D(setup())}>`;
+  }
+  return `<input type="checkbox" data-act="enable" data-r="${r.id}" ${r.enabled ? 'checked' : ''} ${D(setup())}>`;
+}
+
+function inputsHTML(r) { return r.inputs.length ? `<div class="inputs">${r.inputs.map((inp, n) => inputHTML(r, inp, n)).join('')}</div>` : ''; }
+function inputHTML(r, inp, n) {
+  const d = inp.d, blocking = d.type !== 'POLL';
+  const on = blocking ? inp.active : r.status === 'running';
+  const dis = D(on), k = `data-r="${r.id}" data-n="${n}"`;
+  const cur = inp.value ?? inp.draft;
+  let w = '';
+  if (d.type === 'ENUM' && d.input === 'RADIOBUT')
+    w = d.enum.map(o => `<label><input type="radio" name="r${r.id}_${n}" value="${h(o)}" ${dis} ${cur === o ? 'checked' : ''} data-act="draft" ${k}> ${h(o)}</label>`).join('') + `<button ${dis} data-click="submit" ${k}>OK</button>`;
+  else if (d.type === 'ENUM' && d.input === 'CHECKBOX') {
+    const ch = inp.value ?? inp.checked;
+    w = d.enum.map(o => `<label><input type="checkbox" value="${h(o)}" ${dis} ${ch.includes(o) ? 'checked' : ''} data-act="check" ${k}> ${h(o)}</label>`).join('') + `<button ${dis} data-click="submit" ${k}>OK</button>`;
+  } else if (d.type === 'ENUM' && d.input === 'PUSHBUT')
+    w = d.enum.map(o => `<button ${dis} data-click="pick" data-v="${h(o)}" ${k}>${h(o)}</button>`).join('');
+  else if (d.type === 'PROMPT')
+    w = [].concat(d.prompt).map(o => `<button ${dis} data-click="pick" data-v="${h(o)}" ${k}>${h(o)}</button>`).join('');
+  else if (d.type === 'POLL')
+    w = d.prompt.map(o => `<button ${dis} data-click="poll" data-v="${h(o)}" ${k}>${h(o)}</button>`).join('') + `<span class="muted">clicked: ${h(inp.poll ?? '(none)')}</span>`;
+  else {
+    const hint = d.range ? `${d.range[0]} to ${d.range[1]}` : d.pattern ? d.tooltip || d.pattern : '';
+    w = `<input type="text" value="${h(cur)}" placeholder="${h(hint)}" ${dis} data-act="draft" ${k}><button ${dis} data-click="submit" ${k}>OK</button>`;
+  }
+  const entered = inp.value != null && d.type === 'ENUM' && d.input === 'PUSHBUT';
+  return `<div class="inp ${on ? 'inp-on' : ''} ${d.orient === 'VERT' ? 'vert' : ''}" title="${h(d.tooltip || '')}">
+    <span class="inp-desc">${n + 1}. ${h(d.desc)}</span><span class="inp-w">${w}</span>
+    ${entered ? `<span class="muted">chose: ${h(fmt(inp.value))}</span>` : ''}${inp.err ? `<span class="err">${h(inp.err)}</span>` : ''}</div>`;
+}
+
+function logLines(withDebug) {
+  return S.log.filter(l => withDebug || l.level !== 'DEBUG')
+    .map(l => `<div class="ll-${l.level}">${dur(l.t)}  ${l.level.padEnd(7)} ${h(l.msg)}</div>`).join('') || '<span class="muted">No log yet.</span>';
+}
+function titlebar() { return `<div class="titlebar"><b>ATE</b><span class="tab on">Run</span><span class="tab off" title="Not part of this prototype">History</span><span class="grow"></span><span>Station ${STATION}</span><button data-click="debug" style="padding:0 8px;font-size:11px">Debug window</button></div>`; }
+function statusBar() {
+  const t = S.runStart && S.phase !== 'setup';
+  return `<div class="statusbar">
+    <span>${S.phase === 'setup' ? 'Ready' : S.phase === 'done' ? 'Finished' : h(S.curLabel)}</span><span class="grow"></span>
+    <span>Pre-test <b>${S.pre[0]}/${S.pre[1]}</b></span><span>Post-test <b>${S.post[0]}/${S.post[1]}</b></span>
+    <span>Steps <b>${steps().filter(r => r.result).length}/${steps().length}</b></span>
+    <span>Run <b class="js-total">${t ? dur(Date.now() - S.runStart) : '--:--'}</b></span>
+    <span>Current <b class="js-cur">${running() ? dur(Date.now() - S.curStart) : '--:--'}</b></span></div>`;
+}
+function counts() {
+  const all = ['PASS', 'FAIL', 'ERROR', 'SKIPPED', 'NOTRUN', 'FORCED_NOTRUN', 'NOREPORT'];
+  return all.map(k => `<span><span class="res res-${k}">${k}</span></span><span>${steps().filter(r => r.result === k).length}</span>`).join('');
+}
+function scheduleSelect() {
+  return `<select data-act="schedule" ${D(setup())}><option value="">Choose a Test Schedule…</option>${SCHEDULES.map(s =>
+    `<option value="${s.id}" ${s.broken ? 'disabled' : ''} ${s.id === S.scheduleId ? 'selected' : ''}>${s.broken ? '⛔ ' : s.mismatches.length ? '⚠ ' : ''}${h(s.name)}  [${h(s.release)}]${s.broken ? ' : ' + h(s.broken) : ''}</option>`).join('')}</select>`;
+}
+function mismatchFlag() {
+  const s = sel(); if (!s || !s.mismatches.length) return '';
+  return `<div class="flag">⚠ <b>Checksum mismatch</b> in ${h(s.release)}: ${s.mismatches.map(m => h(m.file)).join(', ')}. The files on disk are not the released files.</div>`;
+}
+function resultBanner() {
+  return `<div class="banner ${S.result}"><span style="font-size:20px">${S.result}</span><span>${S.endReason}</span><span class="grow"></span>
+    <button data-click="report">Open report</button><button class="primary" data-click="newRun">New run (same UUT Type)</button></div>`;
+}
+function confirmModal() {
+  const s = sel();
+  return `<div class="modal-back"><div class="modal"><h3>Start Test Run</h3><div class="body">
+    <div><b>${h(s.name)}</b><br><span class="muted">${h(s.release)}</span></div>
+    <div>UUT <b>${h(S.uutType)}</b> s/n <b>${h(S.serial)}</b>, Project ${h(S.project)}, Operator ${h(S.operator)}</div>
+    <div class="flag">⚠ These files do not match their Test Definition checksums:<br>${s.mismatches.map(m => `<code>${h(m.file)}</code> expected ${m.expected}, found ${m.computed}`).join('<br>')}</div>
+    <label><input type="checkbox" data-act="storeMismatched" ${S.storeMismatched ? 'checked' : ''}> Store mismatched files with this Test Run</label>
+    </div><div class="btns"><button data-click="cancelConfirm">Cancel</button><button class="primary" data-click="confirmStart">Start</button></div></div></div>`;
+}
+function promptModal() {
+  const r = S.rows[S.prompt.rowId];
+  return `<div class="modal-back"><div class="modal"><h3>Step ${h(r.no)} ${r.result === 'ERROR' ? 'raised an error' : 'failed'}</h3><div class="body">
+    <div><b>${h(r.no)} ${h(r.name)}</b> <span class="res res-${r.result}">${r.result}</span> ${r.attempts.length > 1 ? `<span class="attempts">Attempt ${r.attempts.length}</span>` : ''}</div>
+    <div>${h(r.msg)}</div>${r.actual ? `<div>Actual <b>${h(r.actual)}</b>, expected ${h(r.expected)}</div>` : ''}
+    </div><div class="btns">${failButtons()}</div></div></div>`;
+}
+function failButtons() {
+  return `<button data-click="pcontinue" title="Keep the result and move on">Continue</button>
+    <button class="primary" data-click="pretry" title="Run the step's action again">Retry</button>
+    <button class="danger" data-click="pabort" title="Run the Post-test Actions and end the run">Abort</button>`;
+}
+function fieldsInvalid() {
+  if (!S.scheduleId) return 'Choose a Test Schedule';
+  if (!S.operator.trim()) return 'Operator is required';
+  if (!S.uutType.trim()) return 'UUT Type is required';
+  if (!S.serial.trim()) return 'Serial is required';
+  return '';
+}
+function stopRadios(name) {
+  return `<label><input type="radio" name="${name}" data-act="stop" value="1" ${S.stopOnFail ? 'checked' : ''} ${D(setup())}> Stop on fail</label>
+    <label><input type="radio" name="${name}" data-act="stop" value="0" ${!S.stopOnFail ? 'checked' : ''} ${D(setup())}> Continue on fail</label>`;
+}
+function textField(f, ph) { return `<input type="text" data-field="${f}" value="${h(S[f])}" placeholder="${ph || ''}" ${D(setup())}>`; }
+
+// ---------- Variant A: classic single column ----------
+function rowA(r, extra = '') {
+  const pad = `padding-left:${10 + r.depth * 24}px`;
+  if (r.kind === 'header')
+    return `<div class="row hdr" style="${pad}"><div class="row-line">${enableBox(r)}<span class="no"><b>${h(r.no)}</b></span><b class="name">${h(r.name)}</b><span class="muted">Sub-schedule</span><span class="grow"></span><span class="muted">${rollup(r.id)}</span></div></div>`;
+  const cls = [r.status === 'running' && 'running', S.prompt?.rowId === r.id && 'failed-hl', !r.enabled && 'off', extra].filter(Boolean).join(' ');
+  return `<div class="row ${cls}" style="${pad}" data-rowid="${r.id}"><div class="row-line">${enableBox(r)}<span class="no">${h(r.no)}</span><span class="name">${h(r.name)}</span><span class="grow"></span>${attemptsBadge(r)}${badge(r)}</div>
+    ${detail(r)}${attemptsList(r)}${inputsHTML(r)}</div>`;
+}
+function vA() {
+  return `<div class="frame">${titlebar()}
+  <div class="a-top">
+    <div class="a-grid">
+      <label>Project</label>${textField('project')}<label>Operator</label>${textField('operator', 'required')}
+      <label>UUT Type</label>${textField('uutType', 'required')}<label>Serial</label>${textField('serial', 'required')}
+      <label>Test Schedule</label><span class="wide">${scheduleSelect()}<button data-click="rescan" ${D(setup())}>Rescan</button></span>
+    </div>
+    <div class="a-opts">
+      <fieldset><legend>On failure</legend>${stopRadios('a-stop')}</fieldset>
+      <div style="display:flex;gap:6px"><button class="primary big" data-click="start" ${D(setup())}>Start</button><button class="danger big" data-click="abort" ${D(running())}>Abort</button></div>
+      ${S.formErr ? `<span class="err">${h(S.formErr)}</span>` : ''}
+    </div>
+  </div>
+  ${mismatchFlag()}${S.phase === 'done' ? resultBanner() : ''}
+  <div class="a-steps" data-scroll="a-steps">${S.rows.map(r => rowA(r)).join('')}</div>
+  <div class="a-log loglines autoscroll" data-scroll="a-log">${logLines(false)}</div>
+  ${statusBar()}</div>
+  ${S.confirm ? confirmModal() : ''}${S.prompt ? promptModal() : ''}`;
+}
+
+// ---------- Variant B: three-pane, table of steps, inline failure prompt ----------
+function rowB(r) {
+  const pad = `padding-left:${r.depth * 16}px`;
+  if (r.kind === 'header')
+    return `<div class="b-row hdr"><div class="b-tr">${enableBox(r)}<span class="mono">${h(r.no)}</span><span style="${pad}">▾ ${h(r.name)}</span><span class="cell muted" style="grid-column:4/9">${rollup(r.id)}</span></div></div>`;
+  const failing = S.prompt?.rowId === r.id;
+  const cls = [r.status === 'running' && 'running', failing && 'failed-hl', !r.enabled && 'off'].filter(Boolean).join(' ');
+  return `<div class="b-row ${cls}" data-rowid="${r.id}"><div class="b-tr">${enableBox(r)}<span class="mono">${h(r.no)}</span><span style="${pad}">${h(r.name)}</span>
+    <span>${badge(r)}</span><span>${r.attempts.length > 1 ? `<span class="attempts" title="${h(r.attempts.map(a => `Attempt ${a.n}: ${a.pf} ${a.msg}`).join('\n'))}">${r.attempts.length}</span>` : ''}</span>
+    <span class="cell" title="${h(r.actual)}">${h(r.actual)}</span><span class="cell muted" title="${h(r.expected)}">${h(r.expected)}</span><span class="cell" title="${h(r.msg)}">${h(r.msg)}</span></div>
+    ${inputsHTML(r)}
+    ${failing ? `<div class="b-inline-prompt"><b>${r.result === 'ERROR' ? 'Error' : 'Failed'}.</b> <span class="grow">${h(r.msg)}</span>${failButtons()}</div>` : ''}</div>`;
+}
+function vB() {
+  const s = sel(), list = SCHEDULES.filter(x => (x.name + x.release).toLowerCase().includes(S.filter.toLowerCase()));
+  return `<div class="frame">${titlebar()}<div class="b-body">
+  <div class="b-left">
+    <div style="display:flex;gap:6px"><input type="text" data-field="filter" value="${h(S.filter)}" placeholder="Filter schedules" style="flex:1" ${D(setup())}><button data-click="rescan" ${D(setup())}>Rescan</button></div>
+    <div class="b-sched">${list.map(x => `<div class="it ${x.id === S.scheduleId ? 'sel' : ''} ${x.broken ? 'broken' : ''}" ${x.broken || !setup() ? '' : `data-click="pickSched" data-sid="${x.id}"`}>
+      <div>${x.broken ? '⛔ ' : ''}${h(x.name)}</div><div class="muted">${h(x.release)}</div>
+      ${x.broken ? `<div class="err">${h(x.broken)}</div>` : x.mismatches.length ? `<div style="color:#8a5a00;font-size:12px">⚠ checksum mismatch: ${x.mismatches.map(m => h(m.file)).join(', ')}</div>` : ''}</div>`).join('')}</div>
+    <div class="b-form">
+      <label>Project</label>${textField('project')}<label>Operator</label>${textField('operator', 'required')}
+      <label>UUT Type</label>${textField('uutType', 'required')}<label>Serial</label>${textField('serial', 'required')}
+    </div>
+    <fieldset><legend>On failure</legend>${stopRadios('b-stop')}</fieldset>
+    ${S.formErr ? `<span class="err">${h(S.formErr)}</span>` : ''}
+    <div style="display:flex;gap:6px"><button class="primary big grow" data-click="start" ${D(setup())}>Start</button><button class="danger big grow" data-click="abort" ${D(running())}>Abort</button></div>
+    ${S.phase === 'done' ? `<div class="banner ${S.result}" style="flex-direction:column;align-items:stretch"><div>${S.result} <span class="muted">${S.endReason}</span></div><div style="display:flex;gap:6px"><button data-click="report">Report</button><button class="primary" data-click="newRun">New run</button></div></div>` : ''}
+    ${S.phase !== 'setup' ? `<fieldset><legend>Results</legend><div class="b-counts">${counts()}</div></fieldset>` : ''}
+  </div>
+  <div class="b-mid">
+    ${s ? `<div style="padding:5px 8px;border-bottom:1px solid #ddd"><b>${h(s.name)}</b> <span class="muted">${h(s.release)}</span></div>` : ''}
+    ${mismatchFlag()}
+    ${S.prompt ? `<div class="b-sticky">Step ${h(S.rows[S.prompt.rowId].no)} ${S.rows[S.prompt.rowId].result}: choose Continue, Retry or Abort below</div>` : ''}
+    <div class="b-thead"><span></span><span>No.</span><span>Step</span><span>Result</span><span title="Attempts">#</span><span>Actual</span><span>Expected</span><span>Message</span></div>
+    <div class="b-rows" data-scroll="b-rows">${s ? S.rows.map(rowB).join('') : '<div class="muted" style="padding:20px">Choose a Test Schedule on the left.</div>'}</div>
+  </div>
+  <div class="b-right"><div class="hd">Log<span class="grow"></span><span class="muted">INFO and above</span></div><div class="loglines autoscroll" data-scroll="b-log">${logLines(false)}</div></div>
+  </div>${statusBar()}</div>${S.confirm ? confirmModal() : ''}`;
+}
+
+// ---------- Variant C: staged setup, then a focus run view ----------
+function vC() {
+  if (S.phase === 'setup') {
+    const st = S.cStage, s = sel();
+    const stages = ['1  Test Schedule', '2  UUT and Operator', '3  Steps and options'];
+    let page = '';
+    if (st === 0) page = `<div style="display:flex;gap:8px;margin-bottom:8px"><h3 style="margin:0" class="grow">Choose a Test Schedule</h3><button data-click="rescan">Rescan</button></div>
+      <table class="c-table"><tr><th>Test Schedule</th><th>Media Release</th><th>Status</th></tr>${SCHEDULES.map(x => `<tr class="${x.broken ? '' : 'pick'} ${x.id === S.scheduleId ? 'sel' : ''}" ${x.broken ? '' : `data-click="pickSched" data-sid="${x.id}"`}>
+        <td>${h(x.name)}</td><td class="muted">${h(x.release)}</td><td>${x.broken ? `<span class="err">⛔ ${h(x.broken)}</span>` : x.mismatches.length ? `<span style="color:#8a5a00">⚠ checksum mismatch: ${x.mismatches.map(m => h(m.file)).join(', ')}</span>` : '<span style="color:#17642a">OK</span>'}</td></tr>`).join('')}</table>`;
+    if (st === 1) page = `<h3 style="margin-top:0">${h(s.name)} <span class="muted">${h(s.release)}</span></h3><div class="c-big">
+      <label>Project</label>${textField('project')}<label>Operator</label>${textField('operator', 'required')}
+      <label>UUT Type</label>${textField('uutType', 'required')}<label>Serial</label>${textField('serial', 'required')}</div>`;
+    if (st === 2) page = `<h3 style="margin-top:0">Steps to run</h3>${mismatchFlag()}
+      ${s.mismatches.length ? `<label style="display:block;margin:6px 0"><input type="checkbox" data-act="storeMismatched" ${S.storeMismatched ? 'checked' : ''}> Store mismatched files with this Test Run</label>` : ''}
+      <fieldset style="margin:8px 0;display:inline-block"><legend>On failure</legend>${stopRadios('c-stop')}</fieldset>
+      <div class="c-tree">${S.rows.map(r => rowA(r)).join('')}</div>`;
+    return `<div class="frame">${titlebar()}<div class="c-stages">${stages.map((x, i) => `<div class="${i === st ? 'on' : i < st ? 'done' : ''}">${x}</div>`).join('')}</div>
+      <div class="c-page">${page}</div>
+      <div class="c-nav"><button data-click="cback" ${D(st > 0)}>Back</button><span class="grow"></span>${S.formErr ? `<span class="err">${h(S.formErr)}</span>` : ''}
+      ${st < 2 ? `<button class="primary big" data-click="cnext" ${D(st === 0 ? !!s : true)}>Next</button>` : `<button class="primary big" data-click="cstart">Start Test Run</button>`}</div>${statusBar()}</div>`;
+  }
+  const s = sel(), cur = currentRow();
+  const state = S.phase === 'done' ? S.result : S.prompt ? 'FAIL' : 'RUN';
+  return `<div class="frame">${titlebar()}
+    <div class="c-head"><span class="state ${state}">${S.phase === 'done' ? S.result : S.prompt ? 'WAITING' : S.phase === 'post' ? 'POST-TEST' : 'RUNNING'}</span>
+      <div><div><b>${h(s.name)}</b></div><div class="meta">${h(S.uutType)} s/n ${h(S.serial)} · ${h(S.project)} · ${h(S.operator)} · ${S.stopOnFail ? 'stop on fail' : 'continue on fail'}${S.endReason ? ' · ' + S.endReason : ''}</div></div>
+      <span class="grow"></span><div class="meta" style="text-align:right">${h(S.curLabel)}<br><span class="timer js-cur">--:--</span> / <span class="timer js-total">--:--</span></div>
+      ${S.phase === 'done' ? `<button data-click="report">Report</button><button class="primary big" data-click="newRun">New run</button>` : `<button class="danger big" data-click="abort">Abort</button>`}</div>
+    <div class="c-list" data-scroll="c-list">${S.rows.map(r => rowA(r, cur && cur.id === r.id ? 'current' : '')).join('')}</div>
+    ${S.prompt ? `<div class="c-failbar"><b>Step ${h(S.rows[S.prompt.rowId].no)} ${S.rows[S.prompt.rowId].result}</b><span class="grow">${h(S.rows[S.prompt.rowId].msg)}</span>${failButtons()}</div>` : ''}
+    <div class="c-bottom"><div class="c-tabs"><div class="${S.tab === 'log' ? 'on' : ''}" data-click="tab" data-v="log">Log</div><div class="${S.tab === 'sum' ? 'on' : ''}" data-click="tab" data-v="sum">Summary</div></div>
+      <div class="pane ${S.tab === 'log' ? 'loglines autoscroll' : ''}" data-scroll="c-pane">${S.tab === 'log' ? logLines(false) : `<div class="b-counts" style="max-width:260px">${counts()}</div>`}</div></div>
+    ${statusBar()}</div>`;
+}
+
+// ---------- debug window, render loop, events ----------
+let dbgPos = { x: window.innerWidth - 600, y: 60 };
+function renderDebug() {
+  const host = document.getElementById('dbg-host');
+  if (!S.debugOpen) { host.innerHTML = ''; return; }
+  const prev = host.querySelector('.loglines'), atBottom = !prev || prev.scrollTop + prev.clientHeight >= prev.scrollHeight - 4;
+  host.innerHTML = `<div class="dbg" style="left:${dbgPos.x}px;top:${dbgPos.y}px"><div class="t" id="dbg-drag">ATE: Debug log (all levels) <span class="grow"></span><span data-click="debug" style="cursor:pointer">✕</span></div><div class="loglines">${logLines(true)}</div></div>`;
+  const ll = host.querySelector('.loglines'); if (atBottom) ll.scrollTop = ll.scrollHeight;
+}
+
+const VARIANTS = { A: ['Classic single column', vA], B: ['Three-pane, step table', vB], C: ['Staged setup, focus run view', vC] };
+const keys = Object.keys(VARIANTS);
+let variant = (new URLSearchParams(location.search).get('variant') || location.hash.slice(1) || 'A').toUpperCase();
+if (!VARIANTS[variant]) variant = 'A';
+
+function render() {
+  const app = document.getElementById('app');
+  const scroll = {}, bottom = {};
+  app.querySelectorAll('[data-scroll]').forEach(e => { scroll[e.dataset.scroll] = e.scrollTop; bottom[e.dataset.scroll] = e.scrollTop + e.clientHeight >= e.scrollHeight - 4; });
+  const focused = document.activeElement && document.activeElement.dataset ? { f: document.activeElement.dataset.field, r: document.activeElement.dataset.r, n: document.activeElement.dataset.n, s: document.activeElement.selectionStart } : null;
+  app.innerHTML = VARIANTS[variant][1]();
+  app.querySelectorAll('[data-indet]').forEach(e => e.indeterminate = true);
+  app.querySelectorAll('[data-scroll]').forEach(e => {
+    const k = e.dataset.scroll;
+    if (e.classList.contains('autoscroll') && (bottom[k] ?? true)) e.scrollTop = e.scrollHeight;
+    else if (k in scroll) e.scrollTop = scroll[k];
+  });
+  if (focused && (focused.f || focused.r != null)) {
+    const sel = focused.f ? `[data-field="${focused.f}"]` : `input[type=text][data-r="${focused.r}"][data-n="${focused.n}"]`;
+    const el = app.querySelector(sel); if (el && !el.disabled) { el.focus(); try { el.setSelectionRange(focused.s, focused.s); } catch (e) {} }
+  }
+  const cur = currentRow();
+  if (cur && cur.id !== S.lastCurrent) { S.lastCurrent = cur.id; const el = app.querySelector(`[data-rowid="${cur.id}"]`); el && el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+  document.getElementById('vlabel').textContent = `${variant} (${VARIANTS[variant][0]})`;
+  renderDebug();
+}
+function focusActive() { setTimeout(() => { const el = document.querySelector('.inp-on input[type=text], .inp-on input:not([type=text]), .inp-on button'); el && el.focus(); }, 0); }
+function setVariant(v) {
+  variant = v;
+  try { const u = new URL(location.href); u.searchParams.set('variant', v); history.replaceState(null, '', u); } catch (e) { location.hash = v; }
+  S.lastCurrent = null; render();
+}
+function tryStart() {
+  S.formErr = fieldsInvalid(); if (S.formErr) return render();
+  if (sel().mismatches.length) { S.confirm = true; render(); } else startRun();
+}
+
+document.getElementById('prev').onclick = () => setVariant(keys[(keys.indexOf(variant) + keys.length - 1) % keys.length]);
+document.getElementById('next').onclick = () => setVariant(keys[(keys.indexOf(variant) + 1) % keys.length]);
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if (e.key === 'Enter' && t.matches('input[type=text][data-r]')) { submitInput(S.rows[t.dataset.r], +t.dataset.n, t.value); return; }
+  if (t.matches('input, textarea, select, [contenteditable]')) return;
+  if (e.key === 'ArrowLeft') document.getElementById('prev').click();
+  if (e.key === 'ArrowRight') document.getElementById('next').click();
+});
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.dataset.field) { S[t.dataset.field] = t.value; if (t.dataset.field === 'filter') render(); return; }
+  if (t.dataset.act === 'draft') S.rows[t.dataset.r].inputs[t.dataset.n].draft = t.value;
+});
+document.addEventListener('change', e => {
+  const t = e.target, a = t.dataset.act;
+  if (a === 'schedule') { S.scheduleId = t.value || null; if (S.scheduleId) S.stopOnFail = sel().stopOnFail; render(); }
+  if (a === 'stop') { S.stopOnFail = t.value === '1'; render(); }
+  if (a === 'storeMismatched') S.storeMismatched = t.checked;
+  if (a === 'check') { const inp = S.rows[t.dataset.r].inputs[t.dataset.n]; inp.checked = inp.d.enum.filter(o => o === t.value ? t.checked : inp.checked.includes(o)); }
+  if (a === 'enable') {
+    const r = S.rows[t.dataset.r];
+    if (r.kind === 'header') descSteps(r.id).forEach(x => x.enabled = t.checked); else r.enabled = t.checked;
+    render();
+  }
+});
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-click]'); if (!t || t.disabled) return;
+  const r = t.dataset.r != null ? S.rows[t.dataset.r] : null, n = +t.dataset.n;
+  switch (t.dataset.click) {
+    case 'submit': { const inp = r.inputs[n]; submitInput(r, n, inp.d.input === 'CHECKBOX' ? inp.checked.slice() : inp.draft); break; }
+    case 'pick': submitInput(r, n, t.dataset.v); break;
+    case 'poll': r.inputs[n].poll = t.dataset.v; log('INFO', `[${r.no}] POLL "${r.inputs[n].d.desc}" clicked: ${t.dataset.v}`); break;
+    case 'start': tryStart(); break;
+    case 'confirmStart': startRun(); break;
+    case 'cancelConfirm': S.confirm = false; render(); break;
+    case 'abort': abort(); break;
+    case 'pcontinue': promptRes && promptRes('continue'); break;
+    case 'pretry': promptRes && promptRes('retry'); break;
+    case 'pabort': promptRes && promptRes('abort'); break;
+    case 'rescan': S.log.push({ t: 0, level: 'INFO', msg: `Rescanned Media Releases: ${SCHEDULES.length} Test Schedules, 2 broken` }); render(); break;
+    case 'debug': S.debugOpen = !S.debugOpen; render(); break;
+    case 'pickSched': S.scheduleId = t.dataset.sid; S.stopOnFail = sel().stopOnFail; render(); break;
+    case 'newRun': { const keep = { project: S.project, operator: S.operator, uutType: S.uutType, scheduleId: S.scheduleId, debugOpen: S.debugOpen }; S = freshState(keep); S.stopOnFail = sel().stopOnFail; S.cStage = 1; render(); break; }
+    case 'report': alert('Prototype: would open the HTML Test Report.'); break;
+    case 'tab': S.tab = t.dataset.v; render(); break;
+    case 'cnext': if (S.cStage === 1) { S.formErr = fieldsInvalid(); if (S.formErr) return render(); } S.formErr = ''; S.cStage++; render(); break;
+    case 'cback': S.formErr = ''; S.cStage--; render(); break;
+    case 'cstart': S.formErr = fieldsInvalid(); S.formErr ? render() : startRun(); break;
+  }
+});
+document.addEventListener('mousedown', e => {
+  if (!e.target.closest('#dbg-drag') || e.target.closest('[data-click]')) return;
+  const sx = e.clientX - dbgPos.x, sy = e.clientY - dbgPos.y;
+  const mv = ev => { dbgPos = { x: ev.clientX - sx, y: ev.clientY - sy }; const d = document.querySelector('.dbg'); d.style.left = dbgPos.x + 'px'; d.style.top = dbgPos.y + 'px'; };
+  const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+  document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+});
+setInterval(() => {
+  const total = S.runStart && S.phase !== 'setup' ? dur(Date.now() - S.runStart) : '--:--';
+  const cur = running() ? dur(Date.now() - S.curStart) : '--:--';
+  if (S.phase === 'done') return;
+  document.querySelectorAll('.js-total').forEach(e => e.textContent = total);
+  document.querySelectorAll('.js-cur').forEach(e => e.textContent = cur);
+}, 250);
+render();
+</script>
+</body>
+</html>
