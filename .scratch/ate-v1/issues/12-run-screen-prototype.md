@@ -1,7 +1,7 @@
 # Run screen, input forms, log pane and debug window
 
 Type: prototype
-Status: claimed
+Status: resolved
 Blocked by: 04, 10
 
 ## Question
@@ -29,6 +29,18 @@ Also from "Sub-schedules" (14):
 
 Also from "What a Test Run records" (11): UUT Type and serial are required free text on the Run screen. With `database.storeMismatchedFiles` = `ask`, the run-start confirmation lists checksum-mismatched files with a "Store mismatched files with this Test Run" checkbox, ticked by default.
 
+## Answer
+
+Full definition: `assets/run-screen.md`.
+
+- **Two layouts in v1**, both views of one run session: **staged** (default; prototype variant C) and **three-pane** (variant B). `ui.layout` sets the default, a View menu switches for the session (even mid-run), and `ui.allowLayoutSwitch` can lock it.
+- **Architecture**: engine, then run session, then layout. The engine and run session import no widgets and are testable without a GUI; layouts render the session and forward actions, with no run logic.
+- **Staged setup order**: 1 UUT and Operator, 2 Test Schedule, 3 Steps and options. The run view enlarges and scrolls to the current step; the failure prompt is a full-width bar; Log and Summary are tabs.
+- **Three-pane**: setup and filterable schedule list on the left, a step table (Result, Attempts, Actual, Expected, Message) with an inline failure prompt in the centre, the log on the right.
+- **Operator** is a required field (gap found by the prototype).
+- **Run-start confirmation** appears only on a checksum mismatch, carrying the store-mismatched-files checkbox.
+- **New run** clears nothing.
+
 ## Comments
 
 ### Prototype, 2026-10-17
@@ -40,3 +52,16 @@ Asset: `prototypes/run-screen/run-screen-prototype.html` on branch `prototype/ru
 - **C, staged setup then focus view**: a three-stage setup (schedule table, UUT and Operator, steps and options with the mismatch checkbox inline), then a run view with a large state header and timers. The current step is enlarged and scrolled into view, the failure prompt is a full-width bar, and the Log and Summary are tabs.
 
 Gap the prototype exposed: the ticket doesn't list an **Operator** field, but every Test Run records a free-text Operator, so all three variants add a required one.
+
+### Prototype feedback, 2026-10-18
+
+- **Variant C** (staged setup, then a focus run view) is preferred, with the first two stages swapped: **1 UUT and Operator**, **2 Test Schedule**, **3 Steps and options**.
+- **Run-start confirmation** appears only when there is a checksum mismatch (carrying the store-mismatched-files checkbox); otherwise Start begins the run directly.
+- **New run after a run clears nothing**: Project, Operator, UUT Type, serial, schedule and options all carry over.
+- **Variant B** (three-pane, step table) is also liked. The user asked whether the UI can be decoupled from the engine enough to offer both layouts (being settled).
+
+### Decoupling, 2026-10-18
+
+- **Both layouts ship in v1**: staged (variant C, with stages swapped) and three-pane (variant B).
+- **Layout choice**: `ui.layout` (`staged` default, or `threePane`) in the app config, plus a View menu switch for the session, including mid-run. `ui.allowLayoutSwitch` (default `true`) can disable the View menu switch.
+- **Architectural rule**: the engine and the run session never import widgets; layouts hold no run logic.

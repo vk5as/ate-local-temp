@@ -36,7 +36,7 @@ The config describes the Station, so it is machine-wide:
   "reports": { "directory": "reports", "organisation": "", "logo": null, "paperSize": "A4" },
   "log": { "directory": "logs", "level": "info" },
   "deviceTrace": { "enabled": false, "maxBytes": 256 },
-  "ui": { "theme": "system" }
+  "ui": { "theme": "system", "layout": "staged", "allowLayoutSwitch": true }
 }
 ```
 
@@ -63,6 +63,8 @@ Keys are camelCase, grouped in sections.
 | `deviceTrace.enabled` | `false` | Device tracing at `Log.DEBUG` (see `ate-table-reference.md`) |
 | `deviceTrace.maxBytes` | `256` | Length past which traced bytes are truncated |
 | `ui.theme` | `system` | `system`, `light` or `dark` |
+| `ui.layout` | `staged` | Default Run screen layout: `staged` or `threePane` (see `run-screen.md`) |
+| `ui.allowLayoutSwitch` | `true` | Whether the View menu can switch the layout for the session |
 
 ## Station identity
 

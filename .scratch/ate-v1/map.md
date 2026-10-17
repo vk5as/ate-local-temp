@@ -26,12 +26,14 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
   - An application config JSON is read at launch; defined in `assets/app-config-format.md`.
   - v1 is one Station with a local database. Operator is a free-text name. Lua is trusted.
   - Reports cover a single Test Run, as HTML with PDF rendered from it, generated at run end or later from the database.
-  - GUI v1: Run screen and History screen; configuration is edited by hand.
+  - GUI v1: Run screen and History screen; configuration is edited by hand. The Run screen has two layouts, staged and three-pane (`assets/run-screen.md`).
+  - Architectural rule: the engine and the run session never import widgets, and layouts hold no run logic, so layouts are interchangeable and the engine is testable without a GUI.
   - Windows and Linux both supported; Windows primary.
 - Grilling tickets: use the `grilling` and `domain-modeling` skills.
 
 ## Decisions so far
 
+- [Run screen, input forms, log pane and debug window](issues/12-run-screen-prototype.md): two layouts on one UI-free run session, staged (default; setup stages UUT and Operator, Test Schedule, Steps and options; a focus run view) and three-pane (step table, inline failure prompt), chosen by `ui.layout` with an optional View menu switch; Operator is required; run-start confirmation only on a checksum mismatch; New run clears nothing. Defined in `assets/run-screen.md`.
 - [Draft the ATE table](issues/15-ate-table-reference.md): a first draft of the `ATE` table: `open`/`read`/`write`/`close` with `onError` handlers, plus timing, `input`, logging and `report`. Its conflicts with earlier decisions went to "The ATE Lua API".
 - [Draft the Lua schedule format](issues/01-lua-schedule-spec.md): `.tslua` files return a `ScheduleParams` builder (report doc fields, Pre-test and Post-test Actions, array of `StepParams` steps with Step Number, enable, Step Inputs, action, Sub-schedule include); written up in `assets/test-schedule-format.md`.
 - [Survey of the Python to Lua binding candidates](issues/02-lua-binding-survey.md): lupa is the only viable binding (bundles Lua 5.1–5.5 and LuaJIT, Windows and Linux packages); pausing in `ATE.input` works through a Lua-side coroutine yield (not inside `pcall` on 5.1) or a worker thread.
