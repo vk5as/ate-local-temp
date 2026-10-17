@@ -1,0 +1,212 @@
+{# PROTOTYPE, throwaway. One template; `furniture` picks how the page header/footer is drawn:
+   css       -> CSS @page margin boxes (Chromium / QWebEngine)
+   xhtml2pdf -> xhtml2pdf @frame + <pdf:pagenumber/> tags
+   none      -> no page furniture in the HTML (for stamping it on afterwards) #}
+{% macro rescls(r) %}res res-{{ r|lower }}{% endmacro %}
+{% set hdr_text = org ~ " · " ~ doc.title ~ " · " ~ doc.id ~ " rev " ~ doc.rev %}
+{% set hdr_right = run.uut_type ~ " " ~ run.serial %}
+{% set ftr_text = "Run " ~ run.uuid ~ " · Run recorded by ATE " ~ run.recorded_by ~ " · Report generated " ~ run.generated_at ~ " by ATE " ~ run.generated_by %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ doc.title }} · {{ run.uut_type }} {{ run.serial }}</title>
+<style>
+{% if furniture == "css" %}
+@page {
+  size: {{ paper }} portrait;
+  margin: 24mm 14mm 18mm 14mm;
+  @top-left { content: url("{{ logo }}"); vertical-align: middle; width: 32mm; }
+  @top-center { content: "{{ hdr_text|replace('"', '\\"') }}"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
+  @top-right { content: "{{ hdr_right }}"; font: bold 9pt sans-serif; vertical-align: middle; border-bottom: none; }
+  @bottom-left { content: "{{ ftr_text|replace('"', '\\"') }}"; font: 7pt sans-serif; color: #555; width: 150mm; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt sans-serif; }
+}
+@media screen { body { max-width: 190mm; margin: 1em auto; } }
+@media print { .screen-only { display: none; } }
+{% elif furniture == "xhtml2pdf" %}
+@page {
+  size: {{ paper|lower }} portrait;
+  margin: 24mm 14mm 18mm 14mm;
+  @frame header_frame { -pdf-frame-content: page-header; left: 14mm; right: 14mm; top: 8mm; height: 13mm; }
+  @frame footer_frame { -pdf-frame-content: page-footer; left: 14mm; right: 14mm; bottom: 6mm; height: 9mm; }
+}
+.screen-only { display: none; }
+/* xhtml2pdf only knows the 14 base PDF fonts; anything past Latin-1 needs a real font file */
+@font-face { font-family: "DejaVu Sans"; src: url("{{ font_dir }}/DejaVuSans.ttf"); }
+@font-face { font-family: "DejaVu Sans"; src: url("{{ font_dir }}/DejaVuSans-Bold.ttf"); font-weight: bold; }
+@font-face { font-family: "DejaVu Sans Mono"; src: url("{{ font_dir }}/DejaVuSansMono.ttf"); }
+{% else %}
+@page { size: {{ paper }} portrait; margin: 24mm 14mm 18mm 14mm; }
+@media print { .screen-only { display: none; } }
+{% endif %}
+body { font-family: "DejaVu Sans", "Segoe UI", Arial, sans-serif; font-size: 9pt; color: #111; }
+h1 { font-size: 16pt; margin: 0 0 2mm 0; }
+h2 { font-size: 12pt; margin: 6mm 0 2mm 0; border-bottom: 0.4mm solid #1f4e8c; padding-bottom: 1mm; color: #1f4e8c; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
+.kv th { width: 35mm; color: #555; font-weight: normal; }
+.page-break { page-break-before: always; }
+.banner { border: 0.5mm solid #b36b00; background: #fff4e0; color: #6b3e00; padding: 2mm 3mm; margin: 2mm 0; font-weight: bold; }
+.verdict { font-size: 34pt; font-weight: bold; letter-spacing: 1mm; padding: 2mm 4mm; border: 1mm solid; text-align: center; }
+.verdict-pass { color: #146c2e; border-color: #146c2e; }
+.verdict-fail { color: #a4161a; border-color: #a4161a; }
+.endreason { text-align: center; color: #333; font-size: 10pt; margin-top: 1mm; }
+.sig { border: 0.4mm solid #333; height: 26mm; width: 80mm; }
+.sigline { border-bottom: 0.3mm solid #333; height: 7mm; width: 50mm; }
+.small { font-size: 7.5pt; color: #444; }
+.counts td, .counts th { border: 0.2mm solid #bbb; text-align: center; }
+.steps th { background: #1f4e8c; color: #fff; font-weight: bold; }
+.steps td { border-bottom: 0.2mm solid #ccc; }
+.steps tr { page-break-inside: avoid; }
+.steps .num { width: 16mm; }
+.steps .exp, .steps .act { width: 28mm; }
+.steps .rescol { width: 26mm; }
+.steps .hdr td { background: #e8eef7; font-weight: bold; border-top: 0.3mm solid #1f4e8c; }
+.steps .att td { color: #666; font-size: 8pt; background: #fafafa; }
+.steps .msg { font-size: 7.5pt; color: #444; }
+.steps .note { font-size: 7pt; color: #1f4e8c; }
+.d1 { padding-left: 6mm; } .d2 { padding-left: 11mm; } .d3 { padding-left: 16mm; }
+.res { font-weight: bold; }
+.res-pass { color: #146c2e; } .res-fail, .res-error, .res-noreport { color: #a4161a; }
+.res-skipped, .res-notrun, .res-forced_notrun { color: #777; }
+.rollup { font-size: 7pt; color: #1f4e8c; font-weight: normal; }
+.mismatch td { background: #fde8e8; }
+.mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 7pt; word-break: break-all; }
+.log td { font-size: 7.5pt; padding: 0.3mm 1.5mm; }
+.log .owner td { font-weight: bold; background: #eee; font-size: 8pt; padding-top: 1.5mm; }
+.lvl-WARNING { color: #8a5200; } .lvl-ERROR { color: #a4161a; }
+.ph { width: 100%; } .ph td { padding: 0; vertical-align: middle; }
+</style>
+</head>
+<body>
+
+{% if furniture == "xhtml2pdf" %}
+<div id="page-header">
+  <table class="ph"><tr>
+    <td style="width: 34mm"><img src="{{ logo }}" style="height: 9mm"></td>
+    <td style="font-size: 8pt; color: #333">{{ hdr_text }}</td>
+    <td style="text-align: right; font-weight: bold">{{ hdr_right }}</td>
+  </tr></table>
+</div>
+<div id="page-footer">
+  <table class="ph"><tr>
+    <td style="font-size: 7pt; color: #555">{{ ftr_text }}</td>
+    <td style="text-align: right; width: 28mm; font-size: 8pt">Page <pdf:pagenumber/> of <pdf:pagecount/></td>
+  </tr></table>
+</div>
+{% endif %}
+
+<div class="screen-only">
+  <table class="ph"><tr>
+    <td style="width: 34mm"><img src="{{ logo }}" style="height: 9mm"></td>
+    <td>{{ hdr_text }}</td><td style="text-align: right"><b>{{ hdr_right }}</b></td>
+  </tr></table>
+</div>
+
+<!-- ============ Cover ============ -->
+<h1>{{ doc.title }}</h1>
+<div class="small">{{ doc.id }} · revision {{ doc.rev }}</div>
+
+{% if run.mismatch %}<div class="banner">⚠ One or more files did not match their recorded checksum. See Configuration.</div>{% endif %}
+{% if run.interrupted %}<div class="banner">⚠ This Test Run was INTERRUPTED and did not finish.</div>{% endif %}
+
+<table style="margin-top: 4mm"><tr>
+  <td style="width: 60%">
+    <table class="kv">
+      <tr><th>UUT Type</th><td>{{ run.uut_type }}</td></tr>
+      <tr><th>Serial</th><td><b>{{ run.serial }}</b></td></tr>
+      <tr><th>Project</th><td>{{ run.project }}</td></tr>
+      <tr><th>Station</th><td>{{ run.station }}</td></tr>
+      <tr><th>Start</th><td>{{ run.start }}</td></tr>
+      <tr><th>End</th><td>{{ run.end }}</td></tr>
+      <tr><th>Duration</th><td>{{ run.duration }}</td></tr>
+      <tr><th>ATE version</th><td>{{ run.recorded_by }}</td></tr>
+      <tr><th>Stop on Fail</th><td>{{ run.stop_on_fail }}</td></tr>
+      <tr><th>Schedule</th><td>{{ schedule.name }}<br><span class="small">{{ schedule.description }}<br>{{ schedule.file }}</span></td></tr>
+      <tr><th>Media Release</th><td>{{ schedule.release }}</td></tr>
+    </table>
+  </td>
+  <td style="width: 40%">
+    <div class="verdict verdict-{{ run.result|lower }}">{{ run.result }}</div>
+    <div class="endreason">End Reason: {{ run.end_reason }}</div>
+  </td>
+</tr></table>
+
+<h2>Summary</h2>
+<table class="counts"><tr>{% for r in results %}<th class="small">{{ r }}</th>{% endfor %}</tr>
+<tr>{% for r in results %}<td class="{{ rescls(r) }}">{{ counts[r] }}</td>{% endfor %}</tr></table>
+<p class="small">Retried steps: {{ retried }} · Operator enable overrides: {{ overrides }}</p>
+
+{% if failures %}
+<h2>Failures</h2>
+<table>
+{% for f in failures %}<tr><td style="width: 16mm">{{ f.number }}</td><td>{{ f.name }}<br><span class="small">{{ f.message }}</span></td><td style="width: 26mm" class="{{ rescls(f.result) }}">{{ f.result }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+
+<h2>Operator</h2>
+<table><tr>
+  <td style="width: 50%">{{ run.operator }}<br><br><span class="small">Date</span><div class="sigline"></div></td>
+  <td><span class="small">Signature</span><div class="sig"></div></td>
+</tr></table>
+
+<!-- ============ Steps ============ -->
+<h2 class="page-break">Steps</h2>
+<table class="steps" repeat="1">
+<thead><tr><th class="num">Step</th><th>Step Name / message</th><th class="exp">Expected</th><th class="act">Actual</th><th class="rescol">Result</th></tr></thead>
+<tbody>
+{% for s in rows %}
+{% if s.kind == "header" %}
+<tr class="hdr"><td class="d{{ s.depth }}">{{ s.number }}</td><td colspan="3" class="d{{ s.depth }}">{{ s.name }}</td><td class="rollup">{{ s.summary }}</td></tr>
+{% else %}
+<tr><td class="d{{ s.depth }}">{{ s.number }}</td>
+<td class="d{{ s.depth }}">{{ s.name }}{% if s.attempts %} <span class="note">↻ {{ s.attempts|length + 1 }}</span>{% endif %}
+{% if s.message %}<div class="msg">{{ s.message }}</div>{% endif %}
+{% for i in s.inputs %}<div class="note">{{ i }}</div>{% endfor %}
+{% if s.override %}<div class="note">{{ s.override }}</div>{% endif %}</td>
+<td>{{ s.expected }}</td><td>{{ s.actual }}</td><td class="{{ rescls(s.result) }}">{{ s.result }}</td></tr>
+{% for a in s.attempts %}
+<tr class="att"><td class="d{{ s.depth + 1 }}">#{{ a.n }}</td><td class="d{{ s.depth + 1 }}">{{ s.name }}<div class="msg">{{ a.message }}</div></td><td>{{ a.expected }}</td><td>{{ a.actual }}</td><td class="{{ rescls(a.result) }}">{{ a.result }}</td></tr>
+{% endfor %}
+{% endif %}
+{% endfor %}
+</tbody>
+</table>
+
+<!-- ============ Equipment ============ -->
+<h2 class="page-break">Equipment</h2>
+<table class="steps" repeat="1">
+<thead><tr><th>Name</th><th>Serial</th><th>Connection</th><th>Cal due</th><th>Notes</th></tr></thead>
+{% for e in equipment %}<tr><td>{{ e.name }}</td><td>{{ e.serial or "" }}</td><td class="mono">{{ e.connection or "" }}</td><td>{{ e.cal or "" }}</td><td>{{ e.notes or "" }}</td></tr>{% endfor %}
+</table>
+
+<!-- ============ Configuration ============ -->
+<h2>Configuration</h2>
+<h3>Media Releases</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Media Number</th><th>Name</th><th>Version</th><th>.atedef SHA-256</th></tr></thead>
+{% for m in releases %}<tr><td>{{ m.media }}</td><td>{{ m.name }}</td><td>{{ m.version }}</td><td class="mono">{{ m.sha }}</td></tr>{% endfor %}
+</table>
+<h3>Files</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Path</th><th>Media</th><th>Expected SHA-256</th><th>Computed SHA-256</th><th>Stored</th></tr></thead>
+{% for f in files %}<tr{% if f.got and f.exp and f.got != f.exp %} class="mismatch"{% endif %}><td>{{ f.path }}</td><td>{{ f.media }}</td><td class="mono">{{ f.exp }}</td><td class="mono">{{ f.got or f.exp }}</td><td>{{ f.stored }}</td></tr>{% endfor %}
+</table>
+<h3>Sub-schedule instances</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Name</th><th>File</th><th>Prefix</th></tr></thead>
+{% for i in instances %}<tr><td>{{ i.name }}</td><td>{{ i.file }}</td><td>{{ i.prefix }}</td></tr>{% endfor %}
+</table>
+
+<!-- ============ Run log ============ -->
+<h2 class="page-break">Run log</h2>
+<table class="log">
+{% for g in log_groups %}
+<tr class="owner"><td colspan="3">{{ g.owner }}</td></tr>
+{% for l in g.lines %}<tr><td style="width: 22mm">{{ l.t }}</td><td style="width: 16mm" class="lvl-{{ l.level }}">{{ l.level }}</td><td>{{ l.text }}</td></tr>{% endfor %}
+{% endfor %}
+</table>
+
+</body>
+</html>

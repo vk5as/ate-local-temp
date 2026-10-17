@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PSU-48V Final Acceptance Test Procedure · PSU-48V SN240117-0042</title>
+<style>
+@page {
+  size: A4 portrait;
+  margin: 24mm 14mm 18mm 14mm;
+  @top-left { content: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHgAAAAoCAYAAAA16j4lAAAAeElEQVR4nO3RQQ2AMADAwDnBEcrwDBL4DBjNNamCG0OSJC3Rth+n/zvg+IDjA44POD7g+IDjA44POD7g+NOB9WyA4wGOBzge4HiA4wGOBzge4HiA4wGOBzje58Bea8DxAccHHB9wfMDxAccHHB9wfMDxb4ElSdIrXW+n4o4d64V6AAAAAElFTkSuQmCC"); vertical-align: middle; width: 32mm; }
+  @top-center { content: "Southern Power Systems Pty Ltd · PSU-48V Final Acceptance Test Procedure · ATP-0117 rev C"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
+  @top-right { content: "PSU-48V SN240117-0042"; font: bold 9pt sans-serif; vertical-align: middle; border-bottom: none; }
+  @bottom-left { content: "Run 0192f3a4-7b1c-7e2d-9a10-5c3e8f0b2d41 · Run recorded by ATE 1.0.3 · Report generated 2026-10-18 09:12:40 +10:30 by ATE 1.1.0"; font: 7pt sans-serif; color: #555; width: 150mm; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt sans-serif; }
+}
+@media screen { body { max-width: 190mm; margin: 1em auto; } }
+@media print { .screen-only { display: none; } }
+body { font-family: "DejaVu Sans", "Segoe UI", Arial, sans-serif; font-size: 9pt; color: #111; }
+h1 { font-size: 16pt; margin: 0 0 2mm 0; }
+h2 { font-size: 12pt; margin: 6mm 0 2mm 0; border-bottom: 0.4mm solid #1f4e8c; padding-bottom: 1mm; color: #1f4e8c; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
+.kv th { width: 35mm; color: #555; font-weight: normal; }
+.page-break { page-break-before: always; }
+.banner { border: 0.5mm solid #b36b00; background: #fff4e0; color: #6b3e00; padding: 2mm 3mm; margin: 2mm 0; font-weight: bold; }
+.verdict { font-size: 34pt; font-weight: bold; letter-spacing: 1mm; padding: 2mm 4mm; border: 1mm solid; text-align: center; }
+.verdict-pass { color: #146c2e; border-color: #146c2e; }
+.verdict-fail { color: #a4161a; border-color: #a4161a; }
+.endreason { text-align: center; color: #333; font-size: 10pt; margin-top: 1mm; }
+.sig { border: 0.4mm solid #333; height: 26mm; width: 80mm; }
+.sigline { border-bottom: 0.3mm solid #333; height: 7mm; width: 50mm; }
+.small { font-size: 7.5pt; color: #444; }
+.counts td, .counts th { border: 0.2mm solid #bbb; text-align: center; }
+.steps th { background: #1f4e8c; color: #fff; font-weight: bold; }
+.steps td { border-bottom: 0.2mm solid #ccc; }
+.steps tr { page-break-inside: avoid; }
+.steps .num { width: 16mm; }
+.steps .exp, .steps .act { width: 28mm; }
+.steps .rescol { width: 26mm; }
+.steps .hdr td { background: #e8eef7; font-weight: bold; border-top: 0.3mm solid #1f4e8c; }
+.steps .att td { color: #666; font-size: 8pt; background: #fafafa; }
+.steps .msg { font-size: 7.5pt; color: #444; }
+.steps .note { font-size: 7pt; color: #1f4e8c; }
+.d1 { padding-left: 6mm; } .d2 { padding-left: 11mm; } .d3 { padding-left: 16mm; }
+.res { font-weight: bold; }
+.res-pass { color: #146c2e; } .res-fail, .res-error, .res-noreport { color: #a4161a; }
+.res-skipped, .res-notrun, .res-forced_notrun { color: #777; }
+.rollup { font-size: 7pt; color: #1f4e8c; font-weight: normal; }
+.mismatch td { background: #fde8e8; }
+.mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 7pt; word-break: break-all; }
+.log td { font-size: 7.5pt; padding: 0.3mm 1.5mm; }
+.log .owner td { font-weight: bold; background: #eee; font-size: 8pt; padding-top: 1.5mm; }
+.lvl-WARNING { color: #8a5200; } .lvl-ERROR { color: #a4161a; }
+.ph { width: 100%; } .ph td { padding: 0; vertical-align: middle; }
+</style>
+</head>
+<body>
+
+
+<div class="screen-only">
+  <table class="ph"><tr>
+    <td style="width: 34mm"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHgAAAAoCAYAAAA16j4lAAAAeElEQVR4nO3RQQ2AMADAwDnBEcrwDBL4DBjNNamCG0OSJC3Rth+n/zvg+IDjA44POD7g+IDjA44POD7g+NOB9WyA4wGOBzge4HiA4wGOBzge4HiA4wGOBzje58Bea8DxAccHHB9wfMDxAccHHB9wfMDxb4ElSdIrXW+n4o4d64V6AAAAAElFTkSuQmCC" style="height: 9mm"></td>
+    <td>Southern Power Systems Pty Ltd · PSU-48V Final Acceptance Test Procedure · ATP-0117 rev C</td><td style="text-align: right"><b>PSU-48V SN240117-0042</b></td>
+  </tr></table>
+</div>
+
+<!-- ============ Cover ============ -->
+<h1>PSU-48V Final Acceptance Test Procedure</h1>
+<div class="small">ATP-0117 · revision C</div>
+
+<div class="banner">⚠ One or more files did not match their recorded checksum. See Configuration.</div>
+<table style="margin-top: 4mm"><tr>
+  <td style="width: 60%">
+    <table class="kv">
+      <tr><th>UUT Type</th><td>PSU-48V</td></tr>
+      <tr><th>Serial</th><td><b>SN240117-0042</b></td></tr>
+      <tr><th>Project</th><td>Contract 7712 / Lot 3</td></tr>
+      <tr><th>Station</th><td>BENCH-03</td></tr>
+      <tr><th>Start</th><td>2026-10-17 14:03:22 +10:30</td></tr>
+      <tr><th>End</th><td>2026-10-17 14:41:09 +10:30</td></tr>
+      <tr><th>Duration</th><td>37 min 47 s</td></tr>
+      <tr><th>ATE version</th><td>1.0.3</td></tr>
+      <tr><th>Stop on Fail</th><td>No</td></tr>
+      <tr><th>Schedule</th><td>PSU-48V Final ATP<br><span class="small">Final acceptance of the 48 V 1.2 kW rectifier module after burn-in.<br>psu48/final_atp.tslua</span></td></tr>
+      <tr><th>Media Release</th><td>MN-2041 · PSU-48V Test Media · 2.3.1</td></tr>
+    </table>
+  </td>
+  <td style="width: 40%">
+    <div class="verdict verdict-fail">FAIL</div>
+    <div class="endreason">End Reason: COMPLETED</div>
+  </td>
+</tr></table>
+
+<h2>Summary</h2>
+<table class="counts"><tr><th class="small">PASS</th><th class="small">FAIL</th><th class="small">ERROR</th><th class="small">SKIPPED</th><th class="small">NOTRUN</th><th class="small">FORCED_NOTRUN</th><th class="small">NOREPORT</th></tr>
+<tr><td class="res res-pass">35</td><td class="res res-fail">2</td><td class="res res-error">1</td><td class="res res-skipped">0</td><td class="res res-notrun">2</td><td class="res res-forced_notrun">0</td><td class="res res-noreport">0</td></tr></table>
+<p class="small">Retried steps: 1 · Operator enable overrides: 2</p>
+
+<h2>Failures</h2>
+<table>
+<tr><td style="width: 16mm">140</td><td>Insulation resistance, L-PE<br><span class="small">rail1.lua:42: attempt to compare nil with number</span></td><td style="width: 26mm" class="res res-error">ERROR</td></tr><tr><td style="width: 16mm">250</td><td>Input current at no load<br><span class="small">outside limits</span></td><td style="width: 26mm" class="res res-fail">FAIL</td></tr><tr><td style="width: 16mm">320</td><td>Firmware version<br><span class="small">outside limits</span></td><td style="width: 26mm" class="res res-fail">FAIL</td></tr></table>
+
+<h2>Operator</h2>
+<table><tr>
+  <td style="width: 50%">J. Citizen<br><br><span class="small">Date</span><div class="sigline"></div></td>
+  <td><span class="small">Signature</span><div class="sig"></div></td>
+</tr></table>
+
+<!-- ============ Steps ============ -->
+<h2 class="page-break">Steps</h2>
+<table class="steps" repeat="1">
+<thead><tr><th class="num">Step</th><th>Step Name / message</th><th class="exp">Expected</th><th class="act">Actual</th><th class="rescol">Result</th></tr></thead>
+<tbody>
+<tr><td class="d0">10</td>
+<td class="d0">Input current at no load<div class="msg">within limits</div></td>
+<td>0.050 .. 0.120 A</td><td>0.102 A</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">20</td>
+<td class="d0">Output voltage, rail 1<div class="msg">within limits</div></td>
+<td>47.50 .. 48.50 V</td><td>47.86 V</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">30</td>
+<td class="d0">Ripple at full load<div class="msg">within limits</div></td>
+<td>&lt; 120 mVpp</td><td>55.5 mVpp</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">40</td>
+<td class="d0">Fan tachometer<div class="msg">within limits</div></td>
+<td>2800 .. 3600 rpm</td><td>3203 rpm</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">50</td>
+<td class="d0">Firmware version<div class="msg">within limits</div></td>
+<td>2.14.0</td><td>2.14.0</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">60</td>
+<td class="d0">Insulation resistance, L-PE<div class="msg">within limits</div><div class="note">Input 1 (LED colour): Green</div></td>
+<td>&gt; 100 MΩ</td><td>231 MΩ</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">70</td>
+<td class="d0">Efficiency at 50 % load<div class="msg">within limits</div></td>
+<td>&gt;= 92.0 %</td><td>92.7 %</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">80</td>
+<td class="d0">Over-temperature trip<div class="note">disabled by Operator</div></td>
+<td>85 .. 95 °C</td><td></td><td class="res res-notrun">NOTRUN</td></tr>
+<tr><td class="d0">90</td>
+<td class="d0">Input current at no load<div class="msg">within limits</div></td>
+<td>0.050 .. 0.120 A</td><td>0.101 A</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">100</td>
+<td class="d0">Output voltage, rail 1<div class="msg">within limits</div></td>
+<td>47.50 .. 48.50 V</td><td>48.18 V</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">110</td>
+<td class="d0">Ripple at full load<div class="msg">within limits</div></td>
+<td>&lt; 120 mVpp</td><td>60.3 mVpp</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">120</td>
+<td class="d0">Fan tachometer <span class="note">↻ 3</span><div class="msg">within limits</div></td>
+<td>2800 .. 3600 rpm</td><td>3092 rpm</td><td class="res res-pass">PASS</td></tr>
+<tr class="att"><td class="d1">#1</td><td class="d1">Fan tachometer<div class="msg">outside limits → RETRY</div></td><td>2800 .. 3600 rpm</td><td>2710 rpm</td><td class="res res-fail">FAIL</td></tr>
+<tr class="att"><td class="d1">#2</td><td class="d1">Fan tachometer<div class="msg">outside limits → RETRY</div></td><td>2800 .. 3600 rpm</td><td>2765 rpm</td><td class="res res-fail">FAIL</td></tr>
+<tr><td class="d0">130</td>
+<td class="d0">Firmware version<div class="msg">within limits</div></td>
+<td>2.14.0</td><td>2.14.0</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">140</td>
+<td class="d0">Insulation resistance, L-PE<div class="msg">rail1.lua:42: attempt to compare nil with number</div></td>
+<td>&gt; 100 MΩ</td><td>645 MΩ</td><td class="res res-error">ERROR</td></tr>
+<tr><td class="d0">150</td>
+<td class="d0">Efficiency at 50 % load<div class="msg">within limits</div></td>
+<td>&gt;= 92.0 %</td><td>92.2 %</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">160</td>
+<td class="d0">Over-temperature trip<div class="msg">within limits</div></td>
+<td>85 .. 95 °C</td><td>93.2 °C</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">170</td>
+<td class="d0">Input current at no load<div class="msg">within limits</div></td>
+<td>0.050 .. 0.120 A</td><td>0.088 A</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">180</td>
+<td class="d0">Output voltage, rail 1<div class="msg">within limits</div></td>
+<td>47.50 .. 48.50 V</td><td>47.80 V</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">190</td>
+<td class="d0">Ripple at full load<div class="msg">within limits</div></td>
+<td>&lt; 120 mVpp</td><td>49.5 mVpp</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">200</td>
+<td class="d0">Fan tachometer<div class="msg">within limits</div></td>
+<td>2800 .. 3600 rpm</td><td>3463 rpm</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">210</td>
+<td class="d0">Firmware version<div class="msg">within limits</div></td>
+<td>2.14.0</td><td>2.14.0</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">220</td>
+<td class="d0">Insulation resistance, L-PE<div class="msg">within limits</div></td>
+<td>&gt; 100 MΩ</td><td>434 MΩ</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">230</td>
+<td class="d0">Efficiency at 50 % load<div class="msg">within limits</div><div class="note">Input 1 (LED colour): Green</div></td>
+<td>&gt;= 92.0 %</td><td>92.9 %</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">240</td>
+<td class="d0">Over-temperature trip<div class="msg">within limits</div></td>
+<td>85 .. 95 °C</td><td>87.5 °C</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">250</td>
+<td class="d0">Input current at no load<div class="msg">outside limits</div></td>
+<td>0.050 .. 0.120 A</td><td>0.062 A</td><td class="res res-fail">FAIL</td></tr>
+<tr class="hdr"><td class="d0">260</td><td colspan="3" class="d0">Burn-in channel 1 (burnin.tslua)</td><td class="rollup">6 steps: 5 PASS, 1 NOTRUN</td></tr>
+<tr><td class="d1">BI1.1</td>
+<td class="d1">Output voltage, rail 1<div class="msg">within limits</div></td>
+<td>47.50 .. 48.50 V</td><td>47.86 V</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d1">BI1.2</td>
+<td class="d1">Ripple at full load<div class="msg">within limits</div></td>
+<td>&lt; 120 mVpp</td><td>106.4 mVpp</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d1">BI1.3</td>
+<td class="d1">Fan tachometer<div class="msg">within limits</div></td>
+<td>2800 .. 3600 rpm</td><td>2932 rpm</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d1">BI1.4</td>
+<td class="d1">Firmware version<div class="msg">within limits</div></td>
+<td>2.14.0</td><td>2.14.0</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d1">BI1.5</td>
+<td class="d1">Insulation resistance, L-PE<div class="msg">within limits</div></td>
+<td>&gt; 100 MΩ</td><td>168 MΩ</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d1">BI1.6</td>
+<td class="d1">Efficiency at 50 % load<div class="note">disabled by Operator</div></td>
+<td>&gt;= 92.0 %</td><td></td><td class="res res-notrun">NOTRUN</td></tr>
+<tr><td class="d0">270</td>
+<td class="d0">Over-temperature trip<div class="msg">within limits</div></td>
+<td>85 .. 95 °C</td><td>88.7 °C</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">280</td>
+<td class="d0">Input current at no load<div class="msg">within limits</div></td>
+<td>0.050 .. 0.120 A</td><td>0.095 A</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">290</td>
+<td class="d0">Output voltage, rail 1<div class="msg">within limits</div></td>
+<td>47.50 .. 48.50 V</td><td>47.83 V</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">300</td>
+<td class="d0">Ripple at full load<div class="msg">within limits</div></td>
+<td>&lt; 120 mVpp</td><td>84.0 mVpp</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">310</td>
+<td class="d0">Fan tachometer<div class="msg">within limits</div></td>
+<td>2800 .. 3600 rpm</td><td>3233 rpm</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">320</td>
+<td class="d0">Firmware version<div class="msg">outside limits</div></td>
+<td>2.14.0</td><td>2.14.0</td><td class="res res-fail">FAIL</td></tr>
+<tr><td class="d0">330</td>
+<td class="d0">Insulation resistance, L-PE<div class="msg">within limits</div></td>
+<td>&gt; 100 MΩ</td><td>774 MΩ</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">340</td>
+<td class="d0">Efficiency at 50 % load<div class="msg">within limits</div></td>
+<td>&gt;= 92.0 %</td><td>93.9 %</td><td class="res res-pass">PASS</td></tr>
+<tr><td class="d0">350</td>
+<td class="d0">Over-temperature trip<div class="msg">within limits</div><div class="note">Input 1 (LED colour): Green</div></td>
+<td>85 .. 95 °C</td><td>87.0 °C</td><td class="res res-pass">PASS</td></tr>
+</tbody>
+</table>
+
+<!-- ============ Equipment ============ -->
+<h2 class="page-break">Equipment</h2>
+<table class="steps" repeat="1">
+<thead><tr><th>Name</th><th>Serial</th><th>Connection</th><th>Cal due</th><th>Notes</th></tr></thead>
+<tr><td>Digital multimeter</td><td>MY5402113</td><td class="mono">VISA USB0::0x2A8D::0x1301::MY5402113::INSTR</td><td>2027-03-01</td><td></td></tr><tr><td>Electronic load</td><td>LD-88213</td><td class="mono">TCP 10.0.4.21:5025</td><td>2026-12-15</td><td>channel 2 only</td></tr><tr><td>Power analyser</td><td>PA3000-0193</td><td class="mono">SERIAL COM4 115200 8N1</td><td>2027-01-20</td><td></td></tr><tr><td>Hipot tester</td><td></td><td class="mono"></td><td></td><td>manual, reading entered by Operator</td></tr></table>
+
+<!-- ============ Configuration ============ -->
+<h2>Configuration</h2>
+<h3>Media Releases</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Media Number</th><th>Name</th><th>Version</th><th>.atedef SHA-256</th></tr></thead>
+<tr><td>MN-2041</td><td>PSU-48V Test Media</td><td>2.3.1</td><td class="mono">3b7e0c51d2a4f9e1b8c6a7d5e4f3029187a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2</td></tr><tr><td>MN-1100</td><td>Common Instrument Library</td><td>1.8.0</td><td class="mono">a0f1e2d3c4b5a6978877665544332211ffeeddccbbaa99887766554433221100</td></tr></table>
+<h3>Files</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Path</th><th>Media</th><th>Expected SHA-256</th><th>Computed SHA-256</th><th>Stored</th></tr></thead>
+<tr><td>psu48/final_atp.tslua</td><td>MN-2041</td><td class="mono">5d41402abc4b2a76b9719d911017c592ae2f6c1b77e5b2b7d1a0c9e8f7a6b5c4</td><td class="mono">5d41402abc4b2a76b9719d911017c592ae2f6c1b77e5b2b7d1a0c9e8f7a6b5c4</td><td>No</td></tr><tr><td>psu48/burnin.tslua</td><td>MN-2041</td><td class="mono">7c211433f02071597741e6ff5a8ea34789abad0f2c1d3e4b5a69788796a5b4c3</td><td class="mono">7c211433f02071597741e6ff5a8ea34789abad0f2c1d3e4b5a69788796a5b4c3</td><td>No</td></tr><tr class="mismatch"><td>lib/scpi.lua</td><td>MN-1100</td><td class="mono">9f2c5e8a1b3d4f6a7c8e9d0b1a2c3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d</td><td class="mono">41ab09f8e7d6c5b4a3928170f6e5d4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b</td><td>Yes</td></tr><tr><td>ate.util</td><td></td><td class="mono"></td><td class="mono">e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</td><td>No</td></tr></table>
+<h3>Sub-schedule instances</h3>
+<table class="steps" repeat="1">
+<thead><tr><th>Name</th><th>File</th><th>Prefix</th></tr></thead>
+<tr><td>Burn-in channel</td><td>psu48/burnin.tslua</td><td>BI1.</td></tr><tr><td>Burn-in channel</td><td>psu48/burnin.tslua</td><td>BI2.</td></tr></table>
+
+<!-- ============ Run log ============ -->
+<h2 class="page-break">Run log</h2>
+<table class="log">
+<tr class="owner"><td colspan="3">Run</td></tr>
+<tr><td style="width: 22mm">14:03:22.101</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>Test Run started by J. Citizen on BENCH-03</td></tr><tr><td style="width: 22mm">14:03:22.140</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>checksum mismatch: lib/scpi.lua (expected 9f2c…, computed 41ab…)</td></tr><tr class="owner"><td colspan="3">Pre-test Action: PSU-48V Final ATP</td></tr>
+<tr><td style="width: 22mm">14:03:22.300</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>power analyser zeroed</td></tr><tr class="owner"><td colspan="3">Step 10 · Input current at no load</td></tr>
+<tr><td style="width: 22mm">14:00:03.261</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:03.460</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:03.807</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:03.029</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:03.780</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 20 · Output voltage, rail 1</td></tr>
+<tr><td style="width: 22mm">14:00:05.605</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:05.031</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:05.554</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:05.390</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:05.432</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr class="owner"><td colspan="3">Step 30 · Ripple at full load</td></tr>
+<tr><td style="width: 22mm">14:00:07.507</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:07.236</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:07.470</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:07.426</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:07.102</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 40 · Fan tachometer</td></tr>
+<tr><td style="width: 22mm">14:00:09.340</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:09.512</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:09.932</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:09.290</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:09.511</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 50 · Firmware version</td></tr>
+<tr><td style="width: 22mm">14:00:11.491</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:11.413</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:11.375</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:11.794</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:11.088</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 60 · Insulation resistance, L-PE</td></tr>
+<tr><td style="width: 22mm">14:00:13.860</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:13.750</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:13.315</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:13.629</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:13.662</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 70 · Efficiency at 50 % load</td></tr>
+<tr><td style="width: 22mm">14:00:15.204</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:15.561</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:15.352</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:15.931</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:15.623</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr class="owner"><td colspan="3">Step 80 · Over-temperature trip</td></tr>
+<tr><td style="width: 22mm">14:00:17.840</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:17.132</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:17.210</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:17.492</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:17.204</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 90 · Input current at no load</td></tr>
+<tr><td style="width: 22mm">14:00:19.001</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:19.805</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:19.614</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:19.650</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:19.185</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 100 · Output voltage, rail 1</td></tr>
+<tr><td style="width: 22mm">14:00:21.261</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:21.689</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:21.017</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:21.773</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:21.112</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 110 · Ripple at full load</td></tr>
+<tr><td style="width: 22mm">14:00:23.261</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:23.672</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:23.301</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:23.508</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:23.319</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 120 · Fan tachometer</td></tr>
+<tr><td style="width: 22mm">14:00:25.259</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:25.214</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:25.998</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:25.406</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:25.982</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 130 · Firmware version</td></tr>
+<tr><td style="width: 22mm">14:00:27.436</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:27.999</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:27.528</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:27.664</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:27.589</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr class="owner"><td colspan="3">Step 140 · Insulation resistance, L-PE</td></tr>
+<tr><td style="width: 22mm">14:00:29.755</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:29.217</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:29.879</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:29.961</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:29.426</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 150 · Efficiency at 50 % load</td></tr>
+<tr><td style="width: 22mm">14:00:31.038</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:31.985</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:31.847</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:31.038</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:31.101</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 160 · Over-temperature trip</td></tr>
+<tr><td style="width: 22mm">14:00:33.504</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:33.399</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:33.017</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:33.411</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:33.205</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr class="owner"><td colspan="3">Step 170 · Input current at no load</td></tr>
+<tr><td style="width: 22mm">14:00:35.439</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:35.098</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:35.352</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:35.786</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:35.742</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 180 · Output voltage, rail 1</td></tr>
+<tr><td style="width: 22mm">14:00:37.218</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:37.614</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:37.376</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:37.298</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:37.618</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr class="owner"><td colspan="3">Step 190 · Ripple at full load</td></tr>
+<tr><td style="width: 22mm">14:00:39.106</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:39.074</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:39.807</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:39.349</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:39.800</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 200 · Fan tachometer</td></tr>
+<tr><td style="width: 22mm">14:00:41.083</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:41.302</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:41.117</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:41.110</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:41.012</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 210 · Firmware version</td></tr>
+<tr><td style="width: 22mm">14:00:43.117</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:43.804</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:43.118</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:43.247</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:43.105</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 220 · Insulation resistance, L-PE</td></tr>
+<tr><td style="width: 22mm">14:00:45.931</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:45.728</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:45.212</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:45.027</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:45.947</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr class="owner"><td colspan="3">Step 230 · Efficiency at 50 % load</td></tr>
+<tr><td style="width: 22mm">14:00:47.408</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:47.324</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:47.114</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:47.632</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:47.480</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr class="owner"><td colspan="3">Step 240 · Over-temperature trip</td></tr>
+<tr><td style="width: 22mm">14:00:49.203</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:49.839</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:49.771</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:49.588</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:49.232</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 250 · Input current at no load</td></tr>
+<tr><td style="width: 22mm">14:00:51.811</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:51.310</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:51.557</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:51.610</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:51.020</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step BI1.1 · Output voltage, rail 1</td></tr>
+<tr><td style="width: 22mm">14:00:55.746</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:00:55.010</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:55.367</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:55.879</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:55.796</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr class="owner"><td colspan="3">Step BI1.2 · Ripple at full load</td></tr>
+<tr><td style="width: 22mm">14:00:57.794</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:00:57.841</td><td style="width: 16mm" class="lvl-ERROR">ERROR</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:57.726</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:57.616</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:00:57.211</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step BI1.3 · Fan tachometer</td></tr>
+<tr><td style="width: 22mm">14:00:59.840</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:59.928</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:00:59.764</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:00:59.306</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:00:59.049</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr class="owner"><td colspan="3">Step BI1.4 · Firmware version</td></tr>
+<tr><td style="width: 22mm">14:01:01.796</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:01.457</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:01.554</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:01.464</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:01.346</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step BI1.5 · Insulation resistance, L-PE</td></tr>
+<tr><td style="width: 22mm">14:01:03.426</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:03.708</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:01:03.607</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:03.848</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:01:03.410</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step BI1.6 · Efficiency at 50 % load</td></tr>
+<tr><td style="width: 22mm">14:01:05.541</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:01:05.664</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:05.654</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:05.320</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:05.979</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 270 · Over-temperature trip</td></tr>
+<tr><td style="width: 22mm">14:01:07.745</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:07.661</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:07.073</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:07.377</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:07.811</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 280 · Input current at no load</td></tr>
+<tr><td style="width: 22mm">14:01:09.380</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:09.754</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:09.876</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:09.983</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:09.180</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr class="owner"><td colspan="3">Step 290 · Output voltage, rail 1</td></tr>
+<tr><td style="width: 22mm">14:01:11.775</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:11.403</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:11.393</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:11.557</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:11.536</td><td style="width: 16mm" class="lvl-ERROR">ERROR</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 300 · Ripple at full load</td></tr>
+<tr><td style="width: 22mm">14:01:13.934</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:13.142</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:13.675</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:13.455</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:13.391</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>reading stable after 3 samples</td></tr><tr class="owner"><td colspan="3">Step 310 · Fan tachometer</td></tr>
+<tr><td style="width: 22mm">14:01:15.637</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:15.122</td><td style="width: 16mm" class="lvl-WARNING">WARNING</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:15.418</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:15.284</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:15.572</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 320 · Firmware version</td></tr>
+<tr><td style="width: 22mm">14:01:17.592</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:17.996</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:17.266</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:17.151</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr><td style="width: 22mm">14:01:17.318</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 330 · Insulation resistance, L-PE</td></tr>
+<tr><td style="width: 22mm">14:01:19.881</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:19.502</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:19.787</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:19.392</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>load set to 12.5 A</td></tr><tr><td style="width: 22mm">14:01:19.110</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr class="owner"><td colspan="3">Step 340 · Efficiency at 50 % load</td></tr>
+<tr><td style="width: 22mm">14:01:21.988</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:21.996</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:21.512</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:01:21.318</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:21.365</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>relay K4 closed</td></tr><tr class="owner"><td colspan="3">Step 350 · Over-temperature trip</td></tr>
+<tr><td style="width: 22mm">14:01:23.358</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr><tr><td style="width: 22mm">14:01:23.347</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>DMM range 100 V</td></tr><tr><td style="width: 22mm">14:01:23.504</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>SCPI&gt; MEAS:VOLT? CH1</td></tr><tr><td style="width: 22mm">14:01:23.386</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>reading stable after 3 samples</td></tr><tr><td style="width: 22mm">14:01:23.003</td><td style="width: 16mm" class="lvl-INFO">INFO</td><td>settling 250 ms</td></tr></table>
+
+</body>
+</html>
