@@ -1,7 +1,7 @@
 # Lua worker thread on Windows
 
 Type: prototype
-Status: open
+Status: claimed
 Blocked by: 09
 
 ## Question
