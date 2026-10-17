@@ -51,10 +51,11 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - [Test Report content and format](issues/13-test-report-format.md): HTML and PDF are written automatically at run end and can be regenerated from History with the current template; files have readable names and are never overwritten. Sections: Cover (result, End Reason, Operator signature box, a count for each `Result`, failures), Steps, Equipment (from a new `ATE.addEquipment`), Configuration (only the files actually used) and Run log (`INFO` and above). The PDF engine was settled by "Render a sample Test Report to PDF". Defined in `assets/test-report-format.md`.
 - [Render a sample Test Report to PDF](issues/17-report-pdf-prototype.md): QWebEngine `printToPdf` (better looking, 3–15x faster than xhtml2pdf, about 341 MB on Windows), run in a separate ATE helper process so screens never stall. CSS `@page` margin boxes draw the page furniture, with the Qt margins matching the CSS. History can regenerate a report without the Run log.
 - [Lua worker thread on Windows](issues/16-lua-worker-windows.md): the runtime design holds on Windows. The GUI stalls at most about 30 ms, and Abort takes 28–43 ms. Refinements: `pcall`/`xpcall` re-raise after an abort, `ATE` errors are strings raised at the caller's line, `unpack_returned_tuples=True`, no `python` table, and chunks load by file name as text only.
+- [Export a Test Run's log from History](issues/18-log-export.md): History exports one finished run's Run log as CSV (default), JSON Lines or Text. Checkboxes pick the levels, sources and owners. There is no log viewer in ATE, and only the Text header records the filters. Defined in `assets/log-export.md`. New term: Run log.
 
 ## Not yet specified
 
-- What the History screen does beyond browsing Test Runs, regenerating reports (optionally without the Run log) and exporting a run's log.
+- What the History screen does beyond browsing Test Runs, regenerating reports (optionally without the Run log) and exporting a Run log: how runs are found (search, filters, sort), and whether anything else happens there (deleting runs, re-running a UUT).
 - How a Device failing mid-run is handled.
 - The Device receive buffer: its size limit, what happens on overflow, and whether a schedule can discard buffered data before a command.
 - Packaging and installers, especially for Windows.

@@ -99,3 +99,7 @@ _Avoid_: Exit status, termination
 **Test Report**:
 A document describing the outcome of exactly one Test Run, generated from stored results.
 _Avoid_: Certificate, log
+
+**Run log**:
+Every log line recorded with one Test Run, at every level, including Device trace. A Test Report shows only part of it. Not the application log, which records ATE's own activity.
+_Avoid_: Test log, transcript
