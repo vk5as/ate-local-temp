@@ -146,6 +146,17 @@ There is no `ATE.gc`: schedules that need a collection call the standard `collec
 - `actual` is the measured value or state; `expected` is optional, the expected value or tolerance. Each may be a number, string or boolean, and ATE stores them as text using `tostring`.
 - The step-result rules in `test-schedule-format.md` apply: the last call wins, every call is logged, and no call means `NOREPORT`.
 
+## Equipment
+
+`ATE.addEquipment(name, serial, connection, calDue, notes)` declares a piece of Equipment the Test Run used, for the Test Report's Equipment section.
+
+- All arguments are strings. `name` is required; the others may be `nil` and show blank. Any other type raises an error.
+- `calDue` is free text, printed as given. ATE doesn't parse it or check expiry.
+- It can be called from a Pre-test Action, a step or a Post-test Action; the Pre-test Action is the usual place.
+- A repeat call with the same `name` and `serial` is ignored and logs a `DEBUG` line. Equipment keeps first-call order.
+- Each call is recorded as it happens (the `equipment` table in `test-run-record.md`).
+- ATE doesn't link Equipment to the Devices a schedule opens.
+
 ## Run information
 
 `ATE.run` is a read-only table describing the current Test Run: the UUT serial number, the Operator, the Station, the Project, the Test Schedule name and the Media Release (media number, name and version). Writing to it raises an error.

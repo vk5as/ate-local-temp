@@ -46,13 +46,13 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - [Test Definition format](issues/07-test-definition-format.md): a JSON `.atedef` file with `format`, `mediaNumber` (unique identity, not a version), `name`, semver `version`, and a `files` list of `.tslua` and `.lua` files with raw-byte SHA-256 checksums. `depends` takes name plus semver range and resolves transitively. Mismatches warn, while missing files, bad entries and duplicates make the release broken. There is no Project in the definition; Project is per Test Run. The Operator picks from one flat list of every visible schedule. Defined in `assets/test-definition-format.md`.
 - [Application config file](issues/08-app-config-file.md): a machine-wide `config.json` (`%PROGRAMDATA%\ATE`, `/etc/ate`), read at launch. A missing file prompts to create defaults or abort; an invalid file stops startup. It holds `station.name` and a generated `station.uuid` that is written back to the file, data-directory default paths, a per-launch application log that is never rotated or deleted, Device tracing, `defaultProject` and `ui.theme`. Defined in `assets/app-config-format.md`.
 - [Sub-schedules](issues/14-sub-schedules.md): `setInclude` resolves like a `files` path, searching dependency releases as `require` does. The tree is expanded at scan and at run start, and a bad include breaks only the including schedule. Each include runs the chunk again with plain-data `keyvals` as `...`. Prefixes are prepended as they are and stack through nesting, with no cycles allowed. The include step is a header row with no `Result` that forces the enable state beneath it. Every step gains an optional Step Name, `StepParams(name)`.
+- [Test Report content and format](issues/13-test-report-format.md): HTML and PDF are written automatically at run end and can be regenerated from History with the current template; files have readable names and are never overwritten. Sections: Cover (result, End Reason, Operator signature box, a count for each `Result`, failures), Steps, Equipment (from a new `ATE.addEquipment`), Configuration (only the files actually used) and Run log (`INFO` and above). The PDF engine is left to a prototype (17). Defined in `assets/test-report-format.md`.
 
 ## Not yet specified
 
 - What the History screen does beyond browsing Test Runs and regenerating reports.
 - How a Device failing mid-run is handled.
 - The Device receive buffer: its size limit, what happens on overflow, and whether a schedule can discard buffered data before a command.
-- Recording instrument identity and calibration on a Test Run.
 - Packaging and installers, especially for Windows.
 - A custom Lua build for lupa (patched `luaconf.h`, extra C libraries, Lua C modules); possible but means building our own wheels. See `research/lupa-custom-lua.md` on branch `research/lupa-custom-lua`.
 
@@ -65,3 +65,6 @@ A v1 spec for ATE that `/to-spec` can turn into tickets: requirements agreed, Lu
 - Logins and roles.
 - A GUI for editing configuration.
 - Lua sandboxing.
+- Report generators scripted in Lua, and user-supplied report templates.
+- Cryptographically signing Test Reports to authenticate them, including PDF signature fields (v2).
+- Linking Equipment to the Devices a schedule opens (for example by VISA `*IDN?`).

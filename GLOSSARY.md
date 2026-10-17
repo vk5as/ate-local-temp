@@ -20,6 +20,10 @@ _Avoid_: Rig, bench, tester
 A piece of equipment, or a connection to a UUT, that a Test Step talks to through ATE, reached using connection details the Test Schedule supplies.
 _Avoid_: Instrument, resource, port
 
+**Equipment**:
+A piece of test equipment a Test Run used, declared by the Test Schedule so its identity and calibration appear on the Test Report. Not the same as a Device: a Device is a connection ATE talks through, Equipment is a record of what was on the bench.
+_Avoid_: Instrument, asset
+
 **Device Type**:
 The kind of connection ATE uses to reach a Device (for example serial), chosen from the `DeviceType` enum; it decides which connection details a Test Schedule must supply.
 _Avoid_: Device class

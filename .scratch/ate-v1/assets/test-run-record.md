@@ -43,6 +43,10 @@ ATE's logical schema for what a Test Run stores, settled in "What a Test Run rec
 | `ate_version` | text | ATE version that ran it |
 | `schedule_name` | text | Top-level `ScheduleParams` name |
 | `schedule_file` | text | Top-level `.tslua` path |
+| `schedule_description` null | text | Top-level `ScheduleParams` description |
+| `doc_title` null | text | `setDocTitle` of the top-level schedule |
+| `doc_id` null | text | `setDocId` of the top-level schedule |
+| `doc_rev` null | text | `setDocRev` of the top-level schedule |
 | `media_number` | text | Media Number of the top-level schedule's Media Release |
 | `stop_on_fail` | bool | Stop on Fail as set at run start |
 | `started_at` | time | Run start |
@@ -146,6 +150,19 @@ Earlier `ATE.report` calls within an Attempt exist only as log lines.
 | `at` | time | When it was entered |
 
 Repeated asks on a blocking input give one row each. A `POLL` click is recorded when it happens, not when Lua reads it.
+
+### `equipment`: Equipment declared with `ATE.addEquipment`
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `run_uuid`, `seq` PK | | Declaration order |
+| `name` | text | |
+| `serial` null, `connection` null, `cal_due` null, `notes` null | text | As given; `cal_due` is free text |
+| `at` | time | When it was declared |
+| `action_seq` null | int | Declaring Pre-test or Post-test Action call |
+| `node_seq` null, `attempt_no` null | int | Declaring step Attempt |
+
+A repeat with the same `name` and `serial` adds no row.
 
 ### `log_line`: everything logged during the run
 

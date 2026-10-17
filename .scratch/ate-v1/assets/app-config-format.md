@@ -33,7 +33,7 @@ The config describes the Station, so it is machine-wide:
     "directories": ["definitions", "D:/releases"]
   },
   "database": { "type": "sqlite", "path": "ate.db", "storeMismatchedFiles": "ask" },
-  "reports": { "directory": "reports" },
+  "reports": { "directory": "reports", "organisation": "", "logo": null, "paperSize": "A4" },
   "log": { "directory": "logs", "level": "info" },
   "deviceTrace": { "enabled": false, "maxBytes": 256 },
   "ui": { "theme": "system" }
@@ -55,6 +55,9 @@ Keys are camelCase, grouped in sections.
 | `database.path` | `<data>/ate.db` | The SQLite database file. Created only by `ate db migrate` (see `test-run-record.md`) |
 | `database.storeMismatchedFiles` | `ask` | `ask`, `always` or `never`: whether the raw bytes of a Lua file with a checksum mismatch are stored with the Test Run |
 | `reports.directory` | `<data>/reports` | Where Test Reports are written |
+| `reports.organisation` | `""` | Text in every Test Report page header |
+| `reports.logo` | `null` | Image file embedded in every Test Report page header |
+| `reports.paperSize` | `A4` | `A4` or `Letter` |
 | `log.directory` | `<data>/logs` | Where the application log is written |
 | `log.level` | `info` | Application log level |
 | `deviceTrace.enabled` | `false` | Device tracing at `Log.DEBUG` (see `ate-table-reference.md`) |
@@ -82,4 +85,4 @@ The application log records ATE's own activity (startup, scans, crashes). It is 
 ## Decided elsewhere
 
 - The database schema, migrations and the `ate db` CLI: `test-run-record.md`.
-- Whether Test Reports are saved automatically at run end, and how they are named: "Test Report content and format".
+- When Test Reports are written and how they are named: `test-report-format.md`.
