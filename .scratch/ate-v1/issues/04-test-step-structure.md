@@ -17,7 +17,7 @@ Answered since: the enum is `Result.PASS`, `Result.FAIL`, and so on. SKIPPED, NO
 
 ## Answer
 
-**Step fields.** A v1 step has exactly `setStepNo`, `setEnable`, `setInputs` and `setAction`. It has no step name, units, limits or measurement fields: the Step Number identifies the step, and units go inside the `result`/`expectedResult` strings. `setInclude`/`setPrefix` are left to "Sub-schedules".
+**Step fields.** A v1 step has exactly `setStepNo`, `setEnable`, `setInputs` and `setAction`. It has no step name (amended: see below), units, limits or measurement fields: the Step Number identifies the step, and units go inside the `result`/`expectedResult` strings. `setInclude`/`setPrefix` are left to "Sub-schedules".
 
 **Step Input types.** All of them are supported: `ENUM` (`RADIOBUT`, `CHECKBOX`, and `PUSHBUT` as a blocking pick-one), `INTEGER`, `FLOAT`, `STRING`, `PROMPT`, `POLL`. `tooltip` and `orient` are honoured.
 
@@ -64,3 +64,5 @@ Answered since: the enum is `Result.PASS`, `Result.FAIL`, and so on. SKIPPED, NO
 - The summary cover page counts `ERROR` along with the other `Result` values.
 
 **Pre-test and Post-test Action errors** are recorded against that action and logged, and the run fails. Whether the remaining steps still run is left to "Flow control".
+
+**Amended by "Sub-schedules" (14):** steps now take an optional Step Name, `StepParams(name)`, shown on the Run screen and the Test Report and recorded on the Test Run.

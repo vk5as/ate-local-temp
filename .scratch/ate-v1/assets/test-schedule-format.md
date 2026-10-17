@@ -24,16 +24,16 @@ Created with `ScheduleParams(name, description)`; `name` is required.
 
 ## Step object
 
-Created with `StepParams()` and configured with:
+Created with `StepParams(name)`, where `name` is the optional Step Name shown on the Run screen and the Test Report, and configured with:
 
 | Setter | Value | Meaning |
 | --- | --- | --- |
-| `:setStepNo(s)` | string | Step Number as displayed, free-form dotted (`"1."`, `"4.0.1"`); required |
-| `:setEnable(b)` | boolean | Default enabled state; the Operator can enable or disable each step before the run starts. A step that is disabled when the run starts is not executed and records `Result.NOTRUN` |
+| `:setStepNo(s)` | string | Step Number as displayed, free-form dotted (`"1."`, `"4.0.1"`); required for an ordinary step, optional for an include step |
+| `:setEnable(b)` | boolean | Default enabled state; the Operator can enable or disable each step before the run starts. A step that is disabled when the run starts is not executed and records `Result.NOTRUN`. On an include step, forces the default of every step beneath it |
 | `:setInputs(t)` | table keyed `1..n` | Step Input declarations; `ATE.input(n)` reads the n-th |
 | `:setAction(fn)` | function | The step's logic; required for an ordinary step |
-| `:setInclude(file, keyvals)` | string, table | Makes this step a placeholder that is replaced by the steps of a Sub-schedule loaded from `file`, parameterised by `keyvals` |
-| `:setPrefix(s)` | string | Prefix applied to the Sub-schedule's Step Numbers (used with `setInclude`) |
+| `:setInclude(file, keyvals)` | string, table | Makes this an include step: a header row followed by the steps of the Sub-schedule loaded from `file`, parameterised by `keyvals` (see Sub-schedules) |
+| `:setPrefix(s)` | string | Prepended to the Sub-schedule's Step Numbers; only with `setInclude` |
 
 ## Step Input declaration
 
@@ -66,11 +66,13 @@ return ScheduleParams("Power board functional", "Basic rails and LEDs")
   :setDocId("TR-0001")
   :setDocRev("A")
   :setSchedule({
-    StepParams():setStepNo("1."):setEnable(true)
+    StepParams("LED colour"):setStepNo("1."):setEnable(true)
       :setInputs({ [1] = { desc = "LED colour", type = "ENUM", input = "RADIOBUT",
                            enum = { "Green", "Red", "Off" }, orient = "HORIZ" } })
       :setAction(function() local c = ATE.input(1) end),
-    StepParams():setStepNo("2."):setAction(measureRail),
+    StepParams("Rail voltage"):setStepNo("2."):setAction(measureRail),
+    StepParams("Channel checks"):setStepNo("3.")
+      :setInclude("channel.tslua", { channel = 1 }):setPrefix("3."),
   })
 ```
 
@@ -116,10 +118,30 @@ Defined in "Flow control":
 - **Post-test Actions always run**. ATE clears the abort flag before them; a second abort ends only the current one, and an error in one is logged, fails the run, and the rest still run.
 - **End reason**: `COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL` or `ABORTED`, recorded alongside `PASS`/`FAIL`.
 
+## Sub-schedules
+
+Defined in "Sub-schedules":
+
+- **Resolving `file`**: a path resolved against the directory holding the including schedule's `.atedef`, using the same rules as `files` paths, which must match a listed `.tslua` file. If it isn't in the including release's own files, ATE searches its dependencies depth first, in declaration order, as `require` does. A path matched in more than one release is an error. The checksum is checked and recorded as for `require`.
+- **Expansion**: ATE expands the whole tree every time it loads a schedule, both at scan time and at run start. A Sub-schedule that is missing, not listed, ambiguous, cyclic or raises while loading breaks the including Test Schedule, not its Media Release.
+- **`keyvals`**: the chunk receives it as its argument, `local kv = ...`. ATE runs the chunk again for every include, so each include is its own instance; `require`d modules stay shared. A top-level schedule, or an include without `keyvals`, receives `{}`. `keyvals` is plain data only (strings, numbers, booleans, nested tables of those), and it is recorded per instance.
+- **Step Numbers**: the prefix is prepended as it is, with no separator (`"3."` + `"1."` is `"3.1."`), and prefixes stack through nesting from the outside in. The duplicate Step Number check runs on the expanded tree.
+- **Nesting**: any depth. A file that appears twice on one include chain is a cycle; the same file in sibling branches is fine.
+- **Include step**: a header row, not a Test Step. It has no `Result` and is not counted in the summary. It shows its own Step Name and optional Step Number, never the Sub-schedule's `ScheduleParams` name. Its Step Number lives in the parent's numbering (outer prefixes apply, its own does not) and is checked for duplicates. `setInputs` or `setAction` with `setInclude`, or `setPrefix` without it, is a load error.
+- **Enabling**: `setEnable` on an include step, if called, forces the default of every step beneath it; otherwise those steps keep their own defaults. Toggling the header before the run sets everything beneath it, and those steps can still be toggled one by one afterwards. A header over mixed states shows a partial mark.
+- **The included schedule's own fields**: only its Pre-test Action, Post-test Action and steps take part. Its doc fields and `setStopOnFail` are ignored. `ATE.run` describes the top-level schedule.
+
+```lua
+-- channel.tslua: runnable alone, or included once per channel
+local kv = ...
+local ch = kv.channel or 1
+return ScheduleParams("Channel check", "One output channel")
+  :setSchedule({
+    StepParams("Output on"):setStepNo("1."):setAction(function() --[[ uses ch ]] end),
+    StepParams("Output off"):setStepNo("2."):setAction(function() --[[ uses ch ]] end),
+  })
+```
+
 ## The `ATE` table
 
 The functions schedules call (`open`, `read`, `write`, `close`, `sleep`, `input`, `log`, `report`, `run`) are defined in `ate-table-reference.md`.
-
-## Still open
-
-- **Sub-schedules**: how `file` is resolved, what `keyvals` does, how the prefix combines with Step Numbers, and whether they nest.

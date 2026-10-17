@@ -21,3 +21,8 @@ Also from "Flow control" (10):
 - On a failure with stop on fail, the run pauses with the failed step highlighted and a Continue / Retry / Abort prompt. Retried steps show their Attempts.
 - A whole-run Abort control; no pause or skip.
 - A status bar at the bottom: progress through the Pre-test and Post-test Actions, total run time, and time in the current action or step.
+
+Also from "Sub-schedules" (14):
+- An include step shows as a header row with its own Step Name and optional Step Number, followed by the Sub-schedule's steps. It has no result of its own; it may show a roll-up of the steps beneath it.
+- Toggling a header before the run sets every step beneath it, nested ones included. Steps beneath can still be toggled one by one, and a header over mixed states shows a tri-state mark.
+- Every step shows its optional Step Name.

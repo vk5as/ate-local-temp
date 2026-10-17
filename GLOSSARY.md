@@ -48,6 +48,10 @@ _Avoid_: Test script, sequence, procedure, test plan
 One entry in the data structure a Test Schedule returns; the unit of execution and of recorded result.
 _Avoid_: Test, test case, check
 
+**Step Name**:
+The optional descriptive name a Test Step, or a Sub-schedule's header row, is shown and reported under alongside its Step Number.
+_Avoid_: Title, label
+
 **Step Number**:
 The free-form dotted identifier a Test Step is shown and reported under (e.g. "4.0.1"); not its execution position.
 _Avoid_: Step ID, index
@@ -57,7 +61,7 @@ A value the Operator supplies during a Test Step, declared on that step.
 _Avoid_: Parameter, field, prompt
 
 **Sub-schedule**:
-A Test Schedule whose Test Steps are pulled into another Test Schedule at a given step position.
+A Test Schedule whose Test Steps are pulled into another Test Schedule at a given step position, under a header row of its own. Each inclusion is a separate instance with its own parameters. Sub-schedules may nest.
 _Avoid_: Include, child schedule, nested schedule
 
 **Pre-test Action**:
