@@ -6,6 +6,7 @@ ATE's definition of the Test Report, settled in "Test Report content and format"
 
 - **At run end** ATE writes the HTML and the PDF into `reports.directory` without asking. If PDF rendering fails, the HTML is still written and the error is logged.
 - **Later**, the History screen regenerates either format for any finished Test Run, including an `INTERRUPTED` one. A run still in progress can't be reported.
+- **Include Run log** is a toggle when regenerating from History, on by default. Turned off, the Run log section is replaced by one line saying it was left out, which keeps very long runs manageable. Reports written at run end always include it.
 - Generated files are outputs only; they are not stored in the database.
 - A regenerated report uses the **current** ATE's template. The footer shows both versions, so a difference is visible.
 
@@ -19,7 +20,11 @@ ATE's definition of the Test Report, settled in "Test Report content and format"
 ## Format
 
 - **HTML** is the source: one self-contained file from a bundled Jinja2 template, with inline CSS and no external assets. A logo is embedded as a data URI.
-- **PDF** is rendered from that HTML. The engine is chosen by "Render a sample Test Report to PDF".
+- **PDF** is rendered from that HTML by **QWebEngine** (`QWebEnginePage.printToPdf`, from PyQt6-WebEngine), settled by "Render a sample Test Report to PDF":
+  - It runs in a **separate ATE helper process** that loads the saved HTML file and writes the PDF, so the Run and History screens never stall. (In the GUI process, Windows stalled 0.35–0.42 s per render, and 8 s on a cold start.)
+  - It loads the **saved file**, never `setHtml`: past about 1.5 MB of report, `setHtml` silently produces a blank page.
+  - The page header and footer are CSS `@page` margin boxes, using `counter(page)` and `counter(pages)`. The `QPageLayout` margins passed to `printToPdf` must equal the CSS `@page` margins; Chromium takes them from Qt.
+  - It adds about 341 MB to a Windows install.
 - **Paper**: `reports.paperSize`, `A4` (default) or `Letter`, portrait.
 - **Every page** has:
   - a header with `reports.organisation` and logo, the doc title, doc id and revision, and the UUT Type and serial;
@@ -83,7 +88,7 @@ There is no section for Pre-test and Post-test Actions. Their failures appear on
 
 ### Run log
 
-Every `INFO`, `WARNING` and `ERROR` line, grouped by owner: the run as a whole, then each Pre-test and Post-test Action, then each step Attempt. Lines appear in time order within each group. `DEBUG` lines and Device trace never appear in a report; they stay in the database.
+Included unless left out when regenerating from History (see Producing reports). Every `INFO`, `WARNING` and `ERROR` line, grouped by owner: the run as a whole, then each Pre-test and Post-test Action, then each step Attempt. Lines appear in time order within each group. `DEBUG` lines and Device trace never appear in a report; they stay in the database.
 
 ## Not in v1
 

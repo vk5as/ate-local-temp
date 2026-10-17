@@ -1,7 +1,7 @@
 # Render a sample Test Report to PDF
 
 Type: prototype
-Status: claimed
+Status: resolved
 Blocked by: 13
 
 ## Question
@@ -14,6 +14,17 @@ Which engine turns the HTML Test Report into PDF: **QWebEngine `printToPdf`** or
 - Whether rendering can run headless at run end without blocking the Run screen. QWebEngine is asynchronous and needs the event loop.
 
 From "Options for turning HTML reports into PDF on Windows and Linux" (03): WeasyPrint and wkhtmltopdf are ruled out.
+
+## Answer
+
+**QWebEngine `printToPdf`**, run in a separate ATE helper process. Recorded in `assets/test-report-format.md`.
+
+- **Engine**: QWebEngine (PyQt6-WebEngine, Chromium). On both Windows and Linux it gave the better-looking output, and it renders the very HTML file ATE saves, so there is one source. xhtml2pdf and Playwright are not used.
+- **Helper process**: ATE starts a separate copy of itself to turn the saved HTML into PDF. In the GUI process, Windows showed GUI stalls of 0.35–0.42 s per render, and 8 s on the first cold render.
+- **Page furniture**: CSS `@page` margin boxes, with `counter(page)` / `counter(pages)` and a data-URI logo. The `QPageLayout` margins must match the CSS `@page` margins, because Chromium takes them from Qt.
+- **Load the saved file**, never `setHtml`: past about 1.5 MB, `setHtml` silently produces a blank page.
+- **Cost**: about 341 MB of WebEngine files on Windows. Render time on Windows: 2.4 s for 40 steps, 11.6 s for 500, and 23 s for 1,000 steps with 10,000 log lines.
+- **New from feedback**: reports include the Run log by default. When regenerating from History, a toggle can leave the Run log out. Exporting a run's log to another format is a new ticket, "Export a Test Run's log from History" (18).
 
 ## Comments
 
@@ -32,3 +43,20 @@ One Jinja2 template follows `assets/test-report-format.md`: the cover with banne
 - **Install size** (Linux venv): about 264 MB for WebEngine files, against about 37 MB for xhtml2pdf with its dependencies. Windows not measured yet.
 - **Playwright** was not built. It is the same Chromium as QWebEngine, so it is only needed if QWebEngine fails on Windows.
 - **Still open**: the Windows run (human), and the verdict.
+
+### Windows run and feedback, 2026-10-18
+
+Run by the user on Windows from `run_windows.bat`; results in their `out\results.txt`.
+
+| Run | QWebEngine | xhtml2pdf (thread) | xhtml2pdf (process) |
+| --- | --- | --- | --- |
+| 40 steps | 2.4 s, 9 pages | 8.8 s | 9.9 s |
+| 500 steps, 5,000 lines | 11.6 s, 124 pages | 96 s | 89 s |
+| 1,000 steps, 10,000 lines | 23.3 s, 246 pages | not run | not run |
+| Longest GUI stall | 8.0 s on the first (cold) render, then 0.35–0.42 s | 0.06–0.3 s | 0.05–0.17 s |
+| Install size | 341 MB | 40 MB with dependencies | |
+
+- QWebEngine looks nicer than xhtml2pdf.
+- Rendering runs in a helper process (the user chose this over rendering in the GUI process), so the Run and History screens never stall.
+- Reports include the log by default. When regenerating from History, a toggle can exclude the Run log section, which helps when it gets large.
+- The log should be exportable to another format. That is a new ticket.
