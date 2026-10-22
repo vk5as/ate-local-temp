@@ -13,8 +13,10 @@ ticket swaps in behind this interface.
 
 from __future__ import annotations
 
+import enum
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -23,6 +25,67 @@ from sqlalchemy import create_engine, event
 
 from ._uuid import new_uuid7
 from .schema import SCHEMA_VERSION, attempt, metadata, node, test_run
+
+
+@dataclass(frozen=True)
+class DbLaunchResult:
+    """The outcome of checking a database at launch (never migrates)."""
+
+    status: DbLaunchStatus
+    user_version: Optional[int] = None  # PRAGMA user_version, or None if unreadable/missing
+
+    @property
+    def message(self) -> str:
+        """A human-readable refusal message for non-OK statuses; empty when OK."""
+        if self.status == DbLaunchStatus.NEEDS_MIGRATE:
+            return "run `ate db migrate` to create or upgrade the database"
+        if self.status == DbLaunchStatus.TOO_OLD:
+            return "this ATE is too old for this database; update ATE"
+        return ""
+
+
+class DbLaunchStatus(enum.Enum):
+    """Why a database refuses launch (or why it allows it)."""
+
+    OK = "OK"  # schema version matches; safe to open
+    NEEDS_MIGRATE = "NEEDS_MIGRATE"  # missing, empty, or older than this ATE
+    TOO_OLD = "TOO_OLD"  # built by a newer ATE
+
+
+def _inspect_db(path: str | Path) -> tuple[bool, Optional[int]]:
+    """Inspect ``path`` read-only without creating it.
+
+    Returns ``(has_v1_table, user_version)``. A missing file yields ``(False, None)``;
+    an existing but empty database (no v1 table yet) yields ``(False, 0)``. Opening in
+    ``mode=ro`` never creates the file, so a refusal at launch leaves nothing behind.
+    """
+    path = Path(path)
+    if not path.exists():
+        return False, None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        has_tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('test_run','node','attempt')"
+        ).fetchone() is not None
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0] or 0
+    finally:
+        conn.close()
+    return has_tables, int(user_version)
+
+
+def check_database_at_launch(path: str | Path) -> DbLaunchResult:
+    """Decide whether ATE may launch against ``path``; never migrates.
+
+    Compares the database's PRAGMA user_version to :data:`SCHEMA_VERSION`: a missing,
+    empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), and a
+    newer one refuses with TOO_OLD ("this ATE is too old"). Only an exact match returns OK.
+    """
+    has_tables, user_version = _inspect_db(path)
+    if not has_tables or user_version < SCHEMA_VERSION:
+        return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version)
+    if user_version > SCHEMA_VERSION:
+        return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version)
+    return DbLaunchResult(DbLaunchStatus.OK, user_version)
 
 
 def _enable_wal(engine) -> None:

@@ -1,0 +1,297 @@
+"""The Lua host: a fresh lupa runtime per schedule load, with just enough to run.
+
+Ticket 02's slice of the engine. Real Lua execution is deliberately stubbed here —
+the host keeps the exact interface later tickets need (version gate, enums as Lua
+tables, the ``ScheduleParams``/``StepParams`` builders, and a minimal ``ATE`` table),
+but it runs canned step actions instead of talking to hardware.
+
+Real Lua execution is **deferred** by design: this module never imports widgets or
+any device driver, so it stays testable under an offscreen Qt event loop. Later
+tickets replace the stubbed action closures with real Device I/O behind the same
+``ScheduleParams``/``StepParams`` interface.
+
+Bridging facts (validated empirically against lupa 2.8):
+
+* ``register_eval=False, register_builtins=False, unpack_returned_tuples=True`` — no
+  Python leaks into Lua; only ATE-provided globals are visible.
+* Enums must be defined by executing an *assignment chunk* (``Result = { ... }``); the
+  table then persists as a real Lua global that later chunks can read. Assigning the
+  value lua.execute returns back onto the global env does **not** work — it comes back
+  as ``None`` and clobbers the global with nil.
+* Builder classes (``ScheduleParams``/``StepParams``) and ATE functions are registered
+  on the runtime's global environment by assigning them there; Lua calls them normally.
+* Steps read back from a loaded schedule: enumerate the step table's keys for the
+  count, then index with **1-based** values to get the real builder objects (iterating
+  the proxy yields indices, not steps). Each step's action is a closure that runs in
+  Lua when called.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from ..errors import ATEError
+
+
+class HostError(ATEError):
+    """Raised when the host refuses or fails to load a schedule."""
+
+
+class VersionMismatch(HostError):
+    """The Lua interpreter is not the version ATE targets (Lua 5.5)."""
+
+
+# The one and only Lua version ATE runs Test Schedules on.
+TARGET_LUA_VERSION = (5, 5)
+
+# Enum tables: Lua label -> string value. Defined as Lua assignment chunks so each
+# becomes a real global readable by the schedule chunk that uses it.
+_ENUMS: dict[str, Mapping[str, str]] = {
+    "Result": {
+        "PASS": "PASS",
+        "FAIL": "FAIL",
+        "ERROR": "ERROR",
+        "SKIPPED": "SKIPPED",
+        "NOTRUN": "NOTRUN",
+        "FORCED_NOTRUN": "FORCED_NOTRUN",
+        "NOREPORT": "NOREPORT",
+    },
+    "Log": {
+        "DEBUG": "DEBUG",
+        "INFO": "INFO",
+        "WARNING": "WARNING",
+        "ERROR": "ERROR",
+    },
+    "DeviceType": {
+        "SERIAL": "SERIAL",
+        "TCP": "TCP",
+        "UDP": "UDP",
+        "VISA": "VISA",
+    },
+    "Parity": {
+        "NONE": "NONE",
+        "EVEN": "EVEN",
+        "ODD": "ODD",
+        "MARK": "MARK",
+        "SPACE": "SPACE",
+    },
+    "FlowControl": {
+        "NONE": "NONE",
+        "RTSCTS": "RTSCTS",
+        "XONXOFF": "XONXOFF",
+        "DSRDTR": "DSRDTR",
+    },
+}
+
+
+def _declare_enums(runtime) -> None:
+    """Define every enum table as a Lua global on ``runtime``."""
+    for name, labels in _ENUMS.items():
+        pairs = ", ".join(f"{key}={value!r}" for key, value in labels.items())
+        runtime.execute(
+            f"{name} = {{ {pairs} }}",
+            name=f"@enum-{name}",
+            mode="t",
+        )
+
+
+class _AteTable:
+    """The ``ATE`` Lua table.
+
+    Only :meth:`report` is implemented for ticket 02; every other ATE function a
+    later ticket needs is registered here the same way and becomes callable from Lua
+    without touching this class's body. Unknown method names fall through to
+    :attr:`_extra`, so adding functions is a one-line registration, not an edit of
+    the dispatch path.
+    """
+
+    def __init__(self) -> None:
+        self._extra: dict[str, Callable[..., Any]] = {}
+
+    def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
+        """Register a Lua-callable under ``name`` (used by later tickets)."""
+        self._extra[name] = fn
+        return self
+
+    def report(
+        self, pass_fail: Any, msg: Any = None, actual: Any = None, expected: Any = None
+    ) -> bool:
+        """Record a step's result. Returns ``true`` so the schedule keeps running."""
+        # The host appends every call in order; the run engine attributes each batch
+        # to the step whose action closure just ran (last call wins per step).
+        self._host.record_report(pass_fail, msg, actual, expected)
+        return True
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
+        try:
+            return self._extra[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class _StepParams:
+    """The ``StepParams`` builder. Setters chain and stash fields for the runner."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.step_no = None
+        self.enabled = True
+        self.inputs = None
+        self.action = None  # a closure that runs in Lua when called
+        self.include_file = None
+        self.keyvals = None
+        self.prefix = None
+
+    def setStepNo(self, value: str) -> "_StepParams":
+        self.step_no = value
+        return self
+
+    def setEnable(self, value: bool) -> "_StepParams":
+        self.enabled = value
+        return self
+
+    def setInputs(self, table: Any) -> "_StepParams":
+        self.inputs = table
+        return self
+
+    def setAction(self, fn: Callable[..., Any]) -> "_StepParams":
+        self.action = fn
+        return self
+
+    def setInclude(self, file: str, keyvals: Mapping[str, Any] | None = None) -> "_StepParams":
+        self.include_file = file
+        self.keyvals = dict(keyvals or {})
+        return self
+
+    def setPrefix(self, value: str) -> "_StepParams":
+        self.prefix = value
+        return self
+
+
+class _ScheduleParams:
+    """The ``ScheduleParams`` builder. Its name/description identify the schedule."""
+
+    def __init__(self, name: str, description: str = "") -> None:
+        self.name = name
+        self.description = description
+        self.doc_title = None
+        self.doc_id = None
+        self.doc_rev = None
+        self.pre_test_action = None
+        self.post_test_action = None
+        self.stop_on_fail = True
+        # A Lua array of step objects, read back 1-based.
+        self.steps: list[_StepParams] = []
+
+    def setDocTitle(self, value: str) -> "_ScheduleParams":
+        self.doc_title = value
+        return self
+
+    def setDocId(self, value: str) -> "_ScheduleParams":
+        self.doc_id = value
+        return self
+
+    def setDocRev(self, value: str) -> "_ScheduleParams":
+        self.doc_rev = value
+        return self
+
+    def setPreTestAction(self, fn: Callable[..., Any]) -> "_ScheduleParams":
+        self.pre_test_action = fn
+        return self
+
+    def setPostTestAction(self, fn: Callable[..., Any]) -> "_ScheduleParams":
+        self.post_test_action = fn
+        return self
+
+    def setStopOnFail(self, value: bool) -> "_ScheduleParams":
+        self.stop_on_fail = value
+        return self
+
+    def setSchedule(self, steps: Any) -> "_ScheduleParams":
+        # ``steps`` arrives as a _LuaTable proxy (an array passed as a function
+        # argument is not unpacked to a Python list). Reading it back by enumerating
+        # its keys and indexing with 1-based values preserves the real builder objects;
+        # ``list(steps)`` would instead return each step's index. Steps without an
+        # action (include/header rows, expanded later) are skipped by the runner.
+        if steps is None:
+            self.steps = []
+            return self
+        keys = list(steps.keys())
+        self.steps = [steps[i] for i in range(1, len(keys) + 1)]
+        return self
+
+
+class _LuaHost:
+    """A fresh lupa runtime plus the globals and one loaded schedule."""
+
+    def __init__(self, path: str | Path) -> None:
+        from lupa import LuaRuntime  # imported here so importing this module needs no lupa
+
+        base = dict(register_eval=False, register_builtins=False, unpack_returned_tuples=True)
+        self._runtime = LuaRuntime(**base)
+        if self._runtime.lua_version != TARGET_LUA_VERSION:
+            raise VersionMismatch(
+                f"ATE requires Lua {TARGET_LUA_VERSION[0]}.{TARGET_LUA_VERSION[1]} "
+                f"(found {self._runtime.lua_version})"
+            )
+
+        # Enums as persistent Lua globals, then the builders and ATE table.
+        _declare_enums(self._runtime)
+        env = self._runtime.globals()
+        env["ScheduleParams"] = _ScheduleParams
+        env["StepParams"] = _StepParams
+        ate = _AteTable()
+        ate._host = self  # report() records into the host's ordered list
+        env["ATE"] = ate
+        self._ate = ate
+
+        # Every ATE.report call, in order. The run engine diffs this around each step's
+        # action closure to attribute reports (last-call-wins) to that step.
+        self.reports: list[tuple[Any, Any, Any, Any]] = []
+
+        # Load and validate the schedule file. Runs in this runtime's global env,
+        # where the enums, builders and ATE table are already registered globals.
+        self._schedule = self._load_schedule(path)
+
+    def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
+        """Record one ATE.report call from a running schedule."""
+        self.reports.append((pass_fail, msg, actual, expected))
+
+    def _load_schedule(self, path: str | Path) -> _ScheduleParams:
+        """Execute ``path`` as a text chunk and return its ScheduleParams."""
+        code = Path(path).read_text(encoding="utf-8")
+        try:
+            schedule = self._runtime.execute(
+                code, name=f"@{Path(path).name}", mode="t"
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
+            raise HostError(f"failed to load {path}: {exc}") from exc
+        if not isinstance(schedule, _ScheduleParams):
+            raise HostError(
+                f"{path} did not return a ScheduleParams (got {type(schedule).__name__})"
+            )
+        if schedule.name is None or schedule.name == "":
+            raise HostError(f"{path} has no ScheduleParams name")
+        return schedule
+
+    @property
+    def runtime(self) -> Any:
+        """The underlying lupa runtime (for later tickets that need it)."""
+        return self._runtime
+
+    @property
+    def ate(self) -> _AteTable:
+        """The registered ``ATE`` table."""
+        return self._ate
+
+    @property
+    def schedule(self) -> _ScheduleParams:
+        """The loaded top-level ScheduleParams object."""
+        return self._schedule
+
+
+# The public host type. ``_``-prefixed classes above are implementation details;
+# later tickets import :class:`LuaHost` from this module and subclass or wrap it as
+# needed, so the name is stable even though the internals may change.
+LuaHost = _LuaHost
