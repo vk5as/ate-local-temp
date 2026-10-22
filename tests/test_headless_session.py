@@ -119,3 +119,36 @@ def test_start_without_selection_raises(tmp_path) -> None:
         session.start()
     except Exception as exc:  # noqa: BLE001 - any selection error is acceptable here
         assert "no schedule selected" in str(exc)
+
+
+def test_interrupted_run_recovery_is_logged_in_the_app_log(tmp_path) -> None:
+    """A run left open by a crash is closed at launch via the real store API and logged.
+
+    Ticket 04's ticket-02 seam-2 test: no on_log override here, so the session opens its own
+    application log for the launch and recovery must be recorded there — proving the recovery
+    uses the real :class:`RunStore` (not a mock) and that ATE keeps one file per launch.
+    """
+    env = write_ate_env(tmp_path)  # config has no on_log; the session wires its own app log
+
+    store = RunStore(env["db"])
+    interrupted_uuid = store.insert_test_run(
+        {"run_uuid": "deadbeef-0000-0000-0000-000000000001", "operator": "ghost"}
+    )["run_uuid"]
+    assert store.get_test_run(interrupted_uuid)["ended_at"] is None  # open row = crashed run
+
+    session = HeadlessRunSession(env["config"])  # on_log defaults to the launch application log
+    session.select_schedule("Passing schedule")
+    engine = session.start()
+    assert _wait_finished(session)
+
+    # The store (real API, no mocks) closed the crashed run as INTERRUPTED / FAIL.
+    closed = store.get_test_run(interrupted_uuid)
+    assert closed is not None
+    assert closed["end_reason"] == "INTERRUPTED"
+    assert closed["result"] == "FAIL"
+
+    # ATE's application log for this launch recorded the recovery (ticket 04).
+    assert session._app_log is not None
+    lines = [ln.strip() for ln in session._app_log.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert any("interrupted" in line.lower() for line in lines)
+

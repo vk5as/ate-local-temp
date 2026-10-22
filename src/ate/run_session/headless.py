@@ -27,6 +27,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..catalog import resolve_schedule
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
+from ..log import AppLog, LogError, open_app_log
 from ..storage.store import RunStore
 
 
@@ -64,8 +65,17 @@ class HeadlessRunSession(QObject):
         self._selected_name: Optional[str] = None
         # The current observable state; updated on the owning thread by signal handlers.
         self._state = SessionState.IDLE
-        # ATE's logger plugs in later (ticket 08); interrupted-run recovery logs via it.
+        # ATE's logger seam (ticket 08); interrupted-run recovery logs through it. Defaults to
+        # the launch application log when a config is present (see below), so ATE-level events —
+        # config load and interrupted-run recovery — are recorded in that one file per launch; a
+        # broken log directory must not block launch, so a failure leaves on_log as None.
         self.on_log: Optional[Callable[[str, str, str], None]] = None
+        if self._config is not None:
+            try:
+                self._app_log = open_app_log(self._config.log_directory, level=self._config.log_level)
+                self.on_log = self._app_log.log
+            except LogError:
+                self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
         # Emit the initial state on the thread that owns this session.
