@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ate"
+dynamic = ["version"]
+description = "Automated Test Execution — run Lua 5.5 Test Schedules against hardware UUTs."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+dependencies = [
+    "PyQt6",
+    "lupa>=2.8",
+    "SQLAlchemy>=2.0",
+    "Jinja2",
+    "pyserial",
+    "pyvisa",
+    "pyvisa-py",
+]
+
+# Version is derived from the git tag at build time (see src/ate/_version.py),
+# which is also what `ate --version` prints at runtime. Falls back to a safe dev
+# version when untagged or when git is unavailable, so building never fails.
+[tool.setuptools.dynamic]
+version = {attr = "ate._version.__version__"}
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-qt"]
+
+[project.scripts]
+ate = "ate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+# The engine and run session must never import widgets. This is enforced by a
+# dedicated test (see tests/test_architecture_rules.py); keep this marker here
+# so the rule is documented at configuration time too.

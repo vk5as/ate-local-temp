@@ -1,0 +1,37 @@
+name: CI
+
+# Run the test suite on every push across the supported platforms and Python
+# versions. Per the spec's testing decisions, that is Windows and Linux, each on
+# CPython 3.13 and 3.14 (GIL builds).
+
+on:
+  push:
+    branches:
+      - main
+      - "integration/*"
+      - "ticket-*"
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, Python ${matrix.python-version})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ATE and test extras (editable)
+        run: pip install -e ".[test]"
+
+      - name: Run tests
+        run: pytest
