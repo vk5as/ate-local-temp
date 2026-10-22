@@ -1,1 +1,23 @@
-.claude/worktrees/
+# Local virtual environments (installed into here for dev; never committed)
+.venv/
+.eggs/
+__pycache__/
+*.py[cod]
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+*.swp
