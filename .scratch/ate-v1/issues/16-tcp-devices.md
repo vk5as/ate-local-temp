@@ -4,7 +4,9 @@
 
 **Blocked by:** 09 (Lua lockdown, errors and `ATE.run`)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 16a, 16b, 16c, 16d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A Device registry with one driver per Device Type; `DeviceType` enum; this ticket implements `TCP`
 - [ ] `open` params are all required and type-checked; unknown, missing or mistyped fields always raise naming the field

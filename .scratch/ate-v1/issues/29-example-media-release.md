@@ -4,7 +4,9 @@
 
 **Blocked by:** 10 (Step Inputs), 12 (Stop on Fail, the failure prompt and Retry), 14 (Pre-test and Post-test Actions and the status bar), 15 (Sub-schedules), 17 (Receive buffer, Device failures and tracing), 18 (SERIAL and UDP Device Types), 19 (VISA Device Type), 20 (Equipment), 21 (HTML Test Report at run end)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 29a, 29b, 29c, 29d, 29e — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] One `.atedef` lists every example file with checksums produced by `ate definition update`, and the catalog scans it with no broken entries and no mismatches
 - [ ] Schedule features: `ScheduleParams` with name, description, doc title, id and revision, `setStopOnFail`; `StepParams(name)` with Step Numbers, `setEnable` defaults (including a step disabled by default)

@@ -4,7 +4,9 @@
 
 **Blocked by:** 13 (Abort)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 14a, 14b, 14c, 14d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] The Pre-test Action runs before the first step and the Post-test Action after the last, called with the run's `passFail`
 - [ ] A Pre-test failure aborts automatically: every step `NOTRUN`, End Reason `PRETEST_FAILED`, and a log line naming the failure and explaining why every step is `NOTRUN`

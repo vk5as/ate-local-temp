@@ -4,7 +4,9 @@
 
 **Blocked by:** 06 (`require`, checksums and mismatch handling)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 07a, 07b, 07c, 07d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `depends` entries with npm-style ranges (exact, `^`, `~`, bounds) resolve at scan time to the highest installed match; pre-releases only when the range names one
 - [ ] Resolution is transitive; `require` searches the release's own files, then each dependency depth first in declaration order

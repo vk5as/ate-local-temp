@@ -4,7 +4,9 @@
 
 **Blocked by:** 07 (Media Release dependencies), 10 (Step Inputs), 12 (Stop on Fail, the failure prompt and Retry), 14 (Pre-test and Post-test Actions and the status bar), 15 (Sub-schedules), 20 (Equipment)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 21a, 21b, 21c — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A bundled Jinja2 template with inline CSS and the logo as a data URI; only `reports.organisation`, `reports.logo` and `reports.paperSize` customise it
 - [ ] File names `<UUT Type>/<UUT Type>_<serial>_<local start>_<PASS|FAIL>.html` under `reports.directory`, Windows-invalid characters replaced, never overwritten (`-2`, `-3` suffixes)

@@ -4,7 +4,9 @@
 
 **Blocked by:** 09 (Lua lockdown, errors and `ATE.run`)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 13a, 13b, 13c — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A whole-run Abort control (no pause or skip)
 - [ ] Blocking calls (`ATE.input`, `ATE.sleep`, and `ATE.read` once Devices exist) wait on the abort flag and raise `"aborted"`

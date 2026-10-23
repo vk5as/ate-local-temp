@@ -4,7 +4,9 @@
 
 **Blocked by:** 04 (Application config in full, and interrupted-run recovery), 16 (TCP Devices and `ate.devices`)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 17a, 17b, 17c — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `SERIAL`/`TCP`/`UDP` Devices are read in the background from `open` to `close`; `read` takes from the buffer first
 - [ ] The buffer is capped by `devices.receiveBufferBytes`; overflow drops the oldest data, logs one `WARNING` per overflow, and the next read carries `overflow = true`

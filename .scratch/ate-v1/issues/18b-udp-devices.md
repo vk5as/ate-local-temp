@@ -1,0 +1,15 @@
+# 18b: UDP Devices
+
+**Parent:** 18 (SERIAL and UDP Device Types) — `18-serial-and-udp-devices.md`
+
+**What to build:** Schedules talk to UDP peers.
+
+**Blocked by:** 17b (Background failures and write timeouts)
+
+**Status:** ready-for-agent
+
+- [ ] `UDP` with `host`, `port`, `localPort`, `timeout`, no terminators; one datagram per read; never partial except when truncated by `size`; buffer is a queue of datagrams
+- [ ] `Udp(host, port)` builder with the documented defaults
+- [ ] Seam-1 tests use a loopback UDP peer
+
+Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.

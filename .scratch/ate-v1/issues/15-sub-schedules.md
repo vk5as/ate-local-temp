@@ -4,7 +4,9 @@
 
 **Blocked by:** 06 (`require`, checksums and mismatch handling), 11 (Enabling and disabling steps before the run), 14 (Pre-test and Post-test Actions and the status bar)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 15a, 15b, 15c, 15d, 15e — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `StepParams(name)` takes an optional Step Name for every step and header
 - [ ] `setInclude(file, keyvals)` and `setPrefix` per `test-schedule-format`: resolution through the Test Definition (and later dependencies), checksum checked and recorded, chunk re-run per include with `keyvals` (plain data only) as its argument

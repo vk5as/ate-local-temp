@@ -4,7 +4,9 @@
 
 **Blocked by:** 17 (Receive buffer, Device failures and tracing)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 18a, 18b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `SERIAL` opens with pyserial `serial_for_url`, so `port` accepts COM/tty names and pyserial URLs; fields `port`, `baud`, `dataBits`, `stopBits`, `parity`, `flowControl`, `timeout`, `readTerm`, `writeTerm`
 - [ ] `Parity` and `FlowControl` enums

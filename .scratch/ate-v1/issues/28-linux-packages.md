@@ -4,7 +4,9 @@
 
 **Blocked by:** 27 (Windows installer and release CI)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 28a, 28b, 28c — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A `.tar.gz` of the PyInstaller build with `install.sh` calling `ate setup`
 - [ ] A self-contained `.deb` for Debian stable (`/opt/ate`, `/usr/bin/ate` link, `postinst` calls `ate setup`); `apt remove` keeps config and data, `apt purge` removes config but never the database, reports or logs
