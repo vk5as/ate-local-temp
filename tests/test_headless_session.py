@@ -13,7 +13,7 @@ from PyQt6.QtCore import QCoreApplication
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 
-from ._fixtures import FAILING, PASSING, write_ate_env
+from ._fixtures import FAILING, LOGGING, PASSING, write_ate_env
 
 
 def _wait_finished(session: HeadlessRunSession) -> bool:
@@ -159,4 +159,60 @@ def test_interrupted_run_recovery_is_logged_in_the_app_log(tmp_path) -> None:
     assert session._app_log is not None
     lines = [ln.strip() for ln in session._app_log.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert any("interrupted" in line.lower() for line in lines)
+
+
+def test_schedule_logs_are_recorded_with_levels_sources_and_owners(tmp_path) -> None:
+    """ATE.log at every level and print are recorded as log lines with source, owner and text."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    states = []
+    session.state_changed.connect(states.append)
+
+    session.set_operator("Ada")
+    session.select_schedule("Logging schedule")
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None and row["result"] == "PASS"  # every step reported PASS
+
+    lines_by_seq = {ln["seq"]: ln for ln in session.store.log_lines(session.run_uuid)}
+
+    # Step 1 logs INFO via ATE.log and again via print (redirected to INFO); steps 2 and 3
+    # log WARNING and ERROR. Four schedule-sourced lines, one per recorded event; each gets
+    # its own seq in emission order (a batch can hold several).
+    schedule = sorted(
+        (ln for ln in lines_by_seq.values() if ln["source"] == "schedule"),
+        key=lambda ln: ln["seq"],
+    )
+    assert [(ln["seq"], ln["level"], ln["text"]) for ln in schedule] == [
+        (0, "INFO", "step one running"),
+        (1, "INFO", "printed here"),  # print maps to INFO and is recorded too; distinct seq within the batch
+        (2, "WARNING", "value 12"),
+        (4, "ERROR", "something failed"),  # ate WARNING for warn step took seq 3
+    ]
+
+    # Every schedule line is owned by the Attempt of the step that emitted it. Ownership
+    # (node_seq/attempt_no) is set once per batch and shared; it is not the line's own seq.
+    expected_owner = [0, 0, 1, 2]  # owning step per recorded schedule event, in run order
+    for ln, owner in zip(schedule, expected_owner):
+        assert ln["node_seq"] == owner and ln["attempt_no"] == 1
+        assert ln["action_seq"] is None
+
+
+def test_error_level_log_line_is_recorded(tmp_path) -> None:
+    """A step that logs at ERROR records an ERROR log line owned by its Attempt."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.select_schedule("Logging schedule")
+    engine = session.start()
+    assert _wait_finished(session)
+
+    lines_by_seq = {ln["seq"]: ln for ln in session.store.log_lines(session.run_uuid)}
+    error_line = next(ln for ln in lines_by_seq.values() if ln["level"] == "ERROR")
+    assert (error_line["source"], error_line["text"]) == ("schedule", "something failed")
+    assert error_line["node_seq"] == 2 and error_line["attempt_no"] == 1
 

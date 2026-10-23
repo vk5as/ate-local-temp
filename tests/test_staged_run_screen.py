@@ -231,3 +231,62 @@ def test_stop_on_fail_is_prefilled_true(qapp, tmp_path):
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
     assert screen.steps_options_stage.stop_on_fail_radio.isChecked() is True
+
+
+def test_log_pane_shows_info_and_above_debug_window_shows_every_level(qapp, tmp_path):
+    """The Run view's Log pane shows INFO and above; the Debug window shows every level.
+
+    The Logging schedule logs at INFO (ATE.log + print), WARNING and ERROR across its steps,
+    so after a run both panes are filled from session.store.log_lines(). The Log pane keeps
+    INFO and above; the Debug window is a separate view that keeps every recorded line.
+    """
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_start(qapp, screen, "Logging schedule")
+    assert _wait_finished(qapp, session)
+
+    log_pane = "\n".join(screen.run_view.log_pane.rendered_lines())
+    debug_window = "\n".join(screen.run_view.debug_window.rendered_lines())
+
+    # The Log pane shows INFO and above: an INFO line (ATE.log/print), a WARNING and an ERROR.
+    assert any(line.startswith("INFO") for line in screen.run_view.log_pane.rendered_lines())
+    assert "WARNING" in log_pane
+    assert "ERROR" in log_pane
+
+    # The Debug window is the separate view that keeps every recorded line — here the same set,
+    # since this schedule records no DEBUG lines.
+    assert screen.run_view.debug_window.rendered_lines() == screen.run_view.log_pane.rendered_lines()
+
+
+def test_debug_line_shown_only_in_debug_window(qapp, tmp_path):
+    """A DEBUG line reaches the Debug window but is filtered out of the Log pane."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_start(qapp, screen, "Logging schedule")
+    assert _wait_finished(qapp, session)
+
+    run_uuid = session.run_uuid
+    nodes = session.store.nodes(run_uuid)
+    attempts = session.store.attempts(run_uuid)
+    log_lines = session.store.log_lines(run_uuid)
+
+    # Ate records its own DEBUG lines (e.g. a recovery note); record one by hand here so the
+    # two panes can be compared on a line that only the Debug window should show.
+    session.store.insert_log_lines(
+        run_uuid, 0, [{"level": "debug", "source": "ate", "text": "a debug message"}]
+    )
+    all_lines = session.store.log_lines(run_uuid)
+
+    # Re-render with the injected DEBUG line present (the FINISHED refresh already ran).
+    screen.run_view.refresh(nodes, attempts, all_lines)
+
+    assert "a debug message" in "\n".join(screen.run_view.debug_window.rendered_lines())
+    assert "a debug message" not in "\n".join(screen.run_view.log_pane.rendered_lines())

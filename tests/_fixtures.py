@@ -41,6 +41,24 @@ return ScheduleParams("Erroring schedule", "A step that raises a Lua error")
   })
 """
 
+# A schedule whose steps log at every level and also use print — exercising ticket 08's
+# ATE.log(Log.X, ...) recording and the print -> INFO redirection.
+LOGGING = """\
+return ScheduleParams("Logging schedule", "Steps that log at every level")
+  :setSchedule({
+    StepParams("info step"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.INFO, "step one running")
+        print("printed here")
+        ATE.report(Result.PASS)
+      end),
+    StepParams("warn step"):setStepNo("2.")
+      :setAction(function() ATE.log(Log.WARNING, "value", 12) end),
+    StepParams("error step"):setStepNo("3.")
+      :setAction(function() ATE.log(Log.ERROR, "something failed") end),
+  })
+"""
+
 
 def _sha256(path: Path) -> str:
     return __import__("hashlib").sha256(Path(path).read_bytes()).hexdigest()
@@ -58,6 +76,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8")
     (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8")
     (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
+    (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8")
 
     atedef = {
         "format": 1,
@@ -68,6 +87,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "passing.tslua", "sha256": _sha256(defs_dir / "passing.tslua")},
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},
             {"path": "erroring.tslua", "sha256": _sha256(defs_dir / "erroring.tslua")},
+            {"path": "logging.tslua", "sha256": _sha256(defs_dir / "logging.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")

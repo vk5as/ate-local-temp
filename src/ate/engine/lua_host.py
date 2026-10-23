@@ -123,6 +123,13 @@ class _AteTable:
         self._host.record_report(pass_fail, msg, actual, expected)
         return True
 
+    def log(self, level: Any, *args: Any) -> bool:
+        """Record a schedule's own log line at ``level``. Returns ``true``."""
+        # The host appends every call in order with source "schedule"; the run engine
+        # attributes each batch to the step whose action closure just ran (see below).
+        self._host.record_log(level, *args)
+        return True
+
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         try:
             return self._extra[name]
@@ -242,13 +249,19 @@ class _LuaHost:
         env["ScheduleParams"] = _ScheduleParams
         env["StepParams"] = _StepParams
         ate = _AteTable()
-        ate._host = self  # report() records into the host's ordered list
+        ate._host = self  # report()/log() record into the host's ordered lists
         env["ATE"] = ate
         self._ate = ate
+        # Redirect stray prints to ATE.log(INFO, ...) so schedule output is always logged.
+        self._bind_print(ate)
 
         # Every ATE.report call, in order. The run engine diffs this around each step's
         # action closure to attribute reports (last-call-wins) to that step.
         self.reports: list[tuple[Any, Any, Any, Any]] = []
+        # Every schedule-sourced log line (ATE.log and the redirected print), in order,
+        # as ``(level, source="schedule", text)``. The run engine diffs this around each
+        # step's action closure to attribute lines to that Attempt.
+        self.logs: list[tuple[str, str, str]] = []
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
@@ -257,6 +270,28 @@ class _LuaHost:
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
         """Record one ATE.report call from a running schedule."""
         self.reports.append((pass_fail, msg, actual, expected))
+
+    def record_log(self, level: Any, *args: Any) -> None:
+        """Append one schedule-sourced log line as ``(level, "schedule", text)``.
+
+        Every argument goes through ``tostring`` and is joined with spaces; the global
+        ``print`` is wired to this so stray prints land at INFO (see :meth:`_bind_print`)."""
+        self.logs.append((str(level), "schedule", " ".join(str(a) for a in args)))
+
+    def _bind_print(self, ate: "_AteTable") -> None:
+        """Redirect the global ``print`` to ``ATE.log(Log.INFO, ...)``.
+
+        The standard library still provides ``print`` (only Python builtins are excluded),
+        so overriding it here routes stray schedule output through the same log line — at
+        INFO — without a separate code path."""
+        env = self._runtime.globals()
+        ate_log = ate.log
+
+        def _print(*args: Any) -> str:
+            ate_log("INFO", *args)
+            return ""
+
+        env["print"] = _print  # type: ignore[assignment]
 
     def _load_schedule(self, path: str | Path) -> _ScheduleParams:
         """Execute ``path`` as a text chunk and return its ScheduleParams."""

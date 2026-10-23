@@ -82,3 +82,18 @@ attempt = Table(
     Column("expected", Text, nullable=True),  # final ATE.report expected as text
     Column("prompt_choice", Text, nullable=True),  # CONTINUE / RETRY / ABORT if it ended at a prompt
 )
+
+
+log_line = Table(
+    "log_line",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key
+    Column("at", Text, nullable=True),  # ISO-8601 UTC with ms
+    Column("level", Text, nullable=True),  # DEBUG / INFO / WARNING / ERROR
+    Column("source", Text, nullable=True),  # schedule / ate / device
+    Column("action_seq", Integer, nullable=True),  # owning Pre-test/Post-test Action call; null for run-level lines
+    Column("node_seq", Integer, nullable=True),  # owning step node; null when not tied to a step
+    Column("attempt_no", Integer, nullable=True),  # the Attempt's number within that node; null otherwise
+    Column("text", Text, nullable=True),  # the line
+)
