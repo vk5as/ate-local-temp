@@ -89,6 +89,7 @@ class RunEngine(QThread):
         media_number: str = "",
         schedule_name: str = "",
         utc_offset: str = "+00:00",
+        overrides: Optional[Mapping[int, bool]] = None,  # packet 11a: per-step enable/disable Operator toggles
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
@@ -108,6 +109,10 @@ class RunEngine(QThread):
         self.media_number = media_number
         self.schedule_name = schedule_name
         self.utc_offset = utc_offset
+        # Packet 11a: the Operator's enable/disable toggles for expanded-tree positions, keyed by
+        # the same seq the runner assigns to each step. Absent here every step keeps its own
+        # :setEnable() default; an override wins over that default when present (see _enabled).
+        self._overrides: dict[int, bool] = {int(seq): bool(en) for seq, en in (overrides or {}).items()}
         # Optional pre-registered ATE functions (a testability seam; see criterion 03). When
         # provided they are registered on the host before it runs, so a failing one can be
         # exercised through real Lua execution without touching device drivers.
@@ -255,14 +260,15 @@ class RunEngine(QThread):
         if record_attempt:
             step = steps[aborted_seq]
             self._store.insert_attempt(run_uuid, aborted_seq, 1, pass_fail="ERROR", msg="Aborted by Operator")
+            default_enabled, enabled = self._enabled(aborted_seq, step)
             self._store.insert_node(
                 run_uuid,
                 aborted_seq,
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
-                default_enabled=int(bool(step.enabled)),
-                enabled=int(bool(step.enabled)),
+                default_enabled=default_enabled,
+                enabled=enabled,
                 result="ERROR",
                 attempt_count=1,
             )
@@ -270,14 +276,15 @@ class RunEngine(QThread):
             later = steps[seq]
             if later.action is None:
                 continue
+            default_enabled, enabled = self._enabled(seq, later)
             self._store.insert_node(
                 run_uuid,
                 seq,
                 kind="step",
                 step_number=later.step_no or "",
                 step_name=later.name,
-                default_enabled=int(bool(later.enabled)),
-                enabled=int(bool(later.enabled)),
+                default_enabled=default_enabled,
+                enabled=enabled,
                 result="NOTRUN",
                 attempt_count=0,
             )
@@ -347,14 +354,15 @@ class RunEngine(QThread):
             step = steps[seq]
             if step.action is None:  # header/include rows have no node recorded (see run)
                 continue
+            default_enabled, enabled = self._enabled(seq, step)
             self._store.insert_node(
                 run_uuid,
                 seq,
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
-                default_enabled=int(bool(step.enabled)),
-                enabled=int(bool(step.enabled)),
+                default_enabled=default_enabled,
+                enabled=enabled,
                 result="NOTRUN",
                 attempt_count=0,
             )
@@ -363,6 +371,14 @@ class RunEngine(QThread):
             [{"level": "ERROR", "source": "ate", "text": f"Pre-test Action failed ({error_text}); the run aborted so every step is NOTRUN."}],
             action_seq=failed_seq,
         )
+
+    def _enabled(self, seq: int, step: Any) -> tuple[int, int]:
+        """Return ``(default_enabled, enabled)`` for a runner step at ``seq``.
+
+        The default comes from the author's :setEnable(); an Operator override wins when one is set."""
+        default_enabled = bool(step.enabled)
+        effective_enabled = self._overrides.get(seq, default_enabled)
+        return int(default_enabled), int(effective_enabled)
 
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
@@ -442,6 +458,22 @@ class RunEngine(QThread):
 
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
+                continue
+            # A step disabled at run start (its :setEnable() default or an Operator override) isn't
+            # executed; record it NOTRUN with no Attempt and move on. See :meth:`_enabled`.
+            default_enabled, enabled = self._enabled(seq, step)
+            if not enabled:
+                self._store.insert_node(
+                    run_uuid,
+                    seq,
+                    kind="step",
+                    step_number=step.step_no or "",
+                    step_name=step.name,
+                    default_enabled=default_enabled,
+                    enabled=enabled,
+                    result="NOTRUN",
+                    attempt_count=0,
+                )
                 continue
             # Whole-run abort checked at the step boundary — this packet covers stopping cleanly
             # between steps; interrupting a running (blocking or busy) step comes in 13b/13c. If
@@ -570,14 +602,15 @@ class RunEngine(QThread):
             if records:
                 self._store.insert_input_values(run_uuid, records)
 
+            default_enabled, enabled = self._enabled(seq, step)
             self._store.insert_node(
                 run_uuid,
                 seq,
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
-                default_enabled=int(bool(step.enabled)),
-                enabled=int(bool(step.enabled)),
+                default_enabled=default_enabled,
+                enabled=enabled,
                 result=last_result,
                 attempt_count=attempts_recorded,
                 inputs=[d.to_dict() for d in validated] if validated else None,

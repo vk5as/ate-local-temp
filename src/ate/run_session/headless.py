@@ -85,6 +85,10 @@ class HeadlessRunSession(QObject):
                 self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
+        # Packet 11a: the Operator's enable/disable toggles for expanded-tree positions, keyed by
+        # the runner seq each step is assigned. Applied at start() as engine overrides; absent here
+        # every step keeps its :setEnable() default (see RunEngine._enabled). ``None`` until set.
+        self._pending_node_enables: Optional[dict[int, bool]] = None
         # Emit the initial state on the thread that owns this session.
         self.state_changed.emit(SessionState.IDLE)
 
@@ -203,6 +207,20 @@ class HeadlessRunSession(QObject):
             raise SessionError("stop_on_fail must be a boolean")
         self._pending_stop_on_fail = value
 
+    def toggle_node(self, seq: int, enable: bool) -> None:
+        """Override one step's enable/disable default for this run at its runner ``seq``.
+
+        Called by the Steps stage when an Operator toggles an expanded-tree position; applied at
+        start() as engine overrides (see RunEngine._enabled). Raises if called with a bad type or
+        while a run is in progress."""
+        if not isinstance(seq, int):
+            raise SessionError("node seq must be an integer")
+        if not isinstance(enable, bool):
+            raise SessionError("enable must be a boolean")
+        if self._engine is not None:
+            raise SessionError("cannot toggle nodes while a run is in progress")
+        self._pending_node_enables = {**(self._pending_node_enables or {}), seq: enable}
+
     def request_abort(self) -> None:
         """Request a whole-run abort of the current run (the Run screen's Abort button calls this).
 
@@ -281,6 +299,7 @@ class HeadlessRunSession(QObject):
             modules=modules,  # packet 06a: forward the release's require'd module map to this run
             schedule_name=self._selected_name,
             utc_offset="+00:00",
+            overrides={int(seq): bool(en) for seq, en in (self._pending_node_enables or {}).items()},
         )
 
         # Announce STARTED on this thread before the worker runs. The worker's queued

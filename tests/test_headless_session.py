@@ -6,15 +6,16 @@ are recorded on the run row; interrupted runs left open by a crash are closed as
 at launch (spec rule 98). No widgets, no mocks.
 """
 
+import pytest
 import sqlite3
 import threading
 
 from PyQt6.QtCore import QCoreApplication
 
-from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
 
-from ._fixtures import FAILING, LOGGING, PASSING, write_ate_env
+from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, write_ate_env
 
 
 def _wait_finished(session: HeadlessRunSession) -> bool:
@@ -350,4 +351,131 @@ def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qa
     ).fetchone()
     assert err is not None and err["pass_fail"] == "ERROR"
     assert err["msg"] == "Aborted by Operator"
+
+
+def _nodes_by_seq(store, run_uuid: str) -> dict[int, dict]:
+    """Index a run's node rows by runner seq for enable/disable assertions."""
+    return {int(n["node_seq"]): n for n in store.nodes(run_uuid)}
+
+
+def _check_nodes(nodes_by_step: dict[str, dict], want: dict[str, dict]) -> None:
+    """Assert each step's recorded fields match ``want`` (a subset of node columns).
+
+    Raises on the first mismatch so a failing test names the offending step and field."""
+    for step_number, fields in want.items():
+        got = nodes_by_step[step_number]
+        for key, value in fields.items():
+            assert got[key] == value, f"{step_number} {key}={got.get(key)!r}"
+
+
+def test_disabled_step_by_default_records_notrun_without_attempt(tmp_path) -> None:
+    """A step :setEnable(false) by default isn't executed and records NOTRUN with no Attempt.
+
+    The Enable/disable schedule has a=0 (on), b=1 (:setEnable(false)), c=2 (on). With no Operator
+    override only the middle step is skipped; its node is NOTRUN/attempt_count 0 / (default,enabled)
+    = (0, 0) and it records no Attempt row. The other steps run normally."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Enable/disable schedule")  # b is :setEnable(false), no override
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    assert row["result"] == "PASS"  # a and c ran; only the disabled middle step was skipped
+
+    nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
+    by_seq = _nodes_by_seq(session.store, session.run_uuid)
+    _check_nodes(nodes, {
+        "1.": {"result": "PASS", "attempt_count": 1, "default_enabled": 1, "enabled": 1},
+        "2.": {"result": "NOTRUN", "attempt_count": 0, "default_enabled": 0, "enabled": 0},
+        "3.": {"result": "PASS", "attempt_count": 1, "default_enabled": 1, "enabled": 1},
+    })
+    # The disabled step recorded no Attempt row at all (attempt_count stays 0).
+    assert not any(a["node_seq"] == 1 for a in session.store.attempts(session.run_uuid))
+
+
+def test_operator_override_enables_a_disabled_step(tmp_path) -> None:
+    """An Operator override flips a :setEnable(false) step on so it runs; the default stays 0.
+
+    b is seq 1 (its position in the three-step schedule); toggling it on before start records
+    (default_enabled, enabled) = (0, 1) and executes it."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Enable/disable schedule")
+    session.toggle_node(1, True)  # override the :setEnable(false) middle step on before start
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
+    by_seq = _nodes_by_seq(session.store, session.run_uuid)
+    _check_nodes(nodes, {
+        "1.": {"result": "PASS", "attempt_count": 1, "default_enabled": 1, "enabled": 1},
+        "2.": {"result": "PASS", "attempt_count": 1, "default_enabled": 0, "enabled": 1},
+        "3.": {"result": "PASS", "attempt_count": 1, "default_enabled": 1, "enabled": 1},
+    })
+
+
+def test_operator_override_disables_a_default_on_step(tmp_path) -> None:
+    """An Operator override flips a default-on step off; it records NOTRUN with no Attempt.
+
+    a is seq 0 (default on); toggling it off before start records (1, 0). The default-off middle
+    step stays skipped too, so both non-running steps are NOTRUN and only c runs."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Enable/disable schedule")
+    session.toggle_node(0, False)  # override the default-on first step off before start
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
+    by_seq = _nodes_by_seq(session.store, session.run_uuid)
+    _check_nodes(nodes, {
+        "1.": {"result": "NOTRUN", "attempt_count": 0, "default_enabled": 1, "enabled": 0},
+        "2.": {"result": "NOTRUN", "attempt_count": 0, "default_enabled": 0, "enabled": 0},
+        "3.": {"result": "PASS", "attempt_count": 1, "default_enabled": 1, "enabled": 1},
+    })
+    assert not any(a["node_seq"] == 0 for a in session.store.attempts(session.run_uuid))
+
+
+def test_toggle_node_rejects_bad_types(tmp_path) -> None:
+    """toggle_node validates its arguments like the neighbouring setters."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    with pytest.raises(SessionError):
+        session.toggle_node("nope", True)  # seq must be an int
+    with pytest.raises(SessionError):
+        session.toggle_node(0, "yes")  # enable must be a bool
+
+    # No override leaked into the run.
+    session.select_schedule("Enable/disable schedule")
+    engine = session.start()
+    assert _wait_finished(session)
+    by_seq = _nodes_by_seq(session.store, session.run_uuid)
+    assert by_seq[0]["result"] == "PASS"  # a ran normally, so no override was applied
+
+
+def test_toggle_node_while_running_raises(tmp_path) -> None:
+    """Toggling nodes after start() has begun (the engine is set) is rejected."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.select_schedule("Enable/disable schedule")
+    engine = session.start()  # constructs the RunEngine; self._engine is now set
+    assert engine is not None
+
+    with pytest.raises(SessionError):
+        session.toggle_node(1, True)
+
+
 
