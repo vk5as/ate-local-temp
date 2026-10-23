@@ -252,7 +252,8 @@ class RunEngine(QThread):
         ``phase`` is "pre" or "post"; the internal context string ("pretest"/"posttest") keeps the
         host's lockdown/location logic intact. On success the outcome is "ok"; a raised Lua error
         becomes an "error" row carrying its first line, with the traceback logged at ERROR and both
-        attributed to this action via ``action_seq`` so later packets can surface it."""
+        attributed to this action via ``action_seq`` so later packets can surface it. Returns
+        ``(outcome, error)`` so the caller can abort on a Pre-test failure (packet 14b)."""
         started_at = _now_iso()
         outcome = "ok"
         error = None
@@ -275,6 +276,34 @@ class RunEngine(QThread):
         self._store.insert_action(
             run_uuid, instance_seq=instance_seq, phase=phase, run_order=0,
             outcome=outcome, error=(error or None), started_at=started_at, ended_at=ended_at,
+        )
+        return outcome, error
+
+    def _record_pretest_failure(self, run_uuid: str, steps: list[Any], *, failed_seq: int, error_text: str) -> None:
+        """Record that a failing Pre-test Action (which started at pre-test ``failed_seq``) aborted the run.
+
+        No step ran yet, so every actionable step is recorded NOTRUN with no Attempt; the failing
+        Pre-test's own ERROR row and traceback already exist from ``_record_phase_action``. A single
+        log line names the failure and explains why every step is NOTRUN."""
+        for seq in range(len(steps)):
+            step = steps[seq]
+            if step.action is None:  # header/include rows have no node recorded (see run)
+                continue
+            self._store.insert_node(
+                run_uuid,
+                seq,
+                kind="step",
+                step_number=step.step_no or "",
+                step_name=step.name,
+                default_enabled=int(bool(step.enabled)),
+                enabled=int(bool(step.enabled)),
+                result="NOTRUN",
+                attempt_count=0,
+            )
+        self._store.insert_log_lines(
+            run_uuid, 0,
+            [{"level": "ERROR", "source": "ate", "text": f"Pre-test Action failed ({error_text}); the run aborted so every step is NOTRUN."}],
+            action_seq=failed_seq,
         )
 
     def run(self) -> None:
@@ -334,10 +363,20 @@ class RunEngine(QThread):
         # Pre-test Actions run up front, in order, each called with the current pass_fail. Nothing
         # has failed yet so this is "PASS"; 13b owns what happens if one fails (aborting). Each runs
         # before any step and records an action row plus its own log lines first.
+        pretest_failed = False  # a Pre-test Action that raised aborts the whole run (packet 14b)
         for seq, action_fn in enumerate(self._phase_actions(schedule, "pre")):
-            self._record_phase_action(host, run_uuid, instance_seq=seq, phase="pre", fn=action_fn, pass_fail=pass_fail)
+            outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="pre", fn=action_fn, pass_fail=pass_fail)
+            if outcome == "error":
+                # A failing Pre-test Action aborts automatically before any step runs.
+                pretest_failed = True
+                self._record_pretest_failure(run_uuid, steps, failed_seq=seq, error_text=error or "")
+                break
 
         for seq, step in enumerate(steps):
+            if pretest_failed:
+                # Already recorded every step NOTRUN above; stop before running any.
+                break
+
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
                 continue
@@ -475,12 +514,15 @@ class RunEngine(QThread):
         # Post-test Actions run after the last step, in reverse, each called with the final pass_fail.
         # They record action rows too; 14c owns whether a skipped Pre-test suppresses them.
         for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
-            self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
+            _outcome, _error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
 
-        # A whole-run abort (requested between steps) fails the run with End Reason ABORTED; a
-        # normal finish is FAIL on any FAIL/ERROR, otherwise PASS. STOPPED_ON_FAIL comes with the
-        # Stop-on-Fail prompt in 13b.
-        if aborted:
+        # A Pre-test failure aborts before any step runs (packet 14b); a whole-run abort requested
+        # between steps fails the run with End Reason ABORTED; a normal finish is FAIL on any
+        # FAIL/ERROR, otherwise PASS. STOPPED_ON_FAIL comes with the Stop-on-Fail prompt in 13b.
+        if pretest_failed:
+            run_result = "FAIL"
+            end_reason = "PRETEST_FAILED"
+        elif aborted:
             run_result = "FAIL"
             end_reason = "ABORTED"
         else:
