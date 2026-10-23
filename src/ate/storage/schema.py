@@ -84,6 +84,20 @@ attempt = Table(
     Column("prompt_choice", Text, nullable=True),  # CONTINUE / RETRY / ABORT if it ended at a prompt
 )
 
+action = Table(
+    "action",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key
+    Column("instance_seq", Integer, nullable=True),  # schedule instance whose action it is
+    Column("phase", Text, nullable=True),  # "pre" or "post"
+    Column("run_order", Integer, nullable=True),  # position within that phase's order
+    Column("started_at", Text, nullable=True),  # ISO-8601 UTC with ms; null when skipped
+    Column("ended_at", Text, nullable=True),  # null while running; set on close
+    Column("outcome", Text, nullable=True),  # ok / error / aborted / skipped
+    Column("error", Text, nullable=True),  # error message; the traceback is in the log
+)
+
 
 log_line = Table(
     "log_line",

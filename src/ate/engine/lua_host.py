@@ -507,15 +507,20 @@ class _LuaHost:
                     return f"{name}:{i + 1}:"
         return f"{name}:"
 
-    def _run_action(self, fn: Callable[..., Any], phase: str) -> Any:
+    def _run_action(self, fn: Callable[..., Any], phase: str, pass_fail: Optional[str] = None) -> Any:
         """Run a Lua action closure with ``phase`` active so context-checked ATE calls raise.
 
         While ``phase`` is set (one of "pretest", "posttest" or "step") the host knows where it is,
         so :meth:`_AteTable.report` and :meth:`_AteTable.input` can refuse a call made where it isn't
         allowed. The context is restored to idle (``None``) afterwards; a fresh host starts at "load"
-        because the top level of the file runs before anything else exists."""
+        because the top level of the file runs before anything else exists.
+
+        A Pre-test or Post-test Action is called with the run's current ``pass_fail`` as its first
+        argument so it can branch on where the run stands (a step action keeps taking no arguments)."""
         self._context = phase
         try:
+            if pass_fail is not None and phase in ("pretest", "posttest"):
+                return fn(pass_fail)  # type: ignore[call-arg]
             return fn()
         finally:
             self._context = None

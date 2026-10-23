@@ -111,6 +111,43 @@ return ScheduleParams("Pretest log schedule", "log in a pretest action is fine")
   :setPreTestAction(function() ATE.log(Log.INFO, "setup running") end)
 """
 
+# A passing step wrapped by Pre-test and Post-test Actions that each log their phase and the pass_fail
+# they were called with. An end-to-end run records both as action rows (outcome ok); the logged values
+# prove the Pre-test saw the initial PASS and the Post-test the final result after its single step.
+PRE_POST_PASS = """\
+return ScheduleParams("Pre post pass schedule", "pre/post actions around one passing step")
+  :setSchedule({
+    StepParams("the step"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "ok") end),
+  })
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pretest "..passFail) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "posttest "..passFail) end)
+"""
+
+# Same shape but the step fails: the Post-test Action must be called with FAIL (the run's final result),
+# proving pass_fail flows from steps to Post-test. The Pre-test still ran first ("PASS").
+PRE_POST_FAIL = """\
+return ScheduleParams("Pre post fail schedule", "pre/post actions around one failing step")
+  :setSchedule({
+    StepParams("the step"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.FAIL, "nope") end),
+  })
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pretest "..passFail) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "posttest "..passFail) end)
+"""
+
+# The Pre-test Action raises a Lua error. This packet does not abort on it (that is 13b); the action row
+# records outcome "error" and execution continues to the step and then the Post-test Action ("ok").
+PRE_ERROR_POST_OK = """\
+return ScheduleParams("Pre error post ok schedule", "a Pre-test Action that raises")
+  :setSchedule({
+    StepParams("the step"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "still runs") end),
+  })
+  :setPreTestAction(function(passFail) error("boom in pretest "..passFail) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "posttest "..passFail) end)
+"""
+
 # A schedule whose single step reads ATE.run.Operator (populated by the run engine from this run's
 # context) and reports it — so an end-to-end run records the operator a step can read.
 READS_RUN = """\
@@ -194,6 +231,9 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8")
     (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
     (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8")
+    (defs_dir / "pre_post_pass.tslua").write_text(PRE_POST_PASS, encoding="utf-8")
+    (defs_dir / "pre_post_fail.tslua").write_text(PRE_POST_FAIL, encoding="utf-8")
+    (defs_dir / "pre_error_post_ok.tslua").write_text(PRE_ERROR_POST_OK, encoding="utf-8")
 
     # Ticket 10 schedules: one blocking input, one POLL-only step, and a step declaring every Step
     # Input type. Written into the demo Test Definition so seam/staged tests can select them by name.
@@ -212,6 +252,9 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},
             {"path": "erroring.tslua", "sha256": _sha256(defs_dir / "erroring.tslua")},
             {"path": "logging.tslua", "sha256": _sha256(defs_dir / "logging.tslua")},
+            {"path": "pre_post_pass.tslua", "sha256": _sha256(defs_dir / "pre_post_pass.tslua")},
+            {"path": "pre_post_fail.tslua", "sha256": _sha256(defs_dir / "pre_post_fail.tslua")},
+            {"path": "pre_error_post_ok.tslua", "sha256": _sha256(defs_dir / "pre_error_post_ok.tslua")},
             {"path": "blocking_input.tslua", "sha256": _sha256(defs_dir / "blocking_input.tslua")},
             {"path": "poll_input.tslua", "sha256": _sha256(defs_dir / "poll_input.tslua")},
             {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
