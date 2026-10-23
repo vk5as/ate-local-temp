@@ -32,7 +32,25 @@ if str(_ROOT) not in sys.path:
 # argument list and rely on that env var instead.
 import pytest  # noqa: E402
 
+from PyQt6.QtCore import QObject, QThread  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
+
+
+def _stop_workers(app: QApplication) -> None:
+    """Stop every live QThread worker before the tree is torn down.
+
+    Ticket 02's RunEngine runs on a QThread and emits cross-thread signals onto this shared
+    application's event loop. If a worker is still alive when one test ends, its queued signals
+    can fire into the next test's construction and leave widgets in a stale visibility state —
+    that is what makes ``test_run_view_is_hidden_until_a_run_starts`` flake across a full run.
+    Stopping workers here guarantees each test starts with no lingering worker feeding events."""
+    def _halt(obj: object) -> None:
+        for child in list(getattr(obj, "children", lambda: [])()):
+            if isinstance(child, QThread) and child.isRunning():
+                child.stop()
+            _halt(child)
+
+    _halt(app)
 
 
 def _destroy_widget_tree(app: QApplication) -> None:
@@ -71,6 +89,7 @@ def qapp() -> QApplication:
     ``QApplication`` is finalized alongside any ``QCoreApplication``."""
     app = QApplication([])
     yield app
+    _stop_workers(app)
     _destroy_widget_tree(app)
     app.processEvents()
     app.quit()
@@ -83,3 +102,18 @@ def app(qapp: QApplication) -> QApplication:
     Ticket 02's QThread-driven tests request this name; it returns the same instance so every test
     drives the worker through one event loop."""
     return qapp
+
+
+@pytest.fixture(autouse=True)
+def _clean_qt_state(qapp: QApplication) -> None:
+    """Give every test a clean Qt slate, regardless of which module runs.
+
+    Ticket 03's StagedRunScreen keeps a live QThread worker and a one-second timer for its whole
+    lifetime; without per-test cleanup those linger across tests and keep firing cross-thread
+    signals onto the shared application's event loop, intermittently corrupting the visibility
+    state of the next test's widgets (the ``run_view`` flake). Stopping workers and dropping every
+    widget tree here — before the next test constructs anything — removes that leak. This runs for
+    all tests too, so a QThread-driven test never leaves a worker feeding events either."""
+    _stop_workers(qapp)
+    _destroy_widget_tree(qapp)
+    qapp.processEvents()
