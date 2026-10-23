@@ -2,8 +2,8 @@
 
 This is ticket 02's slice of the storage layer: three dialect-neutral tables —
 ``test_run``, ``node`` and ``attempt`` — written once here so only :class:`RunStore`
-ever sees SQL. Later tickets add more tables (media_release, run_file, ...) to the
-same metadata; they never touch anything outside this module.
+ever sees SQL. Ticket 06b adds ``media_release``/``run_file`` to this same metadata; later
+tickets add more, and none of them touch anything outside this module.
 
 Portable types (see `assets/test-run-record.md`): UUIDs as 36-character text,
 times as ISO-8601 UTC text with milliseconds, booleans as 0/1, structured values
@@ -19,7 +19,9 @@ from sqlalchemy import Column, Integer, MetaData, Table, Text
 # The schema version lives in PRAGMA user_version. v1 introduces this first real
 # schema (ticket 01 had no tables), so it starts at 1; adding the ``input_value`` table
 # is a forward migration, so it becomes 2 and older databases must be migrated first.
-SCHEMA_VERSION = 2
+# Adding the ``media_release``/``run_file`` tables records each run's checksums, so this
+# build bumps it to 3 — older databases must migrate before launch (see store.py).
+SCHEMA_VERSION = 3
 
 metadata = MetaData()
 
@@ -125,4 +127,34 @@ input_value = Table(
     Column("type", Text, nullable=True),  # Step Input type (ENUM/INTEGER/FLOAT/STRING/PROMPT/POLL)
     Column("value", Text, nullable=True),  # value as text; CHECKBOX as a JSON array of labels
     Column("at", Text, nullable=True),  # ISO-8601 UTC with ms when it was entered
+)
+
+
+# Every Media Release in the resolved chain (see `assets/test-run-record.md`). ``seq`` is the
+# release's position in resolution order; the top-level release that owns this run is always 0.
+media_release = Table(
+    "media_release",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key; 0 for the top-level release
+    Column("media_number", Text, nullable=True),
+    Column("name", Text, nullable=True),
+    Column("version", Text, nullable=True),
+    Column("atedef_sha256", Text, nullable=True),  # SHA-256 of this release's .atedef file
+)
+
+
+# Every file the run used — each schedule and each module it ``require``d (see `assets/test-run-record.md`).
+run_file = Table(
+    "run_file",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key
+    Column("path", Text, nullable=True),  # path as listed in the Test Definition; the `ate.` module name for bundled modules
+    Column("media_number", Text, nullable=True),  # owning Media Release; null for bundled `ate.` modules
+    Column("kind", Text, nullable=True),  # `tslua`, `lua` or `ate-module`
+    Column("expected_sha256", Text, nullable=True),  # from the Test Definition; null for `ate.` modules
+    Column("computed_sha256", Text, nullable=True),  # SHA-256 of the raw bytes at load
+    Column("mismatch", Integer, nullable=True),  # 0/1: expected and computed differ
+    Column("content", Text, nullable=True),  # raw bytes of a mismatched file; stored by ticket 06c
 )

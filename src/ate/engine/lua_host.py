@@ -33,9 +33,15 @@ Bridging facts (validated empirically against lupa 2.8):
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
+
+
+def _sha256_hex(data: bytes) -> str:
+    """SHA-256 of ``data`` as lowercase hex (packet 06b)."""
+    return hashlib.sha256(data).hexdigest()
 
 from ..errors import ATEError
 from .operator_input import OperatorInput
@@ -425,6 +431,11 @@ class _LuaHost:
         # Packet 06a: the whitelist of require'd modules for this host (one per Test Run). ``None``
         # means no replacement require is installed, so any require call reads back as a nil value.
         self._modules = dict(modules) if modules is not None else {}  # no map: nothing is requirable
+        # Packet 06b: every file this host loads at run time — the schedule plus each module it
+        # requires — in load order, once each, as ``(path, kind, sha256-of-raw-bytes)``. ``kind``
+        # is "tslua" for the schedule and "lua" for a required module; the run engine records these
+        # rows (and flags mismatches) when the run ends.
+        self._files_used: list[tuple[str, str, str]] = []
         # Cache of already-loaded module return values; keyed by module name. A nil return caches as
         # ``True`` (stock Lua), and every later require of the same name returns this without re-running.
         self._require_cache: dict[str, Any] = {}
@@ -546,7 +557,10 @@ class _LuaHost:
             cached = self._require_cache.get(name)
             if cached is not None:  # a nil return was already cached as True below, so this never hits for nil
                 return cached
-            source = Path(modules[name]).read_text(encoding="utf-8")
+            module_path = Path(modules[name])
+            data = module_path.read_bytes()  # checksum the raw bytes before decoding (packet 06b)
+            self._files_used.append((str(module_path), "lua", _sha256_hex(data)))
+            source = data.decode("utf-8")
             try:
                 value = self._runtime.execute(source, name=f"@{modules[name]}", mode="t")
             except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
@@ -674,8 +688,13 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         self._runtime.execute(self._AbortPrelude, name=f"@{self._schedule_path.name}-abort", mode="t")
 
     def _load_schedule(self, path: str | Path) -> _ScheduleParams:
-        """Execute ``path`` as a text chunk and return its ScheduleParams."""
-        code = Path(path).read_text(encoding="utf-8")
+        """Execute ``path`` as a text chunk and return its ScheduleParams.
+
+        The schedule's raw bytes are checksummed here (packet 06b) and recorded in :attr:`_files_used`
+        before decoding for execution — the first file used by this host, so it always lands first."""
+        data = Path(path).read_bytes()
+        self._files_used.append((str(path), "tslua", _sha256_hex(data)))
+        code = data.decode("utf-8")
         try:
             schedule = self._runtime.execute(
                 code, name=f"@{Path(path).name}", mode="t"

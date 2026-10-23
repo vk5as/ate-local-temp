@@ -1,8 +1,8 @@
 """The only storage interface in ATE: :class:`RunStore`.
 
 Everything that records a Test Run goes through this class; nothing else sees SQL.
-It opens SQLite (WAL mode) at ``database.path`` and writes the three v1 tables
-(``test_run``, ``node``, ``attempt``). Writes are incremental — each row is committed
+It opens SQLite (WAL mode) at ``database.path`` and writes the v1 tables
+(``test_run``, ``node``, ``attempt``), plus the ``media_release``/``run_file`` rows ticket 06b records for every run. Writes are incremental — each row is committed
 as it happens, so a run left unfinished by a crash can be closed as INTERRUPTED later.
 
 Portable types only: UUIDs as 36-character text, times as ISO-8601 UTC text with
@@ -30,8 +30,10 @@ from .schema import (
     attempt,
     input_value,
     log_line,
+    media_release,
     metadata,
     node,
+    run_file,
     test_run,
 )
 
@@ -170,6 +172,12 @@ class RunStore:
         # The store spans one whole run, so this counter stays monotonic across every
         # step's batches and preserves emission order within and between them.
         self._log_seq: dict[str, int] = {}
+        # Per-run seq counters for the record tables that carry their own ``(run_uuid, seq)`` PK.
+        # media_release and run_file each order their rows from 0 within the run on a counter of
+        # their own, so recording them never shifts the log-line/test-run numbering other records
+        # rely on; input_value shares _log_seq with actions because it is emitted inline with steps.
+        self._media_seq: dict[str, int] = {}
+        self._runfile_seq: dict[str, int] = {}
         self._ensure_schema()
 
     def _run(self, stmt) -> Any:
@@ -358,6 +366,92 @@ class RunStore:
             self._run(input_value.insert().values(**row))
         if next_seq > 0:
             self._log_seq[run_uuid] = next_seq
+
+    # -- media_release -------------------------------------------------------
+
+    def insert_media_release(
+        self,
+        run_uuid: str,
+        *,
+        seq: int = 0,
+        media_number: Optional[str] = None,
+        name: Optional[str] = None,
+        version: Optional[str] = None,
+        atedef_sha256: Optional[str] = None,
+    ) -> dict:
+        """Insert one Media Release row keyed by ``(run_uuid, seq)``.
+
+        ``seq`` is the release's position in resolution order (0 for the top-level release that
+        owns this run). Each row takes the next value of the run's media-release counter
+        (:attr:`_media_seq`) so rows are numbered 0..n within the run and stay unique to this table."""
+        now = self._media_seq.get(run_uuid, 0)
+        row = {
+            "run_uuid": run_uuid,
+            "seq": now,
+            "media_number": media_number or None,
+            "name": name or None,
+            "version": version or None,
+            "atedef_sha256": atedef_sha256 or None,
+        }
+        self._run(media_release.insert().values(**row))
+        next_seq = now + 1
+        if next_seq > 0:
+            self._media_seq[run_uuid] = next_seq
+        return dict(row)
+
+    # -- run_file ------------------------------------------------------------
+
+    def insert_run_file(
+        self,
+        run_uuid: str,
+        *,
+        path: Optional[str] = None,
+        media_number: Optional[str] = None,
+        kind: str = "tslua",
+        expected_sha256: Optional[str] = None,
+        computed_sha256: Optional[str] = None,
+        mismatch: bool = False,
+    ) -> dict:
+        """Insert one file-used row keyed by ``(run_uuid, seq)``.
+
+        ``kind`` is ``tslua``, ``lua`` or ``ate-module``; bundled ``ate.`` modules carry a null
+        ``media_number`` and ``expected_sha256`` (only this build records release files, so both are
+        set here). ``mismatch`` stores as 0/1; the raw bytes of a mismatched file are left null —
+        storing them is ticket 06c."""
+        now = self._runfile_seq.get(run_uuid, 0)
+        row = {
+            "run_uuid": run_uuid,
+            "seq": now,
+            "path": path or None,
+            "media_number": media_number if kind != "ate-module" else None,
+            "kind": kind,
+            "expected_sha256": expected_sha256 if kind != "ate-module" else None,
+            "computed_sha256": computed_sha256 or None,
+            "mismatch": _as_int(mismatch),
+        }
+        self._run(run_file.insert().values(**row))
+        next_seq = now + 1
+        if next_seq > 0:
+            self._runfile_seq[run_uuid] = next_seq
+        return dict(row)
+
+    # -- reads --------------------------------------------------------------
+
+    def media_releases(self, run_uuid: str) -> list[dict]:
+        """Return this run's Media Release rows as dicts (empty when the run is unknown)."""
+        stmt = media_release.select().where(media_release.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(media_release.columns, row)} for row in rows
+        ]
+
+    def run_files(self, run_uuid: str) -> list[dict]:
+        """Return this run's file-used rows as dicts (empty when the run is unknown)."""
+        stmt = run_file.select().where(run_file.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
+        ]
 
     # -- log_line ------------------------------------------------------------
 

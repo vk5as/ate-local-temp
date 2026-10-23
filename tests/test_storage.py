@@ -185,6 +185,46 @@ def test_log_lines_batch_round_trip_through_store(tmp_path) -> None:
     assert run_line["node_seq"] is None and run_line["attempt_no"] is None and run_line["action_seq"] is None
 
 
+def test_media_release_and_run_file_round_trip_through_store(tmp_path) -> None:
+    """A Media Release (seq 0) and its file-used rows survive a write/read cycle."""
+    store = RunStore(tmp_path / "ate.db")
+    run_uuid = new_uuid7()
+
+    # The owning release, then one clean file and one mismatched file. media_release and run_file
+    # each number their rows from 0 on a counter of their own, so (run_uuid, seq) is unique within
+    # every table without shifting the log-line numbering steps rely on.
+    store.insert_media_release(
+        run_uuid,
+        media_number="REL-A",
+        name="Demo release",
+        version="1.0.0",
+        atedef_sha256="deadbeef" * 8,
+    )
+    store.insert_run_file(run_uuid, path="load.tslua", kind="tslua", expected_sha256="aaa", computed_sha256="aaa")
+    store.insert_run_file(
+        run_uuid, path="helper.lua", kind="lua", media_number="REL-A",
+        expected_sha256="bbb", computed_sha256="ccc", mismatch=True,
+    )
+
+    releases = store.media_releases(run_uuid)
+    assert len(releases) == 1
+    rel = releases[0]
+    assert (rel["media_number"], rel["name"], rel["version"], rel["atedef_sha256"]) == ("REL-A", "Demo release", "1.0.0", "deadbeef" * 8)
+    assert rel["seq"] == 0
+
+    files = store.run_files(run_uuid)
+    assert [(f["path"], f["kind"], f["expected_sha256"], f["computed_sha256"], f["mismatch"]) for f in files] == [
+        ("load.tslua", "tslua", "aaa", "aaa", 0),
+        ("helper.lua", "lua", "bbb", "ccc", 1),
+    ]
+    # run_file rows are numbered from 0 within their own counter (monotonic in load order).
+    assert [f["seq"] for f in files] == [0, 1]
+
+    # Reading an unknown run yields nothing.
+    assert store.media_releases("nope") == []
+    assert store.run_files("nope") == []
+
+
 def test_log_lines_for_unknown_run_is_empty(tmp_path) -> None:
     """Reading log lines for a run that was never recorded returns nothing."""
     store = RunStore(tmp_path / "ate.db")

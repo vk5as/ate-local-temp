@@ -57,6 +57,7 @@ class Definition:
     files: tuple[FileEntry, ...] = field(default_factory=tuple)
     dependencies: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     broken: Optional[str] = None
+    atedef_path: Optional[Path] = None  # the .atedef file itself (packet 06b records its SHA-256)
 
 
 # --- semver (RFC 2.0.0) helpers ---------------------------------------------
@@ -228,7 +229,7 @@ def _sha256_bytes(data: bytes) -> str:
 
 def _empty_definition(atedef_path: Path, error: str) -> Definition:
     """A structurally unusable definition with no usable fields (e.g. unparseable JSON)."""
-    return Definition(path=Path(atedef_path).parent, media_number="", name="", version="")
+    return Definition(path=Path(atedef_path).parent, media_number="", name="", version="", atedef_path=atedef_path)
 
 
 def read_definition(atedef_path: str | Path) -> Definition:
@@ -269,6 +270,7 @@ def read_definition(atedef_path: str | Path) -> Definition:
         format_version=int(fmt) if isinstance(fmt, int) else 1,
         files=(),
         dependencies=tuple(),
+        atedef_path=atedef_path,
     )
 
     def broken(message: str) -> Definition:
