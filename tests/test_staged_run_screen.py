@@ -10,6 +10,9 @@ Offscreen: a single :class:`QApplication` on the ``offscreen`` platform covers t
 and no schedule is actually executed — results come back through the store as real rows.
 """
 
+import sqlite3
+import threading
+
 import pytest
 
 from PyQt6.QtWidgets import (
@@ -27,6 +30,17 @@ from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
 
 from ._fixtures import write_ate_env
+
+
+def _rows_for(store, run_uuid: str) -> dict[int, tuple[str, str]]:
+    """Return ``{input_index: (type, value_text)}`` recorded for a run."""
+    store._conn.row_factory = sqlite3.Row  # type: ignore[attr-defined]
+    return {
+        row["input_index"]: (row["type"], row["value"])
+        for row in store._conn.execute(
+            "SELECT input_index, type, value FROM input_value WHERE run_uuid=?", (run_uuid,)
+        ).fetchall()
+    }
 
 
 def _wait_finished(qapp, session):
@@ -290,3 +304,47 @@ def test_debug_line_shown_only_in_debug_window(qapp, tmp_path):
 
     assert "a debug message" in "\n".join(screen.run_view.debug_window.rendered_lines())
     assert "a debug message" not in "\n".join(screen.run_view.log_pane.rendered_lines())
+
+
+def test_staged_run_records_blocking_input_value(qapp, tmp_path):
+    """Ticket 10 checkbox f part 2: a blocking input supplied through the staged screen is recorded.
+
+    Runs BLOCKING_INPUT all the way through StagedRunScreen (selection -> Run view) and supplies its
+    one INTEGER input from this thread via ``screen.engine.operator_input.supply_input`` — the engine
+    reached through the session, no widgets imported for inputs — then asserts the typed value landed
+    in an ``input_value`` row read straight from the store.
+
+    The handler connects to ``session.input_asked`` before starting: grabbing the engine after start()
+    would race the worker's single input announcement (emitted once, right before it blocks), so the
+    staged path forwards that ask onto the session up front and answers it through screen.engine.
+    """
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)  # to the Test Schedule stage
+
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Blocking input schedule")
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    assert session.selected_schedule == "Blocking input schedule"
+
+    # Answer the blocking input through this session *before* starting: connecting here avoids the
+    # single-shot race where the worker announces its input before we could grab the engine, so the
+    # announcement would be dropped and the blocking worker left waiting forever. Supplying through
+    # ``screen.engine`` still records the typed value end-to-end (selection -> session -> RunEngine).
+    answered = threading.Event()
+
+    def _on_ask(node_seq, attempt_no, index):
+        op = screen.engine.operator_input  # set by begin_run once the run starts; valid while running
+        op.supply_input(index - 1, 42)  # supply n=1 -> key 0 with the typed INTEGER value
+        answered.set()
+
+    session.input_asked.connect(_on_ask)
+
+    screen.steps_options_stage.run_button.click()  # queued start (begin_run runs on the next pump)
+    assert _wait_finished(qapp, session)
+    assert answered.is_set()  # announced and answered exactly once through the run session
+
+    rows = {idx: (typ, val) for idx, (typ, val) in _rows_for(store=session.store, run_uuid=session.run_uuid).items()}
+    assert rows == {1: ("INTEGER", "42")}

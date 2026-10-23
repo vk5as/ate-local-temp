@@ -57,6 +57,7 @@ class HeadlessRunSession(QObject):
     """Drives a one-step Test Schedule headlessly and records it through the store."""
 
     state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
+    input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
@@ -227,6 +228,10 @@ class HeadlessRunSession(QObject):
         self._set_state(SessionState.STARTED)
         self._engine.run_uuid_reported.connect(self._on_run_uuid)
         self._engine.state_changed.connect(lambda st: self._set_state(_map_run_status(st)))
+        # Forward the worker's input asks so an operator (or a staged-run test) can answer them
+        # through this session before it starts — connecting here avoids the single-shot race of
+        # grabbing the engine after start() has already begun.
+        self._engine.input_asked.connect(self._on_input_asked)
 
         self._engine.start()
         return self._engine
@@ -234,3 +239,9 @@ class HeadlessRunSession(QObject):
     def _on_run_uuid(self, run_uuid: str) -> None:
         """Capture the freshly generated run key on the main thread."""
         self._run_uuid = run_uuid
+
+    def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
+        """Forward the worker's ``input_asked`` so an operator (or test) can answer it through this session.
+
+        Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
+        self.input_asked.emit(node_seq, attempt_no, index)

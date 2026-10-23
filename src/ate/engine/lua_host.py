@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from ..errors import ATEError
+from .operator_input import OperatorInput
+from .step_inputs import InvalidStepInput, StepInput, validate_inputs
 
 
 class NotAllowedError(ATEError):
@@ -375,8 +377,19 @@ class _ScheduleParams:
 class _LuaHost:
     """A fresh lupa runtime plus the globals and one loaded schedule."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, operator_input: Optional[OperatorInput] = None) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
+
+        # The OperatorInput controller a step's ATE.input calls read/write through; the run engine
+        # injects its own (so the app can wire supply_input/click_poll), otherwise we make one.
+        self._op = operator_input or OperatorInput()
+        # The current step's validated declarations, index-ordered StepInputs, set by the run
+        # engine before each action so ATE.input(n) can look up and type-map that step's inputs.
+        self._step_inputs: list[Any] = []
+        # The (node_seq, attempt_no) context this host is in while a step runs; POLL reads key on it.
+        # Set by the run engine before each action; None/idle outside a run.
+        self._node_seq: Optional[int] = None
+        self._attempt_no: Optional[int] = None
 
         # The options ATE asks lupa for — kept on the instance so criterion 01's runtime
         # settings can be asserted directly (lupa exposes no Python-level accessor).
@@ -392,6 +405,10 @@ class _LuaHost:
                 f"ATE requires Lua {TARGET_LUA_VERSION[0]}.{TARGET_LUA_VERSION[1]} "
                 f"(found {self._runtime.lua_version})"
             )
+        # The table/array proxy type for this runtime's Lua version, captured from an empty table so
+        # it is stable across lupa releases (the module name changes with the Lua version). Used to
+        # convert a schedule's input declarations out of Lua tables into plain Python.
+        self._table_cls = type(self._runtime.table_from({}))
 
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
@@ -439,6 +456,9 @@ class _LuaHost:
         # where the enums, builders and ATE table are already registered globals.
         self._schedule_source = Path(path).read_text(encoding="utf-8")
         self._schedule = self._load_schedule(path)
+        # Validate every step's input declarations against the Test Schedule format; a bad one is a
+        # load error, so surface it here as HostError carrying the schedule's own filename.
+        self._validate_inputs()
 
     def _lockdown(self, env) -> None:
         """Remove the file-loading entry points and the python builtin from ``env``.
@@ -542,6 +562,83 @@ class _LuaHost:
         if schedule.name is None or schedule.name == "":
             raise HostError(f"{path} has no ScheduleParams name")
         return schedule
+
+    def _materialize(self, value: Any) -> Any:
+        """Convert a Lua table/array proxy (or one nested inside another) into plain Python.
+
+        A table whose keys are integers is an array and becomes a list; one keyed by strings stays a
+        dict. Scalars pass through untouched."""
+        if isinstance(value, self._table_cls):
+            keys = list(value.keys())
+            int_keys = [k for k in keys if isinstance(k, int)]
+            str_keys = [k for k in keys if not isinstance(k, int)]
+            if int_keys:
+                return [self._materialize(value[k]) for k in sorted(int_keys)]
+            return {str(k): self._materialize(value[k]) for k in str_keys}
+        return value
+
+    def _validate_inputs(self) -> None:
+        """Validate every step's declared inputs against the Test Schedule format.
+
+        Each declaration is converted out of its Lua tables into plain Python and checked by
+        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying the schedule's
+        own filename so a bad ``setInputs`` table fails the load."""
+        for seq, step in enumerate(self._schedule.steps):
+            if step.inputs is None:
+                continue
+            declarations = {int(k): self._materialize(v) for k, v in step.inputs.items()}
+            try:
+                validated = validate_inputs(declarations)
+            except InvalidStepInput as exc:
+                name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+                raise HostError(f"{name}:{seq + 1}: {exc}") from exc
+            # Stash the validated declarations on the step so the run engine can hand them to the
+            # OperatorInput controller and the host maps typed values for ATE.input(n).
+            step._validated_inputs = validated
+
+    def _map_input(self, decl: StepInput, raw: Any) -> Any:
+        """Convert a raw supplied value into ``ATE.input``'s documented typed return.
+
+        The Operator supplies each value in native form (the label it picked for an ENUM widget, the
+        number/string it typed), and this maps that to what the schedule reads back: the single
+        label for RADIOBUT/PUSHBUT, an array of labels for CHECKBOX, a Lua integer/float for
+        INTEGER/FLOAT, or the entered text for STRING/PROMPT. Raises if ``decl`` is not one of the
+        validated types (defensive — declarations are already checked at load)."""
+        t = decl.type
+        if t == "INTEGER":
+            return int(raw)
+        if t == "FLOAT":
+            return float(raw)
+        if t == "STRING":
+            return str(raw)
+        if t == "PROMPT":
+            # The operator pressed/typed text; returned verbatim.
+            return str(raw)
+        if t == "ENUM":
+            widget = decl.widget
+            if widget == "CHECKBOX":
+                labels = raw if isinstance(raw, (list, tuple)) else (raw,)
+                return tuple(str(label) for label in labels)
+            # RADIOBUT / PUSHBUT: the single selected option's label.
+            return str(raw)
+        raise InvalidStepInput(f"input {decl.index}: unknown type {t!r}")
+
+    def inputs(self, n: Any) -> Any:
+        """Return the current step's n-th Step Input value (typed), blocking for non-POLL types.
+
+        ``n`` is 1-based into this step's declarations; an undeclared index raises :class:`InvalidStepInput`
+        so a bad call becomes an ERROR Attempt. POLL is the only non-blocking type: it returns nil until
+        its button is clicked, then that text (sticky). Every other type blocks this worker thread via
+        the OperatorInput controller until the value is supplied from the operator thread."""
+        if not self._step_inputs or n < 1 or n > len(self._step_inputs):
+            raise InvalidStepInput(f"undeclared input {n}")
+        decl = self._step_inputs[n - 1]
+        op = self._op
+        # POLL reads sticky state keyed by the running step's context; nil until clicked.
+        if decl.type == "POLL":
+            return op.poll_value(self._node_seq, self._attempt_no, n - 1)
+        raw = op.get_raw(n - 1)  # blocks this worker thread until supplied (spec behavior)
+        return self._map_input(decl, raw)
 
     @property
     def runtime_configuration(self) -> dict[str, bool]:

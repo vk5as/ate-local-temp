@@ -8,7 +8,12 @@ the headless session and CLI can be exercised end-to-end against real files — 
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+
+from ate.engine.operator_input import OperatorInput
+from ate.engine.run_engine import RunEngine, RunStatus
 
 
 # A schedule that reports PASS on its single step.
@@ -172,6 +177,12 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
     (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8")
 
+    # Ticket 10 schedules: one blocking input, one POLL-only step, and a step declaring every Step
+    # Input type. Written into the demo Test Definition so seam/staged tests can select them by name.
+    (defs_dir / "blocking_input.tslua").write_text(BLOCKING_INPUT, encoding="utf-8")
+    (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8")
+    (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
+
     atedef = {
         "format": 1,
         "mediaNumber": "REL-A",
@@ -182,6 +193,9 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},
             {"path": "erroring.tslua", "sha256": _sha256(defs_dir / "erroring.tslua")},
             {"path": "logging.tslua", "sha256": _sha256(defs_dir / "logging.tslua")},
+            {"path": "blocking_input.tslua", "sha256": _sha256(defs_dir / "blocking_input.tslua")},
+            {"path": "poll_input.tslua", "sha256": _sha256(defs_dir / "poll_input.tslua")},
+            {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
@@ -201,3 +215,114 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
 def read_run_row(store, run_uuid: str) -> dict:
     """Return a recorded run row as a dict (or ``None``)."""
     return store.get_test_run(run_uuid)
+
+
+# --- Ticket 10 step inputs ---------------------------------------------------
+
+
+# A schedule whose single step asks one blocking INTEGER input, then reports it back. The driver
+# supplies a value from another thread while the worker waits; once supplied the step records the
+# typed value and passes.
+BLOCKING_INPUT = """\
+return ScheduleParams("Blocking input schedule", "a step that blocks on one INTEGER input")
+  :setSchedule({
+    StepParams("voltage"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function() local v=ATE.input(1); ATE.report(Result.PASS, "voltage "..v) end),
+  })
+"""
+
+# A schedule whose single step's only input is a POLL button. It returns nil until the operator
+# clicks one of its buttons (recorded as an input_value row of type POLL), then that text; sticky
+# across the step and reset at each run/step start.
+POLL_INPUT = """\
+return ScheduleParams("Poll input schedule", "a step whose only input is a POLL button")
+  :setSchedule({
+    StepParams("status check"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "device status", type = "POLL", prompt = {"OK", "Error"} } })
+      :setAction(function() local s=ATE.input(1); ATE.report(Result.PASS, "status "..s) end),
+  })
+"""
+
+# A schedule whose single step declares every Step Input type. Each is supplied through the real
+# run engine and recorded as its own input_value row: CHECKBOX arrives as a list of labels and is
+# stored as JSON; POLL clicks are recorded when clicked; the rest carry their typed value.
+ALL_TYPES_INPUTS = """\
+return ScheduleParams("All types schedule", "a step that declares every Step Input type")
+  :setSchedule({
+    StepParams("mixed"):setStepNo("1.")
+      :setInputs({
+        [1] = { desc = "voltage", type = "INTEGER" },
+        [2] = { desc = "current", type = "FLOAT" },
+        [3] = { desc = "serial port", type = "STRING" },
+        [4] = { desc = "mode", type = "ENUM", input = "RADIOBUT", enum = {"Slow", "Fast"} },
+        [5] = { desc = "channels", type = "ENUM", input = "CHECKBOX", enum = {"A", "B", "C"} },
+        [6] = { desc = "prompt text", type = "PROMPT", prompt = {"typed"} },
+      })
+      :setAction(function()
+        local v=ATE.input(1); local c=ATE.input(2); local s=ATE.input(3)
+        local m=ATE.input(4); local ch=ATE.input(5); local p=ATE.input(6)
+        ATE.report(Result.PASS, "v"..v.." c"..c.." s"..s.." m"..m[1].." ch"..ch[1].." p"..p)
+      end),
+  })
+"""
+
+
+# How the driver answers each announced input while pumping events — its own vocabulary, distinct
+# from which schedule is on disk (BLOCKING_INPUT / POLL_INPUT / ALL_TYPES_INPUTS). A blocking
+# schedule supplies a value; a poll schedule clicks its button.
+INPUTS_BLOCKING = "blocking"  # supply every blocking input from another thread while it waits
+INPUTS_POLL = "poll"         # click every POLL button while its step runs
+INPUTS_ALL = "all"           # both: supply blocking inputs and click polls as the run proceeds
+
+
+# Ticket 10 concurrent-supply driver helpers. The worker announces each asked input via the queued
+# ``input_asked`` signal before its action runs; these handlers supply a blocking value or click a
+# POLL button from another thread (so a blocked get_raw wakes while the worker waits and a POLL is
+# clicked while its step runs), then pump events until FINISHED.
+
+
+def _default_input_value(key: int) -> Any:
+    """A type-appropriate default for a blocking supply when no explicit value is given.
+
+    Position-based so a bare driver still records something sensible per index; tests that assert
+    exact values pass ``values_by_index`` instead. CHECKBOX returns a list of labels so it is stored
+    as JSON (ticket 10 checkbox e)."""
+    if key == 4:
+        return ["a", "b"]  # CHECKBOX -> stored as a JSON array
+    if key == 3:
+        return "option"  # RADIOBUT / PUSHBUT single label
+    return float(key)  # INTEGER / FLOAT / STRING / PROMPT all coerce fine
+
+
+def _pump_until_finished(app, engine, op, strategy=INPUTS_BLOCKING, values_by_index=None):
+    """Announce-and-supply inputs concurrently, then pump events until the run reaches FINISHED.
+
+    The handler runs on this (pumping) thread; a blocking supply uses a plain queue so it wakes the
+    worker's ``get_raw`` synchronously while we wait, and POLL clicks set sticky state immediately."""
+    def _on_input_asked(seq, attempt_no, index):
+        key = index - 1  # 0-based position into this step's declarations
+        if strategy == INPUTS_POLL:
+            op.click_poll(node_seq=seq, attempt_no=attempt_no, index=key, text="clicked")
+        else:
+            value = values_by_index[key] if values_by_index is not None else _default_input_value(key)
+            op.supply_input(key, value)
+
+    finished = threading.Event()
+    engine.input_asked.connect(_on_input_asked)
+    engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+
+    deadline = time.time() + 10.0
+    while not finished.is_set():
+        app.processEvents()
+        if time.time() > deadline:
+            raise TimeoutError("run did not reach FINISHED within 10 s")
+
+
+def _drive_with_operator(app, engine, op, strategy=INPUTS_BLOCKING, values_by_index=None):
+    """Start the worker with an injected OperatorInput and pump until FINISHED.
+
+    For tests that construct the RunEngine directly: start it here (it will block on a blocking input)
+    then hand control to :func:`_pump_until_finished`, which supplies/clicks inputs from this thread."""
+    engine.start()
+    _pump_until_finished(app, engine, op, strategy, values_by_index=values_by_index)

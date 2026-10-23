@@ -23,6 +23,7 @@ a snapshot of the host's report log before invoking it and diffing afterwards.
 from __future__ import annotations
 
 import enum
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -30,8 +31,9 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..errors import ATEError
 from ..storage._uuid import new_uuid7
-from ..storage.store import RunStore
+from ..storage.store import RunStore, _now_iso
 from .lua_host import LuaHost
+from .operator_input import OperatorInput
 
 
 class RunStatus(enum.Enum):
@@ -40,6 +42,12 @@ class RunStatus(enum.Enum):
     IDLE = "IDLE"
     RUNNING = "RUNNING"
     FINISHED = "FINISHED"
+
+
+# Announced before each step's action so the GUI can show that step's inputs under it and the
+# operator can supply a blocking value from another thread while the worker blocks on
+# :meth:`OperatorInput.get_raw`. Delivered as a queued signal; the emitting worker is free to block
+# because delivery rides the receiver's own event loop.
 
 
 def _to_text(value: Any) -> Optional[str]:
@@ -54,6 +62,7 @@ class RunEngine(QThread):
 
     run_uuid_reported = pyqtSignal(str)  # the freshly generated run key, on start
     state_changed = pyqtSignal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
+    input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
 
     def __init__(
         self,
@@ -73,6 +82,7 @@ class RunEngine(QThread):
         utc_offset: str = "+00:00",
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
+        operator_input: Optional[OperatorInput] = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -92,11 +102,77 @@ class RunEngine(QThread):
         # provided they are registered on the host before it runs, so a failing one can be
         # exercised through real Lua execution without touching device drivers.
         self._ate_fns = dict(ate_fns or {})
+        # The OperatorInput controller this run's ATE.input calls read/write through; injected by
+        # tests (so they own supply/click) or made fresh when running for real. See ticket 10.
+        self._op = operator_input or OperatorInput()
+
+    @property
+    def operator_input(self) -> OperatorInput:
+        """The :class:`OperatorInput` controller this run's ``ATE.input`` calls read/write through.
+
+        Owned by the engine (a fresh one per real run); tests and the GUI drive it directly so a
+        blocking supply or POLL click reaches the worker while it waits, without importing widgets."""
+        return self._op
+
+    def _record_inputs(self, node_seq: int, validated: list[Any]) -> list[dict[str, Any]]:
+        """Build this step's input_value rows from what OperatorInput recorded during its action.
+
+        Blocking supplies and POLL clicks are typed from the step's declarations (CHECKBOX stored as
+        JSON); a supplied index with no declaration is recorded verbatim so nothing asked for is lost."""
+        records: list[dict[str, Any]] = []
+        # ``key`` is the 0-based get_raw position (n-1) under which each blocking value was stored.
+        for key, raw in self._op.supplied_inputs():
+            decl = validated[key] if 0 <= key < len(validated) else None
+            records.append(self._value_text(node_seq, 1, decl.index if decl is not None else key + 1, decl, raw))
+        # POLL clicks never block the worker; record each one as its own row keyed by context.
+        for _node_seq_ctx, attempt_no, key, at, text in self._op.poll_clicks():
+            records.append(
+                {
+                    "node_seq": node_seq,
+                    "attempt_no": attempt_no,
+                    "input_index": key + 1,
+                    "type": "POLL",
+                    "value_text": text,
+                    "at": at,
+                }
+            )
+        return records
+
+    def _value_text(self, node_seq: int, attempt_no: int, input_index: int, decl: Any, raw: Any) -> dict[str, Any]:
+        """One input_value row for a blocking supply, typed from its declaration."""
+        if decl is not None:
+            return {
+                "node_seq": node_seq,
+                "attempt_no": attempt_no,
+                "input_index": input_index,  # the 1-based n in ATE.input(n)
+                "type": decl.type,
+                "value_text": self._serialise(decl, raw),
+                "at": _now_iso(),
+            }
+        return {
+            "node_seq": node_seq,
+            "attempt_no": attempt_no,
+            "input_index": input_index,  # no declaration for this index (defensive)
+            "type": "",
+            "value_text": str(raw),
+            "at": _now_iso(),
+        }
+
+    def _serialise(self, decl: Any, raw: Any) -> str:
+        """Serialise a supplied raw value to its stored text form for one declaration."""
+        if decl.type == "ENUM" and decl.widget == "CHECKBOX":
+            labels = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+            return json.dumps([str(label) for label in labels])  # CHECKBOX is recorded as JSON
+        typed = self._host._map_input(decl, raw)
+        return str(typed)
 
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
-        # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there.
-        host = LuaHost(self._schedule_path)
+        # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
+        # OperatorInput controller this run owns is injected so its ATE.input calls read/write the
+        # same blocking waits and POLL state the GUI drives through supply_input/click_poll.
+        host = LuaHost(self._schedule_path, operator_input=self._op)
+        self._host = host  # kept on the engine so per-step input values can be typed from declarations
         for name, fn in self._ate_fns.items():
             host.ate.register(name, fn)  # criterion 03: isolate a failing ATE call through Lua
         schedule = host.schedule
@@ -152,6 +228,22 @@ class RunEngine(QThread):
             # and ATE.input, which are rejected elsewhere (criterion b). _run_action sets and then
             # restores that context around the action.
             host._current_step = seq
+            # Ticket 10: put this step's OperatorInput context in place before the action runs so
+            # ATE.input(n) reads POLL sticky state under the right key and range-checks against THIS
+            # step's declarations, install those declarations on the host, and announce each asked
+            # input. The input_asked signals are queued here (before _run_action blocks), so a
+            # blocking supply from another thread wakes get_raw while the worker waits; op.reset()
+            # starts this step's recording window clean so its values attach to it.
+            self._op.reset()
+            validated = getattr(step, "_validated_inputs", None) or []
+            host._node_seq = seq
+            host._attempt_no = 1
+            host._step_inputs = list(validated)
+            for index in range(1, len(validated) + 1):
+                # Announce this input so the OperatorInput controller counts it as outstanding; a
+                # blocking supply or POLL click decrements that count when delivered.
+                self._op.note_asked()
+                self.input_asked.emit(seq, 1, index)
             start = len(host.reports)
             log_start = len(host.logs)
             error_text: Optional[str] = None
@@ -224,6 +316,21 @@ class RunEngine(QThread):
             if last_result == "FAIL" or error_text is not None:
                 failed = True
 
+            # Ticket 10: wait for every announced input to be answered before recording this step's
+            # values. Blocking supplies already woke the worker via get_raw; POLL clicks never block —
+            # so without this wait a worker could record (and drop an unanswered click) before the
+            # operator's answer was delivered on another thread. A blocking supply or POLL click
+            # decrements the outstanding count when it arrives, waking this wait.
+            self._op.wait_for_asks()
+            # Ticket 10: record every input value this step asked for. Supplies and POLL clicks the
+            # OperatorInput controller recorded during the action are typed from this step's
+            # declarations and written as input_value rows; the declarations themselves are stored
+            # on the node (as JSON, in schedule format via StepInput.to_dict) so the GUI can render
+            # each input under its step at all times.
+            records = self._record_inputs(seq, validated)
+            if records:
+                self._store.insert_input_values(run_uuid, records)
+
             self._store.insert_node(
                 run_uuid,
                 seq,
@@ -234,6 +341,7 @@ class RunEngine(QThread):
                 enabled=int(bool(step.enabled)),
                 result=last_result,
                 attempt_count=attempts_recorded,
+                inputs=[d.to_dict() for d in validated] if validated else None,
             )
 
         # FAIL on any FAIL/ERROR; otherwise PASS. End Reason COMPLETED for this ticket.

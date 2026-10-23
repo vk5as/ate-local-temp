@@ -17,8 +17,9 @@ from sqlalchemy import Column, Integer, MetaData, Table, Text
 
 
 # The schema version lives in PRAGMA user_version. v1 introduces this first real
-# schema (ticket 01 had no tables), so it starts at 1 and migrations are forward-only.
-SCHEMA_VERSION = 1
+# schema (ticket 01 had no tables), so it starts at 1; adding the ``input_value`` table
+# is a forward migration, so it becomes 2 and older databases must be migrated first.
+SCHEMA_VERSION = 2
 
 metadata = MetaData()
 
@@ -96,4 +97,18 @@ log_line = Table(
     Column("node_seq", Integer, nullable=True),  # owning step node; null when not tied to a step
     Column("attempt_no", Integer, nullable=True),  # the Attempt's number within that node; null otherwise
     Column("text", Text, nullable=True),  # the line
+)
+
+
+input_value = Table(
+    "input_value",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key
+    Column("node_seq", Integer, nullable=True),  # FK to node; the step that asked
+    Column("attempt_no", Integer, nullable=True),  # the Attempt that asked
+    Column("input_index", Integer, nullable=True),  # n in ATE.input(n)
+    Column("type", Text, nullable=True),  # Step Input type (ENUM/INTEGER/FLOAT/STRING/PROMPT/POLL)
+    Column("value", Text, nullable=True),  # value as text; CHECKBOX as a JSON array of labels
+    Column("at", Text, nullable=True),  # ISO-8601 UTC with ms when it was entered
 )
