@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -71,6 +71,7 @@ class RunEngine(QThread):
         media_number: str = "",
         schedule_name: str = "",
         utc_offset: str = "+00:00",
+        overrides: Optional[Mapping[int, bool]] = None,
         parent: Optional[object] = None,
     ) -> None:
         super().__init__(parent)
@@ -87,6 +88,10 @@ class RunEngine(QThread):
         self.media_number = media_number
         self.schedule_name = schedule_name
         self.utc_offset = utc_offset
+        # The Operator's enable/disable toggles for expanded-tree positions, keyed by the
+        # same seq the runner assigns to each step. Absent here, every step keeps its own
+        # default from :setEnable().
+        self._overrides: dict[int, bool] = {int(seq): bool(en) for seq, en in (overrides or {}).items()}
 
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
@@ -122,6 +127,25 @@ class RunEngine(QThread):
         for seq, step in enumerate(steps):
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
+                continue
+
+            # The default comes from the author's :setEnable(); an Operator override wins.
+            default_enabled = bool(step.enabled)
+            effective_enabled = self._overrides.get(seq, default_enabled)
+
+            # A step disabled at run start is not executed and records NOTRUN with no Attempt.
+            if not effective_enabled:
+                self._store.insert_node(
+                    run_uuid,
+                    seq,
+                    kind="step",
+                    step_number=step.step_no or "",
+                    step_name=step.name,
+                    default_enabled=int(default_enabled),
+                    enabled=int(effective_enabled),
+                    result="NOTRUN",
+                    attempt_count=0,
+                )
                 continue
 
             start = len(host.reports)
@@ -172,8 +196,8 @@ class RunEngine(QThread):
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
-                default_enabled=int(bool(step.enabled)),
-                enabled=int(bool(step.enabled)),
+                default_enabled=int(default_enabled),
+                enabled=int(effective_enabled),
                 result=last_result,
                 attempt_count=attempts_recorded,
             )
