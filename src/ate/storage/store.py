@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, func, select
 
 from ._uuid import new_uuid7
 from .schema import (
@@ -144,6 +144,26 @@ def _as_int(value: Any) -> Optional[int]:
     return 1 if value else 0
 
 
+# Ticket 23a — the History screen's columns. These eight are what a run exposes to history;
+# ``run_uuid`` (the primary key) is not shown but is always ordered last so paging never repeats
+# or skips rows, even when several runs share a sort value.
+HISTORY_COLUMNS = ("started_at", "uut_type", "uut_serial", "result", "end_reason", "schedule_name", "project", "operator")
+HISTORY_SORT_KEYS = tuple(HISTORY_COLUMNS)  # exactly these eight are valid sort keys
+_COLUMN_BY_NAME = {name: test_run.c[name] for name in HISTORY_COLUMNS}
+
+
+def _norm_date(value) -> str:
+    """Normalise a date filter to ISO-8601 UTC text so it compares like ``started_at``.
+
+    Accepts an ISO string or a datetime; datetimes are made explicit UTC with millisecond
+    precision, matching the stored format (e.g. ``2026-10-23T12:34:56.789+00:00``) so lexical
+    comparison is correct."""
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.isoformat(timespec="milliseconds")
+    return str(value)
+
+
 class RunStore:
     """Records Test Runs and their children in a single SQLite database.
 
@@ -240,6 +260,54 @@ class RunStore:
             .where(test_run.c.run_uuid == run_uuid)
             .values(ended_at=now, result=result, end_reason=end_reason)
         )
+
+    def query_runs(self, *, filters=None, sort_key="started_at", descending=True, limit=10 ** 9, offset=0) -> list[dict]:
+        """Return past Test Runs as dicts (ticket 23a).
+
+        ``filters`` is an optional mapping of exact-match columns (uut_type, uut_serial, result,
+        end_reason, project), a case-insensitive serial substring (uut_serial) and/or a date range
+        on started_at (date_from inclusive, date_to exclusive). Every present filter is ANDed.
+
+        ``sort_key`` must be one of the eight History columns; anything else raises ValueError. The
+        result is ordered by that column then run_uuid ascending so every row has a unique position —
+        paging with LIMIT/OFFSET therefore never repeats or skips rows. ``limit``/``offset`` page it."""
+        if sort_key not in HISTORY_SORT_KEYS:
+            raise ValueError(f"unknown sort key {sort_key!r}; expected one of {HISTORY_SORT_KEYS}")
+        # The eight display columns plus run_uuid: the primary key is not shown but is returned so
+        # rows stay identifiable across pages and can break ties when several runs share a sort value.
+        names = list(HISTORY_COLUMNS) + ["run_uuid"]
+        stmt = select(*[test_run.c[n] for n in names])
+        if filters:
+            stmt = self._filter_runs(stmt, filters)
+        col = _COLUMN_BY_NAME[sort_key]
+        if descending:
+            stmt = stmt.order_by(col.desc(), test_run.c.run_uuid.asc())
+        else:
+            stmt = stmt.order_by(col.asc(), test_run.c.run_uuid.asc())
+        rows = self._run(stmt.limit(limit).offset(offset)).fetchall()
+        return [ {name: row[i] for i, name in enumerate(names)} for row in rows ]
+
+    def _filter_runs(self, stmt, filters):
+        """AND together the SQL predicates for ``filters`` (exact columns, serial substring, date range)."""
+        f = dict(filters)  # copy so we never mutate the caller's mapping
+        for key in ("uut_type", "result", "end_reason", "project"):
+            if f.get(key) is not None:
+                stmt = stmt.where(_COLUMN_BY_NAME[key] == f[key])
+        if needle := f.get("uut_serial"):
+            # Case-insensitive substring via LOWER(...); escape LIKE metacharacters so a serial that
+            # literally contains % or _ matches itself, and double any single quote.
+            needle = str(needle).lower().replace("'", "''").replace("%", "\\%").replace("_", "\\_")
+            # The metacharacters are escaped with a backslash, so the LIKE clause's own escape
+            # character must be that same backslash (not '!'); otherwise an unescaped '%'/'_' would
+            # act as a wildcard and match every serial.
+            stmt = stmt.where(func.lower(test_run.c.uut_serial).like(f"%{needle}%", escape="\\"))
+        if f.get("date_from") is not None:
+            lo = _norm_date(f["date_from"])
+            stmt = stmt.where(test_run.c.started_at >= lo)
+        if f.get("date_to") is not None:
+            hi = _norm_date(f["date_to"])
+            stmt = stmt.where(test_run.c.started_at < hi)
+        return stmt
 
     # -- node ---------------------------------------------------------------
 
