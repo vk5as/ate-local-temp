@@ -16,6 +16,7 @@ that never happens — only a lone application is ever finalized.
 
 import os
 import sys
+import weakref
 from pathlib import Path
 
 _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
@@ -125,3 +126,46 @@ def _clean_qt_state(qapp: QApplication) -> None:
     _stop_workers(qapp)
     _destroy_widget_tree(qapp)
     qapp.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def _fake_pdf_helper(request, monkeypatch):
+    """Every finished run with a config starts the PDF helper; outside the one real end-to-end test,
+    run a trivial stand-in process instead of QWebEngine. Tests wanting other helper behaviour patch
+    ``ate.run_session.headless.pdf_helper_command`` again themselves."""
+    if request.node.name.endswith("test_run_end_writes_real_pdf_report"):
+        return
+    from tests._fixtures import WRITES_PDF, fake_pdf_helper
+
+    monkeypatch.setattr("ate.run_session.headless.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+
+
+_started_engines: "weakref.WeakSet" = weakref.WeakSet()
+
+
+@pytest.fixture(autouse=True)
+def _stop_running_engines(monkeypatch):
+    """After each test, abort and join any RunEngine worker still running.
+
+    RunEngines have no Qt parent, so :func:`_stop_workers` never sees them. A test that ends with
+    its run unfinished drops its session; the garbage collector then deletes the session's Qt
+    children (its OperatorInput) under the live worker, which aborts the process in a later test.
+    Every started engine is remembered weakly so this check stays cheap."""
+    from ate.engine.run_engine import RunEngine
+
+    original_start = RunEngine.start
+
+    def start(self, *args):
+        _started_engines.add(self)
+        return original_start(self, *args)
+
+    monkeypatch.setattr(RunEngine, "start", start)
+    yield
+    for engine in list(_started_engines):
+        try:
+            if engine.isRunning():
+                engine.request_abort()
+                engine.wait(5000)
+        except RuntimeError:  # its C++ side is already gone
+            pass
+    _started_engines.clear()

@@ -437,3 +437,18 @@ def _drive_with_operator(app, engine, op, strategy=INPUTS_BLOCKING, values_by_in
     then hand control to :func:`_pump_until_finished`, which supplies/clicks inputs from this thread."""
     engine.start()
     _pump_until_finished(app, engine, op, strategy, values_by_index=values_by_index)
+
+
+def fake_pdf_helper(script: str):
+    """A stand-in for :func:`ate.report.pdf.pdf_helper_command`: a tiny Python process that gets the
+    PDF path as ``argv[1]``, so tests exercise the real QProcess path without QWebEngine."""
+    import os
+    import sys
+
+    def command(html_path, pdf_path, paper="A4"):  # noqa: ANN001 - mirrors pdf_helper_command
+        return sys.executable, ["-c", script, str(pdf_path)], dict(os.environ)
+
+    return command
+
+
+WRITES_PDF = "import sys; open(sys.argv[1], 'wb').write(b'%PDF-1.4 stub')"
