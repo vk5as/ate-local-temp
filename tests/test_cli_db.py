@@ -32,10 +32,10 @@ def test_status_refuses_missing_database_and_migrate_creates_it(tmp_path, capsys
     assert rc == 0
     assert captured.out.strip().startswith("created or upgraded database at")
 
-    # Now launchable: status prints the schema version (2) and exits cleanly.
+    # Now launchable: status prints the schema version (3) and exits cleanly.
     rc, captured = main(["db", "status", path]), capsys.readouterr()
     assert rc == 0
-    assert captured.out.strip() == "2"
+    assert captured.out.strip() == "3"
 
 
 def test_migrate_is_idempotent(tmp_path, capsys):
@@ -55,7 +55,7 @@ def test_status_reports_schema_version_of_migrated_db(tmp_path, capsys):
 
     rc, captured = main(["db", "status", path]), capsys.readouterr()
     assert rc == 0
-    assert captured.out.strip() == "2"
+    assert captured.out.strip() == "3"
 
 
 def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsys):
@@ -64,11 +64,11 @@ def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsy
     The file is left exactly as it was — migrate never downgrades or creates tables here.
     """
     path = _missing_db(tmp_path)
-    # Bootstrap a real v2 database, then simulate a newer ATE by bumping its version.
-    RunStore(path)  # creates the tables and sets user_version to 2
+    # Bootstrap a real v3 database, then simulate a newer ATE by bumping its version one above schema.
+    RunStore(path)  # creates the tables and sets user_version to 3
     conn = sqlite3.connect(f"file:{path}?mode=rwc", uri=True)
     try:
-        conn.execute("PRAGMA user_version=3")
+        conn.execute("PRAGMA user_version=4")
     finally:
         conn.close()
 
@@ -81,13 +81,13 @@ def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsy
     assert rc == 1
     assert "too old" in captured.err.lower()
 
-    # The database is still user_version 3 (untouched).
+    # The database is still user_version 4 (untouched).
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     finally:
         conn.close()
-    assert version == 3
+    assert version == 4
 
 
 def test_migrate_without_yes_prompts_for_confirmation(tmp_path, capsys, monkeypatch):

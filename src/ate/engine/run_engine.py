@@ -34,7 +34,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..errors import ATEError
 from ..storage._uuid import new_uuid7
 from ..storage.store import RunStore, _now_iso
-from .lua_host import _AbortFlag, LuaHost
+from .lua_host import _AbortFlag, _sha256_hex, LuaHost
 from .operator_input import OperatorInput
 
 
@@ -91,6 +91,7 @@ class RunEngine(QThread):
         utc_offset: str = "+00:00",
         overrides: Optional[Mapping[int, bool]] = None,  # packet 11a: per-step enable/disable Operator toggles
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
+        definition: Optional[Any] = None,  # packet 06b: the resolved Media Release that owns this run (records media_release/run_file rows)
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
         operator_input: Optional[OperatorInput] = None,
@@ -123,6 +124,10 @@ class RunEngine(QThread):
         # load-time and step-time requires resolve against it (one host per Test Run). ``None`` means
         # no replacement require is installed.
         self._modules = dict(modules) if modules is not None else None
+        # Packet 06b: the resolved Media Release that owns this run, forwarded from the session so we
+        # can record its media_release row (seq 0) and every file used with expected/computed checksums.
+        # ``None`` means a bare schedule test — nothing extra is recorded then.
+        self._definition = definition
         self._op = operator_input or OperatorInput()
         # Whole-run abort, requested by the Operator (the staged Run screen's Abort button calls
         # :meth:`request_abort` through the session). It is checked between steps so a clean stop
@@ -429,6 +434,17 @@ class RunEngine(QThread):
                 "utc_offset": self.utc_offset,
             }
         )
+        # Packet 06b: record the Media Release that owns this run (seq 0) straight after the test_run
+        # row. Without a resolved definition there is nothing to record — bare schedule tests behave as before.
+        if self._definition is not None:
+            atedef_path = getattr(self._definition, "atedef_path", None)
+            self._store.insert_media_release(
+                run_uuid,
+                media_number=self._definition.media_number or None,
+                name=self._definition.name or None,
+                version=self._definition.version or None,
+                atedef_sha256=_sha256_hex(atedef_path.read_bytes()) if atedef_path is not None else None,
+            )
         # Report the run key and mark RUNNING on the main thread, both queued signals
         # delivered after ``start()`` returns; emitted from the worker before any other
         # row is written beyond this one.
@@ -669,7 +685,43 @@ class RunEngine(QThread):
         else:
             run_result = "FAIL" if failed else "PASS"
             end_reason = "COMPLETED"
+        # Packet 06b: record every file this host loaded (the schedule plus each module it required,
+        # in load order) with its expected and computed checksums; a mismatch adds one WARNING log line.
+        self._record_files(run_uuid, host)
         self._store.update_run_end(run_uuid, result=run_result, end_reason=end_reason)
         # FINISHED is queued to the main thread; QThread's own ``finished`` signal also
         # fires when run() returns. Observers use state_changed for the observable states.
         self.state_changed.emit(RunStatus.FINISHED)
+
+    def _record_files(self, run_uuid: str, host: "_LuaHost") -> None:
+        """Record one ``run_file`` row per file used this run and warn on mismatches (packet 06b).
+
+        Iterates the host's load-order list of ``(path, kind, sha256)`` entries; each is matched back
+        to its Test Definition entry by absolute path so we can carry the definition-listed ``rel_path``,
+        owning media number and expected checksum. A file that loaded but isn't listed has no expected
+        value to compare against, so it is skipped rather than recorded with a null expectation."""
+        if self._definition is None:
+            return
+        by_path = {self._definition.path / entry.rel_path: entry for entry in self._definition.files}
+        mismatches: list[tuple[str, Optional[str], str]] = []
+        for path, kind, computed in getattr(host, "_files_used", []):
+            entry = by_path.get(Path(path))
+            if entry is None:
+                continue
+            mismatch = (entry.expected_sha256 or None) != computed
+            self._store.insert_run_file(
+                run_uuid,
+                path=entry.rel_path,
+                media_number=self._definition.media_number or None,
+                kind=kind,
+                expected_sha256=entry.expected_sha256 or None,
+                computed_sha256=computed,
+                mismatch=mismatch,
+            )
+            if mismatch:
+                mismatches.append((entry.rel_path, entry.expected_sha256, computed))
+        for rel_path, expected, computed in mismatches:
+            self._store.insert_log_lines(
+                run_uuid, 0,
+                [{"level": "WARNING", "source": "ate", "text": f"checksum mismatch for {rel_path} (expected {expected}, got {computed})"}],
+            )

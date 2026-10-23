@@ -297,6 +297,7 @@ class HeadlessRunSession(QObject):
             ate_version="",  # ticket 02 leaves the ATE version empty; a later ticket fills it
             media_number="",
             modules=modules,  # packet 06a: forward the release's require'd module map to this run
+            definition=definition,  # packet 06b: record the owning Media Release and files used with checksums
             schedule_name=self._selected_name,
             utc_offset="+00:00",
             overrides={int(seq): bool(en) for seq, en in (self._pending_node_enables or {}).items()},
