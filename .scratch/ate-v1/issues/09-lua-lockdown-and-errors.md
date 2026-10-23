@@ -4,7 +4,7 @@
 
 **Blocked by:** 08 (Logging, log pane and debug window)
 
-**Status:** in progress — criteria a–d committed on `ticket-09-r3`; e+ next. Do not merge into integration/ate-v1 (orchestrator merges).
+**Status:** resolved
 
 - [x] Runtimes use `register_eval=False`, `register_builtins=False`, `unpack_returned_tuples=True`; `dofile`, `loadfile` and `load` are removed and `python` is `nil`; chunks load with name `@<path>` and mode `t` (bytecode refused) — branch `ticket-09-lua-lockdown-and-errors`, commit `79eccb2`
 - [x] Actions run through `xpcall(fn, debug.traceback)`; an error records `Result.ERROR` with its first line as the message and the full traceback logged at `ERROR` — commit `d86d31d`
