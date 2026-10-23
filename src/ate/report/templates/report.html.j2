@@ -13,7 +13,7 @@
 <style>
 @page {
   size: {{ paper }} portrait;
-  margin: 24mm 14mm 18mm 14mm;
+  margin: {{ page_margin_css }};
   @top-left   { content: url("{{ logo }}"); vertical-align: middle; width: 32mm; }
   @top-center { content: "{{ org ~ ' · ' ~ (doc_title or '') ~ ' · ' ~ (doc_id or '') ~ ' rev ' ~ (doc_rev or '') }}"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
   @top-right  { content: "{{ uut_type }} {{ uut_serial }}"; font: bold 9pt sans-serif; border-bottom: none; }
