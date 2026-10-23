@@ -4,7 +4,7 @@
 
 **What to build:** A second Run screen layout, three panes, on the same run session.
 
-**Blocked by:** 10 (Step Inputs), 12d (Failure bar on the Run screen), 15d (Enabling under headers)
+**Blocked by:** 10a (Step Input widgets on the Run screen), 12d (Failure bar on the Run screen), 15d (Enabling under headers)
 
 **Status:** ready-for-agent
 

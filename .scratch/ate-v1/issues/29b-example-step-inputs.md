@@ -4,7 +4,7 @@
 
 **What to build:** Demonstrate every Step Input type and widget.
 
-**Blocked by:** 29a (Example Media Release scaffold and basics)
+**Blocked by:** 10a (Step Input widgets on the Run screen), 29a (Example Media Release scaffold and basics)
 
 **Status:** ready-for-agent
 
