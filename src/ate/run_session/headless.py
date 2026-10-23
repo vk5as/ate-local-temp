@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..catalog import resolve_schedule
+from ..catalog import module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
@@ -146,10 +146,13 @@ class HeadlessRunSession(QObject):
         config = self._config
         if config is not None:
             try:
-                path = resolve_schedule(*config.test_definition_dirs, schedule_name=name)
-                if path is not None:
-                    host = LuaHost(path)
-                    stop_on_fail = bool(host.schedule.stop_on_fail)
+                definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=name)
+                if definition is not None:
+                    modules = module_map(definition)
+                    path = resolve_schedule_path(definition, name)
+                    if path is not None:
+                        host = LuaHost(path, modules=modules)
+                        stop_on_fail = bool(host.schedule.stop_on_fail)
             except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
                 print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
         self._selected_stop_on_fail = stop_on_fail
@@ -241,9 +244,12 @@ class HeadlessRunSession(QObject):
 
         config = self._config
         assert config is not None, "session was constructed without a config"
-        path = resolve_schedule(*config.test_definition_dirs, schedule_name=self._selected_name)
-        if path is None:
+        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=self._selected_name)
+        if definition is None:
             raise SessionError(f"schedule '{self._selected_name}' is not available")
+        path = resolve_schedule_path(definition, self._selected_name)
+        assert path is not None, "resolved schedule has no matching file"
+        modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the run
 
         pending = {
             "operator": getattr(self, "_pending_operator", "") or "",
@@ -272,6 +278,7 @@ class HeadlessRunSession(QObject):
             station_uuid=self._config.station_uuid or "",
             ate_version="",  # ticket 02 leaves the ATE version empty; a later ticket fills it
             media_number="",
+            modules=modules,  # packet 06a: forward the release's require'd module map to this run
             schedule_name=self._selected_name,
             utc_offset="+00:00",
         )

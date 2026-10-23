@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import list_schedules, resolve_schedule
+from ..catalog import list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
 
@@ -407,10 +407,14 @@ class StagedRunScreen(QWidget):
         config = self.session.config
         if config is None:
             return []
-        path = resolve_schedule(*config.test_definition_dirs, schedule_name=schedule_name)
+        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule_name)
+        if definition is None:
+            return []
+        modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the preview host
+        path = resolve_schedule_path(definition, schedule_name)
         if path is None:
             return []
-        host = LuaHost(path)
+        host = LuaHost(path, modules=modules)
         return list(host.schedule.steps)
 
     # -- running ------------------------------------------------------------
