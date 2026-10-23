@@ -6,6 +6,7 @@ are recorded on the run row; interrupted runs left open by a crash are closed as
 at launch (spec rule 98). No widgets, no mocks.
 """
 
+import re
 import pytest
 import sqlite3
 import threading
@@ -77,6 +78,31 @@ def test_passing_schedule_runs_headless_and_reads_back(tmp_path) -> None:
     assert SessionState("SELECTING") in states
     assert SessionState("STARTED") in states
     assert SessionState("FINISHED") in states
+
+
+def test_run_end_writes_html_report(tmp_path) -> None:
+    """A finished headless run writes its HTML report under reports.directory (packet 21a)."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.set_project("Power board")
+    session.set_uut_type("PSU")
+    session.set_uut_serial("PS-1")
+    session.select_schedule("Passing schedule")
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    # The run-end hook wrote a <Type>/<Type>_<serial>_<stamp>_PASS.html report.
+    written = list(env["reports_dir"].glob("**/*_PASS.html"))
+    assert len(written) == 1, f"no PASS report written at run end: {[p.name for p in env['reports_dir'].glob('**/*.html')]}"
+    report = written[0]
+    assert report.parent == env["reports_dir"] / "PSU"
+    assert re.match(r"^PSU_PS-1_\d{8}-\d{6}_PASS\.html$", report.name)
+    body = report.read_text(encoding="utf-8")
+    assert "<div class=\"verdict verdict-pass\">PASS</div>" in body
+    assert "Ada" in body  # operator name flowed through to the Cover
 
 
 def test_failing_schedule_runs_headless_and_reads_back(tmp_path) -> None:

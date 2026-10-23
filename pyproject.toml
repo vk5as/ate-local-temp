@@ -34,6 +34,10 @@ ate = "ate.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the bundled Jinja2 report template (and any other data files) inside the package.
+[tool.setuptools.package-data]
+ate.report = ["templates/*.j2"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
