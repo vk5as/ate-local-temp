@@ -33,6 +33,7 @@ Bridging facts (validated empirically against lupa 2.8):
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -57,6 +58,29 @@ class HostError(ATEError):
 
 class VersionMismatch(HostError):
     """The Lua interpreter is not the version ATE targets (Lua 5.5)."""
+
+
+class _AbortFlag:
+    """One abort flag shared by a run's Lua runtime and its :class:`RunEngine`.
+
+    The Lua count hook (:meth:`_LuaHost._install_abort_hook`) calls ``aborted()`` every 1000
+    instructions to interrupt a busy loop; the engine sets it from the operator/main thread via
+    :meth:`request_abort`. Both touch it on different threads, so reads and writes go through one
+    lock. ATE's own step runner keeps reading this flag directly rather than the wrapped Lua
+    ``pcall``/``xpcall`` (packet 13c)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._aborted = False
+
+    @property
+    def aborted(self) -> bool:
+        with self._lock:
+            return self._aborted
+
+    def request(self) -> None:
+        with self._lock:
+            self._aborted = True
 
 
 # The one and only Lua version ATE runs Test Schedules on.
@@ -377,12 +401,21 @@ class _ScheduleParams:
 class _LuaHost:
     """A fresh lupa runtime plus the globals and one loaded schedule."""
 
-    def __init__(self, path: str | Path, operator_input: Optional[OperatorInput] = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        operator_input: Optional[OperatorInput] = None,
+        aborted_flag: Optional[_AbortFlag] = None,
+    ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
         # The OperatorInput controller a step's ATE.input calls read/write through; the run engine
         # injects its own (so the app can wire supply_input/click_poll), otherwise we make one.
         self._op = operator_input or OperatorInput()
+        # Shared abort flag: the Lua count hook reads :attr:`aborted` every 1000 instructions, and
+        # the engine sets it from request_abort(). RunEngine passes its own so both see one value;
+        # a host built without one owns a private flag (used by isolated tests of the prelude).
+        self._abort_flag = aborted_flag or _AbortFlag()
         # The current step's validated declarations, index-ordered StepInputs, set by the run
         # engine before each action so ATE.input(n) can look up and type-map that step's inputs.
         self._step_inputs: list[Any] = []
@@ -433,6 +466,13 @@ class _LuaHost:
         )
         # Redirect stray prints to ATE.log(INFO, ...) so schedule output is always logged.
         self._bind_print(ate)
+
+        # Packet 13c: install the abort count hook before the schedule runs so a busy loop (or one
+        # that pcall/xpcall's itself) can be interrupted. ``aborted`` is a Lua callable reading the
+        # shared flag live, and the hook raises "aborted" every 1000 instructions once it is set;
+        # pcall/xpcall are wrapped to re-raise it so an abort can't be caught (packet 13c).
+        env["aborted"] = self._make_aborted_callable()
+        self._install_abort_hook(env)
 
         # Every ATE.report call, in order. The run engine diffs this around each step's
         # action closure to attribute reports (last-call-wins) to that step.
@@ -550,6 +590,37 @@ class _LuaHost:
             return ""
 
         env["print"] = _print  # type: ignore[assignment]
+
+    def _make_aborted_callable(self) -> Callable[[], bool]:
+        """Return a callable registered as Lua ``aborted`` that reads the shared flag live.
+
+        The count hook calls it every 1000 instructions; reading through :attr:`_abort_flag` (which
+        locks) is safe whether the hook fires on the worker thread or request_abort sets it on another."""
+        flag = self._abort_flag
+
+        def aborted() -> bool:
+            return flag.aborted
+
+        return aborted
+
+    _AbortPrelude = r"""
+local function check_abort() if aborted() then error("aborted", 0) end end
+debug.sethook(check_abort, "", 1000)
+
+-- the hook's error is catchable, so a schedule's own pcall/xpcall would swallow an abort (packet
+-- 13c): once the flag is set both re-raise "aborted" so it can't be caught
+local raw_pcall, raw_xpcall = pcall, xpcall
+local function reraise(...)
+  if aborted() then error("aborted", 0) end
+  return ...
+end
+pcall = function(...) return reraise(raw_pcall(...)) end
+xpcall = function(...) return reraise(raw_xpcall(...)) end
+"""
+
+    def _install_abort_hook(self, env: Any) -> None:
+        """Install the abort count hook and re-raising pcall/xpcall on ``env`` (packet 13c)."""
+        self._runtime.execute(self._AbortPrelude, name=f"@{self._schedule_path.name}-abort", mode="t")
 
     def _load_schedule(self, path: str | Path) -> _ScheduleParams:
         """Execute ``path`` as a text chunk and return its ScheduleParams."""
