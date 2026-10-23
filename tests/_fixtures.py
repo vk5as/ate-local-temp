@@ -46,6 +46,23 @@ return ScheduleParams("Erroring schedule", "A step that raises a Lua error")
   })
 """
 
+# A schedule with three ordinary steps: the middle one is disabled by default (:setEnable(false)).
+# seq in the runner is the step's position here — a=0 (on), b=1 (off by default), c=2 (on) — so an
+# Operator override targets it by that integer. Its action only reports if it actually runs, which
+# lets a test confirm a disabled step never executes.
+ENABLE_DISABLED = """\
+return ScheduleParams("Enable/disable schedule", "steps with enable defaults and Operator overrides")
+  :setSchedule({
+    StepParams("a"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "ok a") end),
+    StepParams("b"):setStepNo("2.")
+      :setEnable(false)
+      :setAction(function() ATE.report(Result.PASS, "should not run by default") end),
+    StepParams("c"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "ok c") end),
+  })
+"""
+
 # A failing schedule that explicitly turns Stop on Fail off. Selecting it records stop_on_fail=0
 # without any Operator override; the Steps stage radio would prefill unchecked for it.
 STOP_ON_FAIL_FALSE = """\
@@ -253,6 +270,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8")
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
     (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
+    (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
 
     atedef = {
         "format": 1,
@@ -272,6 +290,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "poll_input.tslua", "sha256": _sha256(defs_dir / "poll_input.tslua")},
             {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
             {"path": "abortable.tslua", "sha256": _sha256(defs_dir / "abortable.tslua")},
+            {"path": "enable_disabled.tslua", "sha256": _sha256(defs_dir / "enable_disabled.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
