@@ -6,9 +6,9 @@
 
 **Blocked by:** 22a (PDF helper process)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] At run end HTML then PDF are written; if the PDF fails the HTML remains and the error is logged
-- [ ] Tests cover success and a failing helper
+- [x] At run end HTML then PDF are written; if the PDF fails the HTML remains and the error is logged
+- [x] Tests cover success and a failing helper
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
