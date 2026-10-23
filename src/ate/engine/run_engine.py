@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -105,6 +106,28 @@ class RunEngine(QThread):
         # The OperatorInput controller this run's ATE.input calls read/write through; injected by
         # tests (so they own supply/click) or made fresh when running for real. See ticket 10.
         self._op = operator_input or OperatorInput()
+        # Whole-run abort, requested by the Operator (the staged Run screen's Abort button calls
+        # :meth:`request_abort` through the session). It is checked between steps so a clean stop
+        # needs no busy-loop or blocking interruption — those come in packets 13b/13c. Guarded by
+        # a lock because it is set from the operator/main thread while the worker reads it each
+        # loop iteration; see :meth:`aborted`.
+        self._abort_lock = threading.Lock()
+        self._aborted = False
+
+    @property
+    def aborted(self) -> bool:
+        """Whether a whole-run abort has been requested for this run."""
+        with self._abort_lock:
+            return self._aborted
+
+    def request_abort(self) -> None:
+        """Request a whole-run abort (settable from the operator/main thread).
+
+        The running worker observes it at its next step boundary and stops between steps, recording
+        the step about to run as an ERROR "Aborted by Operator" attempt, marking every remaining
+        step NOTRUN, and closing with End Reason ABORTED / result FAIL (spec rule 83)."""
+        with self._abort_lock:
+            self._aborted = True
 
     @property
     def operator_input(self) -> OperatorInput:
@@ -166,6 +189,41 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return str(typed)
 
+    def _record_abort(self, run_uuid: str, steps: list[Any], aborted_seq: int) -> None:
+        """Record a whole-run abort that took effect at step ``aborted_seq`` (0-based).
+
+        The step about to run records one ERROR attempt "Aborted by Operator" and its node as
+        ERROR; every later actionable step is recorded NOTRUN with no Attempt. Nothing after the
+        abort point ran, yet the aborted step still has an Attempt explaining why it stopped."""
+        step = steps[aborted_seq]
+        self._store.insert_attempt(run_uuid, aborted_seq, 1, pass_fail="ERROR", msg="Aborted by Operator")
+        self._store.insert_node(
+            run_uuid,
+            aborted_seq,
+            kind="step",
+            step_number=step.step_no or "",
+            step_name=step.name,
+            default_enabled=int(bool(step.enabled)),
+            enabled=int(bool(step.enabled)),
+            result="ERROR",
+            attempt_count=1,
+        )
+        for seq in range(aborted_seq + 1, len(steps)):
+            later = steps[seq]
+            if later.action is None:
+                continue
+            self._store.insert_node(
+                run_uuid,
+                seq,
+                kind="step",
+                step_number=later.step_no or "",
+                step_name=later.name,
+                default_enabled=int(bool(later.enabled)),
+                enabled=int(bool(later.enabled)),
+                result="NOTRUN",
+                attempt_count=0,
+            )
+
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
@@ -217,10 +275,18 @@ class RunEngine(QThread):
         self.state_changed.emit(RunStatus.RUNNING)
 
         failed = False
+        aborted = False  # a whole-run abort requested between steps (see request_abort)
         for seq, step in enumerate(steps):
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
                 continue
+            # Whole-run abort checked at the step boundary — this packet covers stopping cleanly
+            # between steps; interrupting a running (blocking or busy) step comes in 13b/13c. If
+            # set, record the step about to run as ERROR and mark every later step NOTRUN, then stop.
+            if self.aborted:
+                aborted = True
+                self._record_abort(run_uuid, steps, seq)
+                break
 
             # Tell the host which step is running so an isolated ATE error can be attributed to
             # the schedule line where that step's action began (criterion 03), and put the host in
@@ -344,9 +410,16 @@ class RunEngine(QThread):
                 inputs=[d.to_dict() for d in validated] if validated else None,
             )
 
-        # FAIL on any FAIL/ERROR; otherwise PASS. End Reason COMPLETED for this ticket.
-        run_result = "FAIL" if failed else "PASS"
-        self._store.update_run_end(run_uuid, result=run_result, end_reason="COMPLETED")
+        # A whole-run abort (requested between steps) fails the run with End Reason ABORTED; a
+        # normal finish is FAIL on any FAIL/ERROR, otherwise PASS. STOPPED_ON_FAIL comes with the
+        # Stop-on-Fail prompt in 13b.
+        if aborted:
+            run_result = "FAIL"
+            end_reason = "ABORTED"
+        else:
+            run_result = "FAIL" if failed else "PASS"
+            end_reason = "COMPLETED"
+        self._store.update_run_end(run_uuid, result=run_result, end_reason=end_reason)
         # FINISHED is queued to the main thread; QThread's own ``finished`` signal also
         # fires when run() returns. Observers use state_changed for the observable states.
         self.state_changed.emit(RunStatus.FINISHED)

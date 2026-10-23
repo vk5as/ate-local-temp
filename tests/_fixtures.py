@@ -143,6 +143,24 @@ return ScheduleParams("Isolated schedule", "A step that calls an isolated failin
   })
 """
 
+# A whole-run abort fixture (packets 13a). Its first step blocks on a single INTEGER input, so the
+# driver has a guaranteed window between steps: while that step waits it supplies its value and
+# requests an abort. The engine then records the blocked step PASS, marks the next step ERROR
+# "Aborted by Operator", leaves every later step NOTRUN, and closes ABORTED / FAIL — cleanly, with
+# no busy-loop or blocking interruption (those come in 13b/13c).
+ABORTABLE = """\
+return ScheduleParams("Abortable schedule", "several passing steps; first blocks on an input")
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function() local v=ATE.input(1); ATE.report(Result.PASS, "ok "..v) end),
+    StepParams("second"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "should not run") end),
+    StepParams("third"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "also should not run") end),
+  })
+"""
+
 
 def _drive(engine: "RunEngine", app, on_run_uuid=None) -> None:
     """Run the worker to completion, then deliver the signals it queued onto this thread.
@@ -182,6 +200,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "blocking_input.tslua").write_text(BLOCKING_INPUT, encoding="utf-8")
     (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8")
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
+    (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
 
     atedef = {
         "format": 1,
@@ -196,6 +215,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "blocking_input.tslua", "sha256": _sha256(defs_dir / "blocking_input.tslua")},
             {"path": "poll_input.tslua", "sha256": _sha256(defs_dir / "poll_input.tslua")},
             {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
+            {"path": "abortable.tslua", "sha256": _sha256(defs_dir / "abortable.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
