@@ -296,7 +296,7 @@ class RunStore:
         if needle := f.get("uut_serial"):
             # Case-insensitive substring via LOWER(...); escape LIKE metacharacters so a serial that
             # literally contains % or _ matches itself, and double any single quote.
-            needle = str(needle).lower().replace("'", "''").replace("%", "\\%").replace("_", "\\_")
+            needle = str(needle).lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             # The metacharacters are escaped with a backslash, so the LIKE clause's own escape
             # character must be that same backslash (not '!'); otherwise an unescaped '%'/'_' would
             # act as a wildcard and match every serial.

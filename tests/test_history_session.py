@@ -298,3 +298,11 @@ def test_query_runs_is_read_only(empty_store):
     row_after = empty_store.get_test_run(sample_uuid)
     assert row_before is not None and row_after is not None
     assert row_before == row_after  # the queried row was never touched
+
+
+def test_filter_serial_matches_quotes_and_backslashes_literally(empty_store):
+    """The serial substring is a bound parameter: quotes and backslashes need no SQL escaping."""
+    for serial in ("O'BRIEN-7", "AB\\CD-1", "PLAIN-2"):
+        empty_store.insert_test_run({"run_uuid": new_uuid7(), "operator": "Ada", "uut_serial": serial})
+    assert [r["uut_serial"] for r in empty_store.query_runs(filters={"uut_serial": "o'brien"})] == ["O'BRIEN-7"]
+    assert [r["uut_serial"] for r in empty_store.query_runs(filters={"uut_serial": "b\\c"})] == ["AB\\CD-1"]
