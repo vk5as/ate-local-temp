@@ -69,6 +69,36 @@ return ScheduleParams("Never reports schedule", "A step that runs but never repo
   })
 """
 
+# A schedule that calls ATE.report at the top level, outside any Pre-test Action or step. Per the
+# "where each call is allowed" rule this must raise while the file loads: only the builders,
+# require, ATE.log and the enums are legal at load time. The report runs before ``return`` so it
+# actually executes during loading (Lua does not run statements after a ``return``); the raised
+# error surfaces as a load failure.
+LOAD_REPORT = """\
+ATE.report(Result.PASS, "not allowed here")
+return ScheduleParams("Load report schedule", "reports at load time") :setSchedule({})
+  :setPreTestAction(function() end)
+"""
+
+# A schedule whose Pre-test Action calls ATE.input. In a Pre-test/Post-test Action that is not
+# allowed (it belongs to steps), so it must raise when the action runs.
+PRETEST_INPUT = """\
+return ScheduleParams("Pretest input schedule", "input in a pretest action") :setSchedule({})
+  :setPreTestAction(function() ATE.input(1) end)
+"""
+
+# Same restriction for a Post-test Action: input is not allowed there either.
+POSTTEST_INPUT = """\
+return ScheduleParams("Posttest input schedule", "input in a posttest action") :setSchedule({})
+  :setPostTestAction(function() ATE.input(1) end)
+"""
+
+# A schedule whose Pre-test Action calls ATE.log — which IS legal everywhere except load time.
+PRETEST_LOG = """\
+return ScheduleParams("Pretest log schedule", "log in a pretest action is fine") :setSchedule({})
+  :setPreTestAction(function() ATE.log(Log.INFO, "setup running") end)
+"""
+
 # A schedule whose single step calls an isolated failing ATE function (ATE.boom). The function
 # is registered on the driven host via RunEngine's ate_fns seam; calling it from Lua raises a
 # Python exception that _AteTable._isolate must catch, log at ERROR, and return as graceful

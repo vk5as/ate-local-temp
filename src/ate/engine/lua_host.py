@@ -39,6 +39,16 @@ from typing import Any, Callable, Mapping, Optional
 from ..errors import ATEError
 
 
+class NotAllowedError(ATEError):
+    """ATE was called where it isn't allowed (criterion b).
+
+    Raised by :meth:`_AteTable.report` and :meth:`_AteTable.input` when the host's current
+    execution context makes the call illegal — e.g. ``ATE.report`` at load time, or
+    ``ATE.input``/``ATE.report`` inside a Pre-test/Post-test Action instead of a step. The
+    message carries the schedule's own ``<file>:<line>`` and names the function, so it reads as
+    ``schedule.tslua:42: ATE.report: only allowed in a step or Pre/Post-test Action``."""
+
+
 class HostError(ATEError):
     """Raised when the host refuses or fails to load a schedule."""
 
@@ -149,10 +159,28 @@ class _AteTable:
         self, pass_fail: Any, msg: Any = None, actual: Any = None, expected: Any = None
     ) -> bool:
         """Record a step's result. Returns ``true`` so the schedule keeps running."""
+        # ATE.report belongs to steps and Pre/Post-test Actions; it is not legal while the file is
+        # loading (only the builders, require, log and the enums are). Refuse there first with an
+        # error that carries the caller's file:line and names the function.
+        if self._host._context not in ("step", "pretest", "posttest"):
+            raise NotAllowedError(
+                f"{self._host._location()} ATE.report: only allowed in a step or Pre/Post-test Action"
+            )
         # The host appends every call in order; the run engine attributes each batch
         # to the step whose action closure just ran (last call wins per step).
         self._host.record_report(pass_fail, msg, actual, expected)
         return True
+
+    def input(self, n: Any) -> Any:
+        """Return the current step's n-th Step Input. Raises outside a step."""
+        # ATE.input reads the Operator's answer for the running step; it is not legal in a Pre-test
+        # or Post-test Action (or while loading). Refuse there first with an error that carries the
+        # caller's file:line and names the function.
+        if self._host._context != "step":
+            raise NotAllowedError(
+                f"{self._host._location()} ATE.input: only allowed in a step action"
+            )
+        return self._host.inputs(n)
 
     def log(self, level: Any, *args: Any) -> bool:
         """Record a schedule's own log line at ``level``. Returns ``true``."""
@@ -313,6 +341,12 @@ class _LuaHost:
         # attribute an isolated ATE error to the schedule line where it was called. None outside
         # a run, when only the filename is known.
         self._current_step: Optional[int] = None
+        # The execution context this host is in right now — one of "load" (the top level while the
+        # file is loading), "pretest", "posttest" or "step". None means idle, which for a freshly
+        # built host is the same as load time: nothing has started running yet. :meth:`_run_action`
+        # sets it around an action and restores None afterwards; context-checked ATE functions use
+        # it to raise where a call isn't allowed (see criterion b).
+        self._context = "load"
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
@@ -332,12 +366,28 @@ class _LuaHost:
         env["python"] = None
 
     def _location(self) -> str:
-        """Return ``<file>:<line>:``, the schedule line where the step currently running began.
+        """Return ``<file>:<line>:``, the schedule line where the current call was made.
 
-        lupa has no API to read a Python call site, so this locates the current step's action in
-        the loaded source (each action-bearing step contributes one ``:setAction(``), in order)
-        and reports its 1-based line. Outside a run it falls back to just the filename."""
+        lupa has no API to read a Python call site, so this locates the offending line in the
+        loaded source and reports its 1-based number:
+
+        * Inside a Pre-test/Post-test Action (``_context`` set to that phase by :meth:`_run_action`)
+          it points at the action's ``:setPreTestAction(`/`:setPostTestAction(` line.
+        * While a step runs, or while loading / when idle, it locates the current step's
+          ``:setAction(`` line via :attr:`_current_step`.
+
+        Outside a run it falls back to just the filename."""
         name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        ctx = self._context
+        # A Pre-test/Post-test Action is running: point at that action's line.
+        if ctx in ("pretest", "posttest"):
+            lines = self._schedule_source.splitlines() if self._schedule_source else []
+            marker = ":setPreTestAction(" if ctx == "pretest" else ":setPostTestAction("
+            for i, line in enumerate(lines):
+                if marker in line:
+                    return f"{name}:{i + 1}:"
+            return f"{name}:"
+        # A step is running (criterion 03) or we are loading / idle: the current step's action.
         if self._current_step is None or self._schedule_source is None:
             return f"{name}:"
         lines = self._schedule_source.splitlines()
@@ -349,6 +399,19 @@ class _LuaHost:
                 if found == target:
                     return f"{name}:{i + 1}:"
         return f"{name}:"
+
+    def _run_action(self, fn: Callable[..., Any], phase: str) -> Any:
+        """Run a Lua action closure with ``phase`` active so context-checked ATE calls raise.
+
+        While ``phase`` is set (one of "pretest", "posttest" or "step") the host knows where it is,
+        so :meth:`_AteTable.report` and :meth:`_AteTable.input` can refuse a call made where it isn't
+        allowed. The context is restored to idle (``None``) afterwards; a fresh host starts at "load"
+        because the top level of the file runs before anything else exists."""
+        self._context = phase
+        try:
+            return fn()
+        finally:
+            self._context = None
 
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
         """Record one ATE.report call from a running schedule."""

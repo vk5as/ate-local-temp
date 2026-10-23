@@ -132,14 +132,16 @@ class RunEngine(QThread):
                 continue
 
             # Tell the host which step is running so an isolated ATE error can be attributed to
-            # the schedule line where that step's action began (criterion 03).
+            # the schedule line where that step's action began (criterion 03), and put the host in
+            # the "step" phase so a step may legally call any ATE function — including ATE.report
+            # and ATE.input, which are rejected elsewhere (criterion b). _run_action sets and then
+            # restores that context around the action.
             host._current_step = seq
-
             start = len(host.reports)
             log_start = len(host.logs)
             error_text: Optional[str] = None
             try:
-                step.action()  # runs the closure in Lua; may call ATE.report several times
+                host._run_action(step.action, "step")  # runs the closure in Lua; may call ATE.report several times
             except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
                 # The first line is the human-readable message (for a Lua-originated error it
                 # is just the message; file:line lives in the traceback portion). The full
