@@ -602,10 +602,14 @@ class RunEngine(QThread):
         # raised fails the run without changing this reason (packet 14c); a second abort during one
         # ends only that action and leaves the rest to run.
         posttest_aborted = self.aborted
-        self._abort_flag.clear()
         for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
+            # Clear before every action, not just the first: a second abort ends only the action it
+            # lands in, so the flag must not carry over and kill the next one on its first hook tick.
+            self._abort_flag.clear()
             outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
-            if outcome == "error":
+            if outcome == "aborted":
+                posttest_aborted = True
+            elif outcome == "error":
                 # A Post-test Action that raised fails the run (result FAIL) but keeps its End Reason.
                 failed = True
                 pass_fail = "FAIL"
