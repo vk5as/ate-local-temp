@@ -308,9 +308,15 @@ class RunEngine(QThread):
         try:
             host._run_action(fn, PHASE_CONTEXT[phase], pass_fail=pass_fail)
         except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR action row
-            outcome = "error"
-            error = str(exc).splitlines()[0] if str(exc) else ""
-            host.record_log("ERROR", str(exc))
+            # A second abort during a Post-test Action ends only that action (packet 14c): the count
+            # hook raises exactly "aborted", so record outcome "aborted" and don't log it as an
+            # ERROR — it is not a run error, and the caller keeps running any remaining actions.
+            if str(exc).splitlines()[0].strip() == "aborted":
+                outcome = "aborted"
+            else:
+                outcome = "error"
+                error = str(exc).splitlines()[0] if str(exc) else ""
+                host.record_log("ERROR", str(exc))
         finally:
             ended_at = _now_iso()
         new_logs = host.logs[log_start:]
@@ -589,21 +595,32 @@ class RunEngine(QThread):
                         self._record_abort(run_uuid, steps, seq, record_attempt=False)
                         break
 
-        # Post-test Actions run after the last step, in reverse, each called with the final pass_fail.
-        # They record action rows too; 14c owns whether a skipped Pre-test suppresses them.
+        # Post-test Actions always run after the last step, in reverse, each called with the final
+        # pass_fail. Before they start we clear the abort flag (packet 14c) so a previously-aborted
+        # run can still tear down; but if it had already been aborted we remember that here so its
+        # End Reason stays ABORTED even though the flag is now cleared. A Post-test Action that
+        # raised fails the run without changing this reason (packet 14c); a second abort during one
+        # ends only that action and leaves the rest to run.
+        posttest_aborted = self.aborted
+        self._abort_flag.clear()
         for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
-            _outcome, _error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
+            outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
+            if outcome == "error":
+                # A Post-test Action that raised fails the run (result FAIL) but keeps its End Reason.
+                failed = True
+                pass_fail = "FAIL"
 
         # A Pre-test failure aborts before any step runs (packet 14b); a Stop-on-Fail pause that was
-        # aborted ends STOPPED_ON_FAIL; a whole-run operator abort between steps ends ABORTED; a normal
-        # finish is FAIL on any FAIL/ERROR, otherwise PASS.
+        # aborted ends STOPPED_ON_FAIL; a whole-run operator abort — whether between steps or already
+        # set when the Post-test Actions began — ends ABORTED; a normal finish is FAIL on any FAIL/
+        # ERROR, otherwise PASS.
         if pretest_failed:
             run_result = "FAIL"
             end_reason = "PRETEST_FAILED"
         elif self._stopped_on_fail:
             run_result = "FAIL"
             end_reason = "STOPPED_ON_FAIL"
-        elif aborted:
+        elif aborted or posttest_aborted:
             run_result = "FAIL"
             end_reason = "ABORTED"
         else:
