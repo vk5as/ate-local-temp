@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 (Project skeleton, `ate` CLI and CI)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] `ate db migrate` creates a missing SQLite database (WAL mode) after confirmation, or upgrades an older one after a timestamped backup; `ate db status` prints the schema version (`PRAGMA user_version`)
 - [ ] At launch ATE stops with "run `ate db migrate`" for a missing or older database and "this ATE is too old" for a newer one; the app never migrates
