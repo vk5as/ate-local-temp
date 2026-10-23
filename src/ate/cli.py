@@ -15,6 +15,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from .setup import StationLayout, default_layout, prepare_station
 from ._version import __version__
 
 
@@ -36,10 +37,12 @@ def main(argv=None) -> int:
         return _cmd_db(argv[1:])
     if command == "definition":
         return _cmd_definition(argv[1:])
+    if command == "setup":
+        return _cmd_setup(argv[1:])
 
     prog = "ate"
     print(
-        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status' or '{prog} definition update <file.atedef>'",
+        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status', '{prog} setup' or '{prog} definition update <file.atedef>'",
         file=sys.stderr,
     )
     return 1
@@ -78,28 +81,18 @@ def _db_status(path: str) -> int:
     return 0
 
 
-def _db_migrate(path: str, extra: list[str]) -> int:
+def _migrate_database(path: str) -> int:
     """Create or upgrade the database at ``path`` after confirmation.
 
-    ``--yes``/``-y`` skips the interactive prompt (for automation and tests). A database
-    built by a newer ATE is refused rather than downgraded; everything else is opened with
-    :class:`RunStore`, which creates the tables if missing and sets the schema version.
+    Shared by ``ate db migrate --yes`` and ``ate setup``: a database built by a newer ATE is
+    refused rather than downgraded; everything else is opened with :class:`RunStore`, which
+    creates the tables if missing and sets the schema version.
     """
-    parser = argparse.ArgumentParser(prog="ate db migrate", add_help=False)
-    parser.add_argument("--yes", "-y", action="store_true", help="do not prompt for confirmation")
-    args, _unknown = parser.parse_known_args(extra)
-
-    if not args.yes:
-        answer = input(f"Create or upgrade database at {path}? [y/N] ")
-        if answer.strip().lower() not in ("y", "yes"):
-            print("aborted", file=sys.stderr)
-            return 1
-
     from .storage import DbLaunchStatus, RunStore, check_database_at_launch
 
     result = check_database_at_launch(path)
-    # Only a database built by a newer ATE must be refused; a missing or older one is
-    # exactly what migrate exists to create or upgrade.
+    # Only a database built by a newer ATE must be refused; a missing or older one is exactly
+    # what migrate exists to create or upgrade.
     if result.status == DbLaunchStatus.TOO_OLD:
         print(f"database {path}: {result.message}", file=sys.stderr)
         return 1
@@ -112,6 +105,21 @@ def _db_migrate(path: str, extra: list[str]) -> int:
         conn.close()
     print(f"created or upgraded database at {path} (schema version {version})")
     return 0
+
+
+def _db_migrate(path: str, extra: list[str]) -> int:
+    """Dispatch ``ate db <status|migrate> [PATH]``."""
+    parser = argparse.ArgumentParser(prog="ate db migrate", add_help=False)
+    parser.add_argument("--yes", "-y", action="store_true", help="do not prompt for confirmation")
+    args, _unknown = parser.parse_known_args(extra)
+
+    if not args.yes:
+        answer = input(f"Create or upgrade database at {path}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("aborted", file=sys.stderr)
+            return 1
+
+    return _migrate_database(path)
 
 
 def _cmd_definition(argv: list[str]) -> int:
@@ -181,6 +189,23 @@ def _definition_update(path: str) -> int:
     else:
         print(f"definition update: all checksums already current in {path}")
     return 0
+
+
+def _cmd_setup(argv: list[str]) -> int:
+    """Dispatch ``ate setup [--root DIR]``.
+
+    Prepares the Station's directories, permissions and default config (:func:`prepare_station`),
+    then runs ``ate db migrate`` on the resolved database path so neither a first launch nor the
+    first launch after an upgrade stops on a missing or outdated database (see
+    ``assets/packaging.md``). ``--root DIR`` roots the layout at ``DIR`` for automation and tests.
+    """
+    parser = argparse.ArgumentParser(prog="ate setup", add_help=False)
+    parser.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root (for automation and tests)")
+    args, _unknown = parser.parse_known_args(argv)
+
+    layout = StationLayout.from_root(args.root) if args.root is not None else default_layout()
+    prepare_station(layout)  # directories, permissions and a default config.json when none exists
+    return _migrate_database(str(layout.database_path))  # create or upgrade the database
 
 
 if __name__ == "__main__":
