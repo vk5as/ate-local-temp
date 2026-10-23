@@ -155,15 +155,17 @@ class StepsOptionsStage(QWidget):
     starts the run through the screen.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session: Optional["HeadlessRunSession"] = None) -> None:
         super().__init__()
+        self.session = session
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.step_list = QListWidget()
         self.stop_on_fail_radio = QRadioButton("Stop on first failure")
         self.continue_all_radio = QRadioButton("Run every step regardless of failures")
-        # Default policy: stop on the first failure.
+        # Default policy: stop on the first failure; :meth:`load_steps` re-applies it from the
+        # selected schedule's Stop on Fail default once a schedule has been chosen.
         self.stop_on_fail_radio.setChecked(True)
         self.run_button = QPushButton("Start run")
 
@@ -173,7 +175,10 @@ class StepsOptionsStage(QWidget):
         layout.addWidget(self.run_button)
 
     def load_steps(self, steps: Iterable[object]) -> None:
-        """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) in the list."""
+        """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) in the list.
+
+        Also re-applies the selected schedule's Stop on Fail default to the radio pair so it is not
+        stuck at construction-time; the Operator can still toggle either choice."""
         self.step_list.clear()
         for step in steps:
             label = getattr(step, "name", "") or ""
@@ -181,6 +186,13 @@ class StepsOptionsStage(QWidget):
             text = f"{number}  {label}" if number else str(label)
             item = QListWidgetItem(text)
             self.step_list.addItem(item)
+        if self.session is not None:
+            self._apply_stop_on_fail(self.session.selected_stop_on_fail)
+
+    def _apply_stop_on_fail(self, value: bool) -> None:
+        """Set the radio pair to ``value`` (True = stop on first failure)."""
+        self.stop_on_fail_radio.setChecked(value)
+        self.continue_all_radio.setChecked(not value)
 
 
 class RunView(QWidget):
@@ -313,7 +325,7 @@ class StagedRunScreen(QWidget):
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage()
-        self.steps_options_stage = StepsOptionsStage()
+        self.steps_options_stage = StepsOptionsStage(self.session)
         self.run_view = RunView()
         # Disabled until a run starts; _on_state_changed enables it only while STARTED. The session's
         # initial IDLE emit precedes this connection, so set the default here explicitly.

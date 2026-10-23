@@ -142,6 +142,48 @@ def test_selecting_schedule_and_running_reaches_started_then_finished(qapp, tmp_
     assert SessionState("FINISHED") in states
 
 
+def test_steps_radio_reflects_the_schedule_stop_on_fail_default(qapp, tmp_path):
+    """The Steps stage radio prefills from the selected schedule's Stop on Fail default.
+
+    A schedule that sets it False prefills "Run every step" checked; leaving the radio at its
+    prefilled value still records that default on the run row."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen._advance(1)  # to the Test Schedule stage
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Stop on fail false schedule")
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    assert session.selected_stop_on_fail is False
+
+    screen._begin_run_from_selection()
+    assert screen.steps_stack.currentIndex() == 2
+    assert screen.steps_options_stage.stop_on_fail_radio.isChecked() is False
+    assert screen.steps_options_stage.continue_all_radio.isChecked() is True
+
+    # Leaving the radio at its prefilled default still records that default on the run row.
+    screen.steps_options_stage.run_button.click()
+    assert _wait_finished(qapp, session)
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None and row["stop_on_fail"] == 0
+
+
+def test_steps_radio_defaults_to_stop_on_fail_when_schedule_unsets_it(qapp, tmp_path):
+    """A schedule that leaves Stop on Fail unset prefills "Stop on first failure" checked."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen._advance(1)
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Failing schedule")
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    assert session.selected_stop_on_fail is True
+
+    screen._begin_run_from_selection()
+    assert screen.steps_options_stage.stop_on_fail_radio.isChecked() is True
+    assert screen.steps_options_stage.continue_all_radio.isChecked() is False
+
+
 def test_steps_show_live_result_after_run(qapp, tmp_path):
     """After a run, each step shows its live Result in the Run view's step list."""
     env = write_ate_env(tmp_path)
