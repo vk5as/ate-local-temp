@@ -104,18 +104,17 @@ def test_post_action_is_called_with_the_final_pass_fail(app: QCoreApplication) -
     assert "posttest FAIL" in logs  # Post-test saw the final failing result
 
 
-def test_erroring_pre_action_records_error_row_and_continues(app: QCoreApplication) -> None:
-    """Checkbox 2 — a Pre-test Action that raises records an action row with outcome "error" and its
-    error message; execution continues to the step (which passes) and then the Post-test Action ("ok").
-
-    This packet does not abort on a Pre-test failure (that is 13b); it only records the row."""
+def test_erroring_pre_action_aborts_with_notrun_steps(app: QCoreApplication) -> None:
+    """Checkbox 1 — a failing Pre-test Action aborts automatically (packet 14b): every step is NOTRUN,
+    End Reason PRETEST_FAILED / result FAIL, and a log line names the failure and explains why every
+    step is NOTRUN. The raising Pre-test still records an error row carrying its message."""
     store, row = _run_schedule(app, PRE_ERROR_POST_OK)
 
     assert row is not None
     actions = _actions(store._conn, row["run_uuid"])
     pre, post = actions["pre"], actions["post"]
-    assert set(actions) == {"pre", "post"}
     # The raising Pre-test is an error row carrying its message; the Post-test still ran ok.
+    assert set(actions) == {"pre", "post"}
     assert pre["outcome"] == "error"
     assert "boom in pretest PASS" in (pre["error"] or "")
     assert post["outcome"] == "ok"
@@ -124,8 +123,19 @@ def test_erroring_pre_action_records_error_row_and_continues(app: QCoreApplicati
     error_lines = [ln for ln in store.log_lines(row["run_uuid"]) if ln["level"] == "ERROR"]
     assert any("boom in pretest PASS" in ln["text"] for ln in error_lines)
 
-    # A Pre-test failure does not fail the run here (13b owns that); the step still passes.
-    assert row["end_reason"] == "COMPLETED"
+    # Every actionable step aborted before it ran -> NOTRUN with no Attempt.
+    steps = [n for n in store.nodes(row["run_uuid"]) if n["kind"] == "step"]
+    assert len(steps) == 1
+    assert all(n["result"] == "NOTRUN" and n["attempt_count"] == 0 for n in steps)
+
+    # The run fails with End Reason PRETEST_FAILED, not COMPLETED.
+    assert row["end_reason"] == "PRETEST_FAILED"
+    assert row["result"] == "FAIL"
+
+    # A log line names the failure and explains why every step is NOTRUN.
+    logs = "\n".join(ln["text"] for ln in store.log_lines(row["run_uuid"]))
+    assert "boom in pretest PASS" in logs
+    assert "every step is NOTRUN" in logs
 
 
 def test_actions_without_a_schedule_are_not_recorded(app: QCoreApplication) -> None:

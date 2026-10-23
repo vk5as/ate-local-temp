@@ -6,9 +6,9 @@
 
 **Blocked by:** 14a (Pre-test and Post-test Actions and `action` rows)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A Pre-test failure aborts automatically: every step `NOTRUN`, End Reason `PRETEST_FAILED`, and a log line naming the failure and explaining why every step is `NOTRUN`
-- [ ] Seam-1 tests cover it
+- [x] A Pre-test failure aborts automatically: every step `NOTRUN`, End Reason `PRETEST_FAILED`, and a log line naming the failure and explaining why every step is `NOTRUN`
+- [x] Seam-1 tests cover it
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
