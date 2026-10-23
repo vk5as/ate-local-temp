@@ -17,9 +17,17 @@ from ._fixtures import FAILING, PASSING, write_ate_env
 
 
 def _wait_finished(session: HeadlessRunSession) -> bool:
-    """Poll processEvents until the session reaches FINISHED (or times out)."""
+    """Poll an application's processEvents until the session reaches FINISHED (or times out).
+
+    Queued cross-thread signals are only delivered once a QCoreApplication exists to pump them;
+    this offscreen build delivers nothing through bare ``QCoreApplication.processEvents()`` when
+    no instance is present. If none exists, create one so delivery works. The instance is local
+    to the test and gone by the next one, so nothing Qt lingers for interpreter shutdown."""
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication([])
     for _ in range(2000):
-        QCoreApplication.processEvents()
+        app.processEvents()
         if session._state == SessionState.FINISHED:
             return True
     return False

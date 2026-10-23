@@ -274,6 +274,26 @@ class RunStore:
         rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None))).fetchall()
         return [row[0] for row in rows]
 
+    def nodes(self, run_uuid: str) -> list[dict]:
+        """Return this run's expanded-tree rows as dicts (empty when the run is unknown).
+
+        Dialect-neutral and value-only, mirroring :meth:`get_test_run`: each mapping is
+        rebuilt from the selected columns in declaration order because this build's native
+        Row iterates values without ``.keys()`` or ``dict()``."""
+        stmt = node.select().where(node.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(node.columns, row)} for row in rows
+        ]
+
+    def attempts(self, run_uuid: str) -> list[dict]:
+        """Return this run's Attempt rows as dicts (empty when the run is unknown)."""
+        stmt = attempt.select().where(attempt.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(attempt.columns, row)} for row in rows
+        ]
+
     # -- interrupted-run recovery -------------------------------------------
 
     def close_interrupted_runs(self, on_log: Optional[callable] = None) -> list[str]:

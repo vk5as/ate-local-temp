@@ -6,8 +6,12 @@ file only exists so tests can run straight from a checkout; it is harmless once
 the package is installed, where ``import ate`` resolves through the editable
 install regardless of this path tweak.
 
-It also provides one offscreen QApplication for the whole session, so the QThread
-run engine and headless session (ticket 02) can be driven without a display.
+It also provides one offscreen application for the whole session, so the QThread
+run engine and headless session (ticket 02) and the widget Run screen (ticket 03) can be
+driven without a display. This Qt 6.11 / PyQt6 build segfaults at interpreter shutdown when a
+live ``QCoreApplication`` and a live ``QApplication`` are both present; sharing one ``QApplication``
+(for which ``QCoreApplication`` is also true, so queued cross-thread signals still deliver) means
+that never happens — only a lone application is ever finalized.
 """
 
 import os
@@ -22,35 +26,60 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 
-# Ticket 02 drives QThread workers headless (QT_QPA_PLATFORM=offscreen). One shared
-# application for the session avoids creating a second QApplication mid-session.
+# Ticket 02 drives QThread workers headless (QT_QPA_PLATFORM=offscreen). One shared application
+# for the session avoids creating a second QApplication mid-session. This PyQt6 build's
+# ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
+# argument list and rely on that env var instead.
 import pytest  # noqa: E402
 
-from PyQt6.QtCore import QCoreApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 
-# The single offscreen application shared for the whole session. Ticket 02 drives QThread
-# workers headless, and they can only be polled through one QApplication's event loop; a
-# second instance would raise "a QApplication instance already exists". Created lazily on
-# first request so importing conftest needs no display.
-_app = None  # type: QCoreApplication | None
+def _destroy_widget_tree(app: QApplication) -> None:
+    """Recursively delete every descendant widget while Python is still alive.
+
+    A quit ``QApplication`` leaves its QObject descendants orphaned; if any of those are still
+    referenced by Python they get finalized at interpreter shutdown and, in this Qt 6.11 build,
+    that finalization segfaults. Deleting them here (before the app quits) means nothing Qt is
+    left for ``Py_Exit`` to touch."""
+    def _drop(obj: object) -> None:
+        for child in list(getattr(obj, "children", lambda: [])()):
+            if isinstance(child, QWidget):
+                child.deleteLater()
+            else:
+                _drop(child)
+        obj.deleteLater()
+
+    for widget in list(app.children()):
+        if isinstance(widget, QWidget):
+            widget.deleteLater()
+    app.processEvents()
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _qt_app() -> None:
-    """Guarantee one offscreen application exists for the session's QThread tests."""
-    global _app
-    if _app is None:
-        _app = QCoreApplication(sys.argv)
-    yield
+def qapp() -> QApplication:
+    """The single offscreen application shared by every test.
+
+    Autouse so tests that do not declare it still run with one application present (ticket 02's
+    signal delivery needs an application to pump queued cross-thread events). The ``offscreen``
+    platform is supplied by the ``QT_QPA_PLATFORM=offscreen`` env var; this PyQt6 build's
+    ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
+    argument list and rely on that env var.
+
+    The widget tree is destroyed before quitting (see :func:`_destroy_widget_tree`) so the
+    interpreter shutdown has nothing Qt to finalize — this Qt 6.11 build segfaults when a live
+    ``QApplication`` is finalized alongside any ``QCoreApplication``."""
+    app = QApplication([])
+    yield app
+    _destroy_widget_tree(app)
+    app.processEvents()
+    app.quit()
 
 
 @pytest.fixture(scope="session")
-def app() -> QCoreApplication:
+def app(qapp: QApplication) -> QApplication:
     """The shared offscreen application, exposed to tests as ``app``.
 
-    Tests request this (a pytest-qt-style name) rather than the internal ``_qt_app``; it
-    returns the same instance so every test drives the worker through one event loop.
-    """
-    assert _app is not None
-    return _app
+    Ticket 02's QThread-driven tests request this name; it returns the same instance so every test
+    drives the worker through one event loop."""
+    return qapp

@@ -63,6 +63,7 @@ class HeadlessRunSession(QObject):
         self._config = read_config(config) if config is not None else None
         self._store = RunStore(self._config.database_path) if self._config is not None else None
         self._selected_name: Optional[str] = None
+        self._stop_on_fail: bool = False
         # The current observable state; updated on the owning thread by signal handlers.
         self._state = SessionState.IDLE
         # ATE's logger seam (ticket 08); interrupted-run recovery logs through it. Defaults to
@@ -107,9 +108,15 @@ class HeadlessRunSession(QObject):
     # -- selection and fields ------------------------------------------------
 
     def _set_state(self, state: SessionState) -> None:
-        """Update the tracked state and announce it; safe to call on the owning thread."""
+        """Update the tracked state and announce it; safe to call on the owning thread.
+
+        Releasing ``_engine`` when a run reaches FINISHED lets the next start() capture
+        fresh field values (spec "new run keeps every field") without racing the old
+        worker, which is no longer running."""
         if state != self._state:
             self._state = state
+            if state == SessionState.FINISHED:
+                self._engine = None
             self.state_changed.emit(state)
 
     def select_schedule(self, name: str) -> None:
@@ -154,6 +161,14 @@ class HeadlessRunSession(QObject):
             raise SessionError("cannot change fields while a run is in progress")
         self._pending_uut_serial = uut_serial
 
+    def set_stop_on_fail(self, value: bool) -> None:
+        """Set whether the next run stops at the first failure.
+
+        The session default is False; call this to opt in before starting a run."""
+        if not isinstance(value, bool):
+            raise SessionError("stop_on_fail must be a boolean")
+        self._pending_stop_on_fail = value
+
     # -- start ---------------------------------------------------------------
 
     def start(self) -> RunEngine:
@@ -185,6 +200,7 @@ class HeadlessRunSession(QObject):
             "project": getattr(self, "_pending_project", "") or "",
             "uut_type": getattr(self, "_pending_uut_type", "") or "",
             "uut_serial": getattr(self, "_pending_uut_serial", "") or "",
+            "stop_on_fail": bool(getattr(self, "_pending_stop_on_fail", False)),
         }
 
         self._engine = RunEngine(
@@ -194,6 +210,7 @@ class HeadlessRunSession(QObject):
             project=pending["project"],
             uut_type=pending["uut_type"],
             uut_serial=pending["uut_serial"],
+            stop_on_fail=pending["stop_on_fail"],
             station_name=self._config.station_name or "",
             station_uuid=self._config.station_uuid or "",
             ate_version="",  # ticket 02 leaves the ATE version empty; a later ticket fills it
