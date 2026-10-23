@@ -41,6 +41,21 @@ return ScheduleParams("Erroring schedule", "A step that raises a Lua error")
   })
 """
 
+# A three-step schedule with its middle step disabled at the author's default. Used to cover
+# enabling/disabling: seq 0 ("one") and seq 2 ("three") pass when enabled; seq 1 ("two")
+# reports FAIL but is :setEnable(false) by default, so a run leaves it NOTRUN unless toggled on.
+MULTI = """\
+return ScheduleParams("Multi schedule", "Three steps, the middle one off by default")
+  :setSchedule({
+    StepParams("one"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "a", "a") end),
+    StepParams("two"):setStepNo("2."):setEnable(false)
+      :setAction(function() ATE.report(Result.FAIL, "should not run", "b", "c") end),
+    StepParams("three"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "d", "d") end),
+  })
+"""
+
 
 def _sha256(path: Path) -> str:
     return __import__("hashlib").sha256(Path(path).read_bytes()).hexdigest()
@@ -58,6 +73,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8")
     (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8")
     (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
+    (defs_dir / "multi.tslua").write_text(MULTI, encoding="utf-8")
 
     atedef = {
         "format": 1,
@@ -68,6 +84,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "passing.tslua", "sha256": _sha256(defs_dir / "passing.tslua")},
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},
             {"path": "erroring.tslua", "sha256": _sha256(defs_dir / "erroring.tslua")},
+            {"path": "multi.tslua", "sha256": _sha256(defs_dir / "multi.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
