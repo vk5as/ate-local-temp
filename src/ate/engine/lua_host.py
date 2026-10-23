@@ -60,6 +60,64 @@ class VersionMismatch(HostError):
 # The one and only Lua version ATE runs Test Schedules on.
 TARGET_LUA_VERSION = (5, 5)
 
+# ATE.run field names (criterion c). Each maps to a RunEngine attribute when populating the table
+# from run context; until then every field reads back as nil. The table is read-only — writing any
+# of these raises, so a schedule can only READ the current run's identifying metadata and never
+# mutate it. "name" is the test schedule's declared name (distinct conceptually from
+# Test_Schedule_Name, the identifier used to select/run it); both are sourced from the loaded
+# ScheduleParams in ticket 02 where they coincide.
+_RUN_FIELDS: tuple[str, ...] = (
+    "UUT_serial",
+    "Operator",
+    "Station",
+    "Project",
+    "Test_Schedule_Name",
+    "Media_Release_Media_Number",
+    "name",
+    "version",
+)
+
+# Raised when a schedule tries to write one of ATE.run's fields. Surfaced by the run engine as an
+# ERROR Attempt (criterion 02); naming the table keeps it consistent with "<file>:<line>: ATE.<fn>:".
+ATE_RUN_READONLY = "ATE.run: read-only"
+
+
+def _build_readonly_table_source(mapping: Mapping[str, Any]) -> str:
+    """Return Lua source for a read-only metadata table seeded with ``mapping`` (field -> value).
+
+    Values are stored in a private local ``vals``, captured by the metatable's closures as upvalues,
+    so nothing leaks into the schedule's global scope. The public table is empty; its ``__index``
+    serves reads from ``vals`` while its ``__newindex`` raises on any assignment. Because no key is
+    stored directly in the public table, every field appears *missing* to Lua — which makes
+    ``__newindex`` fire even when writing an already-seeded field (Lua only consults ``__newindex``
+    for keys absent from the underlying table; a plain seeded table would let existing-field writes
+    slip through untouched). The raiser is a separate local function because this lupa build's parser
+    rejects an inline ``error(...)`` as the last expression before ``})``, and needs an explicit
+    ``end``. The empty table is returned, so no global leaks into the schedule."""
+    pairs = ", ".join(f"{field}={_lua_value(value)}" for field, value in mapping.items()) or "nil"
+    return (
+        "local function _raise() error(%r) end" % ATE_RUN_READONLY
+        + "\n"
+        + f"local vals = {{ {pairs} }}"
+        + "\n"
+        + "return setmetatable({}, {"
+        + "__index=function(t,k) return vals[k] end,"
+        + "__newindex=function() return _raise() end"
+        + "})"
+    )
+
+
+def _lua_value(value: Any) -> str:
+    """Render a Python value as a safe single-quoted Lua literal (``None``/``""`` become ``nil``).
+
+    Used only to seed ATE.run's fields via :meth:`_AteTable.publish_run`; field names are the fixed
+    :data:`_RUN_FIELDS` constants, so nothing here reaches Lua source and there is no injection."""
+    if value is None or value == "":
+        return "nil"
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 # Enum tables: Lua label -> string value. Defined as Lua assignment chunks so each
 # becomes a real global readable by the schedule chunk that uses it.
 _ENUMS: dict[str, Mapping[str, str]] = {
@@ -123,6 +181,9 @@ class _AteTable:
 
     def __init__(self) -> None:
         self._extra: dict[str, Callable[..., Any]] = {}
+        # Criterion c's read-only ATE.run table. Built by :meth:`_LuaHost.__init__`; ``None`` until
+        # then so a stray attribute probe surfaces the usual AttributeError rather than a table.
+        self._run: Any = None
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
@@ -190,16 +251,32 @@ class _AteTable:
         return True
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
-        # Only the device operations later tickets register here are wrapped so a Python
-        # exception returns graceful halves instead of reaching Lua (criterion 03). Names that
-        # are not registered fall through to ``AttributeError`` — otherwise dunder probes
-        # (e.g. ``__getitem__``, which lupa runs when assigning this table as a global) would
-        # raise the wrong exception type and break construction/lookup.
+        if name == "run":
+            # Criterion c: ATE.run is a read-only metadata table (a real Lua table), not a function.
+            # Return it directly so field reads work and writes trip its __newindex guard; routing
+            # it through _isolate would wrap it in a callable and break both. Names that are not the
+            # run table or registered functions fall through to ``AttributeError`` — otherwise dunder
+            # probes (e.g. ``__getitem__``, which lupa runs when assigning this table as a global)
+            # would raise the wrong exception type and break construction/lookup.
+            return self._run
         try:
             fn = self._extra[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
         return self._isolate(fn, name)
+
+    def publish_run(self, values: Mapping[str, Any]) -> Any:
+        """Rebuild ATE.run from run context (criterion c) and return the new read-only table.
+
+        The table is read-only, so a schedule can only READ these fields; writing any of them raises.
+        Field names are the fixed :data:`_RUN_FIELDS` constants, so nothing here reaches Lua source and
+        there is no injection to worry about."""
+        seeded = {field: values.get(field) for field in _RUN_FIELDS if field in values}
+        self._run = self._host._runtime.execute(
+            _build_readonly_table_source(seeded),
+            name=f"@{self._host._schedule_path.name}-run",
+            mode="t",
+        )
 
 
 class _StepParams:
@@ -327,6 +404,15 @@ class _LuaHost:
         ate._host = self  # report()/log() record into the host's ordered lists
         env["ATE"] = ate
         self._ate = ate
+        # Criterion c: expose the current run's identifying metadata as a read-only Lua table. Built
+        # here (all fields nil) so it exists even before any run context is published; :meth:`_AteTable.publish_run`
+        # rebuilds it from RunEngine context via rawset without tripping the read-only guard. The
+        # schedule reads ATE.run through _AteTable.__getattr__("run").
+        ate._run = self._runtime.execute(
+            _build_readonly_table_source({field: None for field in _RUN_FIELDS}),
+            name=f"@{Path(path).name}-run",
+            mode="t",
+        )
         # Redirect stray prints to ATE.log(INFO, ...) so schedule output is always logged.
         self._bind_print(ate)
 

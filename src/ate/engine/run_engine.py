@@ -100,6 +100,21 @@ class RunEngine(QThread):
         for name, fn in self._ate_fns.items():
             host.ate.register(name, fn)  # criterion 03: isolate a failing ATE call through Lua
         schedule = host.schedule
+        # Criterion c: publish this run's identifying metadata into the read-only ATE.run table so a
+        # step can READ it (e.g. which UUT/operator/project it is running under). Empty fields seed
+        # as nil; writes from Lua are rejected by the table's read-only guard.
+        host.ate.publish_run(
+            {
+                "UUT_serial": self.uut_serial or None,
+                "Operator": self.operator or None,
+                "Station": self.station_name or None,
+                "Project": self.project or None,
+                "Test_Schedule_Name": schedule.name if schedule else None,
+                "Media_Release_Media_Number": self.media_number or None,
+                "name": schedule.name if schedule else None,
+                "version": self.ate_version or None,
+            }
+        )
         steps = schedule.steps
 
         run_uuid = new_uuid7()

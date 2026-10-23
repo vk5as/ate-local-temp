@@ -99,6 +99,26 @@ return ScheduleParams("Pretest log schedule", "log in a pretest action is fine")
   :setPreTestAction(function() ATE.log(Log.INFO, "setup running") end)
 """
 
+# A schedule whose single step reads ATE.run.Operator (populated by the run engine from this run's
+# context) and reports it — so an end-to-end run records the operator a step can read.
+READS_RUN = """\
+return ScheduleParams("Reads run schedule", "a step that reads ATE.run")
+  :setSchedule({
+    StepParams("read operator"):setStepNo("1.")
+      :setAction(function() local op=ATE.run.Operator; ATE.report(Result.PASS, "operator is "..op) end),
+  })
+"""
+
+# A schedule whose single step tries to write ATE.run — which must raise (the table is read-only).
+# The raised error becomes an ERROR attempt and fails the run.
+WRITES_RUN = """\
+return ScheduleParams("Writes run schedule", "a step that writes ATE.run")
+  :setSchedule({
+    StepParams("hacker"):setStepNo("1.")
+      :setAction(function() ATE.run.Operator = "injected" end),
+  })
+"""
+
 # A schedule whose single step calls an isolated failing ATE function (ATE.boom). The function
 # is registered on the driven host via RunEngine's ate_fns seam; calling it from Lua raises a
 # Python exception that _AteTable._isolate must catch, log at ERROR, and return as graceful
