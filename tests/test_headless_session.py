@@ -23,7 +23,15 @@ def _wait_finished(session: HeadlessRunSession) -> bool:
     Queued cross-thread signals are only delivered once a QCoreApplication exists to pump them;
     this offscreen build delivers nothing through bare ``QCoreApplication.processEvents()`` when
     no instance is present. If none exists, create one so delivery works. The instance is local
-    to the test and gone by the next one, so nothing Qt lingers for interpreter shutdown."""
+    to the test and gone by the next one, so nothing Qt lingers for interpreter shutdown.
+
+    A Stop-on-Fail pause blocks the worker until an operator answers a prompt (packet 12b); headless
+    drivers have no UI to do that, so answer Continue here while pumping — mirroring how input-supplying
+    tests supply values. Passing runs never emit failure_prompt, so this only affects paused failures."""
+    def _continue_on_failure(_node_seq: int, _attempt_no: int) -> None:
+        session.choose("CONTINUE")
+
+    session.failure_prompt.connect(_continue_on_failure)
     app = QCoreApplication.instance()
     if app is None:
         app = QCoreApplication([])

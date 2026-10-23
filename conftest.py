@@ -45,7 +45,11 @@ def _stop_workers(app: QApplication) -> None:
     that is what makes ``test_run_view_is_hidden_until_a_run_starts`` flake across a full run.
     Stopping workers here guarantees each test starts with no lingering worker feeding events."""
     def _halt(obj: object) -> None:
-        for child in list(getattr(obj, "children", lambda: [])()):
+        try:
+            children = list(getattr(obj, "children", lambda: [])())
+        except RuntimeError:  # deleted on the C++ side mid-walk (e.g. a gesture object); nothing to stop
+            return
+        for child in children:
             if isinstance(child, QThread) and child.isRunning():
                 child.stop()
             _halt(child)
@@ -61,7 +65,11 @@ def _destroy_widget_tree(app: QApplication) -> None:
     that finalization segfaults. Deleting them here (before the app quits) means nothing Qt is
     left for ``Py_Exit`` to touch."""
     def _drop(obj: object) -> None:
-        for child in list(getattr(obj, "children", lambda: [])()):
+        try:
+            children = list(getattr(obj, "children", lambda: [])())
+        except RuntimeError:  # already deleted on the C++ side
+            return
+        for child in children:
             if isinstance(child, QWidget):
                 child.deleteLater()
             else:

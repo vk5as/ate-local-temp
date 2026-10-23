@@ -44,7 +44,15 @@ def _rows_for(store, run_uuid: str) -> dict[int, tuple[str, str]]:
 
 
 def _wait_finished(qapp, session):
-    """Poll processEvents until the session reaches FINISHED (or times out)."""
+    """Poll processEvents until the session reaches FINISHED (or times out).
+
+    A Stop-on-Fail pause blocks the worker until an operator answers a prompt (packet 12b); headless
+    drivers have no UI to do that, so answer Continue here while pumping — mirroring how input-supplying
+    tests supply values. Passing runs never emit failure_prompt, so this only affects paused failures."""
+    def _continue_on_failure(_node_seq: int, _attempt_no: int) -> None:
+        session.choose("CONTINUE")
+
+    session.failure_prompt.connect(_continue_on_failure)
     for _ in range(3000):
         qapp.processEvents()
         if session._state == SessionState.FINISHED:

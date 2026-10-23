@@ -59,6 +59,7 @@ class HeadlessRunSession(QObject):
 
     state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
@@ -209,6 +210,15 @@ class HeadlessRunSession(QObject):
             raise SessionError("cannot abort when no run is in progress")
         self._engine.request_abort()
 
+    def choose(self, choice: str) -> None:
+        """Answer a Stop-on-Fail failure prompt (CONTINUE / RETRY / ABORT).
+
+        Only meaningful while a run is paused on a failure; delegate to the worker so it records the
+        choice and unblocks. Raises if there is no run to answer."""
+        if self._engine is None:
+            raise SessionError("cannot choose when no run is in progress")
+        self._engine.choose(choice)
+
     # -- start ---------------------------------------------------------------
 
     def start(self) -> RunEngine:
@@ -278,6 +288,9 @@ class HeadlessRunSession(QObject):
         # through this session before it starts — connecting here avoids the single-shot race of
         # grabbing the engine after start() has already begun.
         self._engine.input_asked.connect(self._on_input_asked)
+        # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
+        # answer it through this session once it fires — same connection timing as input asks above.
+        self._engine.failure_prompt.connect(self._on_failure_prompt)
 
         self._engine.start()
         return self._engine
@@ -291,3 +304,9 @@ class HeadlessRunSession(QObject):
 
         Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
         self.input_asked.emit(node_seq, attempt_no, index)
+
+    def _on_failure_prompt(self, node_seq: int, attempt_no: int) -> None:
+        """Forward the worker's Stop-on-Fail failure prompt so an operator (or test) can answer it.
+
+        Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
+        self.failure_prompt.emit(node_seq, attempt_no)
