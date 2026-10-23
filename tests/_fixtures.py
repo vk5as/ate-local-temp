@@ -140,37 +140,18 @@ return ScheduleParams("Isolated schedule", "A step that calls an isolated failin
 
 
 def _drive(engine: "RunEngine", app, on_run_uuid=None) -> None:
-    """Start the worker and pump events until its run key is actually delivered.
+    """Run the worker to completion, then deliver the signals it queued onto this thread.
 
-    The engine delivers ``run_uuid_reported`` through a queued connection onto this shared
-    application's event loop, so the slot only fires when we process events. We wait for that
-    delivery rather than on ``isRunning()``: this Qt 6.11 / PyQt6 build can report a QThread as
-    stopped before it has emitted its queued cross-thread signal, and that misreport accumulates
-    across tests driving workers off one shared application — after ticket 03's staged_run_screen
-    tests leave lingering workers/timers on the loop, a subsequent worker reports ``isRunning()``
-    while never delivering within the pump window. Keep pumping until the key arrives (or the cap
-    is hit), then drain once more for anything queued just before the worker stopped. ``on_run_uuid``
-    captures the run key; pass it from the caller's capture closure instead of connecting separately
-    so there is one connection point.
-    """
-    from PyQt6.QtCore import QCoreApplication  # noqa: E402
-
-    delivered = {"run_uuid": None}
+    The worker's signals reach the test through queued connections, so they only fire once the
+    main thread processes posted events. Wait on the thread itself (a real deadline, not a fixed
+    number of ``processEvents`` calls, which a slow or busy machine can exhaust before the worker
+    has even emitted), then flush the posted events so every queued slot has run."""
     if on_run_uuid is not None:
-        def _slot(run_uuid):
-            delivered["run_uuid"] = run_uuid
-            on_run_uuid(run_uuid)
-
-        engine.run_uuid_reported.connect(_slot)
-    else:
-        engine.run_uuid_reported.connect(lambda _: None)  # still deliver, just ignore
+        engine.run_uuid_reported.connect(on_run_uuid)
     engine.start()
-    for _ in range(2000):
-        app.processEvents()
-        if delivered["run_uuid"] is not None:
-            break
-    for _ in range(200):
-        app.processEvents()
+    assert engine.wait(10_000), "run engine did not finish within 10 s"
+    app.sendPostedEvents()
+    app.processEvents()
 
 
 def _sha256(path: Path) -> str:

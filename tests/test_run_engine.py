@@ -16,17 +16,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage._uuid import new_uuid7
 from ate.storage.store import RunStore
 
-from ._fixtures import ERRORING, FAILING, NEVER_REPORTS, PASSING
-
-
-def _drive(engine: RunEngine, app: QCoreApplication) -> None:
-    """Start the worker and poll processEvents until it stops running."""
-    engine.state_changed.connect(lambda status: None)  # swallow; we read state from the store
-    engine.start()
-    for _ in range(2000):
-        if not engine.isRunning():
-            break
-        app.processEvents()
+from ._fixtures import ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:

@@ -19,7 +19,7 @@ from ate.engine.lua_host import ATE_RUN_READONLY, _RUN_FIELDS, LuaHost
 from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
-from ._fixtures import READS_RUN, WRITES_RUN
+from ._fixtures import READS_RUN, WRITES_RUN, _drive
 
 
 def _make_host(source: str) -> LuaHost:
@@ -28,16 +28,6 @@ def _make_host(source: str) -> LuaHost:
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8")
         return LuaHost(str(schedule_path))
-
-
-def _drive(engine: RunEngine, app: QCoreApplication) -> None:
-    """Start the worker and pump events until it stops running."""
-    engine.state_changed.connect(lambda status: None)  # swallow; we read state from the store
-    engine.start()
-    for _ in range(2000):
-        if not engine.isRunning():
-            break
-        app.processEvents()
 
 
 def _run_schedule(app: QCoreApplication, source: str, **kwargs) -> tuple[RunStore, dict]:
