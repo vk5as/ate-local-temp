@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import json
+import queue
 import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -70,6 +71,7 @@ class RunEngine(QThread):
     run_uuid_reported = pyqtSignal(str)  # the freshly generated run key, on start
     state_changed = pyqtSignal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
 
     def __init__(
         self,
@@ -119,6 +121,18 @@ class RunEngine(QThread):
         # loop iteration; see :meth:`aborted`.
         self._abort_lock = threading.Lock()
         self._aborted = False
+        # Stop-on-Fail failure pause (packet 12b). When set and a step fails, the worker blocks in
+        # :meth:`_pause_for_operator` until choose() records a choice; ``_opted_out_of_pause`` is set
+        # once an operator chooses CONTINUE/RETRY so later failures never pause again. Pending pauses
+        # are keyed by (node_seq, attempt_no) and delivered through plain queues — the same Qt 6.11 /
+        # PyQt6 6.11 offscreen deadlock that makes OperatorInput avoid a Condition means no
+        # threading.Condition here either; a queue blocks-and-wakes correctly under the fixture's
+        # event-loop pump.
+        self._pause_lock = threading.Lock()
+        self._pending: dict[tuple[int, int], queue.Queue] = {}
+        self._opted_out_of_pause = False
+        # Set when a Stop-on-Fail pause is aborted (packet 12b); ends the run STOPPED_ON_FAIL.
+        self._stopped_on_fail = False
 
     @property
     def aborted(self) -> bool:
@@ -142,6 +156,38 @@ class RunEngine(QThread):
         Owned by the engine (a fresh one per real run); tests and the GUI drive it directly so a
         blocking supply or POLL click reaches the worker while it waits, without importing widgets."""
         return self._op
+
+    def _pause_for_operator(self, run_uuid: str, node_seq: int) -> str:
+        """Stop-on-Fail pause for a failed step: announce the pending choice and block until answered.
+
+        The failing Attempt is already recorded; once :meth:`choose` returns a value we stamp its
+        ``prompt_choice`` column (packet 12b checkbox 4). Blocks with no timeout — the worker waits
+        here while the operator/main thread supplies CONTINUE, RETRY or ABORT through choose()."""
+        ch = queue.Queue()
+        with self._pause_lock:
+            self._pending[(node_seq, 1)] = ch
+        # Mark this Attempt as ending at a prompt; resolved to its choice once choose() returns.
+        self._store.update_attempt(run_uuid, node_seq, 1, prompt_choice=None)
+        # Announce the pending choice on the owning thread so an operator/test can answer it there.
+        self.failure_prompt.emit(node_seq, 1)
+        choice = ch.get()  # blocks until choose() puts a value and wakes us
+        # Stamp the chosen CONTINUE/RETRY/ABORT onto this Attempt now that we hold it (packet 12b checkbox 4).
+        self._store.update_attempt(run_uuid, node_seq, 1, prompt_choice=choice)
+        with self._pause_lock:
+            self._pending.pop((node_seq, 1), None)
+        return choice
+
+    def choose(self, choice: str) -> None:
+        """Answer a Stop-on-Fail failure prompt from the operator/main thread (packet 12b).
+
+        Records ``choice`` (CONTINUE / RETRY / ABORT) onto the pending pause channel; the blocked
+        worker wakes and records it as that Attempt's prompt_choice. Raises if there is no run to
+        answer."""
+        with self._pause_lock:
+            entry = next(iter(self._pending), None)
+            ch = self._pending.pop(entry) if entry is not None else None
+        if ch is not None:
+            ch.put_nowait(choice)
 
     def _record_inputs(self, node_seq: int, validated: list[Any]) -> list[dict[str, Any]]:
         """Build this step's input_value rows from what OperatorInput recorded during its action.
@@ -195,25 +241,30 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return str(typed)
 
-    def _record_abort(self, run_uuid: str, steps: list[Any], aborted_seq: int) -> None:
+    def _record_abort(self, run_uuid: str, steps: list[Any], aborted_seq: int, *, record_attempt: bool = True) -> None:
         """Record a whole-run abort that took effect at step ``aborted_seq`` (0-based).
 
         The step about to run records one ERROR attempt "Aborted by Operator" and its node as
         ERROR; every later actionable step is recorded NOTRUN with no Attempt. Nothing after the
-        abort point ran, yet the aborted step still has an Attempt explaining why it stopped."""
-        step = steps[aborted_seq]
-        self._store.insert_attempt(run_uuid, aborted_seq, 1, pass_fail="ERROR", msg="Aborted by Operator")
-        self._store.insert_node(
-            run_uuid,
-            aborted_seq,
-            kind="step",
-            step_number=step.step_no or "",
-            step_name=step.name,
-            default_enabled=int(bool(step.enabled)),
-            enabled=int(bool(step.enabled)),
-            result="ERROR",
-            attempt_count=1,
-        )
+        abort point ran, yet the aborted step still has an Attempt explaining why it stopped.
+
+        ``record_attempt`` is False when the abort came from a Stop-on-Fail pause (packet 12b): that
+        failing step already has its FAIL/ERROR Attempt and prompt_choice recorded, so only the later
+        steps are marked NOTRUN and its result is kept."""
+        if record_attempt:
+            step = steps[aborted_seq]
+            self._store.insert_attempt(run_uuid, aborted_seq, 1, pass_fail="ERROR", msg="Aborted by Operator")
+            self._store.insert_node(
+                run_uuid,
+                aborted_seq,
+                kind="step",
+                step_number=step.step_no or "",
+                step_name=step.name,
+                default_enabled=int(bool(step.enabled)),
+                enabled=int(bool(step.enabled)),
+                result="ERROR",
+                attempt_count=1,
+            )
         for seq in range(aborted_seq + 1, len(steps)):
             later = steps[seq]
             if later.action is None:
@@ -511,17 +562,41 @@ class RunEngine(QThread):
                 inputs=[d.to_dict() for d in validated] if validated else None,
             )
 
+            # Stop on Fail: a failed step pauses until the operator chooses (packet 12b). The failing
+            # Attempt is already recorded above; once choose() returns we stamp its prompt_choice and
+            # either keep going (CONTINUE/RETRY — and disable further pauses) or stop cleanly (ABORT ->
+            # remaining steps NOTRUN, End Reason STOPPED_ON_FAIL / result FAIL). A chosen CONTINUE means
+            # later failures never pause again. RETRY's rerun semantics are 12c; here it keeps going like
+            # Continue so the seam exists and nothing blocks on an unanswered choice.
+            if self.stop_on_fail and not self._opted_out_of_pause:
+                if last_result == "FAIL" or error_text is not None:
+                    failed = True
+                    pass_fail = "FAIL"
+                    choice = self._pause_for_operator(run_uuid, seq)
+                    # _pause_for_operator blocked until choose(); it recorded prompt_choice and returned.
+                    if choice == "ABORT":
+                        # Stop cleanly between steps; keep the failed step's result (already recorded).
+                        self._stopped_on_fail = True
+                        self._record_abort(run_uuid, steps, seq, record_attempt=False)
+                        break
+                    elif choice in ("CONTINUE", "RETRY"):
+                        # Keep this step's result; a chosen continue/retry opts out of further pauses.
+                        self._opted_out_of_pause = True
+
         # Post-test Actions run after the last step, in reverse, each called with the final pass_fail.
         # They record action rows too; 14c owns whether a skipped Pre-test suppresses them.
         for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
             _outcome, _error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
 
-        # A Pre-test failure aborts before any step runs (packet 14b); a whole-run abort requested
-        # between steps fails the run with End Reason ABORTED; a normal finish is FAIL on any
-        # FAIL/ERROR, otherwise PASS. STOPPED_ON_FAIL comes with the Stop-on-Fail prompt in 13b.
+        # A Pre-test failure aborts before any step runs (packet 14b); a Stop-on-Fail pause that was
+        # aborted ends STOPPED_ON_FAIL; a whole-run operator abort between steps ends ABORTED; a normal
+        # finish is FAIL on any FAIL/ERROR, otherwise PASS.
         if pretest_failed:
             run_result = "FAIL"
             end_reason = "PRETEST_FAILED"
+        elif self._stopped_on_fail:
+            run_result = "FAIL"
+            end_reason = "STOPPED_ON_FAIL"
         elif aborted:
             run_result = "FAIL"
             end_reason = "ABORTED"

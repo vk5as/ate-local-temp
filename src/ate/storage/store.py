@@ -273,6 +273,16 @@ class RunStore:
             )
         )
 
+    def update_attempt(self, run_uuid: str, node_seq: int, attempt_no: int, **fields: Any) -> None:
+        """Update one Attempt row by its composite key (e.g. stamp a Stop-on-Fail prompt_choice)."""
+        self._run(
+            attempt.update()
+            .where(attempt.c.run_uuid == run_uuid)
+            .where(attempt.c.node_seq == node_seq)
+            .where(attempt.c.attempt_no == attempt_no)
+            .values(**fields)
+        )
+
     # -- action -------------------------------------------------------------
 
     def insert_action(
