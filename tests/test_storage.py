@@ -167,9 +167,11 @@ def test_log_lines_batch_round_trip_through_store(tmp_path) -> None:
     )
 
     lines = store.log_lines(run_uuid)
-    assert [line["seq"] for line in lines] == [0, 1]
+    # Each line gets its own unique seq (the batch holds several), numbered monotonically.
+    assert [line["seq"] for line in lines] == [0, 1, 2, 3]
 
-    step_lines = [ln for ln in lines if ln["seq"] == 0]
+    # The step's three owned lines are identified by ownership, not by a shared seq.
+    step_lines = [ln for ln in lines if ln["node_seq"] == 0 and ln["attempt_no"] == 1]
     assert [(ln["level"], ln["source"], ln["text"]) for ln in step_lines] == [
         ("INFO", "schedule", "step started"),
         ("WARNING", "schedule", "value out of range"),
@@ -178,7 +180,7 @@ def test_log_lines_batch_round_trip_through_store(tmp_path) -> None:
     # Levels are normalised to upper case; ownership is expressed through the foreign keys.
     assert step_lines[0]["node_seq"] == 0 and step_lines[0]["attempt_no"] == 1
     assert step_lines[0]["action_seq"] is None
-    run_line = lines[1]
+    run_line = lines[3]
     assert (run_line["level"], run_line["source"], run_line["text"]) == ("DEBUG", "ate", "nothing reported")
     assert run_line["node_seq"] is None and run_line["attempt_no"] is None and run_line["action_seq"] is None
 

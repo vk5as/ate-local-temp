@@ -156,6 +156,11 @@ class RunStore:
         # check_same_thread=False lets a later QThread run worker share it; callers
         # that use it cross-thread (the run engine) serialise access themselves.
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        # Per-run next log-line seq, so a batch can hold several lines (an INFO print and
+        # an ERROR warning from the same step) without colliding on ``(run_uuid, seq)``.
+        # The store spans one whole run, so this counter stays monotonic across every
+        # step's batches and preserves emission order within and between them.
+        self._log_seq: dict[str, int] = {}
         self._ensure_schema()
 
     def _run(self, stmt) -> Any:
@@ -288,10 +293,19 @@ class RunStore:
         ``lines`` is an ordered list; each entry needs ``level``, ``source`` and ``text``.
         Ownership (which Action or Attempt owns the line) applies to every line in the
         batch — within one step's action all schedule lines are owned by that Attempt, so a
-        single call batches them with shared ownership rather than writing one row per line."""
+        single call batches them with shared ownership rather than writing one row per line.
+
+        Each line gets its own unique ``seq``: ``(run_uuid, seq)`` is the primary key and a
+        batch can hold several lines (an INFO print plus an ERROR warning from the same step),
+        so they are numbered from the run's log-line counter (:attr:`_log_seq`) rather than
+        sharing one value. The ``seq`` argument stays for call-site clarity; ownership is set
+        through ``node_seq``/``attempt_no`` instead."""
+        next_seq = self._log_seq.get(run_uuid, 0)
         rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no) for line in lines]
-        for row in rows:
+        for i, row in enumerate(rows):
+            row["seq"] = next_seq + i  # unique within this batch
             self._run(log_line.insert().values(**row))
+        self._log_seq[run_uuid] = next_seq + len(rows)  # keep later batches monotonic
 
     def log_lines(self, run_uuid: str) -> list[dict]:
         """Return this run's recorded log lines as dicts (empty when the run is unknown)."""

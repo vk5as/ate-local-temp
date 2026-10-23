@@ -125,6 +125,7 @@ class RunEngine(QThread):
                 continue
 
             start = len(host.reports)
+            log_start = len(host.logs)
             error_text: Optional[str] = None
             try:
                 step.action()  # runs the closure in Lua; may call ATE.report several times
@@ -160,6 +161,30 @@ class RunEngine(QThread):
                         run_uuid, seq, 1, pass_fail="NOREPORT", msg=None
                     )
                     attempts_recorded = 1
+
+            # Every schedule-sourced log line emitted during this step's action belongs to
+            # that Attempt (source "schedule"); a step that never reported adds its own
+            # warning (source "ate"). Both are batched into one insert keyed by the step.
+            new_logs = host.logs[log_start:]
+            if new_logs:
+                self._store.insert_log_lines(
+                    run_uuid,
+                    seq,
+                    [
+                        {"level": level, "source": source, "text": text}
+                        for (level, source, text) in new_logs
+                    ],
+                    node_seq=seq,
+                    attempt_no=1,
+                )
+            if not new_reports:
+                self._store.insert_log_lines(
+                    run_uuid,
+                    seq,
+                    [{"level": "WARNING", "source": "ate", "text": f"step '{step.name}' never reported"}],
+                    node_seq=seq,
+                    attempt_no=1,
+                )
 
             # A step fails the whole run on FAIL or ERROR — whether that came from an
             # ATE.report call above or from a raised action (recorded as an ERROR attempt).
