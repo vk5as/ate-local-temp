@@ -43,10 +43,10 @@ class NotAllowedError(ATEError):
     """ATE was called where it isn't allowed (criterion b).
 
     Raised by :meth:`_AteTable.report` and :meth:`_AteTable.input` when the host's current
-    execution context makes the call illegal — e.g. ``ATE.report`` at load time, or
-    ``ATE.input``/``ATE.report`` inside a Pre-test/Post-test Action instead of a step. The
-    message carries the schedule's own ``<file>:<line>`` and names the function, so it reads as
-    ``schedule.tslua:42: ATE.report: only allowed in a step or Pre/Post-test Action``."""
+    execution context makes the call illegal — e.g. ``ATE.report``/``ATE.input`` at load time, or
+    inside a Pre-test/Post-test Action instead of a step. The message carries the schedule's own
+    ``<file>:<line>`` and names the function, so it reads as
+    ``schedule.tslua:42: ATE.report: only allowed in a step action``."""
 
 
 class HostError(ATEError):
@@ -220,12 +220,13 @@ class _AteTable:
         self, pass_fail: Any, msg: Any = None, actual: Any = None, expected: Any = None
     ) -> bool:
         """Record a step's result. Returns ``true`` so the schedule keeps running."""
-        # ATE.report belongs to steps and Pre/Post-test Actions; it is not legal while the file is
-        # loading (only the builders, require, log and the enums are). Refuse there first with an
-        # error that carries the caller's file:line and names the function.
-        if self._host._context not in ("step", "pretest", "posttest"):
+        # ATE.report belongs to steps only; it is not legal in a Pre-test/Post-test Action or while
+        # the file is loading (only the builders, require, log and the enums are). Refuse there
+        # first with an error that carries the caller's file:line and names the function — exactly
+        # like ATE.input.
+        if self._host._context != "step":
             raise NotAllowedError(
-                f"{self._host._location()} ATE.report: only allowed in a step or Pre/Post-test Action"
+                f"{self._host._location()} ATE.report: only allowed in a step action"
             )
         # The host appends every call in order; the run engine attributes each batch
         # to the step whose action closure just ran (last call wins per step).

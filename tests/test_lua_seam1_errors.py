@@ -131,4 +131,4 @@ def test_report_lockdown_records_message_form_and_content() -> None:
     assert "schedule.tslua:" in text
     assert "ATE.report:" in text
     # Full content: one settled line carrying BOTH the location and the reason.
-    assert "only allowed in a step or Pre/Post-test Action" in text
+    assert "only allowed in a step action" in text

@@ -93,6 +93,13 @@ return ScheduleParams("Posttest input schedule", "input in a posttest action") :
   :setPostTestAction(function() ATE.input(1) end)
 """
 
+# Same restriction for ATE.report in a Pre-test Action: report is step-only (like input), so this
+# must raise when the action runs through its phase context.
+PRETEST_REPORT = """\
+return ScheduleParams("Pretest report schedule", "report in a pretest action") :setSchedule({})
+  :setPreTestAction(function() ATE.report(Result.PASS, "not allowed here") end)
+"""
+
 # A schedule whose Pre-test Action calls ATE.log — which IS legal everywhere except load time.
 PRETEST_LOG = """\
 return ScheduleParams("Pretest log schedule", "log in a pretest action is fine") :setSchedule({})
