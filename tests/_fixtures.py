@@ -63,7 +63,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
         "format": 1,
         "mediaNumber": "REL-A",
         "name": "Demo release",
-        "version": "1.0",
+        "version": "1.0.0",
         "files": [
             {"path": "passing.tslua", "sha256": _sha256(defs_dir / "passing.tslua")},
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},

@@ -9,8 +9,11 @@ reimplementing argument handling here.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sqlite3
 import sys
+from pathlib import Path
 
 from ._version import __version__
 
@@ -31,10 +34,12 @@ def main(argv=None) -> int:
     command = argv[0]
     if command == "db":
         return _cmd_db(argv[1:])
+    if command == "definition":
+        return _cmd_definition(argv[1:])
 
     prog = "ate"
     print(
-        f"{prog}: no command given\ntry '{prog} --version' or '{prog} db status'",
+        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status' or '{prog} definition update <file.atedef>'",
         file=sys.stderr,
     )
     return 1
@@ -106,6 +111,75 @@ def _db_migrate(path: str, extra: list[str]) -> int:
     finally:
         conn.close()
     print(f"created or upgraded database at {path} (schema version {version})")
+    return 0
+
+
+def _cmd_definition(argv: list[str]) -> int:
+    """Dispatch ``ate definition <update|…> [PATH]``."""
+    sub = argv[0] if argv else None
+    if sub == "update":
+        if len(argv) < 2:
+            print("ate definition update: missing <file.atedef>", file=sys.stderr)
+            return 1
+        return _definition_update(argv[1])
+    if sub is None:
+        print(
+            "ate definition: no subcommand given\ntry 'ate definition update <file.atedef>'",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"ate definition: unknown command '{sub}'", file=sys.stderr)
+    return 1
+
+
+def _definition_update(path: str) -> int:
+    """Recompute every listed file's sha256 in place, filling in any that are missing.
+
+    Reads ``<file.atedef>`` as JSON; for each entry with a ``path``, the file is read and its SHA-256
+    (lowercase hex) written back over the existing value or filled in when absent. The definition file
+    is only rewritten when at least one checksum changed, so an already-correct definition is left
+    untouched. A listed file that cannot be read leaves its current sha256 and warns rather than failing
+    the whole command.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        print(f"definition update: file not found: {path}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"definition update: could not read {path}: {exc}", file=sys.stderr)
+        return 1
+
+    if not isinstance(data, dict):
+        print(f"definition update: '{path}' must be a JSON object", file=sys.stderr)
+        return 1
+
+    atedef_path = Path(path).resolve()
+    def_dir = atedef_path.parent
+    updated = 0
+    for index, entry in enumerate(data.get("files", []) or []):
+        if not isinstance(entry, dict) or "path" not in entry:
+            print(f"definition update: files[{index}] has no 'path'; leaving its sha256", file=sys.stderr)
+            continue
+
+        rel = entry["path"]
+        full = rel if Path(rel).is_absolute() else def_dir / rel
+        try:
+            data_bytes = full.read_bytes()
+        except FileNotFoundError:
+            print(f"definition update: cannot checksum missing file {rel}; leaving its sha256", file=sys.stderr)
+            continue
+
+        computed = hashlib.sha256(data_bytes).hexdigest()
+        if "sha256" not in entry or entry["sha256"] != computed:
+            entry["sha256"] = computed
+            updated += 1
+
+    if updated:
+        atedef_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print(f"definition update: wrote {updated} checksum(s) to {path}")
+    else:
+        print(f"definition update: all checksums already current in {path}")
     return 0
 
 
