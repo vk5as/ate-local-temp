@@ -46,6 +46,17 @@ return ScheduleParams("Erroring schedule", "A step that raises a Lua error")
   })
 """
 
+# A failing schedule that explicitly turns Stop on Fail off. Selecting it records stop_on_fail=0
+# without any Operator override; the Steps stage radio would prefill unchecked for it.
+STOP_ON_FAIL_FALSE = """\
+return ScheduleParams("Stop on fail false schedule", "a step that fails and stops on fail is off")
+  :setSchedule({
+    StepParams("LED colour"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.FAIL, "wrong colour", "Red", "Green") end),
+  })
+  :setStopOnFail(false)
+"""
+
 # A schedule whose steps log at every level and also use print — exercising ticket 08's
 # ATE.log(Log.X, ...) recording and the print -> INFO redirection.
 LOGGING = """\
@@ -229,6 +240,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     defs_dir.mkdir(parents=True, exist_ok=True)
     (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8")
     (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8")
+    (defs_dir / "stop_on_fail_false.tslua").write_text(STOP_ON_FAIL_FALSE, encoding="utf-8")
     (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
     (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8")
     (defs_dir / "pre_post_pass.tslua").write_text(PRE_POST_PASS, encoding="utf-8")
@@ -250,6 +262,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
         "files": [
             {"path": "passing.tslua", "sha256": _sha256(defs_dir / "passing.tslua")},
             {"path": "failing.tslua", "sha256": _sha256(defs_dir / "failing.tslua")},
+            {"path": "stop_on_fail_false.tslua", "sha256": _sha256(defs_dir / "stop_on_fail_false.tslua")},
             {"path": "erroring.tslua", "sha256": _sha256(defs_dir / "erroring.tslua")},
             {"path": "logging.tslua", "sha256": _sha256(defs_dir / "logging.tslua")},
             {"path": "pre_post_pass.tslua", "sha256": _sha256(defs_dir / "pre_post_pass.tslua")},
