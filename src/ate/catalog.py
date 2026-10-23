@@ -535,7 +535,7 @@ def _schedule_summaries(definition: Definition) -> list[tuple[str, str, str]]:
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full)
+            host = LuaHost(full, modules=module_map(definition))
             schedule_name = host.schedule.name
             description = host.schedule.description
         except HostError as exc:
@@ -578,7 +578,7 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
                 continue
             full = definition.path / file_entry.rel_path
             try:
-                host = LuaHost(full)
+                host = LuaHost(full, modules=module_map(definition))
                 rows.append(
                     ScheduleRow(
                         media_number=definition.media_number,
@@ -602,7 +602,7 @@ def resolve_schedule_path(definition: Definition, schedule_name: str) -> Path | 
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full)
+            host = LuaHost(full, modules=module_map(definition))
         except HostError:
             continue
         if host.schedule.name == schedule_name:
@@ -623,4 +623,43 @@ def resolve_schedule(*directories: str | Path, schedule_name: str) -> Path | Non
         path = resolve_schedule_path(definition, schedule_name)
         if path is not None:
             return path
+    return None
+
+
+def module_map(definition: Definition) -> dict[str, Path]:
+    """Map each listed helper module name to its absolute path (packet 06a).
+
+    Only non-schedule entries with a derived or explicit ``module_name`` are included — schedules run
+    as Test Schedules, not modules. Paths resolve against the definition's directory so the Lua host
+    can read them directly; a missing file is still listed here (its absence is a defect caught when
+    the module is loaded), never filtered out."""
+    return {
+        entry.module_name: definition.path / entry.rel_path
+        for entry in definition.files
+        if not entry.is_schedule and entry.module_name is not None
+    }
+
+
+def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
+    """Return the usable Media Release whose loaded schedules include ``schedule_name`` (or ``None``).
+
+    Like :func:`resolve_schedule` but returns the whole :class:`Definition`, so a caller can read the
+    release's module map alongside the resolved schedule. Broken releases and schedules that fail to
+    load are skipped, matching :func:`resolve_schedule`.
+    """
+    for definition in find_definitions(*directories):
+        if definition.broken:
+            continue
+        # Load each schedule with its own release's module map so a load-time require still resolves.
+        modules = module_map(definition)
+        for file_entry in definition.files:
+            if not file_entry.is_schedule or file_entry.hidden:
+                continue
+            full = definition.path / file_entry.rel_path
+            try:
+                host = LuaHost(full, modules=modules)
+            except HostError:
+                continue
+            if host.schedule.name == schedule_name:
+                return definition
     return None

@@ -415,12 +415,19 @@ class _LuaHost:
         path: str | Path,
         operator_input: Optional[OperatorInput] = None,
         aborted_flag: Optional[_AbortFlag] = None,
+        modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
     ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
         # The OperatorInput controller a step's ATE.input calls read/write through; the run engine
         # injects its own (so the app can wire supply_input/click_poll), otherwise we make one.
         self._op = operator_input or OperatorInput()
+        # Packet 06a: the whitelist of require'd modules for this host (one per Test Run). ``None``
+        # means no replacement require is installed, so any require call reads back as a nil value.
+        self._modules = dict(modules) if modules is not None else {}  # no map: nothing is requirable
+        # Cache of already-loaded module return values; keyed by module name. A nil return caches as
+        # ``True`` (stock Lua), and every later require of the same name returns this without re-running.
+        self._require_cache: dict[str, Any] = {}
         # Shared abort flag: the Lua count hook reads :attr:`aborted` every 1000 instructions, and
         # the engine sets it from request_abort(). RunEngine passes its own so both see one value;
         # a host built without one owns a private flag (used by isolated tests of the prelude).
@@ -520,6 +527,41 @@ class _LuaHost:
         for name in ("dofile", "loadfile", "load"):
             env[name] = None
         env["python"] = None
+        # Packet 06a: when this host has a module map, install ATE's replacement ``require`` and close
+        # off every other file on disk (empty package paths) so nothing outside the whitelist is reachable.
+        self._install_require(env)  # always: stock require/package.path must never be reachable
+
+    def _install_require(self, env: Any) -> None:
+        """Install ATE's replacement ``require`` and lock ``package.path``/``package.cpath`` (packet 06a).
+
+        ``require(name)`` resolves only against this host's module map; an unknown name raises a Lua
+        error naming the module (via :meth:`_location`, so it reads as ``<file>:<line>: require: unknown
+        module '<name>'``), and a known module is read from disk and run once here, cached per host. With
+        package paths emptied nothing else on disk is reachable."""
+        modules = self._modules  # the whitelist this host was built for
+
+        def _require(name: str) -> Any:
+            if name not in modules:
+                raise NotAllowedError(f"{self._location()} require: unknown module '{name}'")
+            cached = self._require_cache.get(name)
+            if cached is not None:  # a nil return was already cached as True below, so this never hits for nil
+                return cached
+            source = Path(modules[name]).read_text(encoding="utf-8")
+            try:
+                value = self._runtime.execute(source, name=f"@{modules[name]}", mode="t")
+            except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
+                raise HostError(f"failed to load {modules[name]}: {exc}") from exc
+            self._require_cache[name] = True if value is None else value  # a nil return caches as true (stock Lua)
+            return self._require_cache[name]
+
+        env["require"] = _require
+        # Empty package paths so nothing outside the whitelist is reachable; a real Lua table (built by
+        # executing an assignment chunk, like :meth:`_declare_enums`) rather than a Python dict.
+        self._runtime.execute(
+            "package = {}; package.path = ''; package.cpath = ''",
+            name=f"@{self._schedule_path.name}-pkg",
+            mode="t",
+        )
 
     def _location(self) -> str:
         """Return ``<file>:<line>:``, the schedule line where the current call was made.

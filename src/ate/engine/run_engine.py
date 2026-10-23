@@ -89,6 +89,7 @@ class RunEngine(QThread):
         media_number: str = "",
         schedule_name: str = "",
         utc_offset: str = "+00:00",
+        modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
         operator_input: Optional[OperatorInput] = None,
@@ -113,6 +114,10 @@ class RunEngine(QThread):
         self._ate_fns = dict(ate_fns or {})
         # The OperatorInput controller this run's ATE.input calls read/write through; injected by
         # tests (so they own supply/click) or made fresh when running for real. See ticket 10.
+        # Packet 06a: the require'd module map for this run, forwarded to the Lua host so a schedule's
+        # load-time and step-time requires resolve against it (one host per Test Run). ``None`` means
+        # no replacement require is installed.
+        self._modules = dict(modules) if modules is not None else None
         self._op = operator_input or OperatorInput()
         # Whole-run abort, requested by the Operator (the staged Run screen's Abort button calls
         # :meth:`request_abort` through the session). It is checked between steps so a clean stop
@@ -368,6 +373,7 @@ class RunEngine(QThread):
             self._schedule_path,
             operator_input=self._op,
             aborted_flag=self._abort_flag,  # the count hook reads this; see request_abort/aborted
+            modules=self._modules,  # packet 06a: forward the require'd module map to the host
         )
         self._host = host  # kept on the engine so per-step input values can be typed from declarations
         for name, fn in self._ate_fns.items():
