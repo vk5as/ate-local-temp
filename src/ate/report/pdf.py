@@ -8,7 +8,8 @@ QWebEngine and calls ``printToPdf`` with ``QPageLayout`` margins equal to the te
 
 Public API:
     render_pdf(html_path, pdf_path, paper="A4"|"Letter") -> int   # runs inside the helper process
-    run_pdf_helper(html_path, pdf_path, paper="A4", *, timeout=30.0) -> None  # GUI side; raises on failure/timeout
+    pdf_helper_command(html_path, pdf_path, paper="A4") -> (program, args, env)  # for QProcess
+    run_pdf_helper(html_path, pdf_path, paper="A4", *, timeout=30.0) -> None  # blocking; raises on failure/timeout
 """
 
 from __future__ import annotations
@@ -22,29 +23,12 @@ from .html import REPORT_PAGE_MARGINS_MM
 
 
 def _child_env() -> dict[str, str]:
-    """The child helper's environment — a curated minimum rather than ``os.environ.copy()``.
+    """The helper's environment: the parent's, with the offscreen platform forced.
 
-    QtWebEngine builds an offscreen GL context at startup; inheriting the parent process's full
-    environment (which under tests carries sandbox/agent variables) makes that context creation fail
-    intermittently, so no PDF is written and the helper exits non-zero. A small, explicit set — PATH,
-    HOME, the offscreen platform, locale, any library search path already in play, and PYTHONPATH —
-    renders reliably across repeated runs.
-    """
-    env: dict[str, str] = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
-        # Headless rendering (tests, CI) — set here so the child does not inherit a display that is
-        # only attached to the parent's event loop.
-        "QT_QPA_PLATFORM": "offscreen",
-    }
-    # Locale keeps text/glyph handling consistent with the process that produced the report.
-    for key in ("LANG", "LANGUAGE"):
-        if os.environ.get(key):
-            env[key] = os.environ[key]
-    # Library search paths Qt may need to find its bundled system libraries.
-    for key in ("LD_LIBRARY_PATH",):
-        if os.environ.get(key):
-            env[key] = os.environ[key]
+    The helper never shows a window, so it must not depend on a display. Everything else is
+    inherited, which Windows needs (Python won't start without ``SYSTEMROOT`` and friends)."""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
     return env
 
 
@@ -112,46 +96,37 @@ def render_pdf(html_path: str, pdf_path: str, paper: str = "A4") -> int:
     return 0 if loaded_ok["value"] and result_ok["value"] and file_ok["value"] else 1
 
 
-def run_pdf_helper(html_path: str, pdf_path: str, paper: str = "A4", *, timeout: float = 30.0) -> None:
-    """Start a separate helper process to render ``html_path`` to ``pdf_path``; raise on failure/timeout.
+def pdf_helper_command(html_path: str, pdf_path: str, paper: str = "A4") -> tuple[str, list[str], dict[str, str]]:
+    """Return ``(program, args, env)`` that runs the hidden ``ate _pdf`` helper for one report.
 
-    The child is the hidden ``ate _pdf`` subcommand (see :func:`_cmd_pdf_helper`). When ATE is frozen
-    by PyInstaller, ``sys.executable`` runs the app and forwards the subcommand; otherwise it runs
-    ``-m ate``. Raises :class:`TimeoutError` on timeout and :class:`RuntimeError` if the child exits
-    non-zero (including a missing HTML file).
-    """
+    Frozen by PyInstaller, ``sys.executable`` is ATE itself and takes the subcommand directly;
+    otherwise it is Python running ``-m ate``, with this package's own ``src`` directory first on
+    ``PYTHONPATH`` so the child imports the same ATE as the parent."""
+    tail = ["_pdf", str(html_path), str(pdf_path), "--paper", paper]
+    env = _child_env()
+    if getattr(sys, "frozen", False):
+        return sys.executable, tail, env
+    src = str(Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH", "")) if p)
+    return sys.executable, ["-m", "ate", *tail], env
+
+
+def run_pdf_helper(html_path: str, pdf_path: str, paper: str = "A4", *, timeout: float = 30.0) -> None:
+    """Run the helper process to completion, blocking; raise on failure or timeout.
+
+    For callers that may block (CLI, History regeneration on a worker). The run session uses
+    :func:`pdf_helper_command` with a ``QProcess`` instead so the GUI thread never waits.
+    Raises :class:`TimeoutError` on timeout and :class:`RuntimeError` if the child can't start or
+    exits non-zero (including a missing HTML file)."""
     import subprocess
 
-    frozen = getattr(sys, "frozen", False)
-    # A curated minimum (see :func:`_child_env`) — never the parent's full environment.
-    env = _child_env()
-    if frozen:
-        call = [sys.executable, "_pdf", str(html_path), str(pdf_path), "--paper", paper]
-    else:
-        call = [sys.executable, "-m", "ate", "_pdf", str(html_path), str(pdf_path), "--paper", paper]
-        # Make the local checkout importable even when 'ate' is not on sys.path here (e.g. an
-        # editable install that points at a different tree); cwd/src shadows any stale entry.
-        src = str(Path.cwd() / "src")
-        prev = os.environ.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{src}{os.pathsep}{prev}"
-
+    program, args, env = pdf_helper_command(html_path, pdf_path, paper)
     try:
-        proc = subprocess.run(call, env=env, capture_output=True, text=True, timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - surface any launch/capture failure to the caller
-        raise
-    except subprocess.TimeoutExpired as exc:
-        # The child owns its own Qt event loop; kill it if it is still running.
-        target = getattr(exc, "process", None)
-        if target is not None and target.poll() is None:
-            try:
-                target.kill()
-            except OSError:
-                pass
+        proc = subprocess.run([program, *args], env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:  # subprocess.run kills the child before raising
         raise TimeoutError(f"pdf helper timed out after {timeout:g}s") from exc
-    except FileNotFoundError as exc:
+    except OSError as exc:
         raise RuntimeError(f"could not launch pdf helper: {exc}") from exc
-
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"pdf helper exited with code {proc.returncode}: {detail}")
-    # Success — the child produced a PDF and exited 0.

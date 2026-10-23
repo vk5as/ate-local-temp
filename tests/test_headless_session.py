@@ -6,17 +6,45 @@ are recorded on the run row; interrupted runs left open by a crash are closed as
 at launch (spec rule 98). No widgets, no mocks.
 """
 
+import os
 import re
+import sys
+import time
 import pytest
 import sqlite3
 import threading
+from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
 
-from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, write_ate_env
+from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, fake_pdf_helper as _fake_helper, write_ate_env
+
+
+# The real end-to-end PDF test needs QtWebEngineCore; if it can't import here the helper process
+# can never build its page, so skip that one test rather than fail the whole module.
+try:
+    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+
+    PYQT_WEBENGINE_IMPORT_ERROR = None
+except Exception as _exc:  # noqa: BLE001 - any import failure means no real PDF rendering here
+    PYQT_WEBENGINE_IMPORT_ERROR = _exc
+
+
+def _pump_until_report_written(session: HeadlessRunSession, events: list[tuple[str, str]], *, deadline: float | None = None) -> bool:
+    """Pump the event loop until ``report_written`` fired (or ``deadline``), returning whether it did.
+
+    The helper runs in a QProcess whose finished signal is delivered here when events are pumped."""
+    app = QCoreApplication.instance() or QCoreApplication([])
+    if deadline is None:
+        deadline = time.time() + 20.0
+    while not events:
+        app.processEvents()
+        if time.time() > deadline:
+            return False
+    return True
 
 
 def _wait_finished(session: HeadlessRunSession) -> bool:
@@ -103,6 +131,128 @@ def test_run_end_writes_html_report(tmp_path) -> None:
     body = report.read_text(encoding="utf-8")
     assert "<div class=\"verdict verdict-pass\">PASS</div>" in body
     assert "Ada" in body  # operator name flowed through to the Cover
+
+
+def test_run_end_writes_html_and_pdf_reports(tmp_path, monkeypatch) -> None:
+    """A finished run writes both HTML and PDF; the helper process reports both paths (packet 22b)."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    events: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
+
+
+    session.set_operator("Ada")
+    session.set_project("Power board")
+    session.set_uut_type("PSU")
+    session.set_uut_serial("PS-1")
+    session.select_schedule("Passing schedule")
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    # HTML report exists next to the PDF.
+    written = list(env["reports_dir"].glob("**/*_PASS.html"))
+    assert len(written) == 1, f"no PASS report: {[p.name for p in env['reports_dir'].glob('**/*.html')]}"
+    html_path = str(written[0])
+
+    # The helper finished and report_written delivered both paths.
+    assert _pump_until_report_written(session, events)
+    html, pdf = events[-1]
+    assert html == html_path
+    assert Path(pdf).exists() and Path(pdf).stat().st_size > 0
+    assert Path(pdf).name == written[0].with_suffix(".pdf").name
+
+
+def test_run_end_pdf_failure_keeps_html_and_logs_error(tmp_path, monkeypatch) -> None:
+    """A failing PDF helper leaves the HTML, logs an ERROR (source ate), and reports an empty pdf path."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    log_lines: list[str] = []
+    session.on_log = lambda level, source, text: log_lines.append(f"{level}:{source}:{text}")
+
+    events: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
+
+    monkeypatch.setattr(
+        "ate.run_session.headless.pdf_helper_command",
+        _fake_helper("import sys; sys.stderr.write('fake pdf helper blew up'); sys.exit(3)"),
+    )
+
+    session.set_operator("Ada")
+    session.select_schedule("Passing schedule")
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    # HTML stays; no PDF.
+    written = list(env["reports_dir"].glob("**/*_PASS.html"))
+    assert len(written) == 1, f"expected the HTML report to survive: {[p.name for p in env['reports_dir'].glob('**/*.html')]}"
+    assert not any(p.suffix == ".pdf" for p in env["reports_dir"].rglob("*"))
+
+    # report_written fired with an empty pdf path but the html path kept.
+    assert _pump_until_report_written(session, events)
+    # ATE logged the failure with source ate.
+    assert any("ERROR:ate:" in line and "fake pdf helper blew up" in line for line in log_lines), f"no ERROR/ate log line: {log_lines}"
+    html, pdf = events[-1]
+    assert html == str(written[0])
+    assert pdf == ""
+
+
+def test_run_end_pdf_is_not_blocking(tmp_path, monkeypatch) -> None:
+    """The PDF helper runs as a separate process: FINISHED returns well before a ~1s helper finishes."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    events: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
+
+    monkeypatch.setattr(
+        "ate.run_session.headless.pdf_helper_command",
+        _fake_helper("import sys, time; time.sleep(1.0); open(sys.argv[1], 'wb').write(b'%PDF-1.4 slow')"),
+    )
+
+    session.set_operator("Ada")
+    session.select_schedule("Passing schedule")
+
+    start = time.perf_counter()
+    engine = session.start()
+    assert _wait_finished(session)  # FINISHED must return before the ~1s helper completes
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.8, f"FINISHED handling blocked on PDF: {elapsed:.3f}s"
+    # The helper still finishes and reports the PDF afterwards.
+    assert _pump_until_report_written(session, events)
+    _, pdf = events[-1]
+    assert Path(pdf).exists()
+
+
+def test_run_end_writes_real_pdf_report(tmp_path) -> None:
+    """End-to-end with the real helper process; skipped unless QtWebEngineCore can import."""
+    if PYQT_WEBENGINE_IMPORT_ERROR is not None:
+        pytest.skip("QtWebEngineCore unavailable for real PDF rendering")
+
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    events: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
+
+    session.set_operator("Ada")
+    session.select_schedule("Passing schedule")
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    written = list(env["reports_dir"].glob("**/*_PASS.html"))
+    assert len(written) == 1, f"no PASS report: {[p.name for p in env['reports_dir'].glob('**/*.html')]}"
+
+    # The real helper rendered a non-empty PDF next to the HTML.
+    assert _pump_until_report_written(session, events)
+    html, pdf = events[-1]
+    assert html == str(written[0])
+    assert Path(pdf).exists() and Path(pdf).stat().st_size > 0
 
 
 def test_failing_schedule_runs_headless_and_reads_back(tmp_path) -> None:
@@ -502,6 +652,3 @@ def test_toggle_node_while_running_raises(tmp_path) -> None:
 
     with pytest.raises(SessionError):
         session.toggle_node(1, True)
-
-
-
