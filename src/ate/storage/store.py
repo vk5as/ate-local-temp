@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, event
 from ._uuid import new_uuid7
 from .schema import (
     SCHEMA_VERSION,
+    action,
     attempt,
     input_value,
     log_line,
@@ -271,6 +272,54 @@ class RunStore:
                 prompt_choice=fields.get("prompt_choice"),
             )
         )
+
+    # -- action -------------------------------------------------------------
+
+    def insert_action(
+        self,
+        run_uuid: str,
+        *,
+        instance_seq: Optional[int] = None,
+        phase: Optional[str] = None,
+        run_order: int = 0,
+        outcome: str = "ok",
+        error: Optional[str] = None,
+        started_at: Optional[str] = None,
+        ended_at: Optional[str] = None,
+    ) -> dict:
+        """Insert one Pre-test/Post-test Action row keyed by ``(run_uuid, seq)``.
+
+        ``phase`` is "pre" or "post"; ``instance_seq`` names the schedule instance it belongs to;
+        ``run_order`` is its position within that phase's order (0 for a lone action). ``started_at``
+        and ``ended_at`` are stamped from the run clock unless the caller supplies them, so a skipped
+        action can leave both null. Each row takes the next unique value of the run's log-line counter
+        (:attr:`_log_seq`) so ``(run_uuid, seq)`` stays globally unique within the run."""
+        now = _now_iso()
+        started_at = started_at or now
+        ended_at = ended_at or now
+        row = {
+            "run_uuid": run_uuid,
+            "seq": self._log_seq.get(run_uuid, 0),
+            "instance_seq": instance_seq,
+            "phase": phase,
+            "run_order": run_order,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "outcome": outcome,
+            "error": error,
+        }
+        self._run(action.insert().values(**row))
+        next_seq = row["seq"] + 1
+        if next_seq > 0:
+            self._log_seq[run_uuid] = next_seq
+
+    def actions(self, run_uuid: str) -> list[dict]:
+        """Return this run's Action rows as dicts (empty when the run is unknown)."""
+        stmt = action.select().where(action.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(action.columns, row)} for row in rows
+        ]
 
     # -- input_value ---------------------------------------------------------
 

@@ -58,6 +58,12 @@ def _to_text(value: Any) -> Optional[str]:
     return str(value)
 
 
+# The phase a Pre-test/Post-test Action runs in, stored on its action row ("pre"/"post"), mapped to
+# the internal execution context string the Lua host uses for lockdown and error location. A step
+# keeps "step"; loading/idle is None.
+PHASE_CONTEXT = {"pre": "pretest", "post": "posttest"}
+
+
 class RunEngine(QThread):
     """Runs one Test Schedule on a worker thread and records it through the store."""
 
@@ -224,6 +230,53 @@ class RunEngine(QThread):
                 attempt_count=0,
             )
 
+    @staticmethod
+    def _phase_actions(schedule: Any, phase: str) -> list[Callable[..., Any]]:
+        """Return the action closures for one Pre-test/Post-test phase, in run order.
+
+        ``schedule.pre_test_action`` / ``post_test_action`` are each a single closure under the
+        current builder model; wrap it so both phases and any future multi-action schedules share
+        one path (Post-test callers reverse this list to honour "run in reverse")."""
+        actions = getattr(schedule, f"{phase}_test_action", None)
+        if actions is None:
+            return []
+        if callable(actions) and not isinstance(actions, list):
+            return [actions]
+        return [a for a in actions if a is not None]
+
+    def _record_phase_action(
+        self, host: "_LuaHost", run_uuid: str, *, instance_seq: int, phase: str, fn: Callable[..., Any], pass_fail: str
+    ) -> None:
+        """Run one Pre-test/Post-test action closure and record its row (and owned log lines).
+
+        ``phase`` is "pre" or "post"; the internal context string ("pretest"/"posttest") keeps the
+        host's lockdown/location logic intact. On success the outcome is "ok"; a raised Lua error
+        becomes an "error" row carrying its first line, with the traceback logged at ERROR and both
+        attributed to this action via ``action_seq`` so later packets can surface it."""
+        started_at = _now_iso()
+        outcome = "ok"
+        error = None
+        log_start = len(host.logs)
+        try:
+            host._run_action(fn, PHASE_CONTEXT[phase], pass_fail=pass_fail)
+        except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR action row
+            outcome = "error"
+            error = str(exc).splitlines()[0] if str(exc) else ""
+            host.record_log("ERROR", str(exc))
+        finally:
+            ended_at = _now_iso()
+        new_logs = host.logs[log_start:]
+        if new_logs:
+            self._store.insert_log_lines(
+                run_uuid, 0,
+                [{"level": level, "source": source, "text": text} for (level, source, text) in new_logs],
+                action_seq=instance_seq,
+            )
+        self._store.insert_action(
+            run_uuid, instance_seq=instance_seq, phase=phase, run_order=0,
+            outcome=outcome, error=(error or None), started_at=started_at, ended_at=ended_at,
+        )
+
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
@@ -274,8 +327,16 @@ class RunEngine(QThread):
         self.run_uuid_reported.emit(created["run_uuid"])
         self.state_changed.emit(RunStatus.RUNNING)
 
-        failed = False
+        failed = False  # the run's standing result; a step flips pass_fail to FAIL on any FAIL/ERROR
+        pass_fail = "PASS"  # the run's standing result; a step flips it to FAIL on any FAIL/ERROR
         aborted = False  # a whole-run abort requested between steps (see request_abort)
+
+        # Pre-test Actions run up front, in order, each called with the current pass_fail. Nothing
+        # has failed yet so this is "PASS"; 13b owns what happens if one fails (aborting). Each runs
+        # before any step and records an action row plus its own log lines first.
+        for seq, action_fn in enumerate(self._phase_actions(schedule, "pre")):
+            self._record_phase_action(host, run_uuid, instance_seq=seq, phase="pre", fn=action_fn, pass_fail=pass_fail)
+
         for seq, step in enumerate(steps):
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
@@ -381,6 +442,7 @@ class RunEngine(QThread):
             # ATE.report call above or from a raised action (recorded as an ERROR attempt).
             if last_result == "FAIL" or error_text is not None:
                 failed = True
+                pass_fail = "FAIL"  # flip the standing result so Post-test Actions see it
 
             # Ticket 10: wait for every announced input to be answered before recording this step's
             # values. Blocking supplies already woke the worker via get_raw; POLL clicks never block —
@@ -409,6 +471,11 @@ class RunEngine(QThread):
                 attempt_count=attempts_recorded,
                 inputs=[d.to_dict() for d in validated] if validated else None,
             )
+
+        # Post-test Actions run after the last step, in reverse, each called with the final pass_fail.
+        # They record action rows too; 14c owns whether a skipped Pre-test suppresses them.
+        for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
+            self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
 
         # A whole-run abort (requested between steps) fails the run with End Reason ABORTED; a
         # normal finish is FAIL on any FAIL/ERROR, otherwise PASS. STOPPED_ON_FAIL comes with the
