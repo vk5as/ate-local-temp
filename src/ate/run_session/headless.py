@@ -29,6 +29,7 @@ from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
 from ..log import AppLog, LogError, open_app_log
+from ..report.html import write_report as _write_run_report
 from ..storage.store import RunStore
 
 
@@ -126,8 +127,25 @@ class HeadlessRunSession(QObject):
         if state != self._state:
             self._state = state
             if state == SessionState.FINISHED:
+                # The run row is already closed by then; write its HTML report now. A failure is
+                # logged here and never raised so it can't crash the session or a live run (spec).
+                self._write_run_report()
                 self._engine = None
             self.state_changed.emit(state)
+
+    def _write_run_report(self) -> None:
+        """Write this run's HTML report at run end; log and swallow any failure."""
+        config = self._config
+        if config is None or self._run_uuid is None or self._store is None:
+            return
+        try:
+            _write_run_report(self._store, self._run_uuid, config)
+        except Exception as exc:  # noqa: BLE001 - a report failure must not crash the run
+            msg = f"Failed to write Test Report for {self._run_uuid}: {exc}"
+            if self.on_log is not None:
+                self.on_log("ERROR", "ate", msg)
+            else:
+                print(msg)
 
     @property
     def selected_stop_on_fail(self) -> bool:

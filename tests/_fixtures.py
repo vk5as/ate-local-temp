@@ -35,6 +35,19 @@ return ScheduleParams("Failing schedule", "A step that fails")
   })
 """
 
+# A single-passing step with full document metadata (doc title/id/rev) set — so a report's Cover
+# can be checked for every recorded doc field.
+DOC_FIELDS = """\
+return ScheduleParams("Doc fields schedule", "a step with full document metadata")
+  :setDocTitle("Quarterly Power Audit")
+  :setDocId("PS-AUD-2026-Q4")
+  :setDocRev("3")
+  :setSchedule({
+    StepParams("LED colour"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "Green", "Green") end),
+  })
+"""
+
 # A schedule whose first step raises a Lua error and whose second never runs.
 ERRORING = """\
 return ScheduleParams("Erroring schedule", "A step that raises a Lua error")
@@ -253,6 +266,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     created yet — the caller can assert on launch-time refusals before migrating it.
     """
     db = tmp_path / "ate.db"
+    reports_dir = tmp_path / "reports"
     defs_dir = tmp_path / "defs"
     defs_dir.mkdir(parents=True, exist_ok=True)
     (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8")
@@ -263,6 +277,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "pre_post_pass.tslua").write_text(PRE_POST_PASS, encoding="utf-8")
     (defs_dir / "pre_post_fail.tslua").write_text(PRE_POST_FAIL, encoding="utf-8")
     (defs_dir / "pre_error_post_ok.tslua").write_text(PRE_ERROR_POST_OK, encoding="utf-8")
+    (defs_dir / "doc_fields.tslua").write_text(DOC_FIELDS, encoding="utf-8")
 
     # Ticket 10 schedules: one blocking input, one POLL-only step, and a step declaring every Step
     # Input type. Written into the demo Test Definition so seam/staged tests can select them by name.
@@ -299,12 +314,13 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
         "database": {"type": "sqlite", "path": str(db)},
+        "reports": {"directory": str(reports_dir)},
         "testDefinitions": {"directories": [str(defs_dir)]},
     }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    return {"config": config_path, "defs_dir": defs_dir, "db": db}
+    return {"config": config_path, "defs_dir": defs_dir, "db": db, "reports_dir": reports_dir}
 
 
 def read_run_row(store, run_uuid: str) -> dict:
