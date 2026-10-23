@@ -132,12 +132,12 @@ def _clean_qt_state(qapp: QApplication) -> None:
 def _fake_pdf_helper(request, monkeypatch):
     """Every finished run with a config starts the PDF helper; outside the one real end-to-end test,
     run a trivial stand-in process instead of QWebEngine. Tests wanting other helper behaviour patch
-    ``ate.run_session.headless.pdf_helper_command`` again themselves."""
+    ``ate.report.pdf_job.pdf_helper_command`` again themselves."""
     if request.node.name.endswith("test_run_end_writes_real_pdf_report"):
         return
     from tests._fixtures import WRITES_PDF, fake_pdf_helper
 
-    monkeypatch.setattr("ate.run_session.headless.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
 
 
 _started_engines: "weakref.WeakSet" = weakref.WeakSet()
