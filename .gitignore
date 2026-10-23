@@ -1,5 +1,9 @@
 # Local virtual environments (installed into here for dev; never committed)
 .venv/
+
+# Isolated git worktrees used by implementer subagents (each on its own branch);
+# their contents are tracked only within the worktree, never in this repo.
+.worktrees/
 .eggs/
 __pycache__/
 *.py[cod]
