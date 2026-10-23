@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QPushButton,
     QRadioButton,
     QStackedWidget,
@@ -49,6 +50,48 @@ def _format_elapsed(delta: datetime) -> str:
     if hours:
         return f"{hours:d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def _format_log_line(line: dict) -> str:
+    """Render one recorded log line as ``LEVEL  SOURCE  text`` for a pane."""
+    level = str(line.get("level", ""))
+    source = str(line.get("source", ""))
+    return f"{level:<7} {source:<8} {line.get('text', '')}"
+
+
+class _LogPane(QWidget):
+    """A scrollable pane that renders recorded log lines under a header label.
+
+    Both the Run view's Log pane (ticket 08) and its separate Debug window are instances of
+    this: one is fed ``INFO``-and-above lines, the other every level. It never decides what
+    to show — :meth:`add_lines` only renders whatever store rows it is handed, in seq order.
+    """
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._title = QLabel(title)
+        self._title.setStyleSheet("font-weight: bold;")
+        self._list = QListWidget()
+        self._area = QScrollArea()
+        self._area.setWidget(self._list)
+        self._area.setWidgetResizable(True)
+        layout.addWidget(self._title)
+        layout.addWidget(self._area, stretch=1)
+
+    def clear(self) -> None:
+        """Remove every rendered line."""
+        self._list.clear()
+
+    def add_lines(self, lines: Iterable[dict]) -> None:
+        """Render ``lines`` (each a log_line dict) as level/source/text rows in seq order."""
+        for line in sorted(lines, key=lambda ln: ln.get("seq", 0)):
+            self._list.addItem(QListWidgetItem(_format_log_line(line)))
+
+    def rendered_lines(self) -> list[str]:
+        """Return the pane's lines in order (for inspection and tests)."""
+        return [self._list.item(i).text() for i in range(self._list.count())]
 
 
 class UutOperatorStage(QWidget):
@@ -165,18 +208,29 @@ class RunView(QWidget):
         self.tabs.addTab(log_tab, "Log")
         self.tabs.addTab(summary_tab, "Summary")
 
+        # Ticket 08's two log views: the Log pane shows INFO and above; the Debug window is a
+        # separate pane showing every level. Both are filled from session.store.log_lines() in
+        # refresh(), never computed here.
+        self.log_pane = _LogPane("Log — INFO and above")
+        self.debug_window = _LogPane("Debug — every level")
+
         layout.addWidget(self.state_header)
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=1)
         layout.addWidget(self.tabs)
+        layout.addWidget(self.log_pane)
+        layout.addWidget(self.debug_window)
 
-    def refresh(self, nodes: list[dict], attempts: list[dict]) -> None:
+    def refresh(self, nodes: list[dict], attempts: list[dict], log_lines: list[dict]) -> None:
         """Render a finished run's steps, failure bar, and Log/Summary from the store.
 
         Reads only what the store recorded; it never decides pass/fail itself — a step is
         treated as failed purely when its stored result is ``FAIL`` or ``ERROR``, so this
         stays a view of data, not a run engine. The two tabs are added in order (Log, then
         Summary), so they are widgets 0 and 1 here.
+
+        ``log_lines`` feeds the Log pane (INFO and above) and the separate Debug window
+        (every level); DEBUG is filtered out of the Log pane but kept in the debug view.
         """
         log_tab = self.tabs.widget(0)
         summary_tab = self.tabs.widget(1)
@@ -217,6 +271,13 @@ class RunView(QWidget):
                 continue
             lines.append(f"{node.get('step_number', '')}  {node.get('step_name', '')}  →  {node.get('result', '')}")
         summary_tab.setText("\n".join(lines))
+
+        # The Log pane shows INFO and above; the Debug window keeps every level.
+        info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
+        self.log_pane.clear()
+        self.log_pane.add_lines(info_and_above)
+        self.debug_window.clear()
+        self.debug_window.add_lines(log_lines)
 
     def _apply_failure_style(self) -> None:
         """Give the failure bar its red look via a stylesheet."""
@@ -376,7 +437,8 @@ class StagedRunScreen(QWidget):
             run_uuid = self.session.run_uuid
             nodes = self.session.store.nodes(run_uuid) if run_uuid else []
             attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-            self.run_view.refresh(nodes, attempts)
+            log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
+            self.run_view.refresh(nodes, attempts, log_lines)
             # Return to the first setup stage so a new run can be started.
             self.steps_stack.show()
             self.steps_stack.setCurrentIndex(0)
