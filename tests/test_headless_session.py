@@ -7,6 +7,7 @@ at launch (spec rule 98). No widgets, no mocks.
 """
 
 import sqlite3
+import threading
 
 from PyQt6.QtCore import QCoreApplication
 
@@ -215,4 +216,62 @@ def test_error_level_log_line_is_recorded(tmp_path) -> None:
     error_line = next(ln for ln in lines_by_seq.values() if ln["level"] == "ERROR")
     assert (error_line["source"], error_line["text"]) == ("schedule", "something failed")
     assert error_line["node_seq"] == 2 and error_line["attempt_no"] == 1
+
+
+def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qapp, tmp_path) -> None:
+    """Packet 13a checkbox 3 (seam-1): call ``session.request_abort()`` during a blocking run.
+
+    Drives the Abortable schedule entirely through :class:`HeadlessRunSession` — select, start, answer
+    step 1's input so it completes cleanly, then request an abort between steps. The operator controller
+    is reached only via the engine returned by ``start()``; no widgets or staged screen are involved."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    answered = threading.Event()
+
+    def _on_ask(node_seq, attempt_no, index):
+        op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly before aborting
+        answered.set()
+
+    session.input_asked.connect(_on_ask)
+
+    session.set_operator("Ada")
+    session.select_schedule("Abortable schedule")
+    engine = session.start()
+    op = engine.operator_input  # the worker's operator controller; valid while running
+
+    # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
+    # Do not wait for FINISHED here: a bare pump would let the worker race through steps 2 & 3 first.
+    while not answered.is_set():
+        qapp.processEvents()
+    assert answered.is_set()
+
+    # Abort between steps; then let the worker record ERROR / NOTRUN / ABORTED. request_abort runs on
+    # this thread before any post-answer pump, so it wins the step boundary deterministically.
+    session.request_abort()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    # A whole-run abort fails the run with End Reason ABORTED (spec rule 83).
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "ABORTED"
+
+    conn = session.store._conn
+    conn.row_factory = sqlite3.Row
+    nodes = {n["step_number"]: dict(n) for n in conn.execute(
+        "SELECT step_number, result, attempt_count FROM node WHERE run_uuid=? ORDER BY node_seq", (row["run_uuid"],)
+    ).fetchall()}
+    # Step 1 ran and passed; step 2 was the running step at abort time -> ERROR; step 3 never ran.
+    assert nodes == {
+        "1.": {"step_number": "1.", "result": "PASS", "attempt_count": 1},
+        "2.": {"step_number": "2.", "result": "ERROR", "attempt_count": 1},
+        "3.": {"step_number": "3.", "result": "NOTRUN", "attempt_count": 0},
+    }
+
+    err = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=1", (row["run_uuid"],)
+    ).fetchone()
+    assert err is not None and err["pass_fail"] == "ERROR"
+    assert err["msg"] == "Aborted by Operator"
 
