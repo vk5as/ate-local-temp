@@ -139,3 +139,51 @@ def test_close_interrupted_runs_marks_fail(tmp_path):
     assert row["end_reason"] == "INTERRUPTED"
     # ATE logs that it did so.
     assert any("interrupted" in line for line in log_lines)
+
+
+def test_log_lines_batch_round_trip_through_store(tmp_path) -> None:
+    """A batch of log lines is written and read back with level, source and ownership."""
+    store = RunStore(tmp_path / "ate.db")
+    run_uuid = new_uuid7()
+
+    # One step's worth of schedule-sourced lines (owned by that Attempt), plus a run-level
+    # line owned by the run as a whole. Inserted in one batch keyed by the same seq.
+    store.insert_log_lines(
+        run_uuid,
+        0,
+        [
+            {"level": "info", "source": "schedule", "text": "step started"},
+            {"level": "warning", "source": "schedule", "text": "value out of range"},
+            {"level": "error", "source": "device", "text": "port lost"},
+        ],
+        node_seq=0,
+        attempt_no=1,
+    )
+    # A run-level line (no owner) recorded in a separate batch.
+    store.insert_log_lines(
+        run_uuid,
+        1,
+        [{"level": "debug", "source": "ate", "text": "nothing reported"}],
+    )
+
+    lines = store.log_lines(run_uuid)
+    assert [line["seq"] for line in lines] == [0, 1]
+
+    step_lines = [ln for ln in lines if ln["seq"] == 0]
+    assert [(ln["level"], ln["source"], ln["text"]) for ln in step_lines] == [
+        ("INFO", "schedule", "step started"),
+        ("WARNING", "schedule", "value out of range"),
+        ("ERROR", "device", "port lost"),
+    ]
+    # Levels are normalised to upper case; ownership is expressed through the foreign keys.
+    assert step_lines[0]["node_seq"] == 0 and step_lines[0]["attempt_no"] == 1
+    assert step_lines[0]["action_seq"] is None
+    run_line = lines[1]
+    assert (run_line["level"], run_line["source"], run_line["text"]) == ("DEBUG", "ate", "nothing reported")
+    assert run_line["node_seq"] is None and run_line["attempt_no"] is None and run_line["action_seq"] is None
+
+
+def test_log_lines_for_unknown_run_is_empty(tmp_path) -> None:
+    """Reading log lines for a run that was never recorded returns nothing."""
+    store = RunStore(tmp_path / "ate.db")
+    assert store.log_lines("does-not-exist") == []

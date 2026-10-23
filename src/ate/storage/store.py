@@ -24,7 +24,7 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import create_engine, event
 
 from ._uuid import new_uuid7
-from .schema import SCHEMA_VERSION, attempt, metadata, node, test_run
+from .schema import SCHEMA_VERSION, attempt, log_line, metadata, node, test_run
 
 
 @dataclass(frozen=True)
@@ -258,6 +258,48 @@ class RunStore:
                 prompt_choice=fields.get("prompt_choice"),
             )
         )
+
+    # -- log_line ------------------------------------------------------------
+
+    @staticmethod
+    def _log_line_row(run_uuid: str, seq: int, level: str, source: str, text: str, *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> dict:
+        """Build a :class:`schema.log_line` row from a ``level``/``source``/``text`` line.
+
+        Ownership is expressed structurally through the foreign keys rather than a
+        separate column: ``action_seq`` ties the line to an owning Pre-test/Post-test
+        Action, while ``node_seq`` + ``attempt_no`` tie it to a step Attempt; a line with
+        neither belongs to the run as a whole.
+        """
+        return {
+            "run_uuid": run_uuid,
+            "seq": seq,
+            "at": _now_iso(),
+            "level": level.upper(),
+            "source": source,
+            "action_seq": action_seq,
+            "node_seq": node_seq,
+            "attempt_no": attempt_no,
+            "text": text,
+        }
+
+    def insert_log_lines(self, run_uuid: str, seq: int, lines: list[dict[str, Any]], *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> None:
+        """Insert a batch of log lines keyed by ``(run_uuid, seq)``.
+
+        ``lines`` is an ordered list; each entry needs ``level``, ``source`` and ``text``.
+        Ownership (which Action or Attempt owns the line) applies to every line in the
+        batch — within one step's action all schedule lines are owned by that Attempt, so a
+        single call batches them with shared ownership rather than writing one row per line."""
+        rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no) for line in lines]
+        for row in rows:
+            self._run(log_line.insert().values(**row))
+
+    def log_lines(self, run_uuid: str) -> list[dict]:
+        """Return this run's recorded log lines as dicts (empty when the run is unknown)."""
+        stmt = log_line.select().where(log_line.c.run_uuid == run_uuid)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
+        ]
 
     # -- reads --------------------------------------------------------------
 
