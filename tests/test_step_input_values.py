@@ -1,0 +1,218 @@
+"""Ticket 10 checkboxes b/c — ``ATE.input(n)`` returns the documented typed value.
+
+Every input type is exercised through a real LuaHost with an injected :class:`OperatorInput`
+controller: blocking types block the worker thread until supplied from another thread and then
+return their typed value; POLL reads sticky state that becomes available once its button is
+clicked; an undeclared ``n`` raises. Verified against real .tslua schedules on disk — no mocks."""
+
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from ate.engine.lua_host import NotAllowedError, LuaHost
+from ate.engine.operator_input import OperatorInput
+from ate.engine.step_inputs import InvalidStepInput, StepInput
+
+from ._fixtures import _drive
+
+
+# A minimal schedule that loads cleanly and has no steps; the tests set up per-step inputs directly.
+_MINIMAL = (
+    'return ScheduleParams("Inputs", "declares step inputs")\n'
+    '  :setSchedule({})\n'
+)
+
+
+def _host(op: OperatorInput, source: str = _MINIMAL) -> LuaHost:
+    """Build a real host on disk with ``op`` injected so tests own supply/click."""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "schedule.tslua"
+        path.write_text(source, encoding="utf-8")
+        return LuaHost(str(path), operator_input=op)
+
+
+def _host_with(op: OperatorInput, inputs):
+    """A host with one step's validated declarations installed at ``inputs`` (index-ordered)."""
+    host = _host(op)
+    host._step_inputs = list(inputs)
+    return host
+
+
+# --- typed mapping per type ---------------------------------------------------
+
+
+def test_integer_is_returned_as_int():
+    op = OperatorInput()
+    op.supply_input(0, 42)
+    host = _host_with(op, [StepInput(index=1, desc="voltage", type="INTEGER")])
+    value = host.inputs(1)  # a blocking input is consumed by its single read; check both value and type once
+    assert value == 42 and isinstance(value, int)
+
+
+def test_float_is_returned_as_float():
+    op = OperatorInput()
+    op.supply_input(0, 3.5)
+    host = _host_with(op, [StepInput(index=1, desc="current", type="FLOAT")])
+    value = host.inputs(1)  # a blocking input is consumed by its single read; check both value and type once
+    assert value == 3.5 and isinstance(value, float)
+
+
+def test_string_is_returned_as_str():
+    op = OperatorInput()
+    op.supply_input(0, "COM7")
+    host = _host_with(op, [StepInput(index=1, desc="serial", type="STRING")])
+    value = host.inputs(1)  # a blocking input is consumed by its single read; check both value and type once
+    assert value == "COM7" and isinstance(value, str)
+
+
+def test_prompt_returns_entered_text():
+    op = OperatorInput()
+    op.supply_input(0, "continue now")
+    host = _host_with(op, [StepInput(index=1, desc="go", type="PROMPT", prompt=("Press on"))])
+    assert host.inputs(1) == "continue now"
+
+
+def test_enum_radiobutton_returns_single_label():
+    op = OperatorInput()
+    op.supply_input(0, "Red")
+    host = _host_with(op, [StepInput(index=1, desc="colour", type="ENUM", widget="RADIOBUT", enum=("Green", "Red"))])
+    assert host.inputs(1) == "Red"
+
+
+def test_enum_pushbutton_returns_single_label():
+    op = OperatorInput()
+    op.supply_input(0, "Fast")
+    host = _host_with(op, [StepInput(index=1, desc="mode", type="ENUM", widget="PUSHBUT", enum=("Slow", "Fast"))])
+    assert host.inputs(1) == "Fast"
+
+
+def test_enum_checkbox_returns_array_of_labels():
+    op = OperatorInput()
+    op.supply_input(0, ["A", "C"])
+    host = _host_with(op, [StepInput(index=1, desc="channels", type="ENUM", widget="CHECKBOX", enum=("A", "B", "C"))])
+    assert host.inputs(1) == ("A", "C")
+
+
+# --- blocking behaviour -------------------------------------------------------
+
+
+def test_blocking_input_blocks_worker_until_supplied(app):
+    """ATE.input(n) for a blocking type blocks the worker thread until supplied, then returns typed."""
+    op = OperatorInput()
+    host = _host_with(op, [StepInput(index=1, desc="voltage", type="INTEGER")])
+    box = {}
+
+    def worker():
+        box["value"] = host.inputs(1)  # blocks on get_raw until supply_input wakes it
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    time.sleep(0.3)  # give the worker time to block (no value supplied yet)
+    assert "value" not in box, "blocking input returned before a value was supplied"
+
+    op.supply_input(0, 12)  # supply from another thread; wakes the blocked get_raw
+    thread.join(timeout=5)
+    assert box["value"] == 12 and isinstance(box["value"], int)
+
+
+def test_undeclared_index_raises_invalid_step_input():
+    """An input number with no declaration raises InvalidStepInput (becomes an ERROR Attempt)."""
+    op = OperatorInput()
+    host = _host_with(op, [StepInput(index=1, desc="voltage", type="INTEGER")])
+    with pytest.raises(Exception) as excinfo:  # noqa: B017 - InvalidStepInput is the contract
+        host.inputs(99)
+    assert "undeclared input 99" in str(excinfo.value)
+
+
+def test_inputs_out_of_range_raises():
+    op = OperatorInput()
+    host = _host_with(op, [StepInput(index=1, desc="voltage", type="INTEGER")])
+    with pytest.raises(Exception):  # noqa: B017 - InvalidStepInput for n below/above the range
+        host.inputs(0)
+
+
+# --- POLL ---------------------------------------------------------------------
+
+
+def test_poll_is_nil_until_clicked_then_sticky():
+    """POLL returns None until its button is clicked, then that text; sticky after a click."""
+    op = OperatorInput()
+    host = _host_with(op, [StepInput(index=1, desc="status", type="POLL", prompt=("OK", "Error"))])
+    # Establish this step's run context (the run engine sets these before each action); POLL reads
+    # are keyed by it so a click recorded for this step is read back under the same key.
+    host._node_seq = 0
+    host._attempt_no = 1
+    # Not clicked yet -> nil.
+    assert host.inputs(1) is None
+    # The operator clicks the button from another thread; inputs() reads sticky state by context.
+    op.click_poll(node_seq=0, attempt_no=1, index=0, text="OK")
+    assert host.inputs(1) == "OK"
+
+
+def test_poll_clickable_while_step_runs():
+    """A POLL click during the step makes a subsequent read return that button's text."""
+    op = OperatorInput()
+    host = _host_with(op, [StepInput(index=1, desc="status", type="POLL", prompt=("OK", "Error"))])
+    # Establish this step's run context (the run engine sets these before each action); POLL reads
+    # are keyed by it so a click recorded for this step is read back under the same key.
+    host._node_seq = 0
+    host._attempt_no = 1
+    box = {}
+
+    def reader():
+        # Read twice: first before any click (nil), then after the operator clicks.
+        box["first"] = host.inputs(1)
+        op.click_poll(node_seq=0, attempt_no=1, index=0, text="Error")
+        box["after"] = host.inputs(1)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    time.sleep(0.2)  # let the first (nil) read happen before we click
+    op.click_poll(node_seq=0, attempt_no=1, index=0, text="Error")
+    thread.join(timeout=5)
+    assert box["first"] is None
+    assert box["after"] == "Error"
+
+
+# --- integration through the Lua ATE.input path -------------------------------
+
+
+def test_ate_input_rejects_call_outside_a_step(app):
+    """ATE.input raises NotAllowedError when not in a step action (context check)."""
+    op = OperatorInput()
+    host = _host(op)  # no step inputs installed, context is "load"
+    with pytest.raises(NotAllowedError):
+        host.ate.input(1)
+
+
+def test_undeclared_input_through_lua_raises_invalid_step_input(app):
+    """A bad ATE.input(n) inside a step action surfaces as InvalidStepInput carrying "undeclared input n".
+
+    The built-in ``ATE.input`` method raises its native exception verbatim through seam-1 (it is not
+    one of the dynamically-registered functions that :meth:`_AteTable._isolate` wraps), so an undeclared
+    index becomes exactly what the run engine records as an ERROR Attempt's content. Driving the real Lua
+    entry point — ``host.ate.input(9)`` under a step context — asserts this contract rather than bypassing
+    it with a direct ``host.inputs()`` call."""
+    op = OperatorInput()
+    source = (
+        'return ScheduleParams("Bad input", "declares one input")\n'
+        '  :setSchedule({\n'
+        '    StepParams("v"):setStepNo("1.")\n'
+        '      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })\n'
+        '      :setAction(function() ATE.input(9) end),\n'
+        '  })\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "schedule.tslua"
+        path.write_text(source, encoding="utf-8")
+        host = LuaHost(str(path), operator_input=op)
+        # Put the single declared input in place so only index 9 is undeclared.
+        host._step_inputs = [StepInput(index=1, desc="voltage", type="INTEGER")]
+        # A step action context lets the call pass the context check and reach the index lookup.
+        host._context = "step"
+        with pytest.raises(InvalidStepInput) as excinfo:
+            host.ate.input(9)  # the real Lua entry point, not a direct host.inputs() bypass
+        assert "undeclared input 9" in str(excinfo.value)
