@@ -19,6 +19,7 @@ The worker reaches this session only through those queued signals; nothing here 
 from __future__ import annotations
 
 import enum
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -30,6 +31,7 @@ from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
+from ..report.pdf import run_pdf_helper
 from ..storage.store import RunStore
 
 
@@ -61,6 +63,7 @@ class HeadlessRunSession(QObject):
     state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
@@ -127,25 +130,61 @@ class HeadlessRunSession(QObject):
         if state != self._state:
             self._state = state
             if state == SessionState.FINISHED:
-                # The run row is already closed by then; write its HTML report now. A failure is
-                # logged here and never raised so it can't crash the session or a live run (spec).
+                # The run row is already closed by then; write its HTML report now, then render the PDF
+                # on a background thread (never blocking FINISHED). A failure is logged and never raised
+                # so it can't crash the session or a live run (spec 22b).
                 self._write_run_report()
                 self._engine = None
             self.state_changed.emit(state)
 
     def _write_run_report(self) -> None:
-        """Write this run's HTML report at run end; log and swallow any failure."""
+        """Write this run's HTML report at run end, then render its PDF without blocking the run.
+
+        The HTML is written synchronously (spec 21a). The PDF follows on a daemon thread so it never
+        stalls FINISHED; when done ``report_written`` fires with both paths, and on failure an ERROR
+        line names the problem while the pdf path stays empty (spec 22b). A failure here never raises."""
         config = self._config
         if config is None or self._run_uuid is None or self._store is None:
             return
         try:
-            _write_run_report(self._store, self._run_uuid, config)
+            html_path = _write_run_report(self._store, self._run_uuid, config)
         except Exception as exc:  # noqa: BLE001 - a report failure must not crash the run
             msg = f"Failed to write Test Report for {self._run_uuid}: {exc}"
             if self.on_log is not None:
                 self.on_log("ERROR", "ate", msg)
             else:
                 print(msg)
+            return
+
+        # Render the PDF next to the HTML on a background thread; order is HTML then PDF. The call to
+        # run_pdf_helper is module-level so tests can monkeypatch it instead of spawning QWebEngine.
+        threading.Thread(
+            target=self._render_pdf,
+            args=(html_path, config.reports_paper_size),
+            daemon=True,
+        ).start()
+
+    def _render_pdf(self, html_path, paper: str) -> None:
+        """Render ``html_path`` to PDF on this background thread; emit report_written when done.
+
+        On success both paths are delivered via ``report_written``; on any failure (exception, timeout,
+        non-zero exit, or an empty file) the html path is kept and an ERROR line names the problem."""
+        run_uuid = self._run_uuid
+        # write_report returns a Path but the thread boundary may hand us a str too — normalize once.
+        html_path = Path(html_path)
+        try:
+            pdf_path = str(html_path.with_suffix(".pdf"))
+            run_pdf_helper(str(html_path), pdf_path, paper)
+            if not Path(pdf_path).exists() or Path(pdf_path).stat().st_size == 0:
+                raise RuntimeError("PDF helper wrote no PDF")
+            self.report_written.emit(str(html_path), pdf_path)
+        except Exception as exc:  # noqa: BLE001 - a PDF failure must not crash the run
+            msg = f"Failed to write Test Report PDF for {run_uuid}: {exc}"
+            if self.on_log is not None:
+                self.on_log("ERROR", "ate", msg)
+            else:
+                print(msg)
+            self.report_written.emit(str(html_path), "")
 
     @property
     def selected_stop_on_fail(self) -> bool:
