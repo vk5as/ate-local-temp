@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import enum
 import threading
+import weakref
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -171,10 +172,12 @@ class HeadlessRunSession(QObject):
         non-zero exit, or an empty file) the html path is kept and an ERROR line names the problem."""
         run_uuid = self._run_uuid
         # Capture every reference up front so this background thread never touches a possibly-deleted
-        # session: emitting on a QObject whose C++ wrapper has been freed raises "has been deleted",
-        # which would otherwise crash the worker (and, at interpreter shutdown, abort the process).
+        # session. Emitting on a QObject whose C++ wrapper has been freed does not merely raise — it can
+        # segfault in C++, which no Python try/except catches; the weakref probe lets us skip that call
+        # entirely once the session is collected, so a late-finishing worker never aborts the process.
         on_log = self.on_log
         report_written = self.report_written
+        alive = weakref.ref(self)  # None once this session's C++ wrapper has been freed
         # write_report returns a Path but the thread boundary may hand us a str too — normalize once.
         html_path = Path(html_path)
         try:
@@ -182,13 +185,16 @@ class HeadlessRunSession(QObject):
             run_pdf_helper(str(html_path), pdf_path, paper)
             if not Path(pdf_path).exists() or Path(pdf_path).stat().st_size == 0:
                 raise RuntimeError("PDF helper wrote no PDF")
+            # Deliver only while the session is still alive; a freed receiver would segfault on emit.
+            if alive() is None:
+                return
             report_written.emit(str(html_path), pdf_path)
         except Exception as exc:  # noqa: BLE001 - a PDF failure must not crash the run
             msg = f"Failed to write Test Report PDF for {run_uuid}: {exc}"
-            if on_log is not None:
-                on_log("ERROR", "ate", msg)
-            else:
+            if alive() is None or on_log is None:
                 print(msg)
+                return
+            on_log("ERROR", "ate", msg)
             # The receiver may already be gone by now; a freed C++ wrapper raises here, so swallow it —
             # the html stays and the ERROR line above names the problem.
             try:
