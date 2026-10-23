@@ -122,15 +122,13 @@ class RunEngine(QThread):
         self._abort_lock = threading.Lock()
         self._aborted = False
         # Stop-on-Fail failure pause (packet 12b). When set and a step fails, the worker blocks in
-        # :meth:`_pause_for_operator` until choose() records a choice; ``_opted_out_of_pause`` is set
-        # once an operator chooses CONTINUE/RETRY so later failures never pause again. Pending pauses
+        # :meth:`_pause_for_operator` until choose() records a choice; every failure pauses. Pending pauses
         # are keyed by (node_seq, attempt_no) and delivered through plain queues — the same Qt 6.11 /
         # PyQt6 6.11 offscreen deadlock that makes OperatorInput avoid a Condition means no
         # threading.Condition here either; a queue blocks-and-wakes correctly under the fixture's
         # event-loop pump.
         self._pause_lock = threading.Lock()
         self._pending: dict[tuple[int, int], queue.Queue] = {}
-        self._opted_out_of_pause = False
         # Set when a Stop-on-Fail pause is aborted (packet 12b); ends the run STOPPED_ON_FAIL.
         self._stopped_on_fail = False
 
@@ -564,11 +562,11 @@ class RunEngine(QThread):
 
             # Stop on Fail: a failed step pauses until the operator chooses (packet 12b). The failing
             # Attempt is already recorded above; once choose() returns we stamp its prompt_choice and
-            # either keep going (CONTINUE/RETRY — and disable further pauses) or stop cleanly (ABORT ->
-            # remaining steps NOTRUN, End Reason STOPPED_ON_FAIL / result FAIL). A chosen CONTINUE means
-            # later failures never pause again. RETRY's rerun semantics are 12c; here it keeps going like
+            # either keep going (CONTINUE/RETRY) or stop cleanly (ABORT ->
+            # remaining steps NOTRUN, End Reason STOPPED_ON_FAIL / result FAIL). Each later failure
+            # pauses again; only Continue on fail (stop_on_fail False) never pauses. RETRY's rerun semantics are 12c; here it keeps going like
             # Continue so the seam exists and nothing blocks on an unanswered choice.
-            if self.stop_on_fail and not self._opted_out_of_pause:
+            if self.stop_on_fail:
                 if last_result == "FAIL" or error_text is not None:
                     failed = True
                     pass_fail = "FAIL"
@@ -579,9 +577,6 @@ class RunEngine(QThread):
                         self._stopped_on_fail = True
                         self._record_abort(run_uuid, steps, seq, record_attempt=False)
                         break
-                    elif choice in ("CONTINUE", "RETRY"):
-                        # Keep this step's result; a chosen continue/retry opts out of further pauses.
-                        self._opted_out_of_pause = True
 
         # Post-test Actions run after the last step, in reverse, each called with the final pass_fail.
         # They record action rows too; 14c owns whether a skipped Pre-test suppresses them.

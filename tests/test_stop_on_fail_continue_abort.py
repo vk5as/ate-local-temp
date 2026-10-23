@@ -2,9 +2,7 @@
 Abort behave as specified (Retry is packet 12c).
 
 A failing step with Stop on Fail blocks the worker thread on a failure_prompt; the driver answers it
-through engine.choose() from another thread. Continue keeps the failed step's result and moves on
-(and disables further pauses); Abort marks every remaining step NOTRUN, keeps the failed step's
-result, and closes STOPPED_ON_FAIL / FAIL. Each Attempt records its prompt_choice. Verified against a
+through engine.choose() from another thread. Continue keeps the failed step's result and moves on; Abort marks every remaining step NOTRUN, keeps the failed step's result, and closes STOPPED_ON_FAIL / FAIL. Each Attempt records its prompt_choice. Verified against a
 real SQLite file with real .tslua schedules — no mocks."""
 
 import sqlite3
@@ -134,15 +132,16 @@ def test_abort_marks_remaining_notrun_keeps_failed_result_and_stops_on_fail(app:
     assert att["prompt_choice"] == "ABORT"
 
 
-def test_continue_on_fail_never_pauses_again(app: QCoreApplication) -> None:
-    """Packet 12b checkbox 3: once the operator chooses Continue, later failures never pause."""
+def test_continue_at_the_prompt_still_pauses_on_the_next_failure(app: QCoreApplication) -> None:
+    """Choosing Continue moves on but doesn't switch Stop on Fail off: the next failure pauses too.
+    (Only Continue on fail never pauses; see test_no_pause_when_stop_on_fail_off.)"""
     store, row, prompts = _drive_with_choice(app, TWO_FAILS_SOURCE, "CONTINUE")
 
     assert row is not None
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "COMPLETED"
-    # Only the first failure paused; the second did not (Continue opted out of further pauses).
-    assert prompts == 1
+    # Both failures paused.
+    assert prompts == 2
 
     conn = store._conn
     conn.row_factory = sqlite3.Row
