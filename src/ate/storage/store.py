@@ -24,7 +24,15 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import create_engine, event
 
 from ._uuid import new_uuid7
-from .schema import SCHEMA_VERSION, attempt, log_line, metadata, node, test_run
+from .schema import (
+    SCHEMA_VERSION,
+    attempt,
+    input_value,
+    log_line,
+    metadata,
+    node,
+    test_run,
+)
 
 
 @dataclass(frozen=True)
@@ -263,6 +271,34 @@ class RunStore:
                 prompt_choice=fields.get("prompt_choice"),
             )
         )
+
+    # -- input_value ---------------------------------------------------------
+
+    def insert_input_values(self, run_uuid: str, values: list[dict[str, Any]]) -> None:
+        """Insert every recorded Operator input value for a step's Attempt.
+
+        ``values`` is an ordered list of dicts each carrying ``node_seq``, ``attempt_no``,
+        ``input_index``, ``type``, ``value_text`` and ``at``; the run engine diffs this around
+        each step's action closure so ownership lands on that Attempt (index, type, value and
+        time). ``value_text`` is already serialised — a CHECKBOX selection arrives as a JSON
+        array of labels. Each row gets its own unique ``seq`` from :attr:`_log_seq`'s run counter
+        shared with log lines so ``(run_uuid, seq)`` stays globally unique within the run."""
+        next_seq = self._log_seq.get(run_uuid, 0)
+        for value in values:
+            row = {
+                "run_uuid": run_uuid,
+                "seq": next_seq,
+                "node_seq": value["node_seq"],
+                "attempt_no": value["attempt_no"],
+                "input_index": value["input_index"],
+                "type": value["type"],
+                "value": value["value_text"],
+                "at": value["at"],
+            }
+            next_seq += 1
+            self._run(input_value.insert().values(**row))
+        if next_seq > 0:
+            self._log_seq[run_uuid] = next_seq
 
     # -- log_line ------------------------------------------------------------
 
