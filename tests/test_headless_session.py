@@ -71,6 +71,27 @@ def _wait_finished(session: HeadlessRunSession) -> bool:
     return False
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_pdf_worker(request, monkeypatch) -> None:
+    """Stub ``run_pdf_helper`` for every test except the real e2e one.
+
+    A finished headless run spawns a daemon thread that calls ``run_pdf_helper`` inside a QWebEngine
+    subprocess to render the PDF. In this Qt 6.11 build that lingering worker crashes interpreter
+    shutdown and its accumulated state pollutes the shared session application, intermittently stalling
+    cross-thread signal delivery so simple runs fail to reach FINISHED in time (the ``_wait_finished``
+    stalls). Neutralizing the helper here means unit tests never launch a real QWebEngine process —
+    only :func:`test_run_end_writes_real_pdf_report` exercises the genuine helper. Tests that need a
+    specific fake behaviour override it with their own ``monkeypatch.setattr`` (the shared instance's
+    last write wins)."""
+    if request.node.name.endswith("test_run_end_writes_real_pdf_report"):
+        return
+
+    def _fake(html_path, pdf_path, paper="A4"):  # noqa: ANN001 - unit tests don't render PDFs
+        Path(pdf_path).write_bytes(b"%PDF-1.4\n% placeholder written by the test stub\n")
+
+    monkeypatch.setattr("ate.run_session.headless.run_pdf_helper", _fake)
+
+
 def test_passing_schedule_runs_headless_and_reads_back(tmp_path) -> None:
     """A selected schedule runs headless and records a PASS run with the Operator's fields."""
     env = write_ate_env(tmp_path)
