@@ -170,6 +170,11 @@ class HeadlessRunSession(QObject):
         On success both paths are delivered via ``report_written``; on any failure (exception, timeout,
         non-zero exit, or an empty file) the html path is kept and an ERROR line names the problem."""
         run_uuid = self._run_uuid
+        # Capture every reference up front so this background thread never touches a possibly-deleted
+        # session: emitting on a QObject whose C++ wrapper has been freed raises "has been deleted",
+        # which would otherwise crash the worker (and, at interpreter shutdown, abort the process).
+        on_log = self.on_log
+        report_written = self.report_written
         # write_report returns a Path but the thread boundary may hand us a str too — normalize once.
         html_path = Path(html_path)
         try:
@@ -177,14 +182,19 @@ class HeadlessRunSession(QObject):
             run_pdf_helper(str(html_path), pdf_path, paper)
             if not Path(pdf_path).exists() or Path(pdf_path).stat().st_size == 0:
                 raise RuntimeError("PDF helper wrote no PDF")
-            self.report_written.emit(str(html_path), pdf_path)
+            report_written.emit(str(html_path), pdf_path)
         except Exception as exc:  # noqa: BLE001 - a PDF failure must not crash the run
             msg = f"Failed to write Test Report PDF for {run_uuid}: {exc}"
-            if self.on_log is not None:
-                self.on_log("ERROR", "ate", msg)
+            if on_log is not None:
+                on_log("ERROR", "ate", msg)
             else:
                 print(msg)
-            self.report_written.emit(str(html_path), "")
+            # The receiver may already be gone by now; a freed C++ wrapper raises here, so swallow it —
+            # the html stays and the ERROR line above names the problem.
+            try:
+                report_written.emit(str(html_path), "")
+            except RuntimeError:  # noqa: BLE001 - the session was collected after run end
+                pass
 
     @property
     def selected_stop_on_fail(self) -> bool:
