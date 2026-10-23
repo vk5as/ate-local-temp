@@ -8,15 +8,18 @@ real SQLite file with real .tslua schedules; no mocks.
 
 import sqlite3
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
+from ate.engine.operator_input import OperatorInput
 from ate.storage._uuid import new_uuid7
 from ate.storage.store import RunStore
 
-from ._fixtures import ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
+from ._fixtures import ABORTABLE, ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -168,3 +171,77 @@ def test_run_key_is_uuidv7(app: QCoreApplication) -> None:
     store, row = _run_schedule(app, PASSING)
     assert len(row["run_uuid"]) == 36
     assert row["run_uuid"][14] == "7"
+
+
+def _abort_between_steps(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
+    """Drive ``source`` on a fresh engine and request a whole-run abort between steps.
+
+    The ABORTABLE schedule's first step blocks on an INTEGER input; while it waits the driver
+    supplies its value (so that step completes cleanly) and then requests an abort. The engine
+    therefore stops at the next boundary — recording the blocked step PASS, the following step as
+    ERROR "Aborted by Operator", later steps NOTRUN, and closing ABORTED / FAIL.
+
+    Driving is a concurrent pump loop rather than a bare ``QThread.wait``: the worker's queued
+    signals (input_asked -> supply/abort) only fire when the application event loop is pumped, and
+    that pumping races with the worker's own step-2 boundary check under a plain wait. Pumping in
+    lock-step with the worker — as :func:`_pump_until_finished` does for Ticket 10 — delivers every
+    queued slot (including FINISHED) deterministically before we inspect rows."""
+    captured = {}
+
+    def _capture(run_uuid: str) -> None:
+        captured["run_uuid"] = run_uuid
+
+    with tempfile.TemporaryDirectory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        schedule_path = Path(td) / "schedule.tslua"
+        schedule_path.write_text(source, encoding="utf-8")
+        op = OperatorInput()
+        engine = RunEngine(store, str(schedule_path), operator_input=op)
+        engine.run_uuid_reported.connect(_capture)
+
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+
+        def _on_ask(seq: int, attempt_no: int, index: int) -> None:
+            op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly
+            engine.request_abort()  # then stop between steps before step 2 runs
+
+        engine.input_asked.connect(_on_ask)
+        engine.start()
+        deadline = time.time() + 10.0
+        while not finished.is_set():
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("engine did not reach FINISHED within 10 s")
+
+    return store, store.get_test_run(captured["run_uuid"])
+
+
+def test_whole_run_abort_between_steps_records_error_notrun_and_aborted(app: QCoreApplication) -> None:
+    """Packet 13a checkbox 2: aborting between steps records the running step ERROR 'Aborted by
+    Operator', remaining steps NOTRUN, End Reason ABORTED and result FAIL."""
+    store, row = _abort_between_steps(app, ABORTABLE)
+
+    assert row is not None
+    # A whole-run abort fails the run with End Reason ABORTED.
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "ABORTED"
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    nodes = {n["step_number"]: dict(n) for n in conn.execute(
+        "SELECT step_number, result, attempt_count FROM node WHERE run_uuid=? ORDER BY node_seq", (row["run_uuid"],)
+    ).fetchall()}
+    # Step 1 ran and passed; step 2 was the running step at abort time -> ERROR; step 3 never ran.
+    assert nodes == {
+        "1.": {"step_number": "1.", "result": "PASS", "attempt_count": 1},
+        "2.": {"step_number": "2.", "result": "ERROR", "attempt_count": 1},
+        "3.": {"step_number": "3.", "result": "NOTRUN", "attempt_count": 0},
+    }
+
+    # The running step's single attempt carries the operator-abort message.
+    err = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=1", (row["run_uuid"],)
+    ).fetchone()
+    assert err is not None and err["pass_fail"] == "ERROR"
+    assert err["msg"] == "Aborted by Operator"
