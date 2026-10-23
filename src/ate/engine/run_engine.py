@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -72,6 +72,7 @@ class RunEngine(QThread):
         schedule_name: str = "",
         utc_offset: str = "+00:00",
         parent: Optional[object] = None,
+        ate_fns: Mapping[str, Callable[..., Any]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -87,12 +88,33 @@ class RunEngine(QThread):
         self.media_number = media_number
         self.schedule_name = schedule_name
         self.utc_offset = utc_offset
+        # Optional pre-registered ATE functions (a testability seam; see criterion 03). When
+        # provided they are registered on the host before it runs, so a failing one can be
+        # exercised through real Lua execution without touching device drivers.
+        self._ate_fns = dict(ate_fns or {})
 
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there.
         host = LuaHost(self._schedule_path)
+        for name, fn in self._ate_fns.items():
+            host.ate.register(name, fn)  # criterion 03: isolate a failing ATE call through Lua
         schedule = host.schedule
+        # Criterion c: publish this run's identifying metadata into the read-only ATE.run table so a
+        # step can READ it (e.g. which UUT/operator/project it is running under). Empty fields seed
+        # as nil; writes from Lua are rejected by the table's read-only guard.
+        host.ate.publish_run(
+            {
+                "UUT_serial": self.uut_serial or None,
+                "Operator": self.operator or None,
+                "Station": self.station_name or None,
+                "Project": self.project or None,
+                "Test_Schedule_Name": schedule.name if schedule else None,
+                "Media_Release_Media_Number": self.media_number or None,
+                "name": schedule.name if schedule else None,
+                "version": self.ate_version or None,
+            }
+        )
         steps = schedule.steps
 
         run_uuid = new_uuid7()
@@ -124,13 +146,24 @@ class RunEngine(QThread):
             if step.action is None:
                 continue
 
+            # Tell the host which step is running so an isolated ATE error can be attributed to
+            # the schedule line where that step's action began (criterion 03), and put the host in
+            # the "step" phase so a step may legally call any ATE function — including ATE.report
+            # and ATE.input, which are rejected elsewhere (criterion b). _run_action sets and then
+            # restores that context around the action.
+            host._current_step = seq
             start = len(host.reports)
             log_start = len(host.logs)
             error_text: Optional[str] = None
             try:
-                step.action()  # runs the closure in Lua; may call ATE.report several times
+                host._run_action(step.action, "step")  # runs the closure in Lua; may call ATE.report several times
             except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
-                error_text = str(exc)
+                # The first line is the human-readable message (for a Lua-originated error it
+                # is just the message; file:line lives in the traceback portion). The full
+                # traceback — which carries the schedule's file:line — is logged at ERROR so
+                # criterion 03 can rebuild "<file>:<line>: ATE.<func>:" from it.
+                error_text = str(exc).splitlines()[0] if str(exc) else ""
+                host.record_log("ERROR", str(exc))
 
             new_reports = host.reports[start:]
             last_result = "NOREPORT"

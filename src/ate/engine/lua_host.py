@@ -14,6 +14,11 @@ Bridging facts (validated empirically against lupa 2.8):
 
 * ``register_eval=False, register_builtins=False, unpack_returned_tuples=True`` — no
   Python leaks into Lua; only ATE-provided globals are visible.
+* The standard library still ships ``dofile``/``loadfile``/``load``, so they are shadowed to
+  nil and ``python`` is set to nil in :meth:`_LuaHost._lockdown`; a schedule cannot load files
+  or reach Python, and calling a removed name raises "attempt to call a nil value".
+* Loaded chunks run with the name ``@<path>`` in text mode (see :meth:`_load_schedule`), so an
+  error's traceback carries the schedule's own file:line.
 * Enums must be defined by executing an *assignment chunk* (``Result = { ... }``); the
   table then persists as a real Lua global that later chunks can read. Assigning the
   value lua.execute returns back onto the global env does **not** work — it comes back
@@ -29,9 +34,19 @@ Bridging facts (validated empirically against lupa 2.8):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from ..errors import ATEError
+
+
+class NotAllowedError(ATEError):
+    """ATE was called where it isn't allowed (criterion b).
+
+    Raised by :meth:`_AteTable.report` and :meth:`_AteTable.input` when the host's current
+    execution context makes the call illegal — e.g. ``ATE.report``/``ATE.input`` at load time, or
+    inside a Pre-test/Post-test Action instead of a step. The message carries the schedule's own
+    ``<file>:<line>`` and names the function, so it reads as
+    ``schedule.tslua:42: ATE.report: only allowed in a step action``."""
 
 
 class HostError(ATEError):
@@ -44,6 +59,64 @@ class VersionMismatch(HostError):
 
 # The one and only Lua version ATE runs Test Schedules on.
 TARGET_LUA_VERSION = (5, 5)
+
+# ATE.run field names (criterion c). Each maps to a RunEngine attribute when populating the table
+# from run context; until then every field reads back as nil. The table is read-only — writing any
+# of these raises, so a schedule can only READ the current run's identifying metadata and never
+# mutate it. "name" is the test schedule's declared name (distinct conceptually from
+# Test_Schedule_Name, the identifier used to select/run it); both are sourced from the loaded
+# ScheduleParams in ticket 02 where they coincide.
+_RUN_FIELDS: tuple[str, ...] = (
+    "UUT_serial",
+    "Operator",
+    "Station",
+    "Project",
+    "Test_Schedule_Name",
+    "Media_Release_Media_Number",
+    "name",
+    "version",
+)
+
+# Raised when a schedule tries to write one of ATE.run's fields. Surfaced by the run engine as an
+# ERROR Attempt (criterion 02); naming the table keeps it consistent with "<file>:<line>: ATE.<fn>:".
+ATE_RUN_READONLY = "ATE.run: read-only"
+
+
+def _build_readonly_table_source(mapping: Mapping[str, Any]) -> str:
+    """Return Lua source for a read-only metadata table seeded with ``mapping`` (field -> value).
+
+    Values are stored in a private local ``vals``, captured by the metatable's closures as upvalues,
+    so nothing leaks into the schedule's global scope. The public table is empty; its ``__index``
+    serves reads from ``vals`` while its ``__newindex`` raises on any assignment. Because no key is
+    stored directly in the public table, every field appears *missing* to Lua — which makes
+    ``__newindex`` fire even when writing an already-seeded field (Lua only consults ``__newindex``
+    for keys absent from the underlying table; a plain seeded table would let existing-field writes
+    slip through untouched). The raiser is a separate local function because this lupa build's parser
+    rejects an inline ``error(...)`` as the last expression before ``})``, and needs an explicit
+    ``end``. The empty table is returned, so no global leaks into the schedule."""
+    pairs = ", ".join(f"{field}={_lua_value(value)}" for field, value in mapping.items()) or "nil"
+    return (
+        "local function _raise() error(%r) end" % ATE_RUN_READONLY
+        + "\n"
+        + f"local vals = {{ {pairs} }}"
+        + "\n"
+        + "return setmetatable({}, {"
+        + "__index=function(t,k) return vals[k] end,"
+        + "__newindex=function() return _raise() end"
+        + "})"
+    )
+
+
+def _lua_value(value: Any) -> str:
+    """Render a Python value as a safe single-quoted Lua literal (``None``/``""`` become ``nil``).
+
+    Used only to seed ATE.run's fields via :meth:`_AteTable.publish_run`; field names are the fixed
+    :data:`_RUN_FIELDS` constants, so nothing here reaches Lua source and there is no injection."""
+    if value is None or value == "":
+        return "nil"
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
 
 # Enum tables: Lua label -> string value. Defined as Lua assignment chunks so each
 # becomes a real global readable by the schedule chunk that uses it.
@@ -108,20 +181,68 @@ class _AteTable:
 
     def __init__(self) -> None:
         self._extra: dict[str, Callable[..., Any]] = {}
+        # Criterion c's read-only ATE.run table. Built by :meth:`_LuaHost.__init__`; ``None`` until
+        # then so a stray attribute probe surfaces the usual AttributeError rather than a table.
+        self._run: Any = None
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
         self._extra[name] = fn
         return self
 
+    def _isolate(self, fn: Callable[..., Any], name: str) -> Callable[..., Any]:
+        """Wrap an ATE function so a Python exception never reaches Lua (criterion 03).
+
+        If ``fn`` raises while running inside a step action, we log its full traceback at ERROR —
+        with the settled "<file>:<line>: ATE.<name>:" prefix (see :meth:`_location`) — and return
+        halves ``(false, "<file>:<line>: ATE.<name>: <msg>")`` instead of letting the raw Python
+        error surface into Lua. The schedule therefore sees a graceful failure it can handle
+        (through ``onError`` or by inspecting the returned value), never an uncaught exception —
+        and both the log line and the message carry the caller's file:line."""
+        import traceback
+
+        def _wrapped(*args: Any) -> tuple[bool, Any]:
+            try:
+                return fn(*args)
+            except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
+                recorded = "".join(traceback.format_exception(exc))  # the full Python traceback
+                loc = self._host._location()
+                msg = str(exc).splitlines()[0] if str(exc) else "ATE error"
+                # Log at ERROR with the settled format "<file>:<line>: ATE.<fn>:" prefixed to the
+                # full traceback, so the app log carries both the schedule's file:line and the
+                # Python traceback; return graceful halves carrying just that prefix + message.
+                self._host.record_log("ERROR", f"{loc} ATE.{name}: {recorded}")
+                return (False, f"{loc} ATE.{name}: {msg}")
+
+        return _wrapped
+
     def report(
         self, pass_fail: Any, msg: Any = None, actual: Any = None, expected: Any = None
     ) -> bool:
         """Record a step's result. Returns ``true`` so the schedule keeps running."""
+        # ATE.report belongs to steps only; it is not legal in a Pre-test/Post-test Action or while
+        # the file is loading (only the builders, require, log and the enums are). Refuse there
+        # first with an error that carries the caller's file:line and names the function — exactly
+        # like ATE.input.
+        if self._host._context != "step":
+            raise NotAllowedError(
+                f"{self._host._location()} ATE.report: only allowed in a step action"
+            )
         # The host appends every call in order; the run engine attributes each batch
         # to the step whose action closure just ran (last call wins per step).
         self._host.record_report(pass_fail, msg, actual, expected)
         return True
+
+    def input(self, n: Any) -> Any:
+        """Return the current step's n-th Step Input. Raises outside a step."""
+        # ATE.input reads the Operator's answer for the running step; it is not legal in a Pre-test
+        # or Post-test Action (or while loading). Refuse there first with an error that carries the
+        # caller's file:line and names the function.
+        if self._host._context != "step":
+            raise NotAllowedError(
+                f"{self._host._location()} ATE.input: only allowed in a step action"
+            )
+        return self._host.inputs(n)
 
     def log(self, level: Any, *args: Any) -> bool:
         """Record a schedule's own log line at ``level``. Returns ``true``."""
@@ -131,10 +252,32 @@ class _AteTable:
         return True
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
+        if name == "run":
+            # Criterion c: ATE.run is a read-only metadata table (a real Lua table), not a function.
+            # Return it directly so field reads work and writes trip its __newindex guard; routing
+            # it through _isolate would wrap it in a callable and break both. Names that are not the
+            # run table or registered functions fall through to ``AttributeError`` — otherwise dunder
+            # probes (e.g. ``__getitem__``, which lupa runs when assigning this table as a global)
+            # would raise the wrong exception type and break construction/lookup.
+            return self._run
         try:
-            return self._extra[name]
+            fn = self._extra[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
+        return self._isolate(fn, name)
+
+    def publish_run(self, values: Mapping[str, Any]) -> Any:
+        """Rebuild ATE.run from run context (criterion c) and return the new read-only table.
+
+        The table is read-only, so a schedule can only READ these fields; writing any of them raises.
+        Field names are the fixed :data:`_RUN_FIELDS` constants, so nothing here reaches Lua source and
+        there is no injection to worry about."""
+        seeded = {field: values.get(field) for field in _RUN_FIELDS if field in values}
+        self._run = self._host._runtime.execute(
+            _build_readonly_table_source(seeded),
+            name=f"@{self._host._schedule_path.name}-run",
+            mode="t",
+        )
 
 
 class _StepParams:
@@ -235,7 +378,14 @@ class _LuaHost:
     def __init__(self, path: str | Path) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
+        # The options ATE asks lupa for — kept on the instance so criterion 01's runtime
+        # settings can be asserted directly (lupa exposes no Python-level accessor).
         base = dict(register_eval=False, register_builtins=False, unpack_returned_tuples=True)
+        self._runtime_config = base
+
+        # The schedule path this host was built for; :meth:`_location` uses it to name the
+        # error's file (lupa has no API to read a Python call site).
+        self._schedule_path = Path(path)
         self._runtime = LuaRuntime(**base)
         if self._runtime.lua_version != TARGET_LUA_VERSION:
             raise VersionMismatch(
@@ -246,12 +396,24 @@ class _LuaHost:
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
         env = self._runtime.globals()
+        # Lock down the sandbox before anything else is registered so a schedule — even at load
+        # time — cannot escape via file loading or reach Python (criterion 01).
+        self._lockdown(env)
         env["ScheduleParams"] = _ScheduleParams
         env["StepParams"] = _StepParams
         ate = _AteTable()
         ate._host = self  # report()/log() record into the host's ordered lists
         env["ATE"] = ate
         self._ate = ate
+        # Criterion c: expose the current run's identifying metadata as a read-only Lua table. Built
+        # here (all fields nil) so it exists even before any run context is published; :meth:`_AteTable.publish_run`
+        # rebuilds it from RunEngine context via rawset without tripping the read-only guard. The
+        # schedule reads ATE.run through _AteTable.__getattr__("run").
+        ate._run = self._runtime.execute(
+            _build_readonly_table_source({field: None for field in _RUN_FIELDS}),
+            name=f"@{Path(path).name}-run",
+            mode="t",
+        )
         # Redirect stray prints to ATE.log(INFO, ...) so schedule output is always logged.
         self._bind_print(ate)
 
@@ -262,10 +424,81 @@ class _LuaHost:
         # as ``(level, source="schedule", text)``. The run engine diffs this around each
         # step's action closure to attribute lines to that Attempt.
         self.logs: list[tuple[str, str, str]] = []
+        # The step index currently running (set by the run engine before each action), used to
+        # attribute an isolated ATE error to the schedule line where it was called. None outside
+        # a run, when only the filename is known.
+        self._current_step: Optional[int] = None
+        # The execution context this host is in right now — one of "load" (the top level while the
+        # file is loading), "pretest", "posttest" or "step". None means idle, which for a freshly
+        # built host is the same as load time: nothing has started running yet. :meth:`_run_action`
+        # sets it around an action and restores None afterwards; context-checked ATE functions use
+        # it to raise where a call isn't allowed (see criterion b).
+        self._context = "load"
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
+        self._schedule_source = Path(path).read_text(encoding="utf-8")
         self._schedule = self._load_schedule(path)
+
+    def _lockdown(self, env) -> None:
+        """Remove the file-loading entry points and the python builtin from ``env``.
+
+        Assigning each to None makes it Lua nil; calling a nil value raises "attempt to call a
+        nil value", which xpcall/run_engine turns into an ERROR Attempt (criterion 02). The
+        standard library still provides dofile/loadfile/load, so they must be shadowed explicitly.
+        python is excluded by register_builtins=False but is set here too so it reads back as nil
+        and cannot reach the host's Python."""
+        for name in ("dofile", "loadfile", "load"):
+            env[name] = None
+        env["python"] = None
+
+    def _location(self) -> str:
+        """Return ``<file>:<line>:``, the schedule line where the current call was made.
+
+        lupa has no API to read a Python call site, so this locates the offending line in the
+        loaded source and reports its 1-based number:
+
+        * Inside a Pre-test/Post-test Action (``_context`` set to that phase by :meth:`_run_action`)
+          it points at the action's ``:setPreTestAction(`/`:setPostTestAction(` line.
+        * While a step runs, or while loading / when idle, it locates the current step's
+          ``:setAction(`` line via :attr:`_current_step`.
+
+        Outside a run it falls back to just the filename."""
+        name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        ctx = self._context
+        # A Pre-test/Post-test Action is running: point at that action's line.
+        if ctx in ("pretest", "posttest"):
+            lines = self._schedule_source.splitlines() if self._schedule_source else []
+            marker = ":setPreTestAction(" if ctx == "pretest" else ":setPostTestAction("
+            for i, line in enumerate(lines):
+                if marker in line:
+                    return f"{name}:{i + 1}:"
+            return f"{name}:"
+        # A step is running (criterion 03) or we are loading / idle: the current step's action.
+        if self._current_step is None or self._schedule_source is None:
+            return f"{name}:"
+        lines = self._schedule_source.splitlines()
+        target = self._current_step  # 0-based step index; actions are in order
+        found = -1
+        for i, line in enumerate(lines):
+            if ":setAction(" in line:
+                found += 1
+                if found == target:
+                    return f"{name}:{i + 1}:"
+        return f"{name}:"
+
+    def _run_action(self, fn: Callable[..., Any], phase: str) -> Any:
+        """Run a Lua action closure with ``phase`` active so context-checked ATE calls raise.
+
+        While ``phase`` is set (one of "pretest", "posttest" or "step") the host knows where it is,
+        so :meth:`_AteTable.report` and :meth:`_AteTable.input` can refuse a call made where it isn't
+        allowed. The context is restored to idle (``None``) afterwards; a fresh host starts at "load"
+        because the top level of the file runs before anything else exists."""
+        self._context = phase
+        try:
+            return fn()
+        finally:
+            self._context = None
 
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
         """Record one ATE.report call from a running schedule."""
@@ -309,6 +542,16 @@ class _LuaHost:
         if schedule.name is None or schedule.name == "":
             raise HostError(f"{path} has no ScheduleParams name")
         return schedule
+
+    @property
+    def runtime_configuration(self) -> dict[str, bool]:
+        """The lupa options this host was constructed with.
+
+        register_eval=False / register_builtins=False keep Python out of Lua; unpack_returned_
+        tuples=True lets a returned tuple be handed to a step's action as arguments. Kept on the
+        instance so criterion 01's runtime settings can be asserted directly (lupa exposes no
+        Python-level accessor for them)."""
+        return self._runtime_config
 
     @property
     def runtime(self) -> Any:

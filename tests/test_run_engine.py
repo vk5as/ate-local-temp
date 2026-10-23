@@ -16,17 +16,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage._uuid import new_uuid7
 from ate.storage.store import RunStore
 
-from ._fixtures import ERRORING, FAILING, PASSING
-
-
-def _drive(engine: RunEngine, app: QCoreApplication) -> None:
-    """Start the worker and poll processEvents until it stops running."""
-    engine.state_changed.connect(lambda status: None)  # swallow; we read state from the store
-    engine.start()
-    for _ in range(2000):
-        if not engine.isRunning():
-            break
-        app.processEvents()
+from ._fixtures import ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -115,6 +105,62 @@ def test_raised_action_becomes_error_attempt_and_fails_run(app: QCoreApplication
 
     never = by_step["2."]
     assert never["result"] == "PASS"  # execution continued past the error
+
+
+def test_raised_action_logs_full_traceback_at_error(app: QCoreApplication) -> None:
+    """Criterion 02: a raised action records ERROR with its first line as the message and logs
+    the full traceback (with the schedule's file:line in its stack portion) at ERROR."""
+    store, row = _run_schedule(app, ERRORING)
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    err_attempt = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=0", (row["run_uuid"],)
+    ).fetchone()
+    assert err_attempt["pass_fail"] == "ERROR"
+    # The first line of the traceback is recorded verbatim as the message — for a Lua error
+    # that already carries "<file>:<line>: <msg>", matching the ATE error format.
+    assert err_attempt["msg"].startswith("schedule.tslua:")
+    assert "kaboom from Lua" in err_attempt["msg"]
+
+    # The full traceback (with its stack portion) is logged at ERROR, not just the first line.
+    error_lines = [ln for ln in store.log_lines(row["run_uuid"]) if ln["level"] == "ERROR"]
+    assert len(error_lines) >= 1
+    tb = "\n".join(ln["text"] for ln in error_lines)
+    assert "kaboom from Lua" in tb
+    assert "stack traceback" in tb
+
+
+def test_step_that_never_reports_records_noreport_and_warns(app: QCoreApplication) -> None:
+    """Criterion 04 — a step that runs its action but never calls ATE.report records a NOREPORT
+    attempt and logs one warning, so the forgotten report is visible."""
+    store, row = _run_schedule(app, NEVER_REPORTS)
+
+    assert row is not None
+    # The run still completes; a NOREPORT step does not fail it (spec rule 91: only FAIL/ERROR do).
+    assert row["end_reason"] == "COMPLETED"
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    node = conn.execute(
+        "SELECT result, attempt_count FROM node WHERE run_uuid=? AND step_number='1.'", (row["run_uuid"],)
+    ).fetchone()
+    assert node is not None
+    # The only attempt recorded for the silent step is NOREPORT.
+    assert node["result"] == "NOREPORT"
+    assert node["attempt_count"] == 1
+
+    err_attempt = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=0", (row["run_uuid"],)
+    ).fetchone()
+    assert err_attempt is not None
+    assert err_attempt["pass_fail"] == "NOREPORT"
+
+    # Ate-sourced warning that the step never reported.
+    warnings = [ln for ln in store.log_lines(row["run_uuid"]) if ln["level"] == "WARNING"]
+    assert len(warnings) >= 1
+    joined = "\n".join(ln["text"] for ln in warnings)
+    assert "never reported" in joined
 
 
 def test_run_key_is_uuidv7(app: QCoreApplication) -> None:
