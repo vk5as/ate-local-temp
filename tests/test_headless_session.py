@@ -85,6 +85,74 @@ def test_failing_schedule_runs_headless_and_reads_back(tmp_path) -> None:
     assert row["end_reason"] == "COMPLETED"
 
 
+def test_stop_on_fail_records_the_schedule_default_when_unset(tmp_path) -> None:
+    """A schedule that leaves Stop on Fail unset records the spec default (True)."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Failing schedule")  # no setStopOnFail -> default True
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    assert row["stop_on_fail"] == 1
+    assert session.selected_stop_on_fail is True
+
+
+def test_stop_on_fail_records_an_explicit_false_default(tmp_path) -> None:
+    """A schedule that sets Stop on Fail False records it without any Operator override."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Stop on fail false schedule")  # setStopOnFail(False)
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    assert row["stop_on_fail"] == 0
+    assert session.selected_stop_on_fail is False
+
+
+def test_operator_overrides_the_schedule_default_to_false(tmp_path) -> None:
+    """The Operator's choice overrides the schedule default; a True default beaten to False."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Failing schedule")  # default True
+    session.set_stop_on_fail(False)  # Operator runs every step regardless of failures
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    assert row["stop_on_fail"] == 0
+
+
+def test_operator_overrides_the_schedule_default_to_true(tmp_path) -> None:
+    """The Operator's choice overrides a False default back to True."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+
+    session.set_operator("Ada")
+    session.select_schedule("Stop on fail false schedule")  # default False
+    session.set_stop_on_fail(True)  # Operator opts back in before starting
+
+    engine = session.start()
+    assert _wait_finished(session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    assert row["stop_on_fail"] == 1
+
+
 def test_interrupted_runs_are_closed_at_launch(tmp_path) -> None:
     """A run left open by a crash is closed as INTERRUPTED/FAIL before the next run starts."""
     env = write_ate_env(tmp_path)

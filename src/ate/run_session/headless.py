@@ -25,6 +25,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..catalog import resolve_schedule
+from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
 from ..log import AppLog, LogError, open_app_log
@@ -64,7 +65,10 @@ class HeadlessRunSession(QObject):
         self._config = read_config(config) if config is not None else None
         self._store = RunStore(self._config.database_path) if self._config is not None else None
         self._selected_name: Optional[str] = None
-        self._stop_on_fail: bool = False
+        # The selected schedule's declared Stop on Fail default, captured when it is chosen;
+        # ``None`` until a schedule has been selected. Prefills the Steps stage radio (True when
+        # unset) and is what a run records unless the Operator overrides it via set_stop_on_fail.
+        self._selected_stop_on_fail: Optional[bool] = None
         # The current observable state; updated on the owning thread by signal handlers.
         self._state = SessionState.IDLE
         # ATE's logger seam (ticket 08); interrupted-run recovery logs through it. Defaults to
@@ -120,11 +124,34 @@ class HeadlessRunSession(QObject):
                 self._engine = None
             self.state_changed.emit(state)
 
+    @property
+    def selected_stop_on_fail(self) -> bool:
+        """The selected schedule's Stop on Fail default — ``True`` when it is unset or unknown.
+
+        Captured from the loaded :class:`ScheduleParams` at selection time; a broken or unreadable
+        schedule falls back to the spec default (True), so the Steps stage radio always has a value
+        to prefill and a run always records something meaningful."""
+        return self._selected_stop_on_fail if self._selected_stop_on_fail is not None else True
+
     def select_schedule(self, name: str) -> None:
-        """Select a schedule by its loaded name (for listing/validating later)."""
+        """Select a schedule by its loaded name and remember its Stop on Fail default.
+
+        Loads the schedule once (the same host that runs it later) so the Steps stage can prefill
+        its radio from the declared default; a broken or unreadable schedule falls back to True."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
         self._selected_name = name
+        stop_on_fail = True  # spec default when unset, unknown, or the schedule fails to load
+        config = self._config
+        if config is not None:
+            try:
+                path = resolve_schedule(*config.test_definition_dirs, schedule_name=name)
+                if path is not None:
+                    host = LuaHost(path)
+                    stop_on_fail = bool(host.schedule.stop_on_fail)
+            except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
+                print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
+        self._selected_stop_on_fail = stop_on_fail
         # Only announce selection while idle; once running, the run owns the session.
         if self._state in (SessionState.IDLE,):
             self._set_state(SessionState.SELECTING)
@@ -163,9 +190,11 @@ class HeadlessRunSession(QObject):
         self._pending_uut_serial = uut_serial
 
     def set_stop_on_fail(self, value: bool) -> None:
-        """Set whether the next run stops at the first failure.
+        """Override the selected schedule's Stop on Fail default for this run.
 
-        The session default is False; call this to opt in before starting a run."""
+        Called by the Steps stage with the radio's checked state; leaving it at the prefilled
+        default still records that default (the radio is always a definite choice). When nothing
+        has been set, :meth:`start` falls back to the schedule's own default."""
         if not isinstance(value, bool):
             raise SessionError("stop_on_fail must be a boolean")
         self._pending_stop_on_fail = value
@@ -211,8 +240,15 @@ class HeadlessRunSession(QObject):
             "project": getattr(self, "_pending_project", "") or "",
             "uut_type": getattr(self, "_pending_uut_type", "") or "",
             "uut_serial": getattr(self, "_pending_uut_serial", "") or "",
-            "stop_on_fail": bool(getattr(self, "_pending_stop_on_fail", False)),
         }
+
+        # Stop on Fail: the Operator's explicit choice overrides the schedule's default; otherwise
+        # use the schedule's own default (captured at selection, True when unset). Whatever this is
+        # is what gets recorded on the run row, so it always matches what was in effect.
+        if getattr(self, "_pending_stop_on_fail", None) is not None:
+            stop_on_fail = bool(self._pending_stop_on_fail)
+        else:
+            stop_on_fail = self.selected_stop_on_fail
 
         self._engine = RunEngine(
             self._store,
@@ -221,7 +257,7 @@ class HeadlessRunSession(QObject):
             project=pending["project"],
             uut_type=pending["uut_type"],
             uut_serial=pending["uut_serial"],
-            stop_on_fail=pending["stop_on_fail"],
+            stop_on_fail=stop_on_fail,
             station_name=self._config.station_name or "",
             station_uuid=self._config.station_uuid or "",
             ate_version="",  # ticket 02 leaves the ATE version empty; a later ticket fills it
