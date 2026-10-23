@@ -188,6 +188,10 @@ class HeadlessRunSession(QObject):
             # Deliver only while the session is still alive; a freed receiver would segfault on emit.
             if alive() is None:
                 return
+            # Hold a strong reference across the emit so collection can't race us out of the window
+            # between this liveness check and the call below — emitting on a freed C++ wrapper
+            # segfaults in C++, which no Python try/except catches.
+            session = self
             report_written.emit(str(html_path), pdf_path)
         except Exception as exc:  # noqa: BLE001 - a PDF failure must not crash the run
             msg = f"Failed to write Test Report PDF for {run_uuid}: {exc}"
@@ -196,7 +200,9 @@ class HeadlessRunSession(QObject):
                 return
             on_log("ERROR", "ate", msg)
             # The receiver may already be gone by now; a freed C++ wrapper raises here, so swallow it —
-            # the html stays and the ERROR line above names the problem.
+            # the html stays and the ERROR line above names the problem. ``session`` is held strongly
+            # across the emit below for the same reason as above.
+            session = self
             try:
                 report_written.emit(str(html_path), "")
             except RuntimeError:  # noqa: BLE001 - the session was collected after run end
