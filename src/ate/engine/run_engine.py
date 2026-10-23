@@ -34,7 +34,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..errors import ATEError
 from ..storage._uuid import new_uuid7
 from ..storage.store import RunStore, _now_iso
-from .lua_host import LuaHost
+from .lua_host import _AbortFlag, LuaHost
 from .operator_input import OperatorInput
 
 
@@ -116,11 +116,10 @@ class RunEngine(QThread):
         self._op = operator_input or OperatorInput()
         # Whole-run abort, requested by the Operator (the staged Run screen's Abort button calls
         # :meth:`request_abort` through the session). It is checked between steps so a clean stop
-        # needs no busy-loop or blocking interruption — those come in packets 13b/13c. Guarded by
-        # a lock because it is set from the operator/main thread while the worker reads it each
-        # loop iteration; see :meth:`aborted`.
-        self._abort_lock = threading.Lock()
-        self._aborted = False
+        # needs no busy-loop or blocking interruption — those come in packets 13b/13c. This flag is
+        # also read by the Lua count hook (:meth:`_LuaHost._install_abort_hook`) to interrupt a busy
+        # loop, and passed to that host so both threads see one value; see :meth:`aborted`.
+        self._abort_flag = _AbortFlag()
         # Stop-on-Fail failure pause (packet 12b). When set and a step fails, the worker blocks in
         # :meth:`_pause_for_operator` until choose() records a choice; every failure pauses. Pending pauses
         # are keyed by (node_seq, attempt_no) and delivered through plain queues — the same Qt 6.11 /
@@ -135,17 +134,16 @@ class RunEngine(QThread):
     @property
     def aborted(self) -> bool:
         """Whether a whole-run abort has been requested for this run."""
-        with self._abort_lock:
-            return self._aborted
+        return self._abort_flag.aborted
 
     def request_abort(self) -> None:
         """Request a whole-run abort (settable from the operator/main thread).
 
         The running worker observes it at its next step boundary and stops between steps, recording
         the step about to run as an ERROR "Aborted by Operator" attempt, marking every remaining
-        step NOTRUN, and closing with End Reason ABORTED / result FAIL (spec rule 83)."""
-        with self._abort_lock:
-            self._aborted = True
+        step NOTRUN, and closing with End Reason ABORTED / result FAIL (spec rule 83). A busy loop
+        or blocking call in flight is interrupted too (packets 13b/13c) via the shared flag."""
+        self._abort_flag.request()
 
     @property
     def operator_input(self) -> OperatorInput:
@@ -360,7 +358,11 @@ class RunEngine(QThread):
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
         # OperatorInput controller this run owns is injected so its ATE.input calls read/write the
         # same blocking waits and POLL state the GUI drives through supply_input/click_poll.
-        host = LuaHost(self._schedule_path, operator_input=self._op)
+        host = LuaHost(
+            self._schedule_path,
+            operator_input=self._op,
+            aborted_flag=self._abort_flag,  # the count hook reads this; see request_abort/aborted
+        )
         self._host = host  # kept on the engine so per-step input values can be typed from declarations
         for name, fn in self._ate_fns.items():
             host.ate.register(name, fn)  # criterion 03: isolate a failing ATE call through Lua
@@ -470,6 +472,15 @@ class RunEngine(QThread):
                 # traceback — which carries the schedule's file:line — is logged at ERROR so
                 # criterion 03 can rebuild "<file>:<line>: ATE.<func>:" from it.
                 error_text = str(exc).splitlines()[0] if str(exc) else ""
+                # Packet 13c: an abort raised mid-step (the count hook, or a re-raised pcall/xpcall)
+                # ends the run here — record this running step as ERROR and mark every later step
+                # NOTRUN instead of treating it as an ordinary failure. The sentinel is exactly the
+                # string "aborted" that the hook raises; a genuine error whose first line merely
+                # contains it is left to fail normally below.
+                if error_text.strip() == "aborted":
+                    aborted = True
+                    self._record_abort(run_uuid, steps, seq)
+                    break
                 host.record_log("ERROR", str(exc))
 
             new_reports = host.reports[start:]
