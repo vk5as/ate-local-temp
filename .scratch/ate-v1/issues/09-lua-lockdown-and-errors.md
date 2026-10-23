@@ -4,11 +4,11 @@
 
 **Blocked by:** 08 (Logging, log pane and debug window)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Runtimes use `register_eval=False`, `register_builtins=False`, `unpack_returned_tuples=True`; `dofile`, `loadfile` and `load` are removed and `python` is `nil`; chunks load with name `@<path>` and mode `t` (bytecode refused)
-- [ ] Actions run through `xpcall(fn, debug.traceback)`; an error records `Result.ERROR` with its first line as the message and the full traceback logged at `ERROR`
-- [ ] `ATE` functions never let a Python exception reach Lua: Python halves return `(ok, value)` and a Lua shim raises `error("ATE.x: " .. msg, 2)`, so messages start with the schedule's `file:line`; the Python traceback goes to the application log
+- [x] Runtimes use `register_eval=False`, `register_builtins=False`, `unpack_returned_tuples=True`; `dofile`, `loadfile` and `load` are removed and `python` is `nil`; chunks load with name `@<path>` and mode `t` (bytecode refused) — branch `ticket-09-lua-lockdown-and-errors`, commit `79eccb2`
+- [x] Actions run through `xpcall(fn, debug.traceback)`; an error records `Result.ERROR` with its first line as the message and the full traceback logged at `ERROR` — commit `d86d31d`
+- [x] `ATE` functions never let a Python exception reach Lua: `_AteTable._isolate` (routed through `__getattr__`) logs the Python traceback at ERROR prefixed `<file>:<line>: ATE.<fn>:` and returns graceful halves `(false, "<file>:<line>: ATE.<fn>: <msg>")`; messages start with the schedule's `file:line`, the Python traceback goes to the application log — commit `a0f1737`
 - [ ] A step that never calls `ATE.report` records `NOREPORT` and a warning
 - [ ] Load time allows only the builders, `require`, `ATE.log` and the enums; Pre-test and Post-test Actions disallow `input` and `report`; violations raise
 - [ ] `ATE.run` is a read-only table (UUT serial, Operator, Station, Project, Test Schedule name, Media Release media number, name and version); writing to it raises
