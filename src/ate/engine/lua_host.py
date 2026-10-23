@@ -82,6 +82,15 @@ class _AbortFlag:
         with self._lock:
             self._aborted = True
 
+    def clear(self) -> None:
+        """Clear the abort flag so a busy loop stops tripping it (packet 14c).
+
+        Called by the run engine right before its Post-test Actions, which must always run even
+        after an earlier whole-run abort. It only resets ``_aborted``; callers that need to keep
+        remembering the run was aborted read :attr:`aborted` themselves and preserve it."""
+        with self._lock:
+            self._aborted = False
+
 
 # The one and only Lua version ATE runs Test Schedules on.
 TARGET_LUA_VERSION = (5, 5)

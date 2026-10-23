@@ -6,9 +6,9 @@
 
 **Blocked by:** 14b (Pre-test failure), 13c (Abort a busy Lua loop), 12b (Failure pause with Continue and Abort)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] The Post-test Action always runs, after a stop, a Pre-test failure or an abort; ATE clears the abort flag first; a second abort ends only the current action; an error in it is logged and fails the run
-- [ ] Seam-1 tests cover each outcome and End Reason
+- [x] The Post-test Action always runs, after a stop, a Pre-test failure or an abort; ATE clears the abort flag first; a second abort ends only the current action; an error in it is logged and fails the run
+- [x] Seam-1 tests cover each outcome and End Reason
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
