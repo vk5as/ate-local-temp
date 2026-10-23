@@ -14,6 +14,11 @@ Bridging facts (validated empirically against lupa 2.8):
 
 * ``register_eval=False, register_builtins=False, unpack_returned_tuples=True`` — no
   Python leaks into Lua; only ATE-provided globals are visible.
+* The standard library still ships ``dofile``/``loadfile``/``load``, so they are shadowed to
+  nil and ``python`` is set to nil in :meth:`_LuaHost._lockdown`; a schedule cannot load files
+  or reach Python, and calling a removed name raises "attempt to call a nil value".
+* Loaded chunks run with the name ``@<path>`` in text mode (see :meth:`_load_schedule`), so an
+  error's traceback carries the schedule's own file:line.
 * Enums must be defined by executing an *assignment chunk* (``Result = { ... }``); the
   table then persists as a real Lua global that later chunks can read. Assigning the
   value lua.execute returns back onto the global env does **not** work — it comes back
@@ -235,7 +240,10 @@ class _LuaHost:
     def __init__(self, path: str | Path) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
+        # The options ATE asks lupa for — kept on the instance so criterion 01's runtime
+        # settings can be asserted directly (lupa exposes no Python-level accessor).
         base = dict(register_eval=False, register_builtins=False, unpack_returned_tuples=True)
+        self._runtime_config = base
         self._runtime = LuaRuntime(**base)
         if self._runtime.lua_version != TARGET_LUA_VERSION:
             raise VersionMismatch(
@@ -246,6 +254,9 @@ class _LuaHost:
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
         env = self._runtime.globals()
+        # Lock down the sandbox before anything else is registered so a schedule — even at load
+        # time — cannot escape via file loading or reach Python (criterion 01).
+        self._lockdown(env)
         env["ScheduleParams"] = _ScheduleParams
         env["StepParams"] = _StepParams
         ate = _AteTable()
@@ -266,6 +277,18 @@ class _LuaHost:
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
         self._schedule = self._load_schedule(path)
+
+    def _lockdown(self, env) -> None:
+        """Remove the file-loading entry points and the python builtin from ``env``.
+
+        Assigning each to None makes it Lua nil; calling a nil value raises "attempt to call a
+        nil value", which xpcall/run_engine turns into an ERROR Attempt (criterion 02). The
+        standard library still provides dofile/loadfile/load, so they must be shadowed explicitly.
+        python is excluded by register_builtins=False but is set here too so it reads back as nil
+        and cannot reach the host's Python."""
+        for name in ("dofile", "loadfile", "load"):
+            env[name] = None
+        env["python"] = None
 
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
         """Record one ATE.report call from a running schedule."""
@@ -309,6 +332,16 @@ class _LuaHost:
         if schedule.name is None or schedule.name == "":
             raise HostError(f"{path} has no ScheduleParams name")
         return schedule
+
+    @property
+    def runtime_configuration(self) -> dict[str, bool]:
+        """The lupa options this host was constructed with.
+
+        register_eval=False / register_builtins=False keep Python out of Lua; unpack_returned_
+        tuples=True lets a returned tuple be handed to a step's action as arguments. Kept on the
+        instance so criterion 01's runtime settings can be asserted directly (lupa exposes no
+        Python-level accessor for them)."""
+        return self._runtime_config
 
     @property
     def runtime(self) -> Any:
