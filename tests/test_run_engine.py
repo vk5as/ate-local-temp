@@ -16,7 +16,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage._uuid import new_uuid7
 from ate.storage.store import RunStore
 
-from ._fixtures import ERRORING, FAILING, PASSING
+from ._fixtures import ERRORING, FAILING, NEVER_REPORTS, PASSING
 
 
 def _drive(engine: RunEngine, app: QCoreApplication) -> None:
@@ -139,6 +139,38 @@ def test_raised_action_logs_full_traceback_at_error(app: QCoreApplication) -> No
     tb = "\n".join(ln["text"] for ln in error_lines)
     assert "kaboom from Lua" in tb
     assert "stack traceback" in tb
+
+
+def test_step_that_never_reports_records_noreport_and_warns(app: QCoreApplication) -> None:
+    """Criterion 04 — a step that runs its action but never calls ATE.report records a NOREPORT
+    attempt and logs one warning, so the forgotten report is visible."""
+    store, row = _run_schedule(app, NEVER_REPORTS)
+
+    assert row is not None
+    # The run still completes; a NOREPORT step does not fail it (spec rule 91: only FAIL/ERROR do).
+    assert row["end_reason"] == "COMPLETED"
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    node = conn.execute(
+        "SELECT result, attempt_count FROM node WHERE run_uuid=? AND step_number='1.'", (row["run_uuid"],)
+    ).fetchone()
+    assert node is not None
+    # The only attempt recorded for the silent step is NOREPORT.
+    assert node["result"] == "NOREPORT"
+    assert node["attempt_count"] == 1
+
+    err_attempt = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=0", (row["run_uuid"],)
+    ).fetchone()
+    assert err_attempt is not None
+    assert err_attempt["pass_fail"] == "NOREPORT"
+
+    # Ate-sourced warning that the step never reported.
+    warnings = [ln for ln in store.log_lines(row["run_uuid"]) if ln["level"] == "WARNING"]
+    assert len(warnings) >= 1
+    joined = "\n".join(ln["text"] for ln in warnings)
+    assert "never reported" in joined
 
 
 def test_run_key_is_uuidv7(app: QCoreApplication) -> None:

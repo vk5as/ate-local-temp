@@ -59,6 +59,16 @@ return ScheduleParams("Logging schedule", "Steps that log at every level")
   })
 """
 
+# A schedule whose single step runs its action but never calls ATE.report. It must record a
+# NOREPORT attempt and log one warning, so a forgotten report is visible.
+NEVER_REPORTS = """\
+return ScheduleParams("Never reports schedule", "A step that runs but never reports")
+  :setSchedule({
+    StepParams("silent step"):setStepNo("1.")
+      :setAction(function() ATE.log(Log.INFO, "did some work") end),
+  })
+"""
+
 # A schedule whose single step calls an isolated failing ATE function (ATE.boom). The function
 # is registered on the driven host via RunEngine's ate_fns seam; calling it from Lua raises a
 # Python exception that _AteTable._isolate must catch, log at ERROR, and return as graceful
