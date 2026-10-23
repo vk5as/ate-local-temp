@@ -24,6 +24,17 @@ from ..config import Config
 from ..storage.store import RunStore
 
 
+# The CSS ``@page`` margin boxes (mm) must match exactly the ``QPageLayout`` margins passed to
+# ``printToPdf`` by the helper process — Chromium takes its print margins from Qt. Defined once so
+# the template's ``{{ page_margin_css }}`` and the helper can never drift apart (spec rule 21).
+REPORT_PAGE_MARGINS_MM = {"top": 24.0, "right": 14.0, "bottom": 18.0, "left": 14.0}
+
+
+def _page_margin_css(margins: dict[str, float]) -> str:
+    """The ``@page margin`` value as a single CSS string (top right bottom left), e.g. ``24mm 14mm ...``."""
+    return " ".join(f"{m:g}mm" for m in (margins["top"], margins["right"], margins["bottom"], margins["left"]))
+
+
 # The seven Result values a step can end with (NOTRUN for a step that never ran). Order is the
 # order they are shown in the Summary counts table.
 RESULT_LABELS = ["PASS", "FAIL", "ERROR", "NOREPORT", "SKIPPED", "FORCED_NOTRUN", "NOTRUN"]
@@ -155,6 +166,8 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
     pretest_error, posttest_error = _phase_errors(store, run_uuid)
 
     ctx = {
+        # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift.
+        "page_margin_css": _page_margin_css(REPORT_PAGE_MARGINS_MM),
         "org": config.reports_organisation,
         # The logo is a base64 data URI (ASCII A-Za-z0-9+/= plus ",;=/"), so autoescape leaves it
         # byte-for-byte unchanged in the CSS url() / <img src>; no external reference is emitted.

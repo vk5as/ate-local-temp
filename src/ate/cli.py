@@ -24,6 +24,28 @@ def _print_version() -> int:
     return 0
 
 
+def _cmd_pdf_helper(argv: list[str]) -> int:
+    """Dispatch ``ate _pdf <html> <pdf> --paper A4|Letter`` — render a saved HTML report to PDF.
+
+    Runs inside the helper child process; :func:`render_pdf` returns the intended exit code (0 on
+    success, non-zero on any failure). Any unexpected error is reported and turned into a non-zero
+    exit so the GUI side can raise."""
+    parser = argparse.ArgumentParser(prog="ate _pdf", add_help=True)
+    parser.add_argument("html", help="path to the saved HTML report")
+    parser.add_argument("pdf", help="path to write the PDF")
+    parser.add_argument("--paper", choices=["A4", "Letter"], default="A4", help="paper size (default: A4)")
+    args, _unknown = parser.parse_known_args(argv)
+
+    from .report.pdf import render_pdf
+
+    try:
+        code = render_pdf(args.html, args.pdf, args.paper)
+    except Exception as exc:  # a bare traceback would leak into the GUI's error channel
+        print(f"pdf helper error: {exc}", file=sys.stderr)
+        return 1
+    return code
+
+
 def main(argv=None) -> int:
     """Run the ``ate`` CLI. Returns the intended process exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -36,6 +58,9 @@ def main(argv=None) -> int:
         return _cmd_db(argv[1:])
     if command == "definition":
         return _cmd_definition(argv[1:])
+    # Hidden helper subcommand (ticket 22): render a saved HTML report to PDF in a child process.
+    if command == "_pdf":
+        return _cmd_pdf_helper(argv[1:])
 
     prog = "ate"
     print(
