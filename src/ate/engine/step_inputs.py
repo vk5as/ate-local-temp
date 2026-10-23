@@ -56,6 +56,26 @@ class StepInput:
     tooltip: str | None = None
     orient: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return this declaration in its original schedule-format shape for storage.
+
+        The normalized StepInput dataclass renames fields (e.g. ``widget`` instead of the ENUM input
+        widget name); a UI rendering the step's inputs needs the on-disk representation, so persist
+        that rather than the internal one. Tuples become lists so the result is JSON-serializable."""
+        out: dict[str, Any] = {
+            "desc": self.desc,
+            "type": self.type,
+            "range": self.range,
+            "pattern": self.pattern,
+            "prompt": list(self.prompt) if isinstance(self.prompt, tuple) else self.prompt,
+            "tooltip": self.tooltip,
+            "orient": self.orient,
+        }
+        if self.type == "ENUM":
+            out["input"] = self.widget  # RADIOBUT / CHECKBOX / PUSHBUT
+            out["enum"] = list(self.enum)
+        return out
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
