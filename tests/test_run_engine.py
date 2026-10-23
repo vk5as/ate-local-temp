@@ -117,6 +117,30 @@ def test_raised_action_becomes_error_attempt_and_fails_run(app: QCoreApplication
     assert never["result"] == "PASS"  # execution continued past the error
 
 
+def test_raised_action_logs_full_traceback_at_error(app: QCoreApplication) -> None:
+    """Criterion 02: a raised action records ERROR with its first line as the message and logs
+    the full traceback (with the schedule's file:line in its stack portion) at ERROR."""
+    store, row = _run_schedule(app, ERRORING)
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    err_attempt = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=0", (row["run_uuid"],)
+    ).fetchone()
+    assert err_attempt["pass_fail"] == "ERROR"
+    # The first line of the traceback is recorded verbatim as the message — for a Lua error
+    # that already carries "<file>:<line>: <msg>", matching the ATE error format.
+    assert err_attempt["msg"].startswith("schedule.tslua:")
+    assert "kaboom from Lua" in err_attempt["msg"]
+
+    # The full traceback (with its stack portion) is logged at ERROR, not just the first line.
+    error_lines = [ln for ln in store.log_lines(row["run_uuid"]) if ln["level"] == "ERROR"]
+    assert len(error_lines) >= 1
+    tb = "\n".join(ln["text"] for ln in error_lines)
+    assert "kaboom from Lua" in tb
+    assert "stack traceback" in tb
+
+
 def test_run_key_is_uuidv7(app: QCoreApplication) -> None:
     """The generated run key is a canonical uppercase UUIDv7 (version nibble 7)."""
     store, row = _run_schedule(app, PASSING)

@@ -130,7 +130,12 @@ class RunEngine(QThread):
             try:
                 step.action()  # runs the closure in Lua; may call ATE.report several times
             except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
-                error_text = str(exc)
+                # The first line is the human-readable message (for a Lua-originated error it
+                # is just the message; file:line lives in the traceback portion). The full
+                # traceback — which carries the schedule's file:line — is logged at ERROR so
+                # criterion 03 can rebuild "<file>:<line>: ATE.<func>:" from it.
+                error_text = str(exc).splitlines()[0] if str(exc) else ""
+                host.record_log("ERROR", str(exc))
 
             new_reports = host.reports[start:]
             last_result = "NOREPORT"
