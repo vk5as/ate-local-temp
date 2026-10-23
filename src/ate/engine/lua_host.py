@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from ..errors import ATEError
+from .step_inputs import InvalidStepInput, validate_inputs
 
 
 class NotAllowedError(ATEError):
@@ -392,6 +393,10 @@ class _LuaHost:
                 f"ATE requires Lua {TARGET_LUA_VERSION[0]}.{TARGET_LUA_VERSION[1]} "
                 f"(found {self._runtime.lua_version})"
             )
+        # The table/array proxy type for this runtime's Lua version, captured from an empty table so
+        # it is stable across lupa releases (the module name changes with the Lua version). Used to
+        # convert a schedule's input declarations out of Lua tables into plain Python.
+        self._table_cls = type(self._runtime.table_from({}))
 
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
@@ -439,6 +444,9 @@ class _LuaHost:
         # where the enums, builders and ATE table are already registered globals.
         self._schedule_source = Path(path).read_text(encoding="utf-8")
         self._schedule = self._load_schedule(path)
+        # Validate every step's input declarations against the Test Schedule format; a bad one is a
+        # load error, so surface it here as HostError carrying the schedule's own filename.
+        self._validate_inputs()
 
     def _lockdown(self, env) -> None:
         """Remove the file-loading entry points and the python builtin from ``env``.
@@ -542,6 +550,36 @@ class _LuaHost:
         if schedule.name is None or schedule.name == "":
             raise HostError(f"{path} has no ScheduleParams name")
         return schedule
+
+    def _materialize(self, value: Any) -> Any:
+        """Convert a Lua table/array proxy (or one nested inside another) into plain Python.
+
+        A table whose keys are integers is an array and becomes a list; one keyed by strings stays a
+        dict. Scalars pass through untouched."""
+        if isinstance(value, self._table_cls):
+            keys = list(value.keys())
+            int_keys = [k for k in keys if isinstance(k, int)]
+            str_keys = [k for k in keys if not isinstance(k, int)]
+            if int_keys:
+                return [self._materialize(value[k]) for k in sorted(int_keys)]
+            return {str(k): self._materialize(value[k]) for k in str_keys}
+        return value
+
+    def _validate_inputs(self) -> None:
+        """Validate every step's declared inputs against the Test Schedule format.
+
+        Each declaration is converted out of its Lua tables into plain Python and checked by
+        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying the schedule's
+        own filename so a bad ``setInputs`` table fails the load."""
+        for seq, step in enumerate(self._schedule.steps):
+            if step.inputs is None:
+                continue
+            declarations = {int(k): self._materialize(v) for k, v in step.inputs.items()}
+            try:
+                validate_inputs(declarations)
+            except InvalidStepInput as exc:
+                name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+                raise HostError(f"{name}:{seq + 1}: {exc}") from exc
 
     @property
     def runtime_configuration(self) -> dict[str, bool]:
