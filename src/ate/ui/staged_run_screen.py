@@ -37,6 +37,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ate.engine.run_engine import RunEngine
+
 from ..catalog import list_schedules, resolve_schedule
 from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
@@ -299,6 +301,10 @@ class StagedRunScreen(QWidget):
         self.state = SessionState.IDLE
         # Captured when STARTED fires; ``None`` before the first run or after FINISHED.
         self._started_at: Optional[datetime] = None
+        # The RunEngine worker for the current run, set by :meth:`_begin_run_from_selection` and
+        # cleared on FINISHED so a new start() captures fresh fields; ``None`` otherwise. Exposed so
+        # tests can drive inputs (supply/click) through the engine reached via the session.
+        self._engine: Optional[RunEngine] = None
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage()
@@ -421,9 +427,18 @@ class StagedRunScreen(QWidget):
             self.session.set_uut_serial(serial)
 
         engine = self.session.start()  # returns the RunEngine; start is already queued
+        self._engine = engine
         self._started_at = datetime.now(timezone.utc)
         # Switch to the Run view and hide the setup stages for the duration of the run.
         self._reveal_run_view()
+
+    @property
+    def engine(self) -> Optional[RunEngine]:
+        """The RunEngine worker for the current run, or ``None`` before it starts / after FINISHED.
+
+        Exposed so tests can drive inputs (supply/click) through the engine reached via the session;
+        the GUI never needs it — input widgets are a later ticket."""
+        return self._engine
 
     def _on_state_changed(self, state: SessionState) -> None:
         """React to a session state change — the only place run truth reaches the layout."""
@@ -433,6 +448,9 @@ class StagedRunScreen(QWidget):
             self._started_at = datetime.now(timezone.utc)
             self._reveal_run_view()
         elif state == SessionState.FINISHED:
+            # Release the finished worker so a new start() captures fresh fields; the next run owns
+            # its own engine again.
+            self._engine = None
             # Read results from the store (never compute them here) and refresh the view.
             run_uuid = self.session.run_uuid
             nodes = self.session.store.nodes(run_uuid) if run_uuid else []
