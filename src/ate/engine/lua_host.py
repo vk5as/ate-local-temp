@@ -424,7 +424,7 @@ class _LuaHost:
         self._op = operator_input or OperatorInput()
         # Packet 06a: the whitelist of require'd modules for this host (one per Test Run). ``None``
         # means no replacement require is installed, so any require call reads back as a nil value.
-        self._modules = dict(modules) if modules is not None else None
+        self._modules = dict(modules) if modules is not None else {}  # no map: nothing is requirable
         # Cache of already-loaded module return values; keyed by module name. A nil return caches as
         # ``True`` (stock Lua), and every later require of the same name returns this without re-running.
         self._require_cache: dict[str, Any] = {}
@@ -529,8 +529,7 @@ class _LuaHost:
         env["python"] = None
         # Packet 06a: when this host has a module map, install ATE's replacement ``require`` and close
         # off every other file on disk (empty package paths) so nothing outside the whitelist is reachable.
-        if self._modules is not None:
-            self._install_require(env)
+        self._install_require(env)  # always: stock require/package.path must never be reachable
 
     def _install_require(self, env: Any) -> None:
         """Install ATE's replacement ``require`` and lock ``package.path``/``package.cpath`` (packet 06a).
