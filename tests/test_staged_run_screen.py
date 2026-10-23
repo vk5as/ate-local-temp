@@ -348,3 +348,70 @@ def test_staged_run_records_blocking_input_value(qapp, tmp_path):
 
     rows = {idx: (typ, val) for idx, (typ, val) in _rows_for(store=session.store, run_uuid=session.run_uuid).items()}
     assert rows == {1: ("INTEGER", "42")}
+
+
+def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_path):
+    """Packet 13a checkbox 1: the Run view's Abort button sets the session's abort flag.
+
+    Runs ABORTABLE through StagedRunScreen (selection -> Run view) and clicks ``screen.run_view.abort_button``
+    while step 1 blocks on its INTEGER input; the operator answers that input first so step 1 records
+    cleanly, then hits Abort between steps. The button is reached only through the screen — no run logic here."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    # The Abort control exists on the Run view and is disabled until a run starts.
+    assert isinstance(screen.run_view.abort_button, QPushButton)
+    assert screen.run_view.abort_button.isEnabled() is False
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)  # to the Test Schedule stage
+
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Abortable schedule")
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    assert session.selected_schedule == "Abortable schedule"
+
+    answered = threading.Event()
+
+    def _on_ask(node_seq, attempt_no, index):
+        op = screen.engine.operator_input  # set by begin_run once the run starts; valid while running
+        op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly
+        answered.set()
+
+    session.input_asked.connect(_on_ask)
+
+    screen.steps_options_stage.run_button.click()  # queued start (begin_run runs on the next pump)
+
+    # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
+    # Do not wait for FINISHED here: a bare wait would let the worker race through steps 2 & 3 first.
+    while not answered.is_set():
+        qapp.processEvents()
+    assert answered.is_set()  # announced and answered exactly once through the run session
+
+    # Abort between steps while step 1 waits; then let the worker record ERROR / NOTRUN / ABORTED.
+    screen.run_view.abort_button.click()
+    assert _wait_finished(qapp, session)
+
+    row = session.store.get_test_run(session.run_uuid)
+    assert row is not None
+    # A whole-run abort fails the run with End Reason ABORTED.
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "ABORTED"
+
+    conn = session.store._conn
+    conn.row_factory = sqlite3.Row
+    nodes = {n["step_number"]: dict(n) for n in conn.execute(
+        "SELECT step_number, result, attempt_count FROM node WHERE run_uuid=? ORDER BY node_seq", (row["run_uuid"],)
+    ).fetchall()}
+    # Step 1 ran and passed; step 2 was the running step at abort time -> ERROR; step 3 never ran.
+    assert nodes == {
+        "1.": {"step_number": "1.", "result": "PASS", "attempt_count": 1},
+        "2.": {"step_number": "2.", "result": "ERROR", "attempt_count": 1},
+        "3.": {"step_number": "3.", "result": "NOTRUN", "attempt_count": 0},
+    }
+
+    err = conn.execute(
+        "SELECT pass_fail, msg FROM attempt WHERE run_uuid=? AND node_seq=1", (row["run_uuid"],)
+    ).fetchone()
+    assert err is not None and err["pass_fail"] == "ERROR"
+    assert err["msg"] == "Aborted by Operator"

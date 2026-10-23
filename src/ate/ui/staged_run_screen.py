@@ -199,6 +199,10 @@ class RunView(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.state_header = QLabel()
+        # Whole-run Abort control (packets 13a): asks the session to abort the current run so it
+        # stops between steps and records ERROR / NOTRUN / ABORTED. Enabled only while a run is up;
+        # the screen toggles it in _on_state_changed.
+        self.abort_button = QPushButton("Abort")
         self.step_list = QListWidget()
         # Full-width failure bar: a fixed-height label that spans the view's width in the layout.
         self.failure_bar = QLabel()
@@ -217,6 +221,7 @@ class RunView(QWidget):
         self.debug_window = _LogPane("Debug — every level")
 
         layout.addWidget(self.state_header)
+        layout.addWidget(self.abort_button)
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=1)
         layout.addWidget(self.tabs)
@@ -310,6 +315,9 @@ class StagedRunScreen(QWidget):
         self.test_schedule_stage = TestScheduleStage()
         self.steps_options_stage = StepsOptionsStage()
         self.run_view = RunView()
+        # Disabled until a run starts; _on_state_changed enables it only while STARTED. The session's
+        # initial IDLE emit precedes this connection, so set the default here explicitly.
+        self.run_view.abort_button.setEnabled(False)
         self.steps_stack = QStackedWidget()
         self.steps_stack.addWidget(self.uut_operator_stage)
         self.steps_stack.addWidget(self.test_schedule_stage)
@@ -337,6 +345,9 @@ class StagedRunScreen(QWidget):
         self.uut_operator_stage.next_button.clicked.connect(lambda: self._advance(1))
         self.test_schedule_stage.run_button.clicked.connect(self._begin_run_from_selection)
         self.steps_options_stage.run_button.clicked.connect(self.begin_run)
+
+        # The Abort button asks the session to abort the current run; only meaningful while it is up.
+        self.run_view.abort_button.clicked.connect(self._request_abort)
 
         # Populate the schedule list once at construction; rescan reloads it.
         self._refresh_schedule_list()
@@ -432,6 +443,14 @@ class StagedRunScreen(QWidget):
         # Switch to the Run view and hide the setup stages for the duration of the run.
         self._reveal_run_view()
 
+    def _request_abort(self) -> None:
+        """The Abort button asks the session to abort the current run.
+
+        ``session.request_abort`` delegates to the worker, which stops at its next step boundary and
+        records ERROR / NOTRUN / ABORTED; it raises if there is no run in progress (the button is
+        disabled whenever one is not)."""
+        self.session.request_abort()
+
     @property
     def engine(self) -> Optional[RunEngine]:
         """The RunEngine worker for the current run, or ``None`` before it starts / after FINISHED.
@@ -464,6 +483,9 @@ class StagedRunScreen(QWidget):
             # Back on the setup stages; show them again and hide the Run view.
             self.run_view.hide()
             self.steps_stack.show()
+
+        # The Abort button is only meaningful while a run is in progress.
+        self.run_view.abort_button.setEnabled(state == SessionState.STARTED)
 
         self._update_header(state)
 

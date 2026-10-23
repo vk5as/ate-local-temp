@@ -170,6 +170,16 @@ class HeadlessRunSession(QObject):
             raise SessionError("stop_on_fail must be a boolean")
         self._pending_stop_on_fail = value
 
+    def request_abort(self) -> None:
+        """Request a whole-run abort of the current run (the Run screen's Abort button calls this).
+
+        Only meaningful while a run is in progress; delegate to the worker so it stops at its next
+        step boundary and records ERROR "Aborted by Operator", remaining steps NOTRUN, End Reason
+        ABORTED and result FAIL. Raises if there is no run to abort."""
+        if self._engine is None:
+            raise SessionError("cannot abort when no run is in progress")
+        self._engine.request_abort()
+
     # -- start ---------------------------------------------------------------
 
     def start(self) -> RunEngine:
