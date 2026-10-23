@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -72,6 +72,7 @@ class RunEngine(QThread):
         schedule_name: str = "",
         utc_offset: str = "+00:00",
         parent: Optional[object] = None,
+        ate_fns: Mapping[str, Callable[..., Any]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -87,11 +88,17 @@ class RunEngine(QThread):
         self.media_number = media_number
         self.schedule_name = schedule_name
         self.utc_offset = utc_offset
+        # Optional pre-registered ATE functions (a testability seam; see criterion 03). When
+        # provided they are registered on the host before it runs, so a failing one can be
+        # exercised through real Lua execution without touching device drivers.
+        self._ate_fns = dict(ate_fns or {})
 
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there.
         host = LuaHost(self._schedule_path)
+        for name, fn in self._ate_fns.items():
+            host.ate.register(name, fn)  # criterion 03: isolate a failing ATE call through Lua
         schedule = host.schedule
         steps = schedule.steps
 
@@ -123,6 +130,10 @@ class RunEngine(QThread):
             # Header/include rows have no action; only ordinary steps run.
             if step.action is None:
                 continue
+
+            # Tell the host which step is running so an isolated ATE error can be attributed to
+            # the schedule line where that step's action began (criterion 03).
+            host._current_step = seq
 
             start = len(host.reports)
             log_start = len(host.logs)

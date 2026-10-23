@@ -34,7 +34,7 @@ Bridging facts (validated empirically against lupa 2.8):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from ..errors import ATEError
 
@@ -119,6 +119,32 @@ class _AteTable:
         self._extra[name] = fn
         return self
 
+    def _isolate(self, fn: Callable[..., Any], name: str) -> Callable[..., Any]:
+        """Wrap an ATE function so a Python exception never reaches Lua (criterion 03).
+
+        If ``fn`` raises while running inside a step action, we log its full traceback at ERROR —
+        with the settled "<file>:<line>: ATE.<name>:" prefix (see :meth:`_location`) — and return
+        halves ``(false, "<file>:<line>: ATE.<name>: <msg>")`` instead of letting the raw Python
+        error surface into Lua. The schedule therefore sees a graceful failure it can handle
+        (through ``onError`` or by inspecting the returned value), never an uncaught exception —
+        and both the log line and the message carry the caller's file:line."""
+        import traceback
+
+        def _wrapped(*args: Any) -> tuple[bool, Any]:
+            try:
+                return fn(*args)
+            except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
+                recorded = "".join(traceback.format_exception(exc))  # the full Python traceback
+                loc = self._host._location()
+                msg = str(exc).splitlines()[0] if str(exc) else "ATE error"
+                # Log at ERROR with the settled format "<file>:<line>: ATE.<fn>:" prefixed to the
+                # full traceback, so the app log carries both the schedule's file:line and the
+                # Python traceback; return graceful halves carrying just that prefix + message.
+                self._host.record_log("ERROR", f"{loc} ATE.{name}: {recorded}")
+                return (False, f"{loc} ATE.{name}: {msg}")
+
+        return _wrapped
+
     def report(
         self, pass_fail: Any, msg: Any = None, actual: Any = None, expected: Any = None
     ) -> bool:
@@ -136,10 +162,16 @@ class _AteTable:
         return True
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
+        # Only the device operations later tickets register here are wrapped so a Python
+        # exception returns graceful halves instead of reaching Lua (criterion 03). Names that
+        # are not registered fall through to ``AttributeError`` — otherwise dunder probes
+        # (e.g. ``__getitem__``, which lupa runs when assigning this table as a global) would
+        # raise the wrong exception type and break construction/lookup.
         try:
-            return self._extra[name]
+            fn = self._extra[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
+        return self._isolate(fn, name)
 
 
 class _StepParams:
@@ -244,6 +276,10 @@ class _LuaHost:
         # settings can be asserted directly (lupa exposes no Python-level accessor).
         base = dict(register_eval=False, register_builtins=False, unpack_returned_tuples=True)
         self._runtime_config = base
+
+        # The schedule path this host was built for; :meth:`_location` uses it to name the
+        # error's file (lupa has no API to read a Python call site).
+        self._schedule_path = Path(path)
         self._runtime = LuaRuntime(**base)
         if self._runtime.lua_version != TARGET_LUA_VERSION:
             raise VersionMismatch(
@@ -273,9 +309,14 @@ class _LuaHost:
         # as ``(level, source="schedule", text)``. The run engine diffs this around each
         # step's action closure to attribute lines to that Attempt.
         self.logs: list[tuple[str, str, str]] = []
+        # The step index currently running (set by the run engine before each action), used to
+        # attribute an isolated ATE error to the schedule line where it was called. None outside
+        # a run, when only the filename is known.
+        self._current_step: Optional[int] = None
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
+        self._schedule_source = Path(path).read_text(encoding="utf-8")
         self._schedule = self._load_schedule(path)
 
     def _lockdown(self, env) -> None:
@@ -289,6 +330,25 @@ class _LuaHost:
         for name in ("dofile", "loadfile", "load"):
             env[name] = None
         env["python"] = None
+
+    def _location(self) -> str:
+        """Return ``<file>:<line>:``, the schedule line where the step currently running began.
+
+        lupa has no API to read a Python call site, so this locates the current step's action in
+        the loaded source (each action-bearing step contributes one ``:setAction(``), in order)
+        and reports its 1-based line. Outside a run it falls back to just the filename."""
+        name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        if self._current_step is None or self._schedule_source is None:
+            return f"{name}:"
+        lines = self._schedule_source.splitlines()
+        target = self._current_step  # 0-based step index; actions are in order
+        found = -1
+        for i, line in enumerate(lines):
+            if ":setAction(" in line:
+                found += 1
+                if found == target:
+                    return f"{name}:{i + 1}:"
+        return f"{name}:"
 
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
         """Record one ATE.report call from a running schedule."""
