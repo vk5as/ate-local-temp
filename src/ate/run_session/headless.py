@@ -79,6 +79,10 @@ class HeadlessRunSession(QObject):
                 self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
+        # The Operator's enable/disable toggles for expanded-tree positions, keyed by the
+        # same seq the runner assigns to each step. Applied at start() as engine overrides;
+        # absent here every step keeps its :setEnable() default (see run_engine).
+        self._node_enables: dict[int, bool] = {}
         # Emit the initial state on the thread that owns this session.
         self.state_changed.emit(SessionState.IDLE)
 
@@ -169,6 +173,20 @@ class HeadlessRunSession(QObject):
             raise SessionError("stop_on_fail must be a boolean")
         self._pending_stop_on_fail = value
 
+    def toggle_node(self, seq: int, enable: bool) -> None:
+        """Enable or disable the step at expanded-tree position ``seq`` before the run.
+
+        This is stage 3's per-step toggle: it records an override that start() forwards to
+        the engine, where it changes both the ``enabled`` state recorded on the node and
+        whether the step runs (a disabled step records NOTRUN with no Attempt). It only
+        affects the next run — fields are captured at start().
+        """
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise SessionError("node_seq must be an integer")
+        if not isinstance(enable, bool):
+            raise SessionError("enable must be a boolean")
+        self._node_enables[seq] = enable
+
     # -- start ---------------------------------------------------------------
 
     def start(self) -> RunEngine:
@@ -203,6 +221,10 @@ class HeadlessRunSession(QObject):
             "stop_on_fail": bool(getattr(self, "_pending_stop_on_fail", False)),
         }
 
+        # Forward the Operator's step toggles to the engine; empty means every step keeps
+        # its :setEnable() default (RunEngine treats a missing override as such).
+        overrides = {seq: bool(en) for seq, en in getattr(self, "_node_enables", {}).items()}
+
         self._engine = RunEngine(
             self._store,
             path,
@@ -217,6 +239,7 @@ class HeadlessRunSession(QObject):
             media_number="",
             schedule_name=self._selected_name,
             utc_offset="+00:00",
+            overrides=overrides if overrides else None,
         )
 
         # Announce STARTED on this thread before the worker runs. The worker's queued
