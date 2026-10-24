@@ -33,19 +33,58 @@ class _TcpDevice:
         """A one-line description of this device for log lines (host and port)."""
         return f"TCP {self.params['host']}:{self.params['port']}"
 
-    def __index__(self, name: str) -> Any:
-        """Expose this device's Lua-callable methods (packet 16b): read, write and close.
+    def read(self, params: dict[str, Any]) -> tuple[Any, int, bool, str | None]:
+        """Read from the socket and return ``(data, count, partial, err_or_None)``.
 
-        When the handle is returned to Lua it becomes userdata; without ``__index__`` only fields set
-        explicitly would be visible. This makes ``dev.read``, ``dev.write`` and ``dev.close`` callable
-        from a schedule action so a step can drive the socket directly."""
-        if name == "read":
-            return self.read
-        if name == "write":
-            return self.write
-        if name == "close":
-            return self.close
-        raise AttributeError(f"{type(self).__name__} has no field '{name}'")
+        Reads up to ``size`` bytes (or all of it when none is given), stopping at ``readTerm`` or the
+        timeout — whichever comes first. Terminators are stripped before returning so ``count`` is the
+        number of data bytes received. Returns:
+
+        * ``(data, count, False, None)`` — complete read (terminator seen or ``size`` reached).
+        * ``(data, count, True, None)``  — timed out after some bytes but not a full read (partial).
+        * ``(None, 0, False, "timeout")`` — timed out with no bytes.
+        * ``(None, 0, False, err)``       — an unexpected socket failure (port gone, reset, ...).
+
+        Every socket error is caught and returned as ``err`` so it surfaces to the schedule as a read
+        result table rather than raising; only a genuine bug would escape here."""
+        sock = self.sock
+        size = params.get("size")
+        term = self._effective_term(params.get("readTerm"))  # per-call override or open-time config
+        to = self._effective_timeout(params.get("timeout"), self.params)  # per-call override or open-time config
+        deadline = time.monotonic() + to if to is not None else None
+        data = bytearray(self._leftover)
+        
+        # Check if we already have a complete read pending (already found a terminator or reached size)
+        if data and term and term in data:
+            idx = data.index(term)
+            return bytes(data[:idx]), len(data[:idx]), False, None
+        if data and size is not None and len(data) >= size:
+            return bytes(data[:size]), size, False, None
+        
+        while True:
+            remaining = None if deadline is None else (deadline - time.monotonic())
+            remaining = 0.0 if remaining is None or remaining <= 0 else remaining  # clamp to avoid ValueError
+            r, _, _ = select.select([sock], [], [], remaining)  # blocks until data or the timeout elapses
+            if not r:
+                return None, 0, False, "timeout"  # nothing arrived and time ran out
+            chunk = sock.recv(4096)
+            if not chunk:  # the peer closed cleanly; whatever we have is a complete read
+                self._leftover = b""
+                return bytes(data), len(data), False, None
+            data.extend(chunk)
+            
+            # Check if we now have a complete read
+            if term and term in data:
+                idx = data.index(term)
+                self._leftover = bytes(data[idx + len(term):])
+                return bytes(data[:idx]), idx, False, None
+            if size is not None and len(data) >= size:
+                # Size reached: return only up to size; anything past size stays in buffer for next read
+                if len(data) > size:
+                    self._leftover = bytes(data[size:])
+                else:
+                    self._leftover = b""
+                return bytes(data[:size]), size, False, None
 
     @staticmethod
     def _effective_timeout(override: Any, params: dict[str, Any]) -> float | None:
@@ -74,48 +113,6 @@ class _TcpDevice:
         """The terminator to strip/append: the per-call override if given, else the open-time config."""
         term = override if override is not None else self.params.get("readTerm")
         return self._to_bytes(term) if term else b""
-
-    def read(self, params: dict[str, Any]) -> tuple[Any, int, bool, str | None]:
-        """Read from the socket and return ``(data, count, partial, err_or_None)``.
-
-        Reads up to ``size`` bytes (or all of it when none is given), stopping at ``readTerm`` or the
-        timeout — whichever comes first. Terminators are stripped before returning so ``count`` is the
-        number of data bytes received. Returns:
-
-        * ``(data, count, False, None)`` — complete read (terminator seen or ``size`` reached).
-        * ``(data, count, True, None)``  — timed out after some bytes but not a full read (partial).
-        * ``(None, 0, False, "timeout")`` — timed out with no bytes.
-        * ``(None, 0, False, err)``       — an unexpected socket failure (port gone, reset, ...).
-
-        Every socket error is caught and returned as ``err`` so it surfaces to the schedule as a read
-        result table rather than raising; only a genuine bug would escape here."""
-        sock = self.sock
-        size = params.get("size")
-        term = self._effective_term(params.get("readTerm"))  # per-call override or open-time config
-        to = self._effective_timeout(params.get("timeout"), self.params)  # per-call override or open-time config
-        deadline = time.monotonic() + to if to is not None else None
-        data = bytearray(self._leftover)
-        while True:
-            remaining = None if deadline is None else (deadline - time.monotonic())
-            r, _, _ = select.select([sock], [], [], remaining)  # blocks until data or the timeout elapses
-            if not r:
-                if data:  # some bytes arrived but we didn't finish within the timeout -> partial
-                    self._leftover = bytes(data)
-                    return bytes(data), len(data), True, None
-                return None, 0, False, "timeout"  # nothing arrived and time ran out
-            chunk = sock.recv(4096)
-            if not chunk:  # the peer closed cleanly; whatever we have is a complete read
-                self._leftover = b""
-                return bytes(data), len(data), False, None
-            data.extend(chunk)
-            if term and term in data:  # terminator seen -> strip it and everything after
-                idx = data.index(term)
-                self._leftover = bytes(data[idx + len(term):])
-                return bytes(data[:idx]), idx, False, None
-            if size is not None and len(data) >= size:  # the requested byte limit was reached
-                self._leftover = b""
-                return bytes(data[:size]), size, False, None
-        # Unreachable — every recv branch returns. Kept so a static reader sees an explicit fallthrough.
 
     def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
         """Write ``data`` (with ``writeTerm`` appended when set) and return ``(ok, count, err_or_None)``.
@@ -169,7 +166,7 @@ class TcpDriver(Driver):
     # open, never here. A field this Device Type doesn't know (a typo such as "buad"), a missing
     # required field ("data" for write), or a mistyped value always raises and names the field.
     read_fields = {
-        "size": ((int, float), False),  # optional byte limit; None means read until terminator/timeout
+        "size": ((int,), False),  # optional byte limit; None means read until terminator/timeout
         "timeout": ((int, float), False),  # per-call timeout in seconds (falls back to open-time)
         "readTerm": ((str, bytes), False),  # per-call terminator stripped from data ("" = none)
     }
