@@ -238,13 +238,32 @@ def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optio
     return pretest_error, posttest_error
 
 
-def write_report(store: RunStore, run_uuid: str, config: Config) -> Path:
+def report_stem_and_directory(store: RunStore, run_uuid: str, config: Config) -> tuple[Path, str]:
+    """Return ``(directory, stem)`` for this run's report files (spec 21a naming).
+
+    The file name is ``<UUT Type>/<UUT Type>_<serial>_<local start yyyymmdd-HHMMSS>_<PASS|FAIL>.html``;
+    stripping the result suffix leaves a stable ``stem`` that both the HTML report and its derived PDF
+    share, so a caller can glob ``stem*.html`` / ``stem*.pdf`` in ``directory`` to find every file for
+    the run. Raises :class:`ValueError` if no run is recorded for ``run_uuid``."""
+    row = store.get_test_run(run_uuid)
+    if row is None:
+        raise ValueError(f"no test run recorded for {run_uuid!r}")
+    uut_type = (row.get("uut_type") or "").strip() or "Report"
+    serial = (row.get("uut_serial") or "").strip()
+    stamp = _local_stamp(row.get("started_at"), row.get("utc_offset") or "+00:00") or "0000-00-00-000000"
+    directory = Path(config.reports_directory) / uut_type
+    stem = f"{uut_type}_{serial}_{stamp}"
+    return directory, stem
+
+
+def write_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> Path:
     """Render and write this run's HTML report under ``reports.directory``.
 
     File name is ``<UUT Type>/<UUT Type>_<serial>_<local start yyyymmdd-HHMMSS>_<PASS|FAIL>.html``;
     Windows-invalid characters are replaced, and an existing file is never overwritten (a free
-    ``-2``, ``-3`` … suffix is used instead)."""
-    html = render_report(store, run_uuid, config)
+    ``-2``, ``-3`` … suffix is used instead). The optional ``include_run_log`` flag passes through to
+    :func:`render_report`, so a regenerated report can omit the run log."""
+    html = render_report(store, run_uuid, config, include_run_log=include_run_log)
     row = store.get_test_run(run_uuid)
     assert row is not None, "no test run recorded for the report"
 

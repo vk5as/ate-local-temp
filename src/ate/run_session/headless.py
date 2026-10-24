@@ -30,16 +30,8 @@ from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
-from ..report.pdf import pdf_helper_command
+from ..report.pdf_job import start_pdf_job
 from ..storage.store import RunStore
-
-
-PDF_TIMEOUT_MS = 60_000  # a run-end PDF still running after this is killed and logged
-
-# Helper processes still running. Holding them here keeps each job (the process, its callbacks and
-# the session they report to) reachable until it ends; otherwise a session dropped mid-render forms
-# an unreachable cycle and the garbage collector clears it under the still-running process.
-_live_pdf_jobs: set[QProcess] = set()
 
 
 class SessionState(enum.Enum):
@@ -169,57 +161,22 @@ class HeadlessRunSession(QObject):
     def _start_pdf(self, html_path: Path, paper: str) -> None:
         """Render ``html_path`` to a PDF beside it in the helper process, without waiting for it.
 
-        A ``QProcess`` owned by this session runs the helper; its signals arrive on this thread, so
-        no worker thread ever touches the session and the process dies with it. When it ends,
-        ``report_written`` fires with both paths, or with an empty pdf path after an ERROR line names
-        the failure (spec 22b). Nothing here raises into the run."""
+        The QProcess logic lives in :func:`ate.report.pdf_job.start_pdf_job` (shared with any other
+        caller); here we only translate its completion into this session's ``report_written`` signal —
+        both paths on success, an empty pdf path plus an ERROR log line when the helper fails (spec 22b).
+        Nothing here raises into the run."""
         pdf_path = html_path.with_suffix(".pdf")
         run_uuid = self._run_uuid
-        program, args, env = pdf_helper_command(str(html_path), str(pdf_path), paper)
-        proc = QProcess(self)
-        penv = QProcessEnvironment()
-        for key, value in env.items():
-            penv.insert(key, value)
-        proc.setProcessEnvironment(penv)
-        timer = QTimer(proc)
-        timer.setSingleShot(True)
-        timer.timeout.connect(proc.kill)
-        done = False
 
-        def finish(error: Optional[str]) -> None:
-            nonlocal done
-            if done:
-                return
-            done = True
-            timer.stop()
-            if error is None and not (pdf_path.exists() and pdf_path.stat().st_size > 0):
-                error = "PDF helper wrote no PDF"
+        def on_done(error: Optional[str]) -> None:
             if error is None:
                 self.report_written.emit(str(html_path), str(pdf_path))
             else:
                 self._log_error(f"Failed to write Test Report PDF for {run_uuid}: {error}")
                 self.report_written.emit(str(html_path), "")
-            _live_pdf_jobs.discard(proc)
-            proc.deleteLater()
 
-        def on_finished(code: int, status: QProcess.ExitStatus) -> None:
-            if status != QProcess.ExitStatus.NormalExit:
-                finish(f"PDF helper crashed or timed out after {PDF_TIMEOUT_MS // 1000} s")
-            elif code != 0:
-                detail = bytes(proc.readAllStandardError()).decode(errors="replace").strip()
-                finish(f"PDF helper exited with code {code}: {detail}")
-            else:
-                finish(None)
+        start_pdf_job(self, html_path, pdf_path, paper, on_done=on_done)
 
-        def on_error(err: QProcess.ProcessError) -> None:
-            if err == QProcess.ProcessError.FailedToStart:
-                finish(f"could not start PDF helper: {proc.errorString()}")
-
-        proc.finished.connect(on_finished)
-        proc.errorOccurred.connect(on_error)
-        _live_pdf_jobs.add(proc)
-        timer.start(PDF_TIMEOUT_MS)
-        proc.start(program, args)
 
     @property
     def selected_stop_on_fail(self) -> bool:

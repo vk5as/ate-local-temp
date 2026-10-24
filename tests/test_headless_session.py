@@ -176,7 +176,7 @@ def test_run_end_pdf_failure_keeps_html_and_logs_error(tmp_path, monkeypatch) ->
     session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
 
     monkeypatch.setattr(
-        "ate.run_session.headless.pdf_helper_command",
+        "ate.report.pdf_job.pdf_helper_command",
         _fake_helper("import sys; sys.stderr.write('fake pdf helper blew up'); sys.exit(3)"),
     )
 
@@ -209,7 +209,7 @@ def test_run_end_pdf_is_not_blocking(tmp_path, monkeypatch) -> None:
     session.report_written.connect(lambda html, pdf: events.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
 
     monkeypatch.setattr(
-        "ate.run_session.headless.pdf_helper_command",
+        "ate.report.pdf_job.pdf_helper_command",
         _fake_helper("import sys, time; time.sleep(1.0); open(sys.argv[1], 'wb').write(b'%PDF-1.4 slow')"),
     )
 
