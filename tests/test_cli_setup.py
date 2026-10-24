@@ -278,8 +278,11 @@ def test_real_windows_command_construction(tmp_path, monkeypatch):
     perms.grant_users_modify(data_dir)
     perms.admin_only(config_file)
 
-    assert (["icacls", str(data_dir), "/grant:", "Users:(I)(OI)(CI)RwPdC"]) in captured
-    assert (["icacls", str(config_file), "/grant:", "Users:(I)(OI)R"]) in captured
+    assert ["icacls", str(data_dir), "/grant", "*S-1-5-32-545:(OI)(CI)M"] in captured
+    assert [
+        "icacls", str(config_file), "/inheritance:r", "/grant:r",
+        "*S-1-5-32-544:F", "*S-1-5-18:F", "*S-1-5-32-545:R",
+    ] in captured
 
 
 def test_setup_no_permissions_skips_privileged_ops(tmp_path, capsys):

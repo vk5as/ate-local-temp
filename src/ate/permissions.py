@@ -114,21 +114,21 @@ class LinuxPermissions(Permissions):
 class WindowsPermissions(Permissions):
     """Real Windows permissions via ``icacls``."""
 
-    def grant_users_modify(self, path: Path) -> None:
-        """Users get Modify (RWPDaC) on the data directories, inherited and applied to files too.
+    # Well-known SIDs, so the commands work on any Windows display language.
+    USERS, ADMINISTRATORS, SYSTEM = "*S-1-5-32-545", "*S-1-5-32-544", "*S-1-5-18"
 
-        The ``(I)(OI)(CI)`` qualifier inherits from the parent, applies to the object itself and
-        cascades to every file and subdirectory below it.
-        """
-        subprocess.run(
-            ["icacls", str(path), "/grant:", f"Users:(I)(OI)(CI)RwPdC"],
-            check=True,
-        )
+    def grant_users_modify(self, path: Path) -> None:
+        """Users get Modify on a data directory; ``(OI)(CI)`` makes it inherit to every file and
+        subdirectory, existing (icacls propagates it) and future (the database's -wal/-shm, reports)."""
+        subprocess.run(["icacls", str(path), "/grant", f"{self.USERS}:(OI)(CI)M"], check=True)
 
     def admin_only(self, path: Path) -> None:
-        """``config.json`` read-only for Users (keep Read, drop Write)."""
+        """``config.json``: stop inheriting the data directory's Users Modify grant (on Windows the
+        config lives in the same directory) and set an explicit ACL: Administrators and SYSTEM
+        full control, Users read."""
         subprocess.run(
-            ["icacls", str(path), "/grant:", "Users:(I)(OI)R"],
+            ["icacls", str(path), "/inheritance:r", "/grant:r",
+             f"{self.ADMINISTRATORS}:F", f"{self.SYSTEM}:F", f"{self.USERS}:R"],
             check=True,
         )
 
