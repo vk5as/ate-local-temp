@@ -46,6 +46,8 @@ def _drive_abort(
         schedule_path.write_text(source, encoding="utf-8")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
         if wait_input_asked:
             engine.input_asked.connect(lambda *_args: input_asked.set())
 
@@ -62,8 +64,6 @@ def _drive_abort(
         t0 = time.monotonic()
         engine.request_abort()
 
-        finished = threading.Event()
-        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
         # The worker emits FINISHED on its own thread; state_changed is a queued signal, so it only
         # reaches this (operator/main) thread once the event loop is pumped. Pump in small slices
         # rather than blocking idle.
@@ -88,13 +88,13 @@ def _drive_clean(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
         schedule_path.write_text(source, encoding="utf-8")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
         engine.start()
 
         deadline = time.time() + 10.0
         while not captured.get("run_uuid") and time.time() < deadline:
             app.processEvents()
-        finished = threading.Event()
-        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
         deadline = time.time() + 10.0
         while not finished.is_set() and time.time() < deadline:
             app.processEvents()
@@ -172,8 +172,16 @@ def test_abort_interrupts_blocked_ate_input_within_bound(app: QCoreApplication) 
 
 
 def test_small_sleep_completes_step(app: QCoreApplication) -> None:
-    """ATE.sleep(0.05) waits and returns normally: the step passes and the run completes."""
-    store, row = _drive_clean(app, SHORT_SLEEP_SOURCE)
+    """A fractional ATE.sleep really waits and returns normally: the step passes, the run completes,
+    and the run takes at least that long longer than the same schedule sleeping 0 s (so a no-op or a
+    sleep that truncates fractions fails)."""
+    t0 = time.monotonic()
+    _drive_clean(app, SHORT_SLEEP_SOURCE.replace("ATE.sleep(0.05)", "ATE.sleep(0)"))
+    baseline = time.monotonic() - t0
+    t0 = time.monotonic()
+    store, row = _drive_clean(app, SHORT_SLEEP_SOURCE.replace("ATE.sleep(0.05)", "ATE.sleep(0.4)"))
+    slept = time.monotonic() - t0
+    assert slept - baseline >= 0.3, (slept, baseline)
 
     assert row is not None
     assert row["result"] == "PASS"
@@ -181,6 +189,14 @@ def test_small_sleep_completes_step(app: QCoreApplication) -> None:
 
     nodes = _nodes(store, row["run_uuid"])
     assert nodes["1."]["result"] == "PASS"
+
+
+def test_huge_sleep_argument_errors_step_naming_ate_sleep(app: QCoreApplication) -> None:
+    """A finite but enormous ATE.sleep (past what a wait can express) errors the step with a message
+    naming ATE.sleep, not a raw overflow error."""
+    store, row = _drive_clean(app, NEGATIVE_SLEEP_SOURCE.replace("ATE.sleep(-1)", "ATE.sleep(1e300)"))
+    msgs = [a["msg"] for a in store.attempts(row["run_uuid"]) if a["pass_fail"] == "ERROR"]
+    assert msgs and "ATE.sleep" in msgs[0], msgs
 
 
 def test_negative_sleep_argument_errors_step(app: QCoreApplication) -> None:

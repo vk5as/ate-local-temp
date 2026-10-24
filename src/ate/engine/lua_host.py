@@ -334,6 +334,8 @@ class _AteTable:
             raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
         if not math.isfinite(seconds) or seconds < 0:
             raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
+        if seconds > threading.TIMEOUT_MAX:  # past this the wait itself overflows
+            raise ValueError(f"ATE.sleep: seconds must be at most {threading.TIMEOUT_MAX:.0f}, got {seconds!r}")
         flag = self._host._abort_flag
         # An abort requested before the wait starts is no reason to keep sleeping: raise now.
         if flag.aborted or flag.wait(seconds):
