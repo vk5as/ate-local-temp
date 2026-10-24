@@ -242,6 +242,7 @@ For UI packets add: the mockup to follow (`git show prototype/run-screen:prototy
 
 ```
 You are reviewing ONE finished work packet of the ATE v1 spec. READ-ONLY: report findings, change nothing.
+FIRST (Qwen/Ornith), run in order: `pwd`; `git checkout --detach <branch>`; `git rev-parse --short HEAD` — must print <SHA>, else stop and reply with that output; then the suite with the shared venv. (A Qwen reviewer once skipped the checkout and reviewed the integration tip.)
 Follow `.scratch/ate-v1/review-packet.md` exactly (Haiku: `.scratch/ate-v1/haiku-review.md`) — setup, checklist and reply format.
 
 Packet: `.scratch/ate-v1/issues/<NNx-file>.md`. Branch: `<branch>` (head <SHA>). Baseline <N> tests on integration.
@@ -249,7 +250,7 @@ Spec ranges: <file> lines <ranges>. Don't read `.scratch/ate-v1/spec.md`.
 Look hard at: <risky areas: e.g. raw bytes at the lupa boundary, timeouts treated as success, socket cleanup>.
 <Re-review rounds: previous must-fix findings and what the rework says it did, one line each — check each fix and its test.>
 
-Final reply: findings most severe first, each with path:line, what, how you know, must-fix/note; then the pytest line you saw and `MUST-FIX: <n>`.
+Final reply: the `git rev-parse --short HEAD` output; findings most severe first, each with path:line, what, how you know, must-fix/note; then the pytest line you saw and `MUST-FIX: <n>`.
 ```
 
 ### 5.3 Haiku screenshot job
