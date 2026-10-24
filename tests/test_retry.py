@@ -27,6 +27,7 @@ def _drive_with_choices(
     choices: list[str],
     stop_on_fail: bool = True,
     values_by_index: dict[int, float] | None = None,
+    values_by_attempt: dict[int, float] | None = None,
 ) -> tuple[RunStore, dict, list[tuple[int, int]], list[tuple[int, int, int]]]:
     """Drive ``source`` on a fresh engine; answer the n-th Stop-on-Fail prompt with ``choices[n-1]``.
 
@@ -50,7 +51,10 @@ def _drive_with_choices(
         asks.append((node_seq, attempt_no, index))
         op = engine.operator_input
         key = index - 1  # 0-based position into this step's declarations
-        value = values_by_index[key] if values_by_index is not None else float(key)
+        if values_by_attempt is not None:
+            value = values_by_attempt[attempt_no]
+        else:
+            value = values_by_index[key] if values_by_index is not None else float(key)
         op.supply_input(key, value)
 
     with tempfile.TemporaryDirectory() as td:
@@ -105,7 +109,7 @@ def _drive_poll_retry(
 ) -> tuple[RunStore, dict, list[tuple[int, int]], list[tuple[int, int, int]]]:
     """Drive a Stop-on-Fail POLL schedule, clicking ``texts[attempt_no]`` on each Attempt's POLL ask
     and answering every failure prompt RETRY. ``_drive_with_choices`` can't be reused: its blocking
-    ``supply_input`` path rejects POLL. Returns ``(store, run_row, prompts, asks)``."""
+    ``supply_input`` path never feeds POLL (``ATE.input`` reads POLL from ``poll_state``, so the action would spin). Returns ``(store, run_row, prompts, asks)``."""
     captured = {}
     prompts: list[tuple[int, int]] = []
     asks: list[tuple[int, int, int]] = []
@@ -300,6 +304,23 @@ def test_retry_reasks_inputs_with_the_new_attempt_number(app: QCoreApplication) 
     assert nodes["1."]["attempt_count"] == 2
 
 
+def test_blocking_value_from_an_earlier_attempt_is_not_reused(app: QCoreApplication) -> None:
+    """Packet 12c checkbox 1 ("blocking inputs cleared"): a value supplied during Attempt 1 that the
+    action never read must not satisfy Attempt 2's ATE.input. Without the per-Attempt reset the stale
+    value sits in the pending map and Attempt 2 reads it at once instead of waiting for its own."""
+    store, row, prompts, asks = _drive_with_choices(
+        app, UNREAD_INPUT_SOURCE, ["RETRY"], values_by_attempt={1: 1.0, 2: 2.0}
+    )
+
+    assert row is not None
+    assert prompts == [(0, 1)]
+    assert asks == [(0, 1, 1), (0, 2, 1)]
+    assert [(a["attempt_no"], a["pass_fail"], a["msg"]) for a in _attempts(store, row["run_uuid"])] == [
+        (1, "FAIL", "failed before asking"),
+        (2, "PASS", "voltage 2"),
+    ]
+
+
 def test_poll_state_resets_for_each_attempt(app: QCoreApplication) -> None:
     """Packet 12c: a retried Attempt starts with a fresh POLL window — Attempt 2 reads nil until
     clicked again (no sticky value from Attempt 1), and each click is recorded under its own Attempt."""
@@ -466,6 +487,24 @@ return ScheduleParams("Retry inputs schedule", "asks for a voltage; first attemp
 
 # A step whose only input is a POLL button: the action spins until it is clicked, fails on the first
 # Attempt and passes on the retry, reporting the text each Attempt saw.
+UNREAD_INPUT_SOURCE = """\
+local attempts = 0
+return ScheduleParams("Unread input schedule", "Attempt 1 fails before reading its input; the retry reads it")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("voltage"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function()
+        attempts = attempts + 1
+        if attempts == 1 then
+          ATE.report(Result.FAIL, "failed before asking")
+          return
+        end
+        ATE.report(Result.PASS, "voltage " .. ATE.input(1))
+      end),
+  })
+"""
+
 RETRY_POLL_SOURCE = """\
 local attempts = 0
 return ScheduleParams("Retry poll schedule", "a POLL step that fails first and passes on retry")
