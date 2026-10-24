@@ -270,6 +270,8 @@ class FailurePromptBar(QWidget):
 
     def _on_choice(self, choice: str) -> None:
         """A button was clicked: hide the bar first, then hand the choice to the screen."""
+        if not self.isVisible():
+            return  # a second click after the bar already hid itself must not answer twice
         self.hide()
         self.choice_made.emit(choice)
 

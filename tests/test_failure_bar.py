@@ -333,6 +333,42 @@ def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tm
     ]
 
 
+def test_second_click_on_a_hidden_bar_does_not_answer_again(qapp, tmp_path, monkeypatch):
+    """A double-click on the same bar button answers the prompt once, not twice.
+
+    The bar hides itself on the first click; a second click while it is hidden must be ignored, so
+    the session's choose() sees exactly one answer (packet 12d review)."""
+    env = write_ate_env(tmp_path)
+    # Fake the PDF helper so no QProcess outlives the session (suite pattern).
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    prompts = _latch_prompts(session)
+    _select_and_start(qapp, screen, SCHEDULE)
+    _pump_prompts(qapp, prompts, 1)
+
+    bar = screen.run_view.failure_prompt_bar
+    assert bar.isVisible()
+    # Count how many times the prompt is actually answered.
+    chosen: list = []
+    real_choose = session.choose
+    monkeypatch.setattr(session, "choose", lambda choice: (chosen.append(choice), real_choose(choice)))
+
+    bar.continue_button.click()
+    bar.continue_button.click()  # a rapid second click, while the bar is already hidden
+    assert chosen == ["CONTINUE"]
+    assert not bar.isVisible()
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
+    store = session.store
+    run = _run_row(store, session.run_uuid)
+    assert run["result"] == "FAIL"
+    assert run["end_reason"] == "COMPLETED"
+    assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in _attempts_for(store, session.run_uuid, 0)] == [
+        (1, "FAIL", "CONTINUE")
+    ]
+
+
 def test_bar_paints_red_with_white_labels_offscreen(qapp):
     """The bar must actually paint its red background and white labels.
 
