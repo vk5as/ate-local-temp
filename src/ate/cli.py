@@ -15,8 +15,23 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .setup import StationLayout, SetupError, default_layout, prepare_station
+from .setup import SKIP_PERMISSIONS, StationLayout, SetupError, default_layout, prepare_station
 from ._version import __version__
+
+
+def _is_root() -> bool:
+    """Whether this process runs as root/admin (POSIX euid 0). Unavailable platforms report False.
+
+    Packagers run ``ate setup`` elevated, so the default applies real permissions; an unprivileged
+    run warns and skips them rather than failing. Use ``--no-permissions`` for test runs regardless.
+    """
+    import os
+
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        # Non-POSIX (e.g. Windows): we can't prove elevation here, so don't claim it.
+        return False
 
 
 def _print_version() -> int:
@@ -143,13 +158,15 @@ def _db_migrate(path: str, extra: list[str]) -> int:
 
 
 def _cmd_setup(argv: list[str]) -> int:
-    """Dispatch ``ate setup [--root DIR]``.
+    """Dispatch ``ate setup [--root DIR] [--no-permissions]``.
 
     Prepares the Station's directories and default config (:func:`prepare_station`), which also runs
     the database migration, then prints what was created versus already present. ``--root DIR`` roots
     the layout at ``DIR`` for automation and tests; otherwise the platform defaults are used (see
-    ``assets/packaging.md``). A failure to create or write anything — e.g. an unwritable target — is
-    reported on stderr and turned into a non-zero exit.
+    ``assets/packaging.md``). The group/ownership/ACL treatment is applied by default when running as
+    root/admin; an unprivileged run prints a warning on stderr and skips it rather than failing, and
+    ``--no-permissions`` skips it explicitly. A failure to create or write anything — e.g. an
+    unwritable target — is reported on stderr and turned into a non-zero exit.
     """
     from argparse import ArgumentParser
 
@@ -157,13 +174,23 @@ def _cmd_setup(argv: list[str]) -> int:
     parser.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root (for automation and tests)")
     parser.add_argument("--data-dir", metavar="DIR", help="use this data directory instead of --root's data/ (packagers and tests)")
     parser.add_argument("--config-dir", metavar="DIR", help="use this config directory instead of --root's config/ (packagers and tests)")
+    parser.add_argument("--no-permissions", action="store_true", help="skip group/ownership/ACL setup (unprivileged or test runs)")
     args, _unknown = parser.parse_known_args(argv)
 
     layout = StationLayout.from_root(args.root) if args.root is not None else default_layout()
     data_dir = Path(args.data_dir) if args.data_dir is not None else layout.data_dir
     config_dir = Path(args.config_dir) if args.config_dir is not None else layout.config_dir
+
+    elevated = _is_root()
+    skip_permissions = args.no_permissions or not elevated  # unprivileged: warn and skip, don't fail
+    if skip_permissions:
+        print(
+            "ate setup: running unprivileged; skipping group/ownership/ACL setup (packagers run this elevated)",
+            file=sys.stderr,
+        )
+    permissions = SKIP_PERMISSIONS if skip_permissions else None
     try:
-        report = prepare_station(data_dir, config_dir)  # directories + a default config.json when none exists, then migrate the database
+        report = prepare_station(data_dir, config_dir, permissions=permissions)  # directories + a default config.json when none exists, then migrate the database
     except SetupError as exc:
         print(f"setup failed: {exc}", file=sys.stderr)
         return 1
