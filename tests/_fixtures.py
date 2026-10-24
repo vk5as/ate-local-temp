@@ -39,7 +39,7 @@ return ScheduleParams("Failing schedule", "A step that fails")
 
 # First step fails on every attempt, second passes, Stop on Fail armed (packet 12d): a failure
 # prompts the operator, a Retry re-pauses on Attempt 2, and Continue/Abort decide the ending.
-FAIL_THEN_PASS = """\
+STEPS_FAIL_THEN_PASS = """\
 return ScheduleParams("Fail then pass schedule", "first step fails, second passes")
   :setStopOnFail(true)
   :setSchedule({
@@ -47,6 +47,25 @@ return ScheduleParams("Fail then pass schedule", "first step fails, second passe
       :setAction(function() ATE.report(Result.FAIL, "wrong colour", "Red", "Green") end),
     StepParams("second"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "ok now", "Blue", "Blue") end),
+  })
+"""
+
+# Attempt 1 fails, Attempt 2 passes (packet 12d review): the attempt count is a Lua upvalue the
+# step action closes over, so a Retry that passes ends the pause for good.
+FAIL_THEN_PASS = """\
+local attempts = 0
+return ScheduleParams("Passes on retry schedule", "attempt one fails, attempt two passes")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setAction(function()
+        attempts = attempts + 1
+        if attempts == 1 then
+          ATE.report(Result.FAIL, "cold joint", "0.2V", "2.4V")
+        else
+          ATE.report(Result.PASS, "ok now", "2.4V", "2.4V")
+        end
+      end),
   })
 """
 
@@ -504,7 +523,8 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
     (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
     (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
-    (defs_dir / "fail_then_pass.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8")
+    (defs_dir / "fail_then_pass.tslua").write_text(STEPS_FAIL_THEN_PASS, encoding="utf-8")
+    (defs_dir / "passes_on_retry.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8")
 
     # Packet 16a schedules are exercised directly by the seam tests in
     # test_device_registry_16a.py (which substitute the live peer port), so they are not part of
@@ -530,6 +550,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "abortable.tslua", "sha256": _sha256(defs_dir / "abortable.tslua")},
             {"path": "enable_disabled.tslua", "sha256": _sha256(defs_dir / "enable_disabled.tslua")},
             {"path": "fail_then_pass.tslua", "sha256": _sha256(defs_dir / "fail_then_pass.tslua")},
+            {"path": "passes_on_retry.tslua", "sha256": _sha256(defs_dir / "passes_on_retry.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")

@@ -1,7 +1,8 @@
 """Packet 12d: the Stop-on-Fail prompt bar in the staged Run view.
 
-Each test drives a real headless run of the "Fail then pass schedule" (first step fails on
-every attempt, Stop on Fail armed) through the staged screen to a failure prompt. The
+Most tests drive a real headless run of the "Fail then pass schedule" (first step fails on
+every attempt, Stop on Fail armed) through the staged screen to a failure prompt; the
+retry-passes test uses a schedule whose Attempt 1 fails and Attempt 2 passes. The
 session's ``failure_prompt`` signal is latched without being answered, so the run stays
 paused while a test clicks one of the bar's buttons: Continue keeps the run going, Retry
 re-runs the step as Attempt 2, and Abort ends the run STOPPED_ON_FAIL. While the prompt is
@@ -20,6 +21,7 @@ from ate.ui.staged_run_screen import FailurePromptBar, StagedRunScreen
 from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
 
 SCHEDULE = "Fail then pass schedule"
+RETRY_SCHEDULE = "Passes on retry schedule"
 
 
 def _select_and_start(qapp, screen, schedule_name: str) -> None:
@@ -210,6 +212,46 @@ def test_retry_button_reruns_the_failed_step_as_attempt_two(qapp, tmp_path, monk
     assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in _attempts_for(store, session.run_uuid, 0)] == [
         (1, "FAIL", "RETRY"),
         (2, "FAIL", "CONTINUE"),
+    ]
+
+
+def test_retry_button_passes_the_step_on_second_attempt(qapp, tmp_path, monkeypatch):
+    """When Attempt 2 passes, the bar stays hidden, no second prompt arrives, and the run ends PASS.
+
+    The schedule's step action counts its attempts in a Lua upvalue: Attempt 1 reports FAIL,
+    Attempt 2 reports PASS. A retry that passes must end the pause for good — not re-pause."""
+    env = write_ate_env(tmp_path)
+    # Fake the PDF helper so no QProcess outlives the session (suite pattern).
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    prompts = _latch_prompts(session)
+    _select_and_start(qapp, screen, RETRY_SCHEDULE)
+    _pump_prompts(qapp, prompts, 1)
+    assert prompts == [(0, 1)]
+
+    bar = screen.run_view.failure_prompt_bar
+    assert bar.isVisible()
+    assert bar.step_label.text() == "Step 1. FAIL"
+    assert "WAITING" in screen.run_view.state_header.text()
+
+    bar.retry_button.click()
+    _pump_finished(qapp, session)
+    assert prompts == [(0, 1)]  # a second pause would mean Attempt 2 failed again
+    assert not bar.isVisible()
+    assert _highlighted_row(screen.run_view.step_list) is None
+    _pump_report_written(qapp, session)
+
+    store = session.store
+    run = _run_row(store, session.run_uuid)
+    assert run["result"] == "PASS"  # the step passed on its second attempt
+    assert run["end_reason"] == "COMPLETED"
+    by_step = _rows_by_step(store, session.run_uuid)
+    assert by_step["1."]["result"] == "PASS"  # the step's result is its last Attempt's
+    assert by_step["1."]["attempt_count"] == 2
+    assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in _attempts_for(store, session.run_uuid, 0)] == [
+        (1, "FAIL", "RETRY"),
+        (2, "PASS", None),
     ]
 
 
