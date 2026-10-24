@@ -180,6 +180,9 @@ Rules that made briefs work for a 9B local model:
 - Tell it to `grep -n` then read ranges, and to pipe test output through `tail`.
 - Require test-first and commits after each green step.
 - Require a compact final reply with checkable facts (SHA, exact pytest lines).
+- At most ~5 items per run; split longer fix lists across runs.
+- The worker keeps `/tmp/<packet>-checklist.md`, one line per item, updated after each commit with the SHA and covering test name.
+- The final reply pastes command output as evidence: `git diff --stat integration/ate-v1...HEAD`, `grep -c '^def test_' <test file>` (before and after), `grep -n '\- \[' <packet file>`, the pytest lines. Items without evidence are reported NOT DONE. (Why: `context-usage/qwen-false-done-diagnosis.md`.)
 
 ### 5.1 Implementer brief
 
