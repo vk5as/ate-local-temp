@@ -6,9 +6,9 @@
 
 **Blocked by:** 12c (Retry and Attempt recording)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] On a pause the failed step is highlighted and a full-width Continue / Retry / Abort bar appears; buttons call the run session
-- [ ] A pytest-qt test drives each button
+- [x] On a pause the failed step is highlighted and a full-width Continue / Retry / Abort bar appears; buttons call the run session
+- [x] A pytest-qt test drives each button
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
