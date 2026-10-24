@@ -34,6 +34,7 @@ Bridging facts (validated empirically against lupa 2.8):
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import weakref
 from pathlib import Path
@@ -75,12 +76,17 @@ class _AbortFlag:
     The Lua count hook (:meth:`_LuaHost._install_abort_hook`) calls ``aborted()`` every 1000
     instructions to interrupt a busy loop; the engine sets it from the operator/main thread via
     :meth:`request_abort`. Both touch it on different threads, so reads and writes go through one
-    lock. ATE's own step runner keeps reading this flag directly rather than the wrapped Lua
-    ``pcall``/``xpcall`` (packet 13c)."""
+    lock. The flag is also backed by a :class:`threading.Event` (:meth:`wait`), so a worker blocked
+    in an ATE call (ATE.sleep, ATE.input — packet 13b) can wait on it and raise "aborted" into
+    Lua the moment an abort is requested. ATE's own step runner keeps reading this flag directly
+    rather than the wrapped Lua ``pcall``/``xpcall`` (packet 13c)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._aborted = False
+        # Waitable handle behind the same lock: request() sets it, clear() clears it, and
+        # wait() lets a blocked ATE call sleep on it instead of the flag being read-only.
+        self._event = threading.Event()
 
     @property
     def aborted(self) -> bool:
@@ -90,15 +96,25 @@ class _AbortFlag:
     def request(self) -> None:
         with self._lock:
             self._aborted = True
+            self._event.set()
 
     def clear(self) -> None:
         """Clear the abort flag so a busy loop stops tripping it (packet 14c).
 
         Called by the run engine right before its Post-test Actions, which must always run even
-        after an earlier whole-run abort. It only resets ``_aborted``; callers that need to keep
-        remembering the run was aborted read :attr:`aborted` themselves and preserve it."""
+        after an earlier whole-run abort. It resets ``_aborted`` and the waitable event; callers
+        that need to keep remembering the run was aborted read :attr:`aborted` themselves and
+        preserve it."""
         with self._lock:
             self._aborted = False
+            self._event.clear()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block until an abort is requested, or until ``timeout`` seconds elapse.
+
+        Returns True when the flag was set (so a blocked ATE.sleep / ATE.input wakes and raises
+        "aborted" into Lua), False when the wait elapsed with no abort."""
+        return self._event.wait(timeout)
 
 
 # The one and only Lua version ATE runs Test Schedules on.
@@ -306,6 +322,25 @@ class _AteTable:
                 f"{self._host._location()} ATE.input: only allowed in a step action"
             )
         return self._host.inputs(n)
+
+    def sleep(self, seconds: Any) -> bool:
+        """Sleep for ``seconds`` (int or float, fractions allowed), interruptible by an abort.
+
+        Waits on the shared abort flag, so an abort requested during the wait wakes it and raises
+        "aborted" into Lua immediately — the same path the count hook uses — and the running step
+        records ERROR "Aborted by Operator". A non-number, non-finite or negative argument raises
+        a clear error naming ATE.sleep, so a bad call errors the step (story 48)."""
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
+        if seconds > threading.TIMEOUT_MAX:  # past this the wait itself overflows
+            raise ValueError(f"ATE.sleep: seconds must be at most {threading.TIMEOUT_MAX:.0f}, got {seconds!r}")
+        flag = self._host._abort_flag
+        # An abort requested before the wait starts is no reason to keep sleeping: raise now.
+        if flag.aborted or flag.wait(seconds):
+            raise RuntimeError("aborted")
+        return True
 
     def log(self, level: Any, *args: Any) -> bool:
         """Record a schedule's own log line at ``level``. Returns ``true``."""
@@ -1017,7 +1052,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         ``n`` is 1-based into this step's declarations; an undeclared index raises :class:`InvalidStepInput`
         so a bad call becomes an ERROR Attempt. POLL is the only non-blocking type: it returns nil until
         its button is clicked, then that text (sticky). Every other type blocks this worker thread via
-        the OperatorInput controller until the value is supplied from the operator thread."""
+        the OperatorInput controller until the value is supplied from the operator thread; an abort
+        requested while the wait runs raises "aborted" (packet 13b)."""
         if not self._step_inputs or n < 1 or n > len(self._step_inputs):
             raise InvalidStepInput(f"undeclared input {n}")
         decl = self._step_inputs[n - 1]
@@ -1025,7 +1061,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         # POLL reads sticky state keyed by the running step's context; nil until clicked.
         if decl.type == "POLL":
             return op.poll_value(self._node_seq, self._attempt_no, n - 1)
-        raw = op.get_raw(n - 1)  # blocks this worker thread until supplied (spec behavior)
+        raw = op.get_raw(n - 1, self._abort_flag)  # blocks this worker thread until supplied (spec behavior); an abort raises "aborted"
         return self._map_input(decl, raw)
 
     @property

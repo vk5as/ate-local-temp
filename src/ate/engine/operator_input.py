@@ -129,15 +129,28 @@ class OperatorInput(QObject):
         self._note_resolved()
         self.values_changed.emit()
 
-    def get_raw(self, index: int) -> Any:
-        """Block until a value is supplied for ``index``; raise if none ever arrives."""
+    def get_raw(self, index: int, flag: Any = None) -> Any:
+        """Block until a value is supplied for ``index``; raise if none ever arrives.
+
+        A value supplied before the wait starts is returned either way. When ``flag`` (the run's
+        shared abort flag) is given, the wait runs in short slices so an operator abort wakes the
+        thread and raises "aborted" into Lua (packet 13b); with no flag it blocks forever, as before."""
         with self._lock:
             # A value supplied before we started waiting is returned immediately.
             if index in self.pending:
                 return self.pending.pop(index)
             ch = self._channels.setdefault(index, queue.Queue())
         # Released the lock before blocking so supply_input can deliver while we wait.
-        return ch.get()
+        if flag is None:
+            return ch.get()
+        # Slice the wait so an abort is observed within ~50 ms even when no value is arriving;
+        # a value that does arrive is returned normally, ahead of any flag check.
+        while True:
+            try:
+                return ch.get(timeout=0.05)
+            except queue.Empty:
+                if flag.aborted:
+                    raise RuntimeError("aborted")
 
     def click_poll(self, node_seq: int, attempt_no: int, index: int, text: str) -> None:
         """Record a POLL button click as sticky state for this step's context.
