@@ -98,6 +98,51 @@ def _attempts(store: RunStore, run_uuid: str, node_seq: int = 0) -> list[dict]:
     ]
 
 
+def _drive_poll_retry(
+    app: QCoreApplication, source: str, texts: dict[int, str]
+) -> tuple[RunStore, dict, list[tuple[int, int]], list[tuple[int, int, int]]]:
+    """Drive a Stop-on-Fail POLL schedule, clicking ``texts[attempt_no]`` on each Attempt's POLL ask
+    and answering every failure prompt RETRY. ``_drive_with_choices`` can't be reused: its blocking
+    ``supply_input`` path rejects POLL. Returns ``(store, run_row, prompts, asks)``."""
+    captured = {}
+    prompts: list[tuple[int, int]] = []
+    asks: list[tuple[int, int, int]] = []
+
+    def _capture(run_uuid: str) -> None:
+        captured["run_uuid"] = run_uuid
+
+    def _on_failure(node_seq: int, attempt_no: int) -> None:
+        prompts.append((node_seq, attempt_no))
+        engine.choose("RETRY")
+
+    def _on_input_asked(node_seq: int, attempt_no: int, index: int) -> None:
+        asks.append((node_seq, attempt_no, index))
+        # input_asked is queued before the action runs; wait so its first POLL read is nil.
+        time.sleep(0.05)
+        engine.operator_input.click_poll(node_seq, attempt_no, index - 1, texts[attempt_no])
+
+    with tempfile.TemporaryDirectory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        schedule_path = Path(td) / "schedule.tslua"
+        schedule_path.write_text(source, encoding="utf-8")
+        engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
+        engine.run_uuid_reported.connect(_capture)
+        engine.failure_prompt.connect(_on_failure)
+        engine.input_asked.connect(_on_input_asked)
+
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+
+        engine.start()
+        deadline = time.time() + 10.0
+        while not finished.is_set():
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("engine did not reach FINISHED within 10 s")
+
+    return store, store.get_test_run(captured["run_uuid"]), prompts, asks
+
+
 def test_retry_then_pass_makes_run_pass_and_records_two_attempts(app: QCoreApplication) -> None:
     """Packet 12c checkbox 2: RETRY reruns the action; Attempt 1 is FAIL (prompt_choice RETRY) and
     Attempt 2 PASS. The step's result is its last Attempt's, so the run ends PASS / COMPLETED."""
@@ -213,6 +258,40 @@ def test_retry_reasks_inputs_with_the_new_attempt_number(app: QCoreApplication) 
     assert nodes["1."]["attempt_count"] == 2
 
 
+def test_poll_state_resets_for_each_attempt(app: QCoreApplication) -> None:
+    """Packet 12c: a retried Attempt starts with a fresh POLL window — Attempt 2 reads nil until
+    clicked again (no sticky value from Attempt 1), and each click is recorded under its own Attempt."""
+    store, row, prompts, asks = _drive_poll_retry(app, RETRY_POLL_SOURCE, {1: "ok", 2: "ok2"})
+
+    assert row is not None
+    assert row["result"] == "PASS"
+    assert row["end_reason"] == "COMPLETED"
+    assert prompts == [(0, 1)]
+    assert asks == [(0, 1, 1), (0, 2, 1)]
+
+    atts = _attempts(store, row["run_uuid"])
+    assert [(a["attempt_no"], a["pass_fail"]) for a in atts] == [(1, "FAIL"), (2, "PASS")]
+    assert atts[0]["msg"] == "attempt 1 saw ok"
+    assert atts[1]["msg"] == "attempt 2 saw ok2"  # Attempt 1's "ok" did not stick
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    inputs = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT attempt_no, input_index, value FROM input_value WHERE run_uuid=? AND node_seq=0 "
+            "ORDER BY seq",
+            (row["run_uuid"],),
+        ).fetchall()
+    ]
+    assert [i["attempt_no"] for i in inputs] == [1, 2]  # one click per Attempt, under its number
+    assert [i["value"] for i in inputs] == ["ok", "ok2"]
+
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["result"] == "PASS"
+    assert nodes["1."]["attempt_count"] == 2
+
+
 # --- schedules ----------------------------------------------------------------
 #
 # ``local attempts = 0`` is a schedule-level local; each action closure captures it as an upvalue,
@@ -269,6 +348,29 @@ return ScheduleParams("Retry inputs schedule", "asks for a voltage; first attemp
           ATE.report(Result.FAIL, "wrong voltage", "Red", "Green")
         else
           ATE.report(Result.PASS, "voltage " .. v)
+        end
+      end),
+  })
+"""
+
+
+# A step whose only input is a POLL button: the action spins until it is clicked, fails on the first
+# Attempt and passes on the retry, reporting the text each Attempt saw.
+RETRY_POLL_SOURCE = """\
+local attempts = 0
+return ScheduleParams("Retry poll schedule", "a POLL step that fails first and passes on retry")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("status"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "device status", type = "POLL", prompt = {"ok", "ok2"} } })
+      :setAction(function()
+        attempts = attempts + 1
+        local s = ATE.input(1)
+        while s == nil do s = ATE.input(1) end
+        if attempts == 1 then
+          ATE.report(Result.FAIL, "attempt 1 saw " .. s)
+        else
+          ATE.report(Result.PASS, "attempt 2 saw " .. s)
         end
       end),
   })
