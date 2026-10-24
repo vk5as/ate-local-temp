@@ -4,6 +4,13 @@ For implementer subagents working an ATE v1 packet. If you are stuck, hand the p
 
 ## When to ask
 
+You **must** hand off (this is not optional) once any of these is true:
+
+- your context has been compacted twice in this packet, or
+- you have taken about 150 steps and the packet isn't finished.
+
+You should also hand off earlier when:
+
 - The same test or error has survived two honest fix attempts, or
 - about 30 minutes or 60 steps have passed without a commit that moves the packet forward, or
 - you are about to start a long debugging hunt (threads, Qt lifetimes, subprocesses, timing) that would fill your context.
