@@ -21,8 +21,8 @@ Companion files (all in `.scratch/ate-v1/`):
 | Role | Model / how it runs | Does | Never does |
 |---|---|---|---|
 | **Orchestrator** | Claude Opus (this session) | Picks the next packet, writes briefs, verifies, merges, logs usage, reports | Long implementation work (keeps its own context and usage lean) |
-| **Implementer** | Qwen3.5 9B FP8 on coder2 via T3 `delegate_task`, `providerInstanceId: opencode`, `model: coder2/Qwen3.5-9B-FP8-dynamic`, `isolation: worktree` (formerly `lmstudio/ornith-1.5-9b`) | Builds one packet test-first on its own branch | Touches the integration branch or main checkout, creates worktrees, rebases, pushes |
-| **Qwen reviewer** | Qwen3.5 9B FP8 on coder2, `delegate_task`, own worktree, read-only | Reviews the implementer branch (detached checkout), runs the suite, reports findings per `review-packet.md` | Edits, commits, branches |
+| **Implementer** | Qwen-long: Qwen3.8 27B Q4 on llama.cpp (coder2 :8081, 64k context, 1 slot), `delegate_task`, `providerInstanceId: opencode`, `model: llama-qwen-long/qwen3.8-27b`, variant `high`, `isolation: worktree`. Earlier: `lmstudio/ornith-1.5-9b` (to 16b), `coder2/Qwen3.5-9B-FP8-dynamic` (16b–16c) | Builds one packet test-first on its own branch | Touches the integration branch or main checkout, creates worktrees, rebases, pushes |
+| **Qwen reviewer** | Qwen-long (same target as the implementer), `delegate_task`, own worktree, read-only | Reviews the implementer branch (detached checkout), runs the suite, reports findings per `review-packet.md` | Edits, commits, branches |
 | **Ornith reviewer** | Ornith-1.5 9B on LM Studio (`lmstudio/ornith-1.5-9b`), `delegate_task`, own worktree, read-only | Same as the Qwen reviewer | Edits, commits, branches |
 | **Rework implementer** | Qwen (default) or Claude Opus (`providerInstanceId: claudeAgent`, `model: claude-opus-5-5`, worktree) | Fixes the triaged must-fix list on a new branch from the implementer branch | Work beyond the list |
 | **Opus helper** | `claude -p --model claude-opus-5-5`, started by the worker subagent itself | Solves the one problem it was handed, in that subagent's worktree | Reports to the orchestrator (it reports to the worker that started it) |
@@ -104,7 +104,7 @@ pick packet ─► implementer ─► ┬─ Qwen reviewer   ─┐
   "isolation": "worktree",
   "mode": "async",
   "clientRequestId": "ate-v1-packet-16b-impl-r1",
-  "target": {"providerInstanceId": "opencode", "model": "coder2/Qwen3.5-9B-FP8-dynamic",
+  "target": {"providerInstanceId": "opencode", "model": "llama-qwen-long/qwen3.8-27b",
              "options": [{"id": "variant", "value": "high"}]},
   "task": "<brief, see 5.1>"
 }
@@ -127,7 +127,7 @@ No checking at this point; the reviewers come first and the orchestrator's check
 
 All read-only, all following `review-packet.md`, all given the same brief (5.2) and the same branch and head SHA. Send all three in one turn:
 
-- **Qwen:** `delegate_task`, coder2 target with `variant: high`, `isolation: worktree`, title `Review packet NNx (Qwen): …`, `clientRequestId` `ate-v1-packet-NNx-review-qwen-rN`.
+- **Qwen:** `delegate_task`, Qwen-long target with `variant: high`, `isolation: worktree`, title `Review packet NNx (Qwen): …`, `clientRequestId` `ate-v1-packet-NNx-review-qwen-rN`.
 - **Ornith:** `delegate_task`, `{"providerInstanceId":"opencode","model":"lmstudio/ornith-1.5-9b"}`, `isolation: worktree`, title `Review packet NNx (Ornith): …`, `clientRequestId` `ate-v1-packet-NNx-review-ornith-rN`.
 - **Haiku:** Agent tool, `model: haiku`, `run_in_background: true`, prompt starting `Haiku review of packet NNx` and pointing at `haiku-review.md`.
 
