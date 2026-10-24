@@ -15,6 +15,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from .setup import StationLayout, SetupError, default_layout, prepare_station
 from ._version import __version__
 
 
@@ -56,6 +57,8 @@ def main(argv=None) -> int:
     command = argv[0]
     if command == "db":
         return _cmd_db(argv[1:])
+    if command == "setup":
+        return _cmd_setup(argv[1:])
     if command == "definition":
         return _cmd_definition(argv[1:])
     # Hidden helper subcommand (ticket 22): render a saved HTML report to PDF in a child process.
@@ -64,7 +67,7 @@ def main(argv=None) -> int:
 
     prog = "ate"
     print(
-        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status' or '{prog} definition update <file.atedef>'",
+        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status', '{prog} setup' or '{prog} definition update <file.atedef>'",
         file=sys.stderr,
     )
     return 1
@@ -136,6 +139,43 @@ def _db_migrate(path: str, extra: list[str]) -> int:
     finally:
         conn.close()
     print(f"created or upgraded database at {path} (schema version {version})")
+    return 0
+
+
+def _cmd_setup(argv: list[str]) -> int:
+    """Dispatch ``ate setup [--root DIR]``.
+
+    Prepares the Station's directories and default config (:func:`prepare_station`), which also runs
+    the database migration, then prints what was created versus already present. ``--root DIR`` roots
+    the layout at ``DIR`` for automation and tests; otherwise the platform defaults are used (see
+    ``assets/packaging.md``). A failure to create or write anything — e.g. an unwritable target — is
+    reported on stderr and turned into a non-zero exit.
+    """
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(prog="ate setup", add_help=False)
+    parser.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root (for automation and tests)")
+    parser.add_argument("--data-dir", metavar="DIR", help="use this data directory instead of --root's data/ (packagers and tests)")
+    parser.add_argument("--config-dir", metavar="DIR", help="use this config directory instead of --root's config/ (packagers and tests)")
+    args, _unknown = parser.parse_known_args(argv)
+
+    layout = StationLayout.from_root(args.root) if args.root is not None else default_layout()
+    data_dir = Path(args.data_dir) if args.data_dir is not None else layout.data_dir
+    config_dir = Path(args.config_dir) if args.config_dir is not None else layout.config_dir
+    try:
+        report = prepare_station(data_dir, config_dir)  # directories + a default config.json when none exists, then migrate the database
+    except SetupError as exc:
+        print(f"setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    print("ate setup:")
+    for created in report["created_dirs"]:
+        print(f"  created: {created}")
+    if report["default_config_written"]:
+        print(f"  wrote default config: {report['config_file']}")
+    else:
+        print(f"  kept existing config: {report['config_file']}")
+    print(f"  database: {report['database_path']}")
     return 0
 
 
