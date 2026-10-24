@@ -28,3 +28,11 @@ Pre-existing, not 16b: roughly 1 full-suite run in 8 fails one Qt test, a differ
 - `LoopbackPeer(hangup="reset")` with a payload can lose unsent bytes to the RST; no test combines them.
 - `test_write_that_cannot_drain_times_out_with_count_sent` assumes kernel socket buffers < 64 MB.
 - `_hex_field` looks up `string.format` at call time, so a schedule that reassigns it breaks ATE.read/write param handling (self-inflicted).
+
+## 16c notes from review (not fixed)
+
+- **must-fix later, shared:** `_location` (`lua_host.py` ~819-850) reports the step's `:setAction(` line, not the line of the ATE call. The spec wants the call's own `file:line` (Errors section, `final_atp.tslua:42`). Affects every ATE error, predates 16c. The 16c tests now match `tslua:\d+:` with a comment; tighten them once fixed. Candidate follow-up packet.
+- `ATE.read(nil, …)` (wrong device argument) is caught by `_isolate_device` and returns `false, "'NoneType' object has no attribute …"`, so the step can PASS. Inherited from 16a. A type check raising a clean "device must be an open Device" would fit the spec's "always raises".
+- TCP `close` swallows `OSError`, so the close-failure-through-onError path is unreachable and untested.
+- Bad params take the ticket 09/16a graceful `false, msg` path with an ERROR log, but spec line 60 says they "always raise". Decide at the final review.
+- `test_failed_device_returns_buffered_data_before_failing_through_handler` relies on the reset error text containing "reset".
