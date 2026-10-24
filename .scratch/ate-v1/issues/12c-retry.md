@@ -6,10 +6,10 @@
 
 **Blocked by:** 12b (Failure pause with Continue and Abort), 10 (Step Inputs)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Retry reruns the action from the start with `POLL` reset and blocking inputs cleared, Devices kept open, no limit; not offered with Continue on fail
-- [ ] Every Attempt is an `attempt` row with its final report values and `prompt_choice`; the step's result is its last Attempt's; a retried step can make the run pass
-- [ ] Seam-1 tests cover retry-then-pass, retry-then-fail and Attempt rows
+- [x] Retry reruns the action from the start with `POLL` reset and blocking inputs cleared, Devices kept open, no limit; not offered with Continue on fail
+- [x] Every Attempt is an `attempt` row with its final report values and `prompt_choice`; the step's result is its last Attempt's; a retried step can make the run pass
+- [x] Seam-1 tests cover retry-then-pass, retry-then-fail and Attempt rows
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
