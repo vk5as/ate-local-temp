@@ -99,7 +99,8 @@ pick packet ─► implementer ─► light check ─► reviewer ─► orchest
   "isolation": "worktree",
   "mode": "async",
   "clientRequestId": "ate-v1-packet-16b-impl-r1",
-  "target": {"providerInstanceId": "opencode", "model": "coder2/Qwen3.5-9B-FP8-dynamic"},
+  "target": {"providerInstanceId": "opencode", "model": "coder2/Qwen3.5-9B-FP8-dynamic",
+             "options": [{"id": "variant", "value": "high"}]},
   "task": "<brief, see 5.1>"
 }
 ```
