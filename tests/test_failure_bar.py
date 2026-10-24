@@ -251,6 +251,46 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     ]
 
 
+def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
+    """The header Abort button answers a pending prompt with ABORT instead of stalling the paused worker.
+
+    request_abort() only sets a step-boundary flag, which the worker (blocked in the pause) never
+    reaches — so with a prompt up, the header's Abort must take the same path as the bar's own
+    Abort button: answer the pending prompt and end the run STOPPED_ON_FAIL."""
+    env = write_ate_env(tmp_path)
+    # Fake the PDF helper so no QProcess outlives the session (suite pattern).
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    prompts = _latch_prompts(session)
+    _select_and_start(qapp, screen, SCHEDULE)
+    _pump_prompts(qapp, prompts, 1)
+
+    bar = screen.run_view.failure_prompt_bar
+    assert bar.isVisible()
+    assert "WAITING" in screen.run_view.state_header.text()
+
+    # The header's Abort button (not the bar's) ends the paused run.
+    screen.run_view.abort_button.click()
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
+
+    assert not bar.isVisible()
+    assert _highlighted_row(screen.run_view.step_list) is None
+    assert "WAITING" not in screen.run_view.state_header.text()
+
+    store = session.store
+    run = _run_row(store, session.run_uuid)
+    assert run["result"] == "FAIL"
+    assert run["end_reason"] == "STOPPED_ON_FAIL"
+    by_step = _rows_by_step(store, session.run_uuid)
+    assert by_step["1."]["result"] == "FAIL"  # the failed step's result kept
+    assert by_step["2."]["result"] == "NOTRUN"  # the remaining step never ran
+    assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in _attempts_for(store, session.run_uuid, 0)] == [
+        (1, "FAIL", "ABORT")
+    ]
+
+
 def test_bar_paints_red_with_white_labels_offscreen(qapp):
     """The bar must actually paint its red background and white labels.
 

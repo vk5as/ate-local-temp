@@ -550,11 +550,16 @@ class StagedRunScreen(QWidget):
         self._reveal_run_view()
 
     def _request_abort(self) -> None:
-        """The Abort button asks the session to abort the current run.
+        """The Abort button ends the current run — answering a pending prompt or stopping between steps.
 
-        ``session.request_abort`` delegates to the worker, which stops at its next step boundary and
-        records ERROR / NOTRUN / ABORTED; it raises if there is no run in progress (the button is
-        disabled whenever one is not)."""
+        With a Stop-on-Fail prompt up the worker is blocked waiting for a choice, so the
+        step-boundary flag ``request_abort`` would set is never observed and the run hangs: answer
+        the pending prompt with ABORT instead (the bar's own Abort path). Otherwise the worker is
+        free to stop at its next step boundary (records ERROR / NOTRUN / ABORTED); ``request_abort``
+        raises if there is no run in progress (the button is disabled whenever one is not)."""
+        if self.run_view.failure_prompt_bar.isVisible():
+            self._on_prompt_choice("ABORT")
+            return
         self.session.request_abort()
 
     @property
@@ -679,11 +684,14 @@ class StagedRunScreen(QWidget):
         self._update_header()
 
     def _on_prompt_choice(self, choice: str) -> None:
-        """A prompt button was clicked: clear the pause's display, then answer the session.
+        """A prompt was answered (a bar button, or the header Abort while one is up): clear the
+        pause's display, then answer the session.
 
         Clearing first means a run that finishes straight away can refresh() without a highlight
-        still held on an item refresh() would delete; the session's worker unblocks on choose()
-        and the bar has already hidden itself."""
+        still held on an item refresh() would delete; the session's worker unblocks on choose().
+        The bar hides itself in _on_choice, but the header-Abort path answers without the bar, so
+        hide it here too (a no-op when the bar already hid itself)."""
+        self.run_view.failure_prompt_bar.hide()
         self._clear_paused_display()
         self.session.choose(choice)
 
