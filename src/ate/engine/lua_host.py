@@ -1050,7 +1050,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         ``n`` is 1-based into this step's declarations; an undeclared index raises :class:`InvalidStepInput`
         so a bad call becomes an ERROR Attempt. POLL is the only non-blocking type: it returns nil until
         its button is clicked, then that text (sticky). Every other type blocks this worker thread via
-        the OperatorInput controller until the value is supplied from the operator thread."""
+        the OperatorInput controller until the value is supplied from the operator thread; an abort
+        requested while the wait runs raises "aborted" (packet 13b)."""
         if not self._step_inputs or n < 1 or n > len(self._step_inputs):
             raise InvalidStepInput(f"undeclared input {n}")
         decl = self._step_inputs[n - 1]
@@ -1058,7 +1059,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         # POLL reads sticky state keyed by the running step's context; nil until clicked.
         if decl.type == "POLL":
             return op.poll_value(self._node_seq, self._attempt_no, n - 1)
-        raw = op.get_raw(n - 1)  # blocks this worker thread until supplied (spec behavior)
+        raw = op.get_raw(n - 1, self._abort_flag)  # blocks this worker thread until supplied (spec behavior); an abort raises "aborted"
         return self._map_input(decl, raw)
 
     @property
