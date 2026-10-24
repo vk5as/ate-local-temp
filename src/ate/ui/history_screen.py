@@ -63,6 +63,9 @@ class HistoryScreen(QWidget):
         self._page_index = 0
 
         layout = QVBoxLayout(self)
+        # A banner shown while a run is in progress and History is disabled (spec 23c); empty/hidden otherwise.
+        self._status_label = QLabel("")
+        layout.addWidget(self._status_label)
         self.table_view = QTableView()
         model = QStandardItemModel()
         self.table_view.setModel(model)
@@ -191,10 +194,18 @@ class HistoryScreen(QWidget):
         # ``session.page`` returns pure data rows (no header); the header lives at model row 0, so every
         # page's data starts at model row 1 regardless of ``page`` — shifting by ``page`` would leave a
         # gap and make later pages' early cells read back as None.
+        # A running row (no result / end_reason) is flagged here so its "running" status drives the
+        # result cell and disables report actions for it while selected.
+        self._row_running = {}
         for offset, row in enumerate(rows):
-            items = [QStandardItem(str(row.get(column) or "")) for column in HISTORY_COLUMNS]
             abs_row = 1 + offset
             self._row_to_uuid[abs_row] = str(row.get("run_uuid") or "")
+            running = self.session.is_running(row)
+            self._row_running[abs_row] = running
+            items = [QStandardItem(str(row.get(column) or "")) for column in HISTORY_COLUMNS]
+            if running:
+                # an open run has no result yet; show "running" in the result column instead.
+                items[self._column_index["result"]] = QStandardItem("running")
             for i, column in enumerate(HISTORY_COLUMNS):
                 model.setItem(abs_row, self._column_index[column], items[HISTORY_COLUMNS.index(column)])
         # 'Load more' stays visible while a page has rows and hides only once a fetch returns none, so the
@@ -226,11 +237,17 @@ class HistoryScreen(QWidget):
         return self._row_to_uuid[row]
 
     def _refresh_summary(self) -> None:
+        index = self.table_view.selectedIndexes()
+        row = index[0].row() if index else 0
+        running = row in self._row_to_uuid and self._row_running.get(row, False)
         run_uuid = self._selected_run_uuid()
-        if not run_uuid:
-            self._summary_fields.setText("")
-            self._result_counts.setText("")
+        # A selected run still executing has no result yet: show "running" instead of a summary.
+        if not run_uuid or running:
+            self._summary_fields.setText("running" if running else "")
+            self._result_counts.setText("running" if running else "")
             self._mismatches.setText("")
+            # report actions for an open run are disabled regardless of the global flag below.
+            self._update_actions_for_selected()
             return
         summary = self.session.summary(run_uuid)
         fields = ", ".join(f"{key}={value}" for key, value in summary.items() if key not in ("run_uuid", "result_counts", "checksum_mismatches"))
@@ -240,11 +257,47 @@ class HistoryScreen(QWidget):
         mismatches = [f.path for f in summary["checksum_mismatches"]] or "none"
         self._mismatches.setText(mismatches)
 
+    def _update_actions_for_selected(self) -> None:
+        """Disable report actions for a selected run still executing (spec 23c)."""
+        if not self.session.available():
+            return
+        index = self.table_view.selectedIndexes()
+        row = index[0].row() if index else 0
+        running = row in self._row_to_uuid and self._row_running.get(row, False)
+        if not running:
+            return
+        # An open run has no report to open or regenerate yet. "Show all runs" / "New run" are left enabled.
+        self.open_report_button.setEnabled(False)
+        self.regenerate_button.setEnabled(False)
+        export_log = getattr(self, "export_log_button", None)
+        if export_log is not None:
+            export_log.setEnabled(False)
+
+    def set_run_in_progress(self, active: bool) -> None:
+        """Tell the session a run is (no longer) in progress and refresh the display.
+
+        When History is disabled during a run the table and action bar are disabled and "A Test Run is in
+        progress" is shown; when it becomes available again they are restored, and any still-selected open
+        run has its report actions re-disabled by :meth:`_update_actions_for_selected`."""
+        self.session.set_run_in_progress(active)
+        if not self.session.available():
+            self.table_view.setEnabled(False)
+            self._actions_bar.setEnabled(False)
+            self._status_label.setText("A Test Run is in progress")
+            self._status_label.setVisible(True)
+        else:
+            self.table_view.setEnabled(True)
+            self._actions_bar.setEnabled(True)
+            self._status_label.setText("")
+            self._status_label.setVisible(False)
+            self._update_actions_for_selected()
+
     # -- actions -------------------------------------------------------------
 
     def _build_actions(self, parent: QVBoxLayout) -> None:
         """Open report, Regenerate (HTML / HTML+PDF + Include run log), Show all runs of this UUT, New run for this UUT."""
         bar = QWidget()
+        self._actions_bar = bar
         bar_layout = QVBoxLayout(bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
 

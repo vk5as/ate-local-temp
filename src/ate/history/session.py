@@ -40,6 +40,8 @@ class HistorySession:
         self.filters: dict[str, Any] = {}
         # Cursor into the current sort/filter state (0-based page index).
         self._page_index = 0
+        # Whether a run is currently in progress; set by :meth:`set_run_in_progress`.
+        self._run_in_progress = False
 
     def set_filters(self, filters: Mapping[str, Any]) -> None:
         """Replace the active filters and reset to the first page."""
@@ -86,6 +88,30 @@ class HistorySession:
         return len(
             self.store.query_runs(filters=self.filters or None, sort_key=self.sort_key, descending=self.descending)
         )
+
+    # -- during a run -------------------------------------------------------
+
+    def allow_during_run(self) -> bool:
+        """Whether History may be used while a run is in progress (from Config, default True)."""
+        return self.config.ui_allow_history_during_run if self.config is not None else True
+
+    def set_run_in_progress(self, active: bool) -> None:
+        """Mark a run as in progress or finished; the screen reads :meth:`available` to refresh.
+
+        Rows still come from the store, so this only tracks the transient app-level state (a run that has
+        started but not yet been closed through :meth:`RunStore.update_run_end`) — an open row is otherwise
+        recognised as running by :meth:`is_running`."""
+        self._run_in_progress = bool(active)
+
+    def available(self) -> bool:
+        """Whether the History screen can be used now.
+
+        False only while a run is in progress and ``ui.allowHistoryDuringRun`` disables it."""
+        return not (self._run_in_progress and not self.allow_during_run())
+
+    def is_running(self, row: Mapping[str, Any]) -> bool:
+        """True for a run with no result and no end_reason (still executing)."""
+        return not row.get("result") and not row.get("end_reason")
 
     # -- a selected run -----------------------------------------------------
 
