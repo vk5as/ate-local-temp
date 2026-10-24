@@ -32,7 +32,7 @@ from ._fixtures import (
 
 def test_write_appends_term_and_transmits_raw_bytes_including_0xFF() -> None:
     """A write appends ``writeTerm`` and transmits the raw bytes verbatim — including a 0xFF byte."""
-    peer = LoopbackPeer(payload=b"echo")  # buffered by TCP so it precedes what we send back
+    peer = LoopbackPeer()
     peer.start()
     try:
         dev = TcpDriver().open(
@@ -41,11 +41,6 @@ def test_write_appends_term_and_transmits_raw_bytes_including_0xFF() -> None:
         # wait_for_connection gates on "a connection was accepted"; its return value is a bool, so grab the real socket for indexing received below.
         peer.wait_for_connection()
         conn = peer.connections[-1]
-        # Ensure peer has sent its echo payload before we write
-        # This fixes racing threads where recv() catches "Hi\n" but not "echo"
-        # by giving peer its send+recv setup time
-        import time
-        time.sleep(0.05)
         ok, count, err = dev.write({"data": b"Hi\xff", "writeTerm": b"\n"})
     finally:
         dev.close()
@@ -53,8 +48,8 @@ def test_write_appends_term_and_transmits_raw_bytes_including_0xFF() -> None:
 
     assert (ok, count, err) == (True, 4, None)  # b"Hi\xff" is 3 bytes + "\n" term = 4; count includes the terminator
     wait_for_disconnect(peer)
-    # The peer received exactly its own payload followed by what we wrote: b"echo" + b"Hi\xff\n".
-    assert peer.received[conn] == b"echoHi\xff\n"
+    # The peer received exactly what we wrote, terminator included.
+    assert peer.received[conn] == b"Hi\xff\n"
 
 
 def test_read_strips_readTerm_and_returns_raw_bytes() -> None:
@@ -132,7 +127,7 @@ def _run_with_peer(app: QCoreApplication, source: str, port: int):
 
 def test_write_term_appended_through_lua_and_count_includes_term(app: QCoreApplication) -> None:
     """ATE.write appends the per-call terminator and ``count`` includes it; the peer gets exact bytes."""
-    peer = LoopbackPeer(payload=b"pre")  # buffered ahead of our write so received is unambiguous
+    peer = LoopbackPeer()
     peer.start()
     try:
         store, ru = _run_with_peer(
@@ -150,12 +145,9 @@ def test_write_term_appended_through_lua_and_count_includes_term(app: QCoreAppli
     finally:
         peer.stop()
 
-    # Give peer time to send payload and receive device data
-    import time
-    time.sleep(0.05)
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
-    assert peer.received[conn] == b"preHi\n"  # "Hi" + appended "\n"; the 0xFF-free ASCII proves term append
+    assert peer.received[conn] == b"Hi\n"  # "Hi" + the per-call "\n" terminator
     node = next(n for n in store.nodes(ru) if n["kind"] == "step")
     assert node["result"] == "PASS"
     assert any(a["msg"] == "ok true count 3" for a in store.attempts(ru))
