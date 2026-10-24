@@ -45,23 +45,10 @@ class _TcpDevice:
         * ``(data, count, True, None)``  — timed out after some bytes (they are consumed).
         * ``(None, 0, False, "timeout")`` — timed out with no bytes.
         * ``(None, 0, False, err)``       — the connection failed (peer closed, reset) and nothing is
-          buffered.
-
-        For spec 16c (onError): if the device is closed already, we return an immediate failure via
-        onError instead of letting the underlying socket error raise.
-        """
+          buffered."""
         size = params.get("size")
         term = self._term(params, "readTerm")
         deadline = time.monotonic() + self._timeout(params)
-        # For spec 16c: check if device failed/closed before reading
-        if self._failed is not None or self.sock._closed:
-            if self._failed:
-                if not self._buffer:
-                    return None, 0, False, self._failed
-                data = self._take(len(self._buffer))  # the connection ended after these bytes
-                return data, len(data), False, None
-            else:
-                return None, 0, False, "device closed"
         while True:
             data = self._take_complete(term, size)
             if data is not None:
@@ -112,9 +99,8 @@ class _TcpDevice:
         ``count`` is the bytes actually sent: the whole payload, terminator included, on success; what
         went out before the failure otherwise. A payload that can't be sent within ``timeout`` fails
         with ``err = "timeout"``."""
-        # For spec 16c (onError), we need to check if device is closed/failed first
-        if self._failed is not None or self.sock._closed:
-            return False, 0, self._failed or "device closed"
+        if self._failed is not None:
+            return False, 0, self._failed
         payload = self._to_bytes(params["data"]) + self._term(params, "writeTerm")
         deadline = time.monotonic() + self._timeout(params)
         sent = 0

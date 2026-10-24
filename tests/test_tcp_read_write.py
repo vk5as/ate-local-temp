@@ -373,7 +373,7 @@ def test_timeout_no_bytes_reports_err_timeout(app: QCoreApplication) -> None:
     peer.start()
     try:
         store, ru = _run_with_peer(app, _step("""
-        local r = ATE.read(dev, {size=10, timeout=0.2})
+        local r = ATE.read(dev, {size=10, timeout=0.2}, function(res) return res end)  -- onError hands back the failure table
         ATE.report(Result.PASS, tostring(r.data).." "..r.count.." "..tostring(r.partial).." "..r.err)"""), peer.port)
     finally:
         peer.stop()
@@ -388,8 +388,9 @@ def test_read_other_failure_through_lua(app: QCoreApplication) -> None:
     peer.start()
     try:
         store, ru = _run_with_peer(app, _step("""
-        local r = ATE.read(dev, {timeout=2})
-        local w = ATE.write(dev, {data = "x"})
+        local keep = function(res) return res end  -- onError hands back the failure table
+        local r = ATE.read(dev, {timeout=2}, keep)
+        local w = ATE.write(dev, {data = "x"}, keep)
         ATE.report(Result.PASS, tostring(r.data).."|"..r.count.."|"..tostring(r.partial).."|"..r.err
           .."|"..tostring(w.ok).."|"..w.count.."|"..w.err)"""), peer.port)
     finally:
@@ -443,7 +444,7 @@ def test_lua_read_removes_terminator_and_handles_timeout(app: QCoreApplication) 
     try:
         store, ru = _run_with_peer(app, _step("""
         local r = ATE.read(dev, {readTerm = string.char(254), timeout = 0.5})
-        local t = ATE.read(dev, {timeout = 0.1})
+        local t = ATE.read(dev, {timeout = 0.1}, function(res) return res end)  -- onError hands back the failure table
         ATE.report(Result.PASS, string.format("%d %d %d %d %d %s %s %s %d",
           string.byte(r.data, 1), string.byte(r.data, 2), string.byte(r.data, 3), #r.data, r.count,
           tostring(r.partial), tostring(t.data), t.err, t.count))"""), peer.port)

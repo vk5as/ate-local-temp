@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -123,6 +124,10 @@ _RUN_FIELDS: tuple[str, ...] = (
 # Raised when a schedule tries to write one of ATE.run's fields. Surfaced by the run engine as an
 # ERROR Attempt (criterion 02); naming the table keeps it consistent with "<file>:<line>: ATE.<fn>:".
 ATE_RUN_READONLY = "ATE.run: read-only"
+
+# Packet 16c: the first value a Device function returns to its Lua wrapper when the operation failed
+# (see ``_LuaHost._device_wrapper``). A string so Lua can compare it; schedules never see it.
+_DEVICE_FAILURE = "\0ate-device-failure\0"
 
 
 def _build_readonly_table_source(mapping: Mapping[str, Any]) -> str:
@@ -238,6 +243,10 @@ class _AteTable:
         # by the device and returned as result tables, so only param-validation errors raise here.
         self._extra["read"] = self._isolate_device(self._do_read, "read")
         self._extra["write"] = self._isolate_device(self._do_write, "write")
+        # Packet 16c: each open Device's onError from ATE.open, the fallback for its read/write/close.
+        self._open_handlers: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+        # Packet 16c: the Lua-wrapped device functions __getattr__ hands out, built on first use.
+        self._lua_device_fns: dict[str, Any] = {}
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
@@ -326,13 +335,16 @@ class _AteTable:
         return names[0]
 
     def _isolate_device(self, fn: Callable[..., Any], name: str) -> Callable[..., Any]:
-        """Wrap an ATE.open/ATE.close call (packet 16a).
+        """Wrap an ATE.open/read/write/close call (packets 16a–16c).
 
         Unlike :meth:`_isolate` this wrapper is *context-aware*: while loading it re-raises so a
-        load-time open/close propagates as a HostError (they are only legal after the schedule loads),
-        but in a step, Pre-test or Post-test Action it isolates like any other ATE function — logging
-        at source="ate" and returning graceful halves. The finalized wrapper is marked so :meth:`__getattr__`
-        returns it directly instead of re-wrapping with the always-isolating ``_isolate``."""
+        load-time call propagates as a HostError (Devices are only legal after the schedule loads),
+        but in a step, Pre-test or Post-test Action a param error isolates like any other ATE function —
+        logging at source="ate" and returning graceful halves, never touching ``onError``. A Device
+        failure is not an exception: ``fn`` returns it as :meth:`_failure`'s tuple, which passes
+        through here untouched to the Lua wrapper that runs ``onError`` or raises (see
+        :attr:`_LuaHost._device_wrapper`). The finalized wrapper is marked so :meth:`__getattr__` wraps
+        it in that Lua function instead of the always-isolating ``_isolate``."""
         import traceback
 
         def _wrapped(*args: Any) -> tuple[bool, Any]:
@@ -352,58 +364,64 @@ class _AteTable:
                 self._host.record_log("ERROR", f"{loc} ATE.{name}: {recorded}", source="ate")
                 return (False, f"{loc} ATE.{name}: {msg}")
 
-        _wrapped._isolate_device = True  # marker: __getattr__ returns this directly instead of re-wrapping
+        _wrapped._isolate_device = True  # marker: __getattr__ wraps this for Lua instead of re-wrapping
         return _wrapped
+
+    @staticmethod
+    def _split_args(params: Any, error_handler: Any) -> tuple[Any, Any]:
+        """Let an optional ``params`` be skipped: ``ATE.read(dev, onError)`` passes the handler second."""
+        from lupa import lua_type
+
+        if error_handler is None and lua_type(params) == "function":
+            return None, params
+        return params, error_handler
+
+    def _failure(self, name: str, what: str, result: dict[str, Any], params: Any, handler: Any) -> tuple:
+        """The tuple a failed Device call hands its Lua wrapper (packet 16c).
+
+        ``result`` is the failure table the call would return (with ``err``), ``params`` the table the
+        schedule passed in, ``handler`` the ``onError`` to try, and the message the error raised when
+        there is no handler or it returns nil: ``<file>:<line>: ATE.<fn>: <device>: <err>``."""
+        message = f"{self._host._location()} ATE.{name}: {what}: {result['err']}"
+        return _DEVICE_FAILURE, self._host._runtime.table_from(result), params, handler, message
+
+    def _handler_for(self, device: Any, error_handler: Any) -> Any:
+        """The call's own ``onError`` if given, else the one given to ``open`` (or nil)."""
+        return error_handler if error_handler is not None else self._open_handlers.get(device)
 
     def _do_open(self, device_type: Any, params: Any = None, error_handler: Any = None) -> Any:
         """Open a Device of ``device_type`` with ``params``; returns an opaque handle (userdata).
 
-        The real logic behind :meth:`open`. The handle is only ever passed back to ``read``/``write``/``close``.
-        ``error_handler`` is stored on the device and used for read/write/close failures. Param validation
-        raises before connecting and never goes through ``error_handler``."""
+        The real logic behind :meth:`open`. The handle is only ever passed back to ``read``/``write``/``close``,
+        and ``error_handler`` is kept as their fallback ``onError``. Param validation raises before
+        connecting and never goes through ``error_handler``; a failed connect does."""
         registry = self._host._devices
         name = self._device_type_name(device_type)
-        handle = registry.open_device(name, self._raw_params(params, ("readTerm", "writeTerm")))
-        # Store error_handler on the device handle for later use in read/write/close
-        handle._on_error = error_handler
+        raw = self._raw_params(params, ("readTerm", "writeTerm"))
+        try:
+            handle = registry.open_device(name, raw)
+        except OSError as exc:  # refused, unreachable, timed out: a Device failure, not a schedule bug
+            what = f"{name} {raw.get('host')}:{raw.get('port')}"
+            return self._failure("open", what, {"ok": False, "err": str(exc)}, params, error_handler)
+        if error_handler is not None:
+            self._open_handlers[handle] = error_handler
         return handle
 
     def _do_close(self, device: Any = None, params: Any = None, error_handler: Any = None) -> Any:
         """Close a Device and release it; the real logic behind :meth:`close`.
 
-        ``error_handler`` can be provided for this call; if not, falls back to the device's stored
-        handler (from open), then uses the host's default None. If handler returns non-nil, that
-        value is returned; otherwise {ok=true} is returned even for failed closes.
-        """
+        Returns a genuine Lua table ``{ok = true}`` (built by the runtime) so ``"closed "..r.ok`` reads "closed
+        true"; a plain dict/object would round-trip as userdata instead. Closing twice is a no-op: removing from
+        tracking returns False on the second call, but we still report success. A close that fails goes
+        through ``onError``."""
+        params, error_handler = self._split_args(params, error_handler)
         registry = self._host._devices
-        # Use provided handler, device's handler, or None (returns default {ok=true})
-        handler = error_handler or getattr(device, "_on_error", None)
         try:
-            # Removing from tracking - if already closed, this returns False
-            ok = registry.close_device(device)
-        except Exception as exc:  # noqa: BLE001
-            loc = self._host._location()
-            msg = str(exc).splitlines()[0] if str(exc) else "ATE error"
-            self._host.record_log("ERROR", f"{loc} ATE.close: {msg}", source="ate")
-            ok = False
-        
-        # Default result - close success
-        result = self._host._runtime.table_from({"ok": True})
-        
-        # If close_failed (ok is False) and there's a handler, call it
-        if not ok and handler is not None:
-            op_result = {"ok": False, "err": f"{loc} ATE.close: {msg}"}
-            try:
-                return_val = handler(op_result, params)
-                if return_val is not None:
-                    return return_val
-            except ValueError as ve:
-                self._host.record_log(
-                    "ERROR", f"{loc} ATE.close: onError handler raised: {ve}", source="ate"
-                )
-                pass  # fall through to return error table
-        
-        return result
+            registry.close_device(device)
+        except OSError as exc:
+            result = {"ok": False, "err": str(exc)}
+            return self._failure("close", device.describe(), result, params, self._handler_for(device, error_handler))
+        return self._host._runtime.table_from({"ok": True})
 
     def _raw_params(self, params: Any, byte_fields: tuple[str, ...]) -> Any:
         """Copy a Lua params table into a dict, taking each of ``byte_fields`` as raw bytes.
@@ -427,82 +445,52 @@ class _AteTable:
         Validates the per-call override fields against the driver's read_fields and delegates to the
         device; I/O timeouts/failures come back from the device as result tables, never raised here —
         only a param-validation error raises, and that is isolated at source="ate" by _isolate_device.
-        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged.
-        
-        If an error occurred (err != None) and onError was provided, the handler is called.
-        The handler's non-nil return value becomes the result; if it raises or returns nil,
-        the default error table is returned (not raised per spec)."""
-        params = self._raw_params(params, ("readTerm",))
-        validated = validate_params(TcpDriver(), params, TcpDriver.read_fields)  # names any bad field
+        A timeout with no bytes, a failed connection or a closed Device goes through ``onError``.
+        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged."""
+        params, error_handler = self._split_args(params, error_handler)
+        validated = validate_params(TcpDriver(), self._raw_params(params, ("readTerm",)), TcpDriver.read_fields)
         if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
             raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
-        data, count, partial, err = device.read(validated)
+        if self._host._devices.is_open(device):
+            data, count, partial, err = device.read(validated)
+        else:
+            data, count, partial, err = None, 0, False, "device closed"
         if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
             self._host.record_log(
                 "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
             )
-        # Build the result table - it may contain err on failures
-        result = self._host._runtime.table_from({
+        result = {
             "data": data,  # None -> nil on a timeout with no bytes or a failure
             "count": count,
             "partial": partial,
             "err": err,  # None -> nil unless the read failed
-        })
-        
-        # If there was an error and a handler was provided, call it
+        }
         if err is not None:
-            handler = error_handler or getattr(device, "_on_error", None)
-            if handler is not None:
-                # Build op_result dict for the handler
-                op_result = {"data": data, "count": count, "partial": partial, "err": err}
-                try:
-                    return_val = handler(op_result, params)
-                    # If handler returned a non-nil value, use it
-                    if return_val is not None:
-                        return return_val
-                except ValueError as ve:  # onError raising is treated as returning nil
-                    self._host.record_log(
-                        "ERROR", f"{self._host._location()} ATE.read: onError handler raised: {ve}", source="ate"
-                    )
-                    pass  # fall through to return the default error table
-        
-        return result
+            return self._failure("read", device.describe(), result, params, self._handler_for(device, error_handler))
+        return self._host._runtime.table_from(result)
 
     def _do_write(self, device=None, params=None, error_handler=None):
         """Write to a Device (packet 16b); the real logic behind ATE.write.
 
         Validates the per-call fields against write_fields and delegates to the device; I/O
-        timeouts/failures come back from the device as result tables, never raised here. ``count`` is
-        the number of bytes actually sent, terminator included.
-        
-        If an error occurred (ok=False err set) and onError was provided, the handler is called
-        and its non-nil return value is used; otherwise the default error table is returned."""
-        params = self._raw_params(params, ("data", "writeTerm"))
-        validated = validate_params(TcpDriver(), params, TcpDriver.write_fields)  # names any bad field
-        ok, count, err = device.write(validated)
-        # Build result table
-        result = self._host._runtime.table_from({
+        timeouts/failures come back from the device as result tables, never raised here, and go through
+        ``onError``, as does writing to a closed Device. ``count`` is the number of bytes actually sent,
+        terminator included."""
+        validated = validate_params(
+            TcpDriver(), self._raw_params(params, ("data", "writeTerm")), TcpDriver.write_fields
+        )
+        if self._host._devices.is_open(device):
+            ok, count, err = device.write(validated)
+        else:
+            ok, count, err = False, 0, "device closed"
+        result = {
             "ok": ok,
             "count": count,
             "err": err,  # None -> nil unless the write failed
-        })
-        
-        # If there was an error and a handler was provided, call it
+        }
         if err is not None:
-            handler = error_handler or getattr(device, "_on_error", None)
-            if handler is not None:
-                op_result = {"ok": ok, "count": count, "err": err}
-                try:
-                    return_val = handler(op_result, params)
-                    if return_val is not None:
-                        return return_val
-                except ValueError as ve:
-                    self._host.record_log(
-                        "ERROR", f"{self._host._location()} ATE.write: onError handler raised: {ve}", source="ate"
-                    )
-                    pass  # fall through to return error table
-        
-        return result
+            return self._failure("write", device.describe(), result, params, self._handler_for(device, error_handler))
+        return self._host._runtime.table_from(result)
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         if name == "run":
@@ -517,10 +505,13 @@ class _AteTable:
             fn = self._extra[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
-        # Packet 16a: ATE.open/ATE.close are finalized device wrappers (see _isolate_device); return them
-        # directly so their context-aware load-time propagation and source="ate" isolation take effect.
+        # Packet 16a: ATE.open/read/write/close are finalized device wrappers (see _isolate_device); they
+        # skip _isolate so their context-aware load-time propagation and source="ate" isolation take
+        # effect. Packet 16c: each is wrapped once in the host's Lua function that runs onError or raises.
         if getattr(fn, "_isolate_device", False):
-            return fn
+            if name not in self._lua_device_fns:
+                self._lua_device_fns[name] = self._host._device_wrapper(_DEVICE_FAILURE, fn)
+            return self._lua_device_fns[name]
         return self._isolate(fn, name)
 
     def publish_run(self, values: Mapping[str, Any]) -> Any:
@@ -691,6 +682,24 @@ class _LuaHost:
         self._hex_field = self._runtime.eval(
             "function(t, k) local v = t[k]; if type(v) == 'string' then "
             "return (v:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end end"
+        )
+        # Packet 16c: wraps each Device function so a failure is finished in Lua. The Python side returns
+        # ``_DEVICE_FAILURE, opResult, opArgs, onError, message``; the wrapper calls onError there and
+        # returns its non-nil value, or raises ``message`` as a plain Lua error. Calling the handler and
+        # raising in Lua keeps the handler's own errors (and an abort) ordinary Lua errors.
+        self._device_wrapper = self._runtime.eval(
+            """function(fail, fn)
+              local function finish(first, ...)
+                if first ~= fail then return first, ... end
+                local result, args, handler, message = ...
+                if handler ~= nil then
+                  local value = handler(result, args)
+                  if value ~= nil then return value end
+                end
+                error(message, 0)
+              end
+              return function(...) return finish(fn(...)) end
+            end"""
         )
 
         # Enums as persistent Lua globals, then the builders and ATE table.
