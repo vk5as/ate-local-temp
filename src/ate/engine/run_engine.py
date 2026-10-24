@@ -5,9 +5,10 @@ Ticket 02's flow-control slice. On ``run()`` (executed on the worker thread) the
 1. inserts a fresh :class:`~ate.storage.store.RunStore` test_run row, stamping the
    Station UTC offset once for the run;
 2. steps through the schedule's expanded steps in order — skipping header/include rows
-   that have no action — invoking each step's Lua action closure and recording one
-   Attempt per ``ATE.report`` call it makes (last call wins); a step whose action raises
-   records an ERROR Attempt;
+   that have no action — invoking each step's Lua action closure once per Attempt and
+   recording one Attempt per run with its last ``ATE.report`` (last call wins); when the
+   operator chooses RETRY the action runs again as a new Attempt, and a step whose action
+   raises records an ERROR Attempt;
 3. sets the run result to FAIL if any step failed or errored, otherwise PASS, with End
    Reason COMPLETED, then closes the run row.
 
