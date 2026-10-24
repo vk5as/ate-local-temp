@@ -180,8 +180,9 @@ def test_read_strips_readTerm_through_lua(app: QCoreApplication) -> None:
 
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [hex, count] — the read consumed the payload; only the writeback is recorded
-    print("REC:", rec, "attempt msgs:", [a["msg"] for a in store.attempts(ru)])
+    rec = peer.received[conn].split(b"\n")  # [data, count] — the read consumed the payload; only the writeback is recorded
+    data = rec[0].decode()
+    assert data == "Hello"  # actual stripped data, not hex
 
     node = next(n for n in store.nodes(ru) if n["kind"] == "step")
     assert node["result"] == "PASS"
@@ -210,8 +211,9 @@ def test_read_stops_at_size_through_lua(app: QCoreApplication) -> None:
 
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [hex, count, partial] — the read consumed the payload; only the writeback is recorded
-    assert bytes.fromhex(rec[0].decode()) == b"01234"
+    rec = peer.received[conn].split(b"\n")  # [data, count, partial] — the read consumed the payload; only the writeback is recorded
+    data = rec[0].decode()
+    assert data.startswith("01234")  # actual bytes as string, not hex
     assert int(rec[1]) == 5
     assert rec[2] == b"false"
 
@@ -243,8 +245,9 @@ def test_per_call_override_applies_to_that_call_only(app: QCoreApplication) -> N
 
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [hex, count] — the read consumed the payload; only the writeback is recorded
-    assert bytes.fromhex(rec[0].decode()) == b"a"  # stripped at the per-call "=" — not the open-time "\n"
+    rec = peer.received[conn].split(b"\n")  # [data, count] — the read consumed the payload; only the writeback is recorded
+    data = rec[0].decode()
+    assert data == "a"  # stripped at the per-call "=" — not the open-time "\n"
     assert int(rec[1]) == 1
 
     node = next(n for n in store.nodes(ru) if n["kind"] == "step")

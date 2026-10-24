@@ -393,7 +393,7 @@ class _AteTable:
                 "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
             )
         return self._host._runtime.table_from({
-            "data": data.hex() if data is not None else "",  # ASCII hex of the raw bytes; binary-safe through _materialize (None on a timeout-with-no-bytes stays nil)
+            "data": data,  # raw bytes (interpret as nil if None/timeout-no-bytes)
             "count": int(count),
             "partial": bool(partial),
             "err": err,  # None -> nil (only present when there is an error)
