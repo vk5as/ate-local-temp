@@ -37,6 +37,19 @@ return ScheduleParams("Failing schedule", "A step that fails")
   })
 """
 
+# First step fails on every attempt, second passes, Stop on Fail armed (packet 12d): a failure
+# prompts the operator, a Retry re-pauses on Attempt 2, and Continue/Abort decide the ending.
+FAIL_THEN_PASS = """\
+return ScheduleParams("Fail then pass schedule", "first step fails, second passes")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.FAIL, "wrong colour", "Red", "Green") end),
+    StepParams("second"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "ok now", "Blue", "Blue") end),
+  })
+"""
+
 # A single-passing step with full document metadata (doc title/id/rev) set — so a report's Cover
 # can be checked for every recorded doc field.
 DOC_FIELDS = """\
@@ -491,6 +504,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
     (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
     (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
+    (defs_dir / "fail_then_pass.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8")
 
     # Packet 16a schedules are exercised directly by the seam tests in
     # test_device_registry_16a.py (which substitute the live peer port), so they are not part of
@@ -515,6 +529,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
             {"path": "abortable.tslua", "sha256": _sha256(defs_dir / "abortable.tslua")},
             {"path": "enable_disabled.tslua", "sha256": _sha256(defs_dir / "enable_disabled.tslua")},
+            {"path": "fail_then_pass.tslua", "sha256": _sha256(defs_dir / "fail_then_pass.tslua")},
         ],
     }
     (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
