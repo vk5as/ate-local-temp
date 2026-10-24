@@ -242,7 +242,7 @@ For UI packets add: the mockup to follow (`git show prototype/run-screen:prototy
 
 ```
 You are reviewing ONE finished work packet of the ATE v1 spec. READ-ONLY: report findings, change nothing.
-FIRST (Qwen/Ornith), run in order: `pwd`; `git checkout --detach <branch>`; `git rev-parse --short HEAD` — must print <SHA>, else stop and reply with that output; then the suite with the shared venv. (A Qwen reviewer once skipped the checkout and reviewed the integration tip.)
+FIRST (Qwen/Ornith), run as ONE shell command (parallel tool calls race): `pwd && git checkout --detach <branch> && git rev-parse --short HEAD` — must print <SHA>, else stop and reply with that output; then the suite with the shared venv. (A Qwen reviewer once skipped the checkout and reviewed the integration tip.)
 Follow `.scratch/ate-v1/review-packet.md` exactly (Haiku: `.scratch/ate-v1/haiku-review.md`) — setup, checklist and reply format.
 
 Packet: `.scratch/ate-v1/issues/<NNx-file>.md`. Branch: `<branch>` (head <SHA>). Baseline <N> tests on integration.
