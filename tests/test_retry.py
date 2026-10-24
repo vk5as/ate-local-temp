@@ -18,6 +18,8 @@ from PyQt6.QtCore import QCoreApplication
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
+from ._fixtures import LoopbackPeer, wait_for_disconnect
+
 
 def _drive_with_choices(
     app: QCoreApplication,
@@ -292,6 +294,34 @@ def test_poll_state_resets_for_each_attempt(app: QCoreApplication) -> None:
     assert nodes["1."]["attempt_count"] == 2
 
 
+def test_devices_stay_open_across_attempts(app: QCoreApplication) -> None:
+    """Packet 12c: a retry reruns the action but Devices stay open — Attempt 1 opens the TCP device
+    once, Attempt 2 writes to that same connection, and the peer sees both Attempts' bytes."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        source = RETRY_DEVICE_SOURCE.replace(LoopbackPeer.PORT_PLACEHOLDER, str(peer.port))
+        # ABORT only answers an unexpected second prompt, so a failed Attempt 2 ends the run cleanly.
+        store, row, prompts, _asks = _drive_with_choices(app, source, ["RETRY", "ABORT"])
+        assert wait_for_disconnect(peer)  # run-end teardown closes it, flushing peer.received
+    finally:
+        peer.stop()
+
+    assert row is not None
+    atts = _attempts(store, row["run_uuid"])
+    assert [(a["attempt_no"], a["pass_fail"], a["msg"]) for a in atts] == [
+        (1, "FAIL", "first write"),
+        (2, "PASS", "write ok"),  # Attempt 2's write succeeded (no "device closed")
+    ]
+    assert row["result"] == "PASS"
+    assert prompts == [(0, 1)]
+    assert len(peer.connections) == 1  # opened once, reused by the retry
+    assert list(peer.received.values()) == [b"A\x01" + b"B\x02"]  # both Attempts' writes, one socket
+
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["attempt_count"] == 2
+
+
 # --- schedules ----------------------------------------------------------------
 #
 # ``local attempts = 0`` is a schedule-level local; each action closure captures it as an upvalue,
@@ -371,6 +401,32 @@ return ScheduleParams("Retry poll schedule", "a POLL step that fails first and p
           ATE.report(Result.FAIL, "attempt 1 saw " .. s)
         else
           ATE.report(Result.PASS, "attempt 2 saw " .. s)
+        end
+      end),
+  })
+"""
+
+
+# Opens a loopback TCP device on the first Attempt only (upvalue guard) and writes every Attempt:
+# Attempt 1 writes "A\1" and fails, the retry writes "B\2" to the same device and passes.
+RETRY_DEVICE_SOURCE = """\
+local attempts = 0
+local dev = nil
+return ScheduleParams("Retry device schedule", "opens a device once and writes on every attempt")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("write"):setStepNo("1.")
+      :setAction(function()
+        attempts = attempts + 1
+        if dev == nil then
+          dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        end
+        if attempts == 1 then
+          ATE.write(dev, {data = "A" .. string.char(1)})
+          ATE.report(Result.FAIL, "first write")
+        else
+          local r = ATE.write(dev, {data = "B" .. string.char(2)})
+          if r.ok then ATE.report(Result.PASS, "write ok") else ATE.report(Result.FAIL, tostring(r.err)) end
         end
       end),
   })
