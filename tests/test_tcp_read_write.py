@@ -3,17 +3,18 @@
 Seam-1 coverage of raw byte I/O with terminators and per-call overrides, driving a real LuaHost +
 QThread RunEngine against a loopback peer (no mocks). The peer is a controlled listener on 127.0.0.1
 whose accepted connections record the exact bytes each side sends, so every result shape — complete
-read, partial-on-timeout, timeout-with-no-bytes, terminator stripping, size limits, per-call
-overrides and bad params — is verified against real sockets.
+read, partial-on-timeout, timeout-with-no-bytes, other failure, write success/failure, terminator
+stripping, size limits, per-call overrides and bad params — is verified against real sockets.
 
 The read/write driver logic lives in :mod:`ate.devices.tcp`; :func:`_do_read`/:func:`_do_write` are the
 ATE.read/ATE.write wrappers behind it; ``LoopbackPeer`` + ``_drive`` exercise the whole stack."""
 
+import select
+import socket
 import tempfile
 import time
 from pathlib import Path
 
-import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from ate.devices import TcpDriver
@@ -27,6 +28,15 @@ from ._fixtures import (
 )
 
 
+def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = ""):
+    """Open a TCP device on ``peer`` and wait until the peer has accepted it."""
+    dev = TcpDriver().open(
+        {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": read_term, "writeTerm": write_term}
+    )
+    assert peer.wait_for_connection()
+    return dev
+
+
 # --- Unit: the driver over a real socket ---------------------------------------------------
 
 
@@ -35,20 +45,15 @@ def test_write_appends_term_and_transmits_raw_bytes_including_0xFF() -> None:
     peer = LoopbackPeer()
     peer.start()
     try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
-        )
-        # wait_for_connection gates on "a connection was accepted"; its return value is a bool, so grab the real socket for indexing received below.
-        peer.wait_for_connection()
+        dev = _open(peer)
         conn = peer.connections[-1]
         ok, count, err = dev.write({"data": b"Hi\xff", "writeTerm": b"\n"})
-    finally:
         dev.close()
+    finally:
         peer.stop()
 
-    assert (ok, count, err) == (True, 4, None)  # b"Hi\xff" is 3 bytes + "\n" term = 4; count includes the terminator
-    wait_for_disconnect(peer)
-    # The peer received exactly what we wrote, terminator included.
+    assert (ok, count, err) == (True, 4, None)  # 3 data bytes + "\n"; count includes the terminator
+    assert wait_for_disconnect(peer)
     assert peer.received[conn] == b"Hi\xff\n"
 
 
@@ -56,60 +61,184 @@ def test_read_strips_readTerm_and_returns_raw_bytes() -> None:
     """A read strips ``readTerm`` and returns the raw bytes that preceded it."""
     peer = LoopbackPeer(payload=b"Hello\n")
     peer.start()
-    # Give accept thread a moment to be ready
     try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "\n", "writeTerm": ""}
-        )
-        wait = 0.1
-        assert peer.wait_for_connection(timeout=2.0), f"wait_for_connection failed with {len(peer.connections)} connections"
-        conn = peer.connections[-1]
-        data, count, partial, err = dev.read({"size": 10, "readTerm": "\n"})
-    finally:
+        dev = _open(peer, read_term="\n")
+        result = dev.read({"size": 10})
         dev.close()
+    finally:
         peer.stop()
 
-    assert (data, count, partial, err) == (b"Hello", 5, False, None)
+    assert result == (b"Hello", 5, False, None)
 
 
 def test_read_stops_at_size() -> None:
     """A read with a ``size`` limit returns exactly that many bytes and marks it complete."""
     peer = LoopbackPeer(payload=b"0123456789ABCDEF")
     peer.start()
-    # Give accept thread a moment to be ready
     try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        data, count, partial, err = dev.read({"size": 5})
-    finally:
+        dev = _open(peer)
+        result = dev.read({"size": 5})
         dev.close()
+    finally:
         peer.stop()
 
-    assert (data, count, partial, err) == (b"01234", 5, False, None)
+    assert result == (b"01234", 5, False, None)
 
 
 def test_partial_read_on_timeout_is_partial_and_carries_bytes() -> None:
     """A read that grabs some bytes then times out returns them with ``partial = true`` and no error."""
     peer = LoopbackPeer(payload=b"abc")  # only three bytes; the rest never arrives
     peer.start()
-    # Give accept thread a moment to be ready
     try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        data, count, partial, err = dev.read({"size": 10, "timeout": 0.3})
-    finally:
+        dev = _open(peer)
+        result = dev.read({"size": 10, "timeout": 0.2})
         dev.close()
+    finally:
         peer.stop()
 
-    assert (data, count, partial, err) == (b"abc", 3, True, None)
+    assert result == (b"abc", 3, True, None)
+
+
+def test_two_reads_split_buffered_terminators() -> None:
+    """Bytes past a terminator are kept, and a terminator already buffered completes the next read
+    without waiting on the socket."""
+    peer = LoopbackPeer(payload=b"a\nb\n")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        first = dev.read({"timeout": 0.5})
+        start = time.monotonic()
+        second = dev.read({"timeout": 0.5})
+        elapsed = time.monotonic() - start
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"a", 1, False, None)
+    assert second == (b"b", 1, False, None)
+    assert elapsed < 0.2, f"second read waited {elapsed:.2f}s on the socket despite a buffered terminator"
+
+
+def test_partial_read_bytes_not_returned_again() -> None:
+    """The bytes a partial read returns are consumed: the next read times out with no bytes."""
+    peer = LoopbackPeer(payload=b"abc")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        first = dev.read({"timeout": 0.2})
+        second = dev.read({"timeout": 0.1})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"abc", 3, True, None)  # no terminator arrives -> partial
+    assert second == (None, 0, False, "timeout")
+
+
+def test_size_limit_with_terminator_beyond_keeps_rest() -> None:
+    """``size`` caps the read even when the terminator lies past it; the rest stays for the next read."""
+    peer = LoopbackPeer(payload=b"0123456789abc\n")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        first = dev.read({"size": 4})
+        second = dev.read({"timeout": 0.5})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"0123", 4, False, None)
+    assert second == (b"456789abc", 9, False, None)
+
+
+def test_terminator_within_size_ends_the_read() -> None:
+    """A terminator inside the ``size`` limit ends the read there; the bytes after it are kept."""
+    peer = LoopbackPeer(payload=b"ab\ncdefgh")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        first = dev.read({"size": 4})
+        second = dev.read({"size": 4})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"ab", 2, False, None)
+    assert second == (b"cdef", 4, False, None)
+
+
+def test_bytes_then_peer_close_is_complete_then_next_read_fails() -> None:
+    """Bytes followed by the peer closing are a complete read (no timeout, no partial); the next read
+    returns the failure with ``data = nil``."""
+    peer = LoopbackPeer(payload=b"tail", hangup="close")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        start = time.monotonic()
+        first = dev.read({"timeout": 2})
+        elapsed = time.monotonic() - start
+        second = dev.read({"timeout": 2})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"tail", 4, False, None)
+    assert elapsed < 1, "EOF must end the read at once, not wait out the timeout"
+    assert second == (None, 0, False, "connection closed by peer")
+
+
+def test_read_connection_reset_is_other_failure() -> None:
+    """A connection reset is a read 'other failure': ``data = nil``, ``count = 0``, ``err = <message>``."""
+    peer = LoopbackPeer(hangup="reset")
+    peer.start()
+    try:
+        dev = _open(peer)
+        data, count, partial, err = dev.read({"timeout": 2})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert (data, count, partial) == (None, 0, False)
+    assert err and "reset" in err.lower()
+
+
+def test_write_after_connection_reset_fails_with_message() -> None:
+    """A write on a reset connection returns ``ok = false``, the bytes sent (0) and the error."""
+    peer = LoopbackPeer(hangup="reset")
+    peer.start()
+    try:
+        dev = _open(peer)
+        readable, _, _ = select.select([dev.sock], [], [], 2)  # the RST has arrived
+        assert readable
+        ok, count, err = dev.write({"data": b"x"})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert (ok, count) == (False, 0)
+    assert err and ("reset" in err.lower() or "pipe" in err.lower())
+
+
+def test_write_that_cannot_drain_times_out_with_count_sent() -> None:
+    """A write the peer never drains fails with ``err = "timeout"`` and ``count`` = the bytes that went out."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    try:
+        dev = TcpDriver().open(
+            {"host": "127.0.0.1", "port": listener.getsockname()[1], "timeout": 5, "readTerm": "", "writeTerm": ""}
+        )
+        conn, _ = listener.accept()  # accepted but never read, so the send buffers fill
+        payload = b"\x00" * (64 * 1024 * 1024)
+        start = time.monotonic()
+        ok, count, err = dev.write({"data": payload, "timeout": 0.2})
+        elapsed = time.monotonic() - start
+        dev.close()
+        conn.close()
+    finally:
+        listener.close()
+
+    assert (ok, err) == (False, "timeout")
+    assert 0 < count < len(payload)
+    assert elapsed < 1.5
 
 
 # --- Seam-1: read/write through a driven RunEngine ------------------------------------------
@@ -134,129 +263,90 @@ def _run_with_peer(app: QCoreApplication, source: str, port: int):
     return store, captured["run_uuid"]
 
 
+def _step_message(store: RunStore, ru: str) -> str:
+    """The single step's result, asserted PASS, and the message its ATE.report recorded."""
+    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
+    assert node["result"] == "PASS"
+    (attempt,) = store.attempts(ru)
+    return attempt["msg"]
+
+
+def _step(body: str, read_term: str = "", write_term: str = "") -> str:
+    """A one-step schedule that opens a TCP device on the peer as ``dev`` and runs ``body``."""
+    return f"""return ScheduleParams("x") :setSchedule({{
+    StepParams("io"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {{host="127.0.0.1", port=__PORT__, timeout=5, readTerm="{read_term}", writeTerm="{write_term}"}})
+{body}
+        ATE.close(dev)
+      end),
+  }})"""
+
+
 def test_write_term_appended_through_lua_and_count_includes_term(app: QCoreApplication) -> None:
     """ATE.write appends the per-call terminator and ``count`` includes it; the peer gets exact bytes."""
     peer = LoopbackPeer()
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        store, ru = _run_with_peer(app, _step("""
         local w = ATE.write(dev, {data = "Hi", writeTerm = "\\n"})
-        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count)
-      end),
-  })""",
-            peer.port,
-        )
+        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count.." err "..tostring(w.err))"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    assert peer.received[conn] == b"Hi\n"  # "Hi" + the per-call "\n" terminator
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
-    assert any(a["msg"] == "ok true count 3" for a in store.attempts(ru))
+    assert wait_for_disconnect(peer)
+    assert peer.received[peer.connections[-1]] == b"Hi\n"
+    assert _step_message(store, ru) == "ok true count 3 err nil"
 
 
 def test_read_strips_readTerm_through_lua(app: QCoreApplication) -> None:
-    """ATE.read strips the terminator; the echoed hex round-trips raw bytes (binary-safe through Lua)."""
-    peer = LoopbackPeer(payload=b"Hello=")  # no newline, so splitting the echo on "\n" is unambiguous
+    """ATE.read strips the terminator and reports a complete read."""
+    peer = LoopbackPeer(payload=b"Hello=")
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="=", writeTerm=""})
+        store, ru = _run_with_peer(app, _step("""
         local r = ATE.read(dev, {size=10})
-        -- echo the stripped data (hex) plus count so the test can decode exact bytes through recorded bytes
-        ATE.write(dev, {data = r.data .. "\\n" .. tostring(r.count)})
-        ATE.report(Result.PASS, "count "..r.count.." partial "..tostring(r.partial).." type"..type(r.count).." tstr"..tostring(r.count))
-      end),
-  })""",
-            peer.port,
-        )
+        ATE.report(Result.PASS, r.data.." "..r.count.." "..tostring(r.partial).." "..tostring(r.err))""",
+            read_term="="), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [data, count] — the read consumed the payload; only the writeback is recorded
-    data = rec[0].decode()
-    assert data == "Hello"  # actual stripped data, not hex
-
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+    assert _step_message(store, ru) == "Hello 5 false nil"
 
 
 def test_read_stops_at_size_through_lua(app: QCoreApplication) -> None:
     """ATE.read with ``size`` returns exactly that many bytes and marks the read complete."""
-    peer = LoopbackPeer(payload=b"0123456789ABCDEF")  # no terminator; size is what ends the read
+    peer = LoopbackPeer(payload=b"0123456789ABCDEF")
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        store, ru = _run_with_peer(app, _step("""
         local r = ATE.read(dev, {size=5})
-        ATE.write(dev, {data = r.data .. "\\n" .. tostring(r.count) .. "\\n" .. tostring(r.partial)})
-        ATE.report(Result.PASS, "count "..r.count.." partial "..tostring(r.partial))
-      end),
-  })""",
-            peer.port,
-        )
+        ATE.report(Result.PASS, r.data.." "..r.count.." "..tostring(r.partial))"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [data, count, partial] — the read consumed the payload; only the writeback is recorded
-    data = rec[0].decode()
-    assert data.startswith("01234")  # actual bytes as string, not hex
-    assert int(rec[1]) == 5
-    assert rec[2] == b"false"
-
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+    assert _step_message(store, ru) == "01234 5 false"
 
 
 def test_per_call_override_applies_to_that_call_only(app: QCoreApplication) -> None:
-    """A per-call readTerm and writeTerm override applies to that call only."""
-    peer = LoopbackPeer()
+    """A per-call readTerm and writeTerm override applies to that call only; the next call uses the
+    open-time terminators again."""
+    peer = LoopbackPeer(payload=b"a;b#")
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm="#"})
-        -- First write: per-call override with "X" terminator instead of "#"
+        store, ru = _run_with_peer(app, _step("""
+        local r1 = ATE.read(dev, {readTerm = ";", timeout = 0.5})
+        local r2 = ATE.read(dev, {timeout = 0.5})
         local w1 = ATE.write(dev, {data = "hello", writeTerm = "X"})
-        -- Echo the result to verify
-        ATE.write(dev, {data = tostring(w1.count)})
-        ATE.report(Result.PASS, "done")
-      end),
-  })""",
-            peer.port,
-        )
+        local w2 = ATE.write(dev, {data = "bye"})
+        ATE.report(Result.PASS, r1.data.." "..r2.data.." "..w1.count.." "..w2.count)""",
+            read_term="#", write_term="#"), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    full = peer.received[conn]
-    assert full.startswith(b"helloX"), "first write should use X terminator"
-    
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+    assert wait_for_disconnect(peer)
+    assert peer.received[peer.connections[-1]] == b"helloXbye#"
+    assert _step_message(store, ru) == "a b 6 4"
 
 
 def test_partial_timeout_logs_warning_and_marks_partial(app: QCoreApplication) -> None:
@@ -264,251 +354,112 @@ def test_partial_timeout_logs_warning_and_marks_partial(app: QCoreApplication) -
     peer = LoopbackPeer(payload=b"abc")  # three bytes, then silence — the read can't finish in time
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
-        local r = ATE.read(dev, {size=10, timeout=0.5})
-        ATE.write(dev, {data = tostring(r.count) .. "\\n" .. tostring(r.partial)})
-        ATE.report(Result.PASS, "count "..r.count.." partial "..tostring(r.partial))
-      end),
-  })""",
-            peer.port,
-        )
+        store, ru = _run_with_peer(app, _step("""
+        local r = ATE.read(dev, {size=10, timeout=0.2})
+        ATE.report(Result.PASS, r.data.." "..r.count.." "..tostring(r.partial).." "..tostring(r.err))"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [count, partial]
-    assert int(rec[0]) == 3
-    assert rec[1] == b"true"
-
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+    assert _step_message(store, ru) == "abc 3 true nil"
     warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "ate"]
-    assert len(warnings) >= 1, "a partial read on timeout must log a WARNING at source ate"
+    assert len(warnings) == 1, "a partial read on timeout must log one WARNING at source ate"
+    assert "timed out after 3 byte(s)" in warnings[0]["text"]
 
 
 def test_timeout_no_bytes_reports_err_timeout(app: QCoreApplication) -> None:
-    """A read that times out with no bytes reports ``err = "timeout"``."""
+    """A read that times out with no bytes reports ``data = nil``, ``count = 0`` and ``err = "timeout"``."""
     peer = LoopbackPeer()  # sends nothing; the read waits out its timeout empty-handed
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
-        local r = ATE.read(dev, {size=10, timeout=0.5})
-        -- echo count/partial/err so the test can read err through recorded bytes (data is nil here)
-        ATE.write(dev, {data = tostring(r.count) .. "\\n" .. tostring(r.partial) .. "\\n" .. (r.err or "")})
-        ATE.report(Result.PASS, "count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
-      end),
-  })""",
-            peer.port,
-        )
+        store, ru = _run_with_peer(app, _step("""
+        local r = ATE.read(dev, {size=10, timeout=0.2})
+        ATE.report(Result.PASS, tostring(r.data).." "..r.count.." "..tostring(r.partial).." "..r.err)"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [count, partial, err]
-    assert int(rec[0]) == 0
-    assert rec[1] == b"false"
-    assert rec[2] == b"timeout"
+    assert _step_message(store, ru) == "nil 0 false timeout"
 
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+
+def test_read_other_failure_through_lua(app: QCoreApplication) -> None:
+    """A reset connection reaches Lua as ``{data = nil, count = 0, partial = false, err = <message>}``,
+    and the following write returns ``{ok = false, count = 0, err = <same message>}``."""
+    peer = LoopbackPeer(hangup="reset")
+    peer.start()
+    try:
+        store, ru = _run_with_peer(app, _step("""
+        local r = ATE.read(dev, {timeout=2})
+        local w = ATE.write(dev, {data = "x"})
+        ATE.report(Result.PASS, tostring(r.data).."|"..r.count.."|"..tostring(r.partial).."|"..r.err
+          .."|"..tostring(w.ok).."|"..w.count.."|"..w.err)"""), peer.port)
+    finally:
+        peer.stop()
+
+    data, count, partial, err, ok, wcount, werr = _step_message(store, ru).split("|")
+    assert (data, count, partial) == ("nil", "0", "false")
+    assert "reset" in err.lower()
+    assert (ok, wcount, werr) == ("false", "0", err)
 
 
 def test_bad_call_params_isolated_and_name_field(app: QCoreApplication) -> None:
-    """A bad per-call override raises, is isolated (never onError), and names the offending field."""
+    """A bad per-call field (unknown, string/float/bool ``size``) is isolated (logged at ERROR, source
+    ate, never onError), names the field, and ATE.read/ATE.write return the graceful halves
+    ``false, "<file>:<line>: ATE.<fn>: <msg>"`` without touching the device."""
     peer = LoopbackPeer(payload=b"x")
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
-        -- a mistyped override (a string where an int is expected) must name the field and not raise
-        local r = ATE.read(dev, {size = "oops"})
-        ATE.report(Result.PASS, "should not reach")
-      end),
-  })""",
-            peer.port,
-        )
+        store, ru = _run_with_peer(app, _step("""
+        local out = {}
+        for _, p in ipairs({{size = "oops"}, {size = 5.0}, {size = true}, {sizee = 1}}) do
+          local ok, msg = ATE.read(dev, p)
+          out[#out + 1] = tostring(ok) .. " " .. msg
+        end
+        local ok, msg = ATE.write(dev, {writeTerm = "\\n"})
+        out[#out + 1] = tostring(ok) .. " " .. msg
+        ATE.report(Result.PASS, table.concat(out, "\\n"))"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] != "ERROR", "a param bug is isolated at source ate, not an onError step failure"
-
+    lines = _step_message(store, ru).split("\n")
+    assert len(lines) == 5
+    assert all(ln.startswith("false ") for ln in lines)
+    assert "ATE.read: field 'size' must be one of int, got str" in lines[0]
+    assert "ATE.read: field 'size' must be one of int, got float" in lines[1]
+    assert "ATE.read: field 'size' must be one of int, got bool" in lines[2]
+    assert "ATE.read: unknown field 'sizee'" in lines[3]
+    assert "ATE.write: missing required field 'data'" in lines[4]
     error_logs = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR" and ln["source"] == "ate"]
-    assert len(error_logs) >= 1
-    joined = "\n".join(ln["text"] for ln in error_logs)
-    assert "size" in joined  # names the bad field
-
-
-def test_two_reads_split_buffered_terminators() -> None:
-    """Two reads split across a buffer where each line is separated by a terminator that's buffered."""
-    peer = LoopbackPeer(payload=b"a\nb\n")
-    peer.start()
-    try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        
-        start = time.monotonic()
-        # First read gets b"a\nb\n", finds \n after a, returns b"a", partial=False
-        data1, count1, partial1, err1 = dev.read({"size": 1, "timeout": 0.2})
-        elapsed1 = time.monotonic() - start
-        # The driver sees \n and returns b"a"; b"\nb\n" is buffered for next read
-        assert (data1, count1, partial1, err1) == (b"a", 1, False, None), f"first read: {data1}, {count1}, {partial1}, {err1}"
-        
-        start2 = time.monotonic()
-        # Second read gets b"\nb\n", finds \n after b, returns b"b", partial=False
-        data2, count2, partial2, err2 = dev.read({"timeout": 0.2})
-        elapsed2 = time.monotonic() - start2
-        
-        # Check the buffered data ensures both reads complete quickly
-        # both reads together should finish fast
-        elapsed_total = elapsed1 + elapsed2
-        assert elapsed_total < 0.5, f"both reads took {elapsed_total}s"
-        
-    finally:
-        dev.close()
-        peer.stop()
-
-
-def test_partial_read_bytes_not_returned_again() -> None:
-    """A partial read (timeout after bytes) returns the bytes; the next read on timeout gives err='timeout' and data=None."""
-    # Open with readTerm="" so we don't look for newline, just test partial vs timeout behavior
-    peer = LoopbackPeer(payload=b"abc")
-    peer.start()
-    try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        
-        # First read gets all 3 bytes, size=3 means complete read
-        data1, count1, partial1, err1 = dev.read({"size": 3})
-        assert (data1, count1, partial1, err1) == (b"abc", 3, False, None)
-        # After read, wait for more or timeout
-        # Wait a bit then call read again with timeout (no size)
-        time.sleep(0.1)
-        
-        # timeout after waiting, no more data -> None
-        data2, count2, partial2, err2 = dev.read({"timeout": 0.1})
-        assert data2 is None, f"second read returned data={data2!r} instead of None"
-        assert count2 == 0, f"second read returned count={count2} instead of 0"
-        assert partial2 == False, f"second read partial={partial2} but should be False (nothing read)"
-        assert err2 == "timeout", f"second read err={err2!r} but should be 'timeout'"
-        
-    finally:
-        dev.close()
-        peer.stop()
-
-
-def test_size_limit_with_terminator_beyond_keeps_rest() -> None:
-    """A read finds \n first and strips it, leaving nothing in buffer."""
-    peer = LoopbackPeer(payload=b"0123456789abc\n")
-    peer.start()
-    try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "\n", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        
-        # First read with size=4, no readTerm specified 
-        # Data includes terminal but driver type was configured with readTerm as \n
-        # So terminal check triggers
-        data1, count1, partial1, err1 = dev.read({"size": 4})
-        # First read - driver consumed everything, terminal found, returns all data up to terminal
-        assert (data1, count1, partial1, err1) == (b"0123456789abc", 13, False, None)
-        
-    finally:
-        dev.close()
-        peer.stop()
-
+    assert len(error_logs) == 5
 
 
 def test_lua_read_removes_terminator_and_handles_timeout(app: QCoreApplication) -> None:
-    """Verify Lua read removes terminator, and timeout returns nil/timeout error."""
-    peer = LoopbackPeer(payload=b"hello\n")
+    """Raw bytes reach Lua intact (0xFF and 0x00 survive, ``#r.data == r.count``), a raw per-call
+    terminator is stripped, and a following read that times out gives ``data = nil``, ``err = "timeout"``."""
+    peer = LoopbackPeer(payload=b"\xff\x00A\xfe")
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm=string.char(10), writeTerm=""})
-        local r = ATE.read(dev, {size=10})
-        -- Echo the stripped data back  
-        ATE.write(dev, {data = tostring(r.count) .. "\\n"})
-        ATE.report(Result.PASS, "count="..tostring(r.count))
-      end),
-  })""",
-            peer.port,
-        )
+        store, ru = _run_with_peer(app, _step("""
+        local r = ATE.read(dev, {readTerm = string.char(254), timeout = 0.5})
+        local t = ATE.read(dev, {timeout = 0.1})
+        ATE.report(Result.PASS, string.format("%d %d %d %d %d %s %s %s %d",
+          string.byte(r.data, 1), string.byte(r.data, 2), string.byte(r.data, 3), #r.data, r.count,
+          tostring(r.partial), tostring(t.data), t.err, t.count))"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    # The echo sends count followed by \n (from ATE.write terminator on echo)  
-    # and some additional \n from setup - just check we get "5"
-    assert "5" in peer.received[conn].decode(), f"expected count 5 in {peer.received[conn]!r}"
-    
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
+    assert _step_message(store, ru) == "255 0 65 3 3 false nil timeout 0"
 
 
 def test_lua_write_sends_raw_0xFF(app: QCoreApplication) -> None:
-    """
-    Lua write tests using standard characters first:
-    - ATE.write should send data and append writeTerm
-    """
+    """A Lua string with non-UTF-8 bytes goes out verbatim (no re-encoding), with a raw terminator."""
     peer = LoopbackPeer()
     peer.start()
     try:
-        store, ru = _run_with_peer(
-            app,
-            """return ScheduleParams("x") :setSchedule({
-    StepParams("open"):setStepNo("1.")
-      :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
-        -- write simple ASCII first
-        local w = ATE.write(dev, {data = "Hi", writeTerm = "\\n"})
-        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count)
-      end),
-  })""",
-            peer.port,
-        )
+        store, ru = _run_with_peer(app, _step("""
+        local w = ATE.write(dev, {data = string.char(255, 65), writeTerm = string.char(13, 128)})
+        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count)"""), peer.port)
     finally:
         peer.stop()
 
-    wait_for_disconnect(peer)
-    conn = peer.connections[-1]
-    assert peer.received[conn] == b"Hi\n", f"expected Hi\\n, got {peer.received[conn]!r}"
-
-    node = next(n for n in store.nodes(ru) if n["kind"] == "step")
-    assert node["result"] == "PASS"
-
-
-# --- Helpers -------------------------------------------------------------------------------
+    assert wait_for_disconnect(peer)
+    assert peer.received[peer.connections[-1]] == b"\xffA\r\x80"
+    assert _step_message(store, ru) == "ok true count 4"
