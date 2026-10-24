@@ -120,6 +120,10 @@ class DeviceRegistry:
         device.close()  # the handle's own teardown (TCP closes its socket); safe to call twice
         return True
 
+    def is_open(self, handle: Any) -> bool:
+        """Whether ``handle`` is still open this run (not yet closed)."""
+        return id(handle) in self._open
+
     def snapshot(self) -> list[Any]:
         """Return every handle still open this run, for run-end teardown."""
         return list(self._open.values())
