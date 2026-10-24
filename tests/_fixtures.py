@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -313,22 +314,37 @@ class LoopbackPeer:
 
     Each peer binds an ephemeral port (so sequential tests never collide), :meth:`start` begins
     accepting, and each accepted socket is recorded so the test can assert a connection arrived;
-    :meth:`stop` closes everything. When a device closes its end of the socket (explicitly or at run
-    end) the peer's accepted socket errors on ``recv`` — :func:`wait_for_disconnect` polls for that."""
+    :meth:`stop` closes everything. Every accepted connection also gets a reader thread that records
+    the bytes the device sends back into ``received`` and flags the connection in ``closed`` when its
+    other end hits EOF or an error (a clean disconnect). A per-peer ``payload`` is sent to each new
+    connection on accept, so a schedule's read has data buffered the moment it connects;
+    :func:`wait_for_disconnect` polls for the disconnect."""
 
     #: Placeholder substituted with the live peer port when writing a schedule to disk, so a static
     #: Lua string can target whatever ephemeral port this run's peer chose.
     PORT_PLACEHOLDER = "__PORT__"
 
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = b"", hangup: str | None = None) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
+        # bytes the device sent back on each connection (device -> peer), keyed by the accepted socket.
+        self.received: dict[socket.socket, bytes] = {}
+        # connections whose other end has closed (the reader saw EOF/error).
+        self.closed: set[socket.socket] = set()
+        # accepted sockets and their reader thread; lets wait_for_disconnect reuse the recorded state.
+        self._readers: dict[socket.socket, threading.Thread] = {}
         self.connections: list[socket.socket] = []
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._running = False
+        # Sent to each accepted connection on accept (buffered by TCP), so a read has data ready.
+        self._payload = payload
+        # Hang up right after sending the payload: "close" is an orderly close (the device reads EOF),
+        # "reset" sets SO_LINGER 0 so the close sends an RST (the device's next recv/send fails). No
+        # reader thread is started for such connections.
+        self._hangup = hangup
 
     def start(self) -> None:
         """Begin accepting connections (bind/listen already happened in ``__init__``)."""
@@ -355,7 +371,39 @@ class LoopbackPeer:
                 conn, _addr = self._sock.accept()
             except OSError:
                 break  # stopped or the listen socket closed
-            self.connections.append(conn)
+            self.connections.append(conn)  # recorded first so wait_for_connection sees it immediately
+            if self._hangup:
+                try:
+                    if self._payload:
+                        conn.sendall(self._payload)
+                    if self._hangup == "reset":
+                        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            th = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
+            self._readers[conn] = th
+            th.start()
+
+    def _handle_conn(self, conn: socket.socket) -> None:
+        """Send the peer's payload (if any), then record every byte the device sends until it closes."""
+        if self._payload:
+            try:
+                conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
+            except OSError:
+                pass  # connection already gone; nothing to send
+        buf = bytearray()
+        while self._running:
+            try:
+                chunk = conn.recv(4096)
+            except OSError:
+                break  # reset by the device side -> record what we have and stop
+            if not chunk:  # orderly close reads as EOF
+                break
+            buf.extend(chunk)
+        self.received[conn] = bytes(buf)
+        self.closed.add(conn)
 
     def stop(self) -> None:
         """Stop accepting and close the listener."""
@@ -369,19 +417,30 @@ class LoopbackPeer:
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
 
-    Returns True if every recorded connection was seen to close; False on timeout. A still-open idle
-    socket blocks ``recv`` up to its short timeout, so we retry across connections."""
+    When the peer has reader threads for an accepted socket (not hung up on accept), we rely only
+    on the ``closed`` set that the reader thread populates at EOF/error — no recv/fallback to avoid
+    racing with the reader and stealing bytes. For hung-up connections that have no reader
+    thread, we fall back to polling recv (the 16a open/close schedules with no readers). Returns True
+    if any recorded connection was seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         for conn in list(peer.connections):
-            try:
-                conn.settimeout(0.05)
-                if conn.recv(1) == b"":  # an orderly close reads as EOF
-                    return True
-            except socket.timeout:
-                continue  # still open
-            except (ConnectionError, OSError):  # reset by the device side
+            # Check peer.closed first — this is populated by the reader thread when it sees EOF
+            if conn in peer.closed:
                 return True
+            # Connections with a reader thread should only use closed set (avoid recv racing).
+            # Only fall back to recv polling for hung-up connections, which have no reader thread.
+            if conn not in peer._readers:
+                # This connection has no reader — safe to poll recv
+                try:
+                    conn.settimeout(0.05)
+                    r = conn.recv(1)
+                    if r == b"":  # an orderly close reads as EOF
+                        return True
+                except socket.timeout:
+                    continue  # still open
+                except (ConnectionError, OSError):  # reset by the device side
+                    return True
         time.sleep(0.02)
     return False
 

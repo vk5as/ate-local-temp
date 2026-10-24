@@ -44,6 +44,7 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 from ..devices import DeviceRegistry, TcpDriver
+from ..devices.registry import validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
 from .step_inputs import InvalidStepInput, StepInput, validate_inputs
@@ -232,6 +233,11 @@ class _AteTable:
         # with the always-isolating _isolate. Registered here; they read self._host lazily when called.
         self._extra["open"] = self._isolate_device(self._do_open, "open")
         self._extra["close"] = self._isolate_device(self._do_close, "close")
+        # Packet 16b: register ATE.read/ATE.write as finalized device wrappers (see _isolate_device).
+        # They validate the per-call override fields and delegate to the device; I/O failures are caught
+        # by the device and returned as result tables, so only param-validation errors raise here.
+        self._extra["read"] = self._isolate_device(self._do_read, "read")
+        self._extra["write"] = self._isolate_device(self._do_write, "write")
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
@@ -357,7 +363,7 @@ class _AteTable:
         16c. Param validation raises before connecting and never goes through ``error_handler``."""
         registry = self._host._devices
         name = self._device_type_name(device_type)
-        handle = registry.open_device(name, params or {})
+        handle = registry.open_device(name, self._raw_params(params, ("readTerm", "writeTerm")))
         return handle
 
     def _do_close(self, device: Any = None, params: Any = None, error_handler: Any = None) -> Any:
@@ -370,6 +376,60 @@ class _AteTable:
         # Removing from tracking is what makes a second close a no-op; if it was already closed this returns False.
         _ = registry.close_device(device)
         return self._host._runtime.table_from({"ok": True})
+
+    def _raw_params(self, params: Any, byte_fields: tuple[str, ...]) -> Any:
+        """Copy a Lua params table into a dict, taking each of ``byte_fields`` as raw bytes.
+
+        Fetched normally, a Lua string comes back UTF-8-decoded, so a terminator or payload holding
+        0xFF would raise; these fields are fetched through the host's hex helper instead. Anything
+        that isn't a Lua table is returned as is for :func:`validate_params` to reject."""
+        if params is None:
+            return {}
+        if not isinstance(params, self._host._table_cls):
+            return params
+        out = {}
+        for key in params.keys():
+            hexed = self._host._hex_field(params, key) if key in byte_fields else None
+            out[key] = bytes.fromhex(hexed) if hexed is not None else params[key]
+        return out
+
+    def _do_read(self, device=None, params=None, error_handler=None):
+        """Read from a Device (packet 16b); the real logic behind ATE.read.
+
+        Validates the per-call override fields against the driver's read_fields and delegates to the
+        device; I/O timeouts/failures come back from the device as result tables, never raised here —
+        only a param-validation error raises, and that is isolated at source="ate" by _isolate_device.
+        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged."""
+        params = self._raw_params(params, ("readTerm",))
+        validated = validate_params(TcpDriver(), params, TcpDriver.read_fields)  # names any bad field
+        if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
+            raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
+        data, count, partial, err = device.read(validated)
+        if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
+            self._host.record_log(
+                "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
+            )
+        return self._host._runtime.table_from({
+            "data": data,  # None -> nil on a timeout with no bytes or a failure
+            "count": count,
+            "partial": partial,
+            "err": err,  # None -> nil unless the read failed
+        })
+
+    def _do_write(self, device=None, params=None, error_handler=None):
+        """Write to a Device (packet 16b); the real logic behind ATE.write.
+
+        Validates the per-call fields against write_fields and delegates to the device; I/O
+        timeouts/failures come back from the device as result tables, never raised here. ``count`` is
+        the number of bytes actually sent, terminator included."""
+        params = self._raw_params(params, ("data", "writeTerm"))
+        validated = validate_params(TcpDriver(), params, TcpDriver.write_fields)  # names any bad field
+        ok, count, err = device.write(validated)
+        return self._host._runtime.table_from({
+            "ok": ok,
+            "count": count,
+            "err": err,  # None -> nil unless the write failed
+        })
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         if name == "run":
@@ -552,6 +612,13 @@ class _LuaHost:
         # it is stable across lupa releases (the module name changes with the Lua version). Used to
         # convert a schedule's input declarations out of Lua tables into plain Python.
         self._table_cls = type(self._runtime.table_from({}))
+        # Packet 16b: lupa decodes every Lua string it hands Python as UTF-8, which fails on (or
+        # mangles) raw device bytes such as 0xFF. This returns a table field's string as hex — always
+        # ASCII — so ATE.write/ATE.read params can be rebuilt as the exact bytes (see _raw_params).
+        self._hex_field = self._runtime.eval(
+            "function(t, k) local v = t[k]; if type(v) == 'string' then "
+            "return (v:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end end"
+        )
 
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
