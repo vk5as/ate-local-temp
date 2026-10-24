@@ -5,9 +5,10 @@ Ticket 02's flow-control slice. On ``run()`` (executed on the worker thread) the
 1. inserts a fresh :class:`~ate.storage.store.RunStore` test_run row, stamping the
    Station UTC offset once for the run;
 2. steps through the schedule's expanded steps in order — skipping header/include rows
-   that have no action — invoking each step's Lua action closure and recording one
-   Attempt per ``ATE.report`` call it makes (last call wins); a step whose action raises
-   records an ERROR Attempt;
+   that have no action — invoking each step's Lua action closure once per Attempt and
+   recording one ``attempt`` row per execution, with its last ``ATE.report`` (last call wins); when the
+   operator chooses RETRY the action runs again as a new Attempt, and a step whose action
+   raises records an ERROR Attempt;
 3. sets the run result to FAIL if any step failed or errored, otherwise PASS, with End
    Reason COMPLETED, then closes the run row.
 
@@ -168,24 +169,25 @@ class RunEngine(QThread):
         blocking supply or POLL click reaches the worker while it waits, without importing widgets."""
         return self._op
 
-    def _pause_for_operator(self, run_uuid: str, node_seq: int) -> str:
-        """Stop-on-Fail pause for a failed step: announce the pending choice and block until answered.
+    def _pause_for_operator(self, run_uuid: str, node_seq: int, attempt_no: int) -> str:
+        """Stop-on-Fail pause for a failed Attempt: announce the pending choice and block until answered.
 
         The failing Attempt is already recorded; once :meth:`choose` returns a value we stamp its
         ``prompt_choice`` column (packet 12b checkbox 4). Blocks with no timeout — the worker waits
         here while the operator/main thread supplies CONTINUE, RETRY or ABORT through choose()."""
         ch = queue.Queue()
         with self._pause_lock:
-            self._pending[(node_seq, 1)] = ch
+            self._pending[(node_seq, attempt_no)] = ch
         # Mark this Attempt as ending at a prompt; resolved to its choice once choose() returns.
-        self._store.update_attempt(run_uuid, node_seq, 1, prompt_choice=None)
-        # Announce the pending choice on the owning thread so an operator/test can answer it there.
-        self.failure_prompt.emit(node_seq, 1)
+        self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=None)
+        # Announce the pending choice on the owning thread so an operator/test can answer it there,
+        # carrying this Attempt's number so a retried failure is announced as Attempt 2, 3, ...
+        self.failure_prompt.emit(node_seq, attempt_no)
         choice = ch.get()  # blocks until choose() puts a value and wakes us
         # Stamp the chosen CONTINUE/RETRY/ABORT onto this Attempt now that we hold it (packet 12b checkbox 4).
-        self._store.update_attempt(run_uuid, node_seq, 1, prompt_choice=choice)
+        self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=choice)
         with self._pause_lock:
-            self._pending.pop((node_seq, 1), None)
+            self._pending.pop((node_seq, attempt_no), None)
         return choice
 
     def choose(self, choice: str) -> None:
@@ -200,16 +202,17 @@ class RunEngine(QThread):
         if ch is not None:
             ch.put_nowait(choice)
 
-    def _record_inputs(self, node_seq: int, validated: list[Any]) -> list[dict[str, Any]]:
-        """Build this step's input_value rows from what OperatorInput recorded during its action.
+    def _record_inputs(self, node_seq: int, validated: list[Any], attempt_no: int) -> list[dict[str, Any]]:
+        """Build this Attempt's input_value rows from what OperatorInput recorded during its action.
 
         Blocking supplies and POLL clicks are typed from the step's declarations (CHECKBOX stored as
-        JSON); a supplied index with no declaration is recorded verbatim so nothing asked for is lost."""
+        JSON); a supplied index with no declaration is recorded verbatim so nothing asked for is lost.
+        Every row carries ``attempt_no`` so a retried Attempt's values land on its own rows (12c)."""
         records: list[dict[str, Any]] = []
         # ``key`` is the 0-based get_raw position (n-1) under which each blocking value was stored.
         for key, raw in self._op.supplied_inputs():
             decl = validated[key] if 0 <= key < len(validated) else None
-            records.append(self._value_text(node_seq, 1, decl.index if decl is not None else key + 1, decl, raw))
+            records.append(self._value_text(node_seq, attempt_no, decl.index if decl is not None else key + 1, decl, raw))
         # POLL clicks never block the worker; record each one as its own row keyed by context.
         for _node_seq_ctx, attempt_no, key, at, text in self._op.poll_clicks():
             records.append(
@@ -252,7 +255,9 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return str(typed)
 
-    def _record_abort(self, run_uuid: str, steps: list[Any], aborted_seq: int, *, record_attempt: bool = True) -> None:
+    def _record_abort(
+        self, run_uuid: str, steps: list[Any], aborted_seq: int, *, record_attempt: bool = True, attempt_no: int = 1
+    ) -> None:
         """Record a whole-run abort that took effect at step ``aborted_seq`` (0-based).
 
         The step about to run records one ERROR attempt "Aborted by Operator" and its node as
@@ -261,10 +266,14 @@ class RunEngine(QThread):
 
         ``record_attempt`` is False when the abort came from a Stop-on-Fail pause (packet 12b): that
         failing step already has its FAIL/ERROR Attempt and prompt_choice recorded, so only the later
-        steps are marked NOTRUN and its result is kept."""
+        steps are marked NOTRUN and its result is kept. ``attempt_no`` names the Attempt the abort
+        landed on — Attempt 1 for a step boundary, the in-flight Attempt's number when a retry's
+        rerun was interrupted (packet 12c), so the ERROR row never collides with Attempt 1's."""
         if record_attempt:
             step = steps[aborted_seq]
-            self._store.insert_attempt(run_uuid, aborted_seq, 1, pass_fail="ERROR", msg="Aborted by Operator")
+            self._store.insert_attempt(
+                run_uuid, aborted_seq, attempt_no, pass_fail="ERROR", msg="Aborted by Operator"
+            )
             default_enabled, enabled = self._enabled(aborted_seq, step)
             self._store.insert_node(
                 run_uuid,
@@ -275,7 +284,7 @@ class RunEngine(QThread):
                 default_enabled=default_enabled,
                 enabled=enabled,
                 result="ERROR",
-                attempt_count=1,
+                attempt_count=attempt_no,
             )
         for seq in range(aborted_seq + 1, len(steps)):
             later = steps[seq]
@@ -533,150 +542,165 @@ class RunEngine(QThread):
             # and ATE.input, which are rejected elsewhere (criterion b). _run_action sets and then
             # restores that context around the action.
             host._current_step = seq
-            # Ticket 10: put this step's OperatorInput context in place before the action runs so
-            # ATE.input(n) reads POLL sticky state under the right key and range-checks against THIS
-            # step's declarations, install those declarations on the host, and announce each asked
-            # input. The input_asked signals are queued here (before _run_action blocks), so a
-            # blocking supply from another thread wakes get_raw while the worker waits; op.reset()
-            # starts this step's recording window clean so its values attach to it.
-            self._op.reset()
             validated = getattr(step, "_validated_inputs", None) or []
             host._node_seq = seq
-            host._attempt_no = 1
             host._step_inputs = list(validated)
-            for index in range(1, len(validated) + 1):
-                # Announce this input so the OperatorInput controller counts it as outstanding; a
-                # blocking supply or POLL click decrements that count when delivered.
-                self._op.note_asked()
-                self.input_asked.emit(seq, 1, index)
-            start = len(host.reports)
-            log_start = len(host.logs)
-            error_text: Optional[str] = None
-            try:
-                host._run_action(step.action, "step")  # runs the closure in Lua; may call ATE.report several times
-            except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
-                # The first line is the human-readable message (for a Lua-originated error it
-                # is just the message; file:line lives in the traceback portion). The full
-                # traceback — which carries the schedule's file:line — is logged at ERROR so
-                # criterion 03 can rebuild "<file>:<line>: ATE.<func>:" from it.
-                error_text = str(exc).splitlines()[0] if str(exc) else ""
-                # Packet 13c: an abort raised mid-step (the count hook, or a re-raised pcall/xpcall)
-                # ends the run here — record this running step as ERROR and mark every later step
-                # NOTRUN instead of treating it as an ordinary failure. The sentinel is exactly the
-                # string "aborted" that the hook raises; a genuine error whose first line merely
-                # contains it is left to fail normally below.
-                if error_text.strip() == "aborted":
-                    aborted = True
-                    self._record_abort(run_uuid, steps, seq)
-                    break
-                host.record_log("ERROR", str(exc))
-
-            new_reports = host.reports[start:]
+            # Packet 12c: run the step's action, and whenever a Stop-on-Fail pause is answered RETRY
+            # rerun it from the start as a new Attempt (no limit). Each Attempt runs against a fresh
+            # OperatorInput window — op.reset() clears its supplied values and POLL clicks, and every
+            # asked input is re-announced under the new Attempt's number — while Devices stay open
+            # (the registry lives on the host, untouched by reset). One attempt row is recorded per
+            # executed Attempt, carrying that Attempt's final report's values; the step's node row is
+            # written once, after its last Attempt, with that Attempt's result.
             last_result = "NOREPORT"
-            attempts_recorded = 0
-            if error_text is not None:
-                self._store.insert_attempt(
-                    run_uuid, seq, 1, pass_fail="ERROR", msg=error_text
-                )
-                attempts_recorded = 1
-                last_result = "ERROR"  # the step has an ERROR attempt; reflect it on the node
-            else:
-                for report in new_reports:
-                    pass_fail, msg, actual, expected = report
+            attempt_count = 0
+            while True:
+                attempt_count += 1
+                host._attempt_no = attempt_count  # ATE.input POLL reads its sticky state under this key
+                # Ticket 10: put this Attempt's OperatorInput context in place before the action runs
+                # so ATE.input(n) range-checks against THIS step's declarations, and announce each
+                # asked input. The input_asked signals are queued here (before _run_action blocks), so
+                # a blocking supply from another thread wakes get_raw while the worker waits; the
+                # op.reset() below starts this Attempt's recording window clean so its values attach
+                # to it (a retried Attempt re-asks under its own number, packet 12c).
+                self._op.reset()
+                for index in range(1, len(validated) + 1):
+                    # Announce this input so the OperatorInput controller counts it as outstanding; a
+                    # blocking supply or POLL click decrements that count when delivered.
+                    self._op.note_asked()
+                    self.input_asked.emit(seq, attempt_count, index)
+                start = len(host.reports)
+                log_start = len(host.logs)
+                error_text: Optional[str] = None
+                try:
+                    host._run_action(step.action, "step")  # runs the closure in Lua; may call ATE.report several times
+                except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
+                    # The first line is the human-readable message (for a Lua-originated error it
+                    # is just the message; file:line lives in the traceback portion). The full
+                    # traceback — which carries the schedule's file:line — is logged at ERROR so
+                    # criterion 03 can rebuild "<file>:<line>: ATE.<func>:" from it.
+                    error_text = str(exc).splitlines()[0] if str(exc) else ""
+                    # Packet 13c: an abort raised mid-step (the count hook, or a re-raised pcall/xpcall)
+                    # ends the run here — record this running Attempt as ERROR and mark every later
+                    # step NOTRUN instead of treating it as an ordinary failure. The sentinel is
+                    # exactly the string "aborted" that the hook raises; a genuine error whose first
+                    # line merely contains it is left to fail normally below. A retry in flight
+                    # records its ERROR at the in-flight Attempt's number (packet 12c).
+                    if error_text.strip() == "aborted":
+                        aborted = True
+                        self._record_abort(run_uuid, steps, seq, attempt_no=attempt_count)
+                        break
+                    host.record_log("ERROR", str(exc))
+
+                # One attempt row per executed Attempt, carrying its final report's values — every
+                # Attempt is recorded (spec rule), and the step's result will be its last Attempt's.
+                new_reports = host.reports[start:]
+                if error_text is not None:
+                    self._store.insert_attempt(
+                        run_uuid, seq, attempt_count, pass_fail="ERROR", msg=error_text
+                    )
+                    last_result = "ERROR"  # the Attempt raised; reflect it on the node
+                elif new_reports:
+                    report_pass_fail, report_msg, report_actual, report_expected = new_reports[-1]
                     self._store.insert_attempt(
                         run_uuid,
                         seq,
-                        1,
-                        pass_fail=pass_fail,
-                        msg=msg,
-                        actual=_to_text(actual),
-                        expected=_to_text(expected),
+                        attempt_count,
+                        pass_fail=report_pass_fail,
+                        msg=report_msg,
+                        actual=_to_text(report_actual),
+                        expected=_to_text(report_expected),
                     )
-                    attempts_recorded += 1
-                    last_result = pass_fail
-                if not new_reports:
-                    # Ran but never reported -> NOREPORT (logged as a warning later).
+                    last_result = report_pass_fail
+                else:
+                    # Ran but never reported -> NOREPORT (logged as a warning below).
                     self._store.insert_attempt(
-                        run_uuid, seq, 1, pass_fail="NOREPORT", msg=None
+                        run_uuid, seq, attempt_count, pass_fail="NOREPORT", msg=None
                     )
-                    attempts_recorded = 1
+                    last_result = "NOREPORT"
 
-            # Every schedule-sourced log line emitted during this step's action belongs to
-            # that Attempt (source "schedule"); a step that never reported adds its own
-            # warning (source "ate"). Both are batched into one insert keyed by the step.
-            new_logs = host.logs[log_start:]
-            if new_logs:
-                self._store.insert_log_lines(
-                    run_uuid,
-                    seq,
-                    [
-                        {"level": level, "source": source, "text": text}
-                        for (level, source, text) in new_logs
-                    ],
-                    node_seq=seq,
-                    attempt_no=1,
-                )
-            if not new_reports:
-                self._store.insert_log_lines(
-                    run_uuid,
-                    seq,
-                    [{"level": "WARNING", "source": "ate", "text": f"step '{step.name}' never reported"}],
-                    node_seq=seq,
-                    attempt_no=1,
-                )
+                # Every schedule-sourced log line emitted during this Attempt's action belongs to
+                # that Attempt (source "schedule"); an Attempt that never reported adds its own
+                # warning (source "ate"). Both are batched into one insert keyed by the step.
+                new_logs = host.logs[log_start:]
+                if new_logs:
+                    self._store.insert_log_lines(
+                        run_uuid,
+                        seq,
+                        [
+                            {"level": level, "source": source, "text": text}
+                            for (level, source, text) in new_logs
+                        ],
+                        node_seq=seq,
+                        attempt_no=attempt_count,
+                    )
+                if not new_reports:
+                    self._store.insert_log_lines(
+                        run_uuid,
+                        seq,
+                        [{"level": "WARNING", "source": "ate", "text": f"step '{step.name}' never reported"}],
+                        node_seq=seq,
+                        attempt_no=attempt_count,
+                    )
 
-            # A step fails the whole run on FAIL or ERROR — whether that came from an
-            # ATE.report call above or from a raised action (recorded as an ERROR attempt).
-            if last_result == "FAIL" or error_text is not None:
-                failed = True
-                pass_fail = "FAIL"  # flip the standing result so Post-test Actions see it
+                # Ticket 10: wait for every announced input to be answered before recording this
+                # Attempt's values. Blocking supplies already woke the worker via get_raw; POLL clicks
+                # never block — so without this wait a worker could record (and drop an unanswered
+                # click) before the operator's answer was delivered on another thread. A blocking
+                # supply or POLL click decrements the outstanding count when it arrives, waking this
+                # wait. Each Attempt waits on its own re-announced inputs, so a retry's supplies land
+                # on its own rows (packet 12c).
+                self._op.wait_for_asks()
+                # Ticket 10: record every input value this Attempt asked for. Supplies and POLL clicks
+                # the OperatorInput controller recorded during the action are typed from this step's
+                # declarations and written as input_value rows; the declarations themselves are stored
+                # on the node (as JSON, in schedule format via StepInput.to_dict) so the GUI can render
+                # each input under its step at all times.
+                records = self._record_inputs(seq, validated, attempt_count)
+                if records:
+                    self._store.insert_input_values(run_uuid, records)
 
-            # Ticket 10: wait for every announced input to be answered before recording this step's
-            # values. Blocking supplies already woke the worker via get_raw; POLL clicks never block —
-            # so without this wait a worker could record (and drop an unanswered click) before the
-            # operator's answer was delivered on another thread. A blocking supply or POLL click
-            # decrements the outstanding count when it arrives, waking this wait.
-            self._op.wait_for_asks()
-            # Ticket 10: record every input value this step asked for. Supplies and POLL clicks the
-            # OperatorInput controller recorded during the action are typed from this step's
-            # declarations and written as input_value rows; the declarations themselves are stored
-            # on the node (as JSON, in schedule format via StepInput.to_dict) so the GUI can render
-            # each input under its step at all times.
-            records = self._record_inputs(seq, validated)
-            if records:
-                self._store.insert_input_values(run_uuid, records)
-
-            default_enabled, enabled = self._enabled(seq, step)
-            self._store.insert_node(
-                run_uuid,
-                seq,
-                kind="step",
-                step_number=step.step_no or "",
-                step_name=step.name,
-                default_enabled=default_enabled,
-                enabled=enabled,
-                result=last_result,
-                attempt_count=attempts_recorded,
-                inputs=[d.to_dict() for d in validated] if validated else None,
-            )
-
-            # Stop on Fail: a failed step pauses until the operator chooses (packet 12b). The failing
-            # Attempt is already recorded above; once choose() returns we stamp its prompt_choice and
-            # either keep going (CONTINUE/RETRY) or stop cleanly (ABORT ->
-            # remaining steps NOTRUN, End Reason STOPPED_ON_FAIL / result FAIL). Each later failure
-            # pauses again; only Continue on fail (stop_on_fail False) never pauses. RETRY's rerun semantics are 12c; here it keeps going like
-            # Continue so the seam exists and nothing blocks on an unanswered choice.
-            if self.stop_on_fail:
-                if last_result == "FAIL" or error_text is not None:
-                    failed = True
-                    pass_fail = "FAIL"
-                    choice = self._pause_for_operator(run_uuid, seq)
-                    # _pause_for_operator blocked until choose(); it recorded prompt_choice and returned.
+                # Stop on Fail: a failed Attempt pauses until the operator chooses (packet 12b). The
+                # Attempt is already recorded above; once choose() returns, _pause_for_operator has
+                # stamped its prompt_choice. RETRY reruns the action from the start as the next
+                # Attempt, with no limit (packet 12c); CONTINUE keeps this Attempt's result and moves
+                # on; ABORT stops cleanly (remaining steps NOTRUN, End Reason STOPPED_ON_FAIL / result
+                # FAIL). Continue on fail (stop_on_fail False) never pauses.
+                if (last_result == "FAIL" or error_text is not None) and self.stop_on_fail:
+                    choice = self._pause_for_operator(run_uuid, seq, attempt_count)
+                    if choice == "RETRY":
+                        continue  # rerun this step's action as a new Attempt from the start
                     if choice == "ABORT":
-                        # Stop cleanly between steps; keep the failed step's result (already recorded).
                         self._stopped_on_fail = True
                         self._record_abort(run_uuid, steps, seq, record_attempt=False)
                         break
+                break
+
+            # The step's node row is written once, after its last Attempt, carrying that Attempt's
+            # result and the number of Attempts executed (packet 12c). The mid-step abort path above
+            # already recorded its own ERROR node and attempt, so it is skipped here.
+            if not aborted:
+                default_enabled, enabled = self._enabled(seq, step)
+                self._store.insert_node(
+                    run_uuid,
+                    seq,
+                    kind="step",
+                    step_number=step.step_no or "",
+                    step_name=step.name,
+                    default_enabled=default_enabled,
+                    enabled=enabled,
+                    result=last_result,
+                    attempt_count=attempt_count,
+                    inputs=[d.to_dict() for d in validated] if validated else None,
+                )
+                # The step's result is its last Attempt's (packet 12c): a step that passed on retry
+                # no longer fails the run, so the standing result flips only when the last Attempt
+                # was FAIL or ERROR (a raised action recorded as an ERROR attempt).
+                if last_result == "FAIL" or last_result == "ERROR":
+                    failed = True
+                    pass_fail = "FAIL"  # flip the standing result so Post-test Actions see it
+            if aborted or self._stopped_on_fail:
+                break
 
         # Post-test Actions always run after the last step, in reverse, each called with the final
         # pass_fail. Before they start we clear the abort flag (packet 14c) so a previously-aborted
