@@ -479,7 +479,9 @@ class LoopbackPeer:
                 except OSError:
                     pass
                 continue
-            threading.Thread(target=self._handle_conn, args=(conn,), daemon=True).start()
+            th = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
+            self._readers[conn] = th
+            th.start()
 
     def _handle_conn(self, conn: socket.socket) -> None:
         """Send the peer's payload (if any), then record every byte the device sends until it closes."""
@@ -531,20 +533,20 @@ def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     any recorded connection was seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if peer._readers:  # reader threads are recording -> use their closed set
-            for conn in list(peer.connections):
-                if conn in peer.closed:
+        for conn in list(peer.connections):
+            # Check peer.closed first - this is populated by the reader thread when it sees EOF
+            if conn in peer.closed:
+                return True
+            # Fall back to recv poll if we can't use closed set (e.g. no reader thread)
+            try:
+                conn.settimeout(0.05)
+                r = conn.recv(1)
+                if r == b"":  # an orderly close reads as EOF
                     return True
-        else:  # no readers (e.g. the 16a open/close schedules) -> poll recv as before
-            for conn in list(peer.connections):
-                try:
-                    conn.settimeout(0.05)
-                    if conn.recv(1) == b"":  # an orderly close reads as EOF
-                        return True
-                except socket.timeout:
-                    continue  # still open
-                except (ConnectionError, OSError):  # reset by the device side
-                    return True
+            except socket.timeout:
+                continue  # still open
+            except (ConnectionError, OSError):  # reset by the device side
+                return True
         time.sleep(0.02)
     return False
 
