@@ -145,6 +145,46 @@ def _drive_poll_retry(
     return store, store.get_test_run(captured["run_uuid"]), prompts, asks
 
 
+def _drive_retry_then_abort(app: QCoreApplication, source: str) -> tuple[RunStore, dict, list[tuple[int, int]]]:
+    """Drive ``source``; answer the first failure prompt RETRY, then request abort from this
+    (operator) thread while the retried Attempt busy-loops. Returns ``(store, run_row, prompts)``."""
+    captured = {}
+    prompts: list[tuple[int, int]] = []
+
+    def _capture(run_uuid: str) -> None:
+        captured["run_uuid"] = run_uuid
+
+    def _on_failure(node_seq: int, attempt_no: int) -> None:
+        prompts.append((node_seq, attempt_no))
+        engine.choose("RETRY")
+
+    with tempfile.TemporaryDirectory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        schedule_path = Path(td) / "schedule.tslua"
+        schedule_path.write_text(source, encoding="utf-8")
+        engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
+        engine.run_uuid_reported.connect(_capture)
+        engine.failure_prompt.connect(_on_failure)
+
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+
+        engine.start()
+        deadline = time.time() + 10.0
+        while not prompts:  # pump until Attempt 1's prompt is answered RETRY
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("no failure prompt within 10 s")
+        time.sleep(0.2)  # let Attempt 2 enter its busy loop
+        engine.request_abort()
+        while not finished.is_set():
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("engine did not reach FINISHED within 10 s")
+
+    return store, store.get_test_run(captured["run_uuid"]), prompts
+
+
 def test_retry_then_pass_makes_run_pass_and_records_two_attempts(app: QCoreApplication) -> None:
     """Packet 12c checkbox 2: RETRY reruns the action; Attempt 1 is FAIL (prompt_choice RETRY) and
     Attempt 2 PASS. The step's result is its last Attempt's, so the run ends PASS / COMPLETED."""
@@ -322,6 +362,30 @@ def test_devices_stay_open_across_attempts(app: QCoreApplication) -> None:
     assert nodes["1."]["attempt_count"] == 2
 
 
+def test_abort_mid_step_during_retry_records_error_on_that_attempt(app: QCoreApplication) -> None:
+    """Packet 12c: an abort while a retried Attempt runs records the ERROR on that Attempt (2), not
+    on the failed Attempt 1, and marks the later steps NOTRUN."""
+    store, row, prompts = _drive_retry_then_abort(app, RETRY_THEN_BUSY_SOURCE)
+
+    assert row is not None
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "ABORTED"
+    assert prompts == [(0, 1)]
+
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["result"] == "ERROR"
+    assert nodes["1."]["attempt_count"] == 2
+    assert nodes["2."]["result"] == "NOTRUN"
+
+    atts = _attempts(store, row["run_uuid"])
+    assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in atts] == [
+        (1, "FAIL", "RETRY"),
+        (2, "ERROR", None),
+    ]
+    assert atts[0]["msg"] == "first attempt fails"  # Attempt 1 left untouched
+    assert atts[1]["msg"] == "Aborted by Operator"
+
+
 # --- schedules ----------------------------------------------------------------
 #
 # ``local attempts = 0`` is a schedule-level local; each action closure captures it as an upvalue,
@@ -429,5 +493,27 @@ return ScheduleParams("Retry device schedule", "opens a device once and writes o
           if r.ok then ATE.report(Result.PASS, "write ok") else ATE.report(Result.FAIL, tostring(r.err)) end
         end
       end),
+  })
+"""
+
+
+# Fails on Attempt 1; the retry busy-loops so an operator abort lands mid-Attempt 2.
+RETRY_THEN_BUSY_SOURCE = """\
+local attempts = 0
+return ScheduleParams("Retry then busy schedule", "first attempt fails, the retry spins until aborted")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("spin"):setStepNo("1.")
+      :setAction(function()
+        attempts = attempts + 1
+        if attempts == 1 then
+          ATE.report(Result.FAIL, "first attempt fails")
+        else
+          for i = 1, 1e9 do end
+          ATE.report(Result.PASS, "never reached")
+        end
+      end),
+    StepParams("after"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "ok") end),
   })
 """
