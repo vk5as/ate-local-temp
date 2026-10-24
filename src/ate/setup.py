@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .errors import ATEError
+from .permissions import ATE_GROUP, SKIP_PERMISSIONS, _current_platform, Permissions, real_permissions_for
 from .storage import DbLaunchStatus, RunStore, check_database_at_launch
 
 
@@ -75,13 +76,6 @@ class StationLayout:
         return self.config_dir / "config.json"
 
 
-def _current_platform() -> str:
-    """This process's platform label, used to seed :attr:`StationLayout.platform`."""
-    import os
-
-    return "windows" if os.name == "nt" else "linux"
-
-
 def default_layout() -> StationLayout:
     """The platform's real directories. Overridden by ``--root`` for automation and tests."""
     import os
@@ -118,14 +112,19 @@ def _migrate_database(path: str) -> int:
     return 0
 
 
-def prepare_station(data_dir: Path, config_dir: Path) -> dict[str, Any]:
+def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> dict[str, Any]:
     """Create the Station's directories and default config, then migrate its database.
 
     Creates ``data_dir`` with ``reports`` and ``logs`` under it and ``config_dir``, writes a
     default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
     overwriting one — and runs the shared migration against ``<data_dir>/ate.db``. Returns a report
     describing what was created versus already present; raises :class:`SetupError` if anything could
-    not be created or written (for example, an unwritable target).
+    not be created or written (for example, an unwritable target) or if applying permissions failed.
+
+    After creating the directories and config, :func:`prepare_station` applies the filesystem/
+    permissions treatment through ``permissions`` (:mod:`ate.permissions`). ``None`` uses the real
+    implementation for this platform; :data:`SKIP_PERMISSIONS` skips it entirely (unprivileged runs);
+    anything else is a :class:`Permissions` instance whose calls are recorded by tests.
     """
     data_dir = Path(data_dir)
     config_dir = Path(config_dir)
@@ -158,6 +157,21 @@ def prepare_station(data_dir: Path, config_dir: Path) -> dict[str, Any]:
     if report != 0:
         raise SetupError(f"database migration failed at {data_dir / 'ate.db'}")
 
+    # 4. Apply the filesystem/permissions treatment now that everything exists — users can modify the
+    # database, WAL files and reports/logs; config.json (and the config dir on Linux) stays admin-only.
+    if permissions is None:
+        perms = real_permissions_for(_current_platform())
+    elif permissions is SKIP_PERMISSIONS:
+        perms = None  # skip the privileged treatment entirely (unprivileged or --no-permissions)
+    else:
+        perms = permissions
+
+    if perms is not None:
+        try:
+            _apply_permissions(perms, data_dir, config_dir)
+        except OSError as exc:
+            raise SetupError(f"cannot apply permissions to {data_dir}: {exc}") from exc
+
     return {
         "ok": True,
         "created_dirs": created_dirs,
@@ -165,6 +179,24 @@ def prepare_station(data_dir: Path, config_dir: Path) -> dict[str, Any]:
         "config_file": str(config_dir / "config.json"),
         "database_path": str(data_dir / "ate.db"),
     }
+
+
+def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path) -> None:
+    """Grant ordinary users modify rights on the data tree and keep the config admin-only.
+
+    Linux owns everything under ``data_dir`` to the group (recursively, with setgid so new files like
+    ``ate.db-wal``/``-shm`` and fresh reports inherit it) and makes both ``config.json`` and
+    ``config_dir`` root-owned; Windows grants Users Modify across ``data_dir`` and leaves
+    ``config.json`` read-only for them.
+    """
+    if _current_platform() == "windows":
+        perms.grant_users_modify(data_dir)
+        perms.admin_only(config_dir / "config.json")
+    else:  # linux — a separate data tree, with the config dir itself admin-only (dir and file)
+        perms.ensure_group(ATE_GROUP)
+        perms.set_group_writable(data_dir, ATE_GROUP, recursive=True)
+        perms.set_admin_only(config_dir / "config.json")
+        perms.set_admin_only(config_dir)
 
 
 # The default config and its writer already live in :mod:`ate.config`; reuse them rather than
