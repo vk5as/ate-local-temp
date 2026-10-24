@@ -22,12 +22,14 @@ Companion files (all in `.scratch/ate-v1/`):
 |---|---|---|---|
 | **Orchestrator** | Claude Opus (this session) | Picks the next packet, writes briefs, verifies, merges, logs usage, reports | Long implementation work (keeps its own context and usage lean) |
 | **Implementer** | Qwen3.5 9B FP8 on coder2 via T3 `delegate_task`, `providerInstanceId: opencode`, `model: coder2/Qwen3.5-9B-FP8-dynamic`, `isolation: worktree` (formerly `lmstudio/ornith-1.5-9b`) | Builds one packet test-first on its own branch | Touches the integration branch or main checkout, creates worktrees, rebases, pushes |
-| **Reviewer** | Fresh worker-model session, same target, own worktree | Fast-forwards onto the implementer branch, reviews the diff, fixes findings | Refactors for taste, expands scope |
+| **Qwen reviewer** | Qwen3.5 9B FP8 on coder2, `delegate_task`, own worktree, read-only | Reviews the implementer branch (detached checkout), runs the suite, reports findings per `review-packet.md` | Edits, commits, branches |
+| **Ornith reviewer** | Ornith-1.5 9B on LM Studio (`lmstudio/ornith-1.5-9b`), `delegate_task`, own worktree, read-only | Same as the Qwen reviewer | Edits, commits, branches |
+| **Rework implementer** | Qwen (default) or Claude Opus (`providerInstanceId: claudeAgent`, `model: claude-opus-5-5`, worktree) | Fixes the triaged must-fix list on a new branch from the implementer branch | Work beyond the list |
 | **Opus helper** | `claude -p --model claude-opus-5-5`, started by the worker subagent itself | Solves the one problem it was handed, in that subagent's worktree | Reports to the orchestrator (it reports to the worker that started it) |
-| **Haiku reviewer** | Agent tool, `model: haiku`, read-only | Second-opinion review of every packet after the worker reviewer, following `haiku-review.md`; reports findings to the orchestrator | Edits, commits, checkouts, running the suite |
+| **Haiku reviewer** | Agent tool, `model: haiku`, background, read-only | Same review from the main checkout via `git diff`/`git show`, following `haiku-review.md` | Edits, commits, checkouts, running the suite |
 | **Haiku side jobs** | Agent tool, `model: haiku` | Screenshots of the app, mechanical chores | Code changes on the integration branch |
 
-**One subagent at a time.** LM Studio loses its prompt cache when two sessions interleave, and prefill then dominates run time. Never run an implementer and a reviewer together, or two implementers.
+**One subagent per machine at a time.** A local server loses its prompt cache when two sessions interleave, and prefill then dominates run time. coder2 (Qwen), zeus (LM Studio, Ornith) and Anthropic (Haiku, Opus) are separate, so the three reviewers run **simultaneously**, one on each. Implementers and rework still run one at a time.
 
 ---
 
@@ -60,7 +62,7 @@ Companion files (all in `.scratch/ate-v1/`):
 
    `-p no:cacheprovider` stops worktrees fighting over `.pytest_cache`. `tail` keeps output out of the subagent's context.
 5. **Model servers:** coder2 vLLM at `http://192.168.8.186:8000/v1`, Qwen3.5 9B FP8 with a 262,144-token window (`variant` option low/medium/high). Earlier: LM Studio at `http://192.168.8.94:1234` with Ornith loaded at 132,608 tokens. OpenCode auto-compacts at roughly 85% of the window. `collect.py` reads both servers for the window size.
-6. Commit `escalate-to-opus.md` and `review-packet.md` to the integration branch so every new worktree (which starts from the integration tip) has them.
+6. Commit `escalate-to-opus.md`, `review-packet.md` and `haiku-review.md` to the integration branch so every new worktree (which starts from the integration tip) has them.
 
 ---
 
@@ -86,7 +88,9 @@ Pick the next packet by critical path, not by number: a packet that unblocks a c
 ## 4. The per-packet loop
 
 ```
-pick packet ─► implementer ─► worker reviewer ─► Haiku reviewer ─► orchestrator light review ─► merge ─► log + report ─► next
+pick packet ─► implementer ─► ┬─ Qwen reviewer   ─┐
+                               ├─ Ornith reviewer ─┼─► triage (wait for all three) ─┬─► rework (Qwen or Opus) ─► reviewers again
+                               └─ Haiku reviewer  ─┘                                └─► orchestrator light review ─► merge ─► log + report ─► next
 ```
 
 ### 4.1 Dispatch the implementer
@@ -110,42 +114,58 @@ pick packet ─► implementer ─► worker reviewer ─► Haiku reviewer ─�
 - `clientRequestId`: `ate-v1-packet-NNx-impl-rN`. Bump `rN` for a re-dispatch; keep it identical when retrying the same call.
 - Keep the returned `taskId`. Don't poll; T3 notifies on completion. Use `task_status` only if asked or if it seems stuck. Check `t3_pending_request_list` if a subagent appears blocked on an approval.
 
-### 4.2 Hand-off to the reviewer (no review yet)
+### 4.2 Hand-off to the reviewers (no review yet)
 
 No checking at this point; the reviewers come first and the orchestrator's check is at the end (4.4).
 
 - Note the branch name from the reply or `git worktree list`. T3 may prefix it, for example `t3/packet-16b-tcp-read-write`.
-- Remove its worktree, keep the branch: `git worktree remove <path>`. A branch can't be checked out in two worktrees, and the reviewer needs it. If the worktree has uncommitted changes, commit them as `packet NNx: WIP (orchestrator-saved)` first.
+- Remove its worktree, keep the branch: `git worktree remove <path>`. If the worktree has uncommitted changes, commit them as `packet NNx: WIP (orchestrator-saved)` first.
 - If it made no commits at all, re-dispatch the implementer instead of sending an empty branch to review.
+- Check the main checkout is still on `integration/ate-v1` (`git branch --show-current`).
 
-### 4.3 Dispatch the reviewer
+### 4.3 Dispatch the three reviewers in parallel
 
-Same target and isolation. Title `Review packet NNx: …` (so the role logs as `reviewer`), `clientRequestId` `ate-v1-packet-NNx-review-r1`. Brief in 5.2. The reviewer branches from the implementer branch (`git checkout -b review-NNx <branch>`) and merges in the integration tip, so its branch ends up as the implementer's commits plus review fixes. (`--ff-only` from the integration tip fails as soon as the orchestrator commits anything to the integration branch meanwhile.)
+All read-only, all following `review-packet.md`, all given the same brief (5.2) and the same branch and head SHA. Send all three in one turn:
 
-### 4.3a Haiku review
+- **Qwen:** `delegate_task`, coder2 target with `variant: high`, `isolation: worktree`, title `Review packet NNx (Qwen): …`, `clientRequestId` `ate-v1-packet-NNx-review-qwen-rN`.
+- **Ornith:** `delegate_task`, `{"providerInstanceId":"opencode","model":"lmstudio/ornith-1.5-9b"}`, `isolation: worktree`, title `Review packet NNx (Ornith): …`, `clientRequestId` `ate-v1-packet-NNx-review-ornith-rN`.
+- **Haiku:** Agent tool, `model: haiku`, `run_in_background: true`, prompt starting `Haiku review of packet NNx` and pointing at `haiku-review.md`.
 
-After the worker reviewer hands back: remove its worktree (keep the branch), then run a Haiku Agent-tool subagent (`model: haiku`) with the brief in 5.2a. It's read-only and inspects the branch with `git diff`/`git show` from the main checkout, so it needs no worktree. It runs on Anthropic's servers, not the local model, but still keep it sequential so findings land before verification.
+Titles starting `Review packet` log as role `reviewer` (the model is recorded separately); the Haiku prompt logs as `haiku-reviewer`.
 
-Its findings feed the orchestrator light review (4.4): must-fix items that are small I fix myself; bigger ones go back to a fresh worker (title `Fix packet NNx: Haiku review findings`) on the reviewer's branch; notes go to `review-notes.md`. Prompt must contain "Haiku review of packet NNx" so `collect.py` logs it as role `haiku-reviewer`.
+Reviewers check out the branch detached, so no branch is created and nothing conflicts. Remove the two reviewer worktrees once they report.
 
-### 4.4 Orchestrator light review (last, on the reviewer's branch)
+### 4.3a Triage (only after all three have reported)
 
-The final gate after both reviewers. Kept light to save orchestrator usage, but not skipped: every role has made false claims.
+Don't act on a partial set. Then:
 
-1. Read the implementer's, worker reviewer's and Haiku reviewer's replies. Treat every claim as unverified.
+1. Merge the three lists. Drop duplicates, note which reviewers raised each item, and confirm each must-fix against the code. Reviewers make false alarms too; one model's lone claim needs a look at the line.
+2. Decide:
+   - **No confirmed must-fix:** forward to the light review (4.4). Notes go to `review-notes.md`.
+   - **Rework with Qwen** (default): the fixes are local, well specified and few. At most ~5 items per run, with the evidence rules from section 5.
+   - **Rework with Opus** (`delegate_task`, `{"providerInstanceId":"claudeAgent","model":"claude-opus-5-5"}`, `isolation: worktree`): Qwen is unlikely to do well. For example, threads, sockets, Qt lifetimes or subprocess timing; a design problem rather than a slip; more than ~5 interlocking items; or Qwen already failed this packet's rework once.
+   - **Trivial (a line or two):** fix it myself during the light review.
+3. Rework title `Fix packet NNx: <summary>`. It branches from the current packet branch (`git checkout -b packet-NNx-fixN <branch>`) and must add a failing test before each code fix.
+4. After rework, review again with all three reviewers on the new head, including the previous findings in the brief so they check the fixes. After two rework rounds, the next rework goes to Opus.
+
+### 4.4 Orchestrator light review (last, on the final packet branch)
+
+The final gate after triage has nothing left to rework. Kept light to save orchestrator usage, but not skipped: every role has made false claims.
+
+1. Read the implementer's reply and the last round of three reviews. Treat every claim as unverified.
 2. `git log --oneline integration/ate-v1..<branch>` and `git diff --stat`: the work is there, packet file ticked and resolved.
 3. Run the full suite **3 times** from a worktree of the branch; check the total time hasn't jumped.
 4. Diff the collected tests against the integration branch (`pytest --collect-only -q`) to catch silently deleted tests.
-5. Haiku must-fix items: confirm each against the code; fix the small ones myself, send bigger ones to a fresh worker (`Fix packet NNx: …`) on the same branch, then repeat this step.
+5. Fix any trivial leftovers myself; anything bigger goes back through triage (4.3a).
 6. Spot-check one or two risky behaviours only where the reviewers' replies leave doubt. Remaining gaps go in `review-notes.md` or a follow-up packet.
 
 ### 4.5 Merge
 
 ```
-ATE_ORCHESTRATOR=1 git merge --no-ff <reviewer branch> -m "Merge packet NNx: <one-line summary>"
+ATE_ORCHESTRATOR=1 git merge --no-ff <final packet branch> -m "Merge packet NNx: <one-line summary>"
 ```
 
-Run the suite once more on the integration branch. Mark the packet resolved if nobody did. Remove the reviewer worktree. Delete branches only at the end.
+Run the suite once more on the integration branch. Mark the packet resolved if nobody did. Make sure no packet worktrees are left. Delete branches only at the end.
 
 ### 4.6 Log and report
 
@@ -157,7 +177,7 @@ python3 .scratch/ate-v1/frontier.py
 
 Add a `notes` entry in `usage.jsonl` for any problem run (false claims, flaky tests, orchestrator fixes needed).
 
-Report to the user after every run, for the implementer and the reviewer:
+Report to the user after every implementer or rework run and after each review round (one combined report for all three reviewers):
 
 - steps, wall time, peak context (tokens and % of window), number of auto-compactions;
 - tokens: input / output / reasoning (and whether an Opus helper ran, with its tokens);
@@ -166,7 +186,7 @@ Report to the user after every run, for the implementer and the reviewer:
 
 ### 4.7 Next
 
-Dispatch the next packet only after the merge, never in parallel.
+Dispatch the next packet's implementer only after the merge. Implementers never run in parallel with each other or with rework on the same machine.
 
 ---
 
@@ -218,30 +238,18 @@ Final reply (short): branch, head SHA, exact pytest summary lines from your 3 fu
 
 For UI packets add: the mockup to follow (`git show prototype/run-screen:prototypes/run-screen/run-screen-prototype.html`, variant C staged layout, variant B three-pane, plus `run-screen.md`), the specific sections of it that the packet covers, and that a screenshot check will follow.
 
-### 5.2 Reviewer brief
+### 5.2 Reviewer brief (same text for Qwen, Ornith and Haiku)
 
 ```
-You are reviewing and fixing ONE finished work packet of the ATE v1 spec, in your own git worktree (your current directory).
+You are reviewing ONE finished work packet of the ATE v1 spec. READ-ONLY: report findings, change nothing.
+Follow `.scratch/ate-v1/review-packet.md` exactly (Haiku: `.scratch/ate-v1/haiku-review.md`) — setup, checklist and reply format.
 
-Packet: `.scratch/ate-v1/issues/<NNx-file>.md`. Implementer branch: `<branch>` (head <SHA>).
-Follow `.scratch/ate-v1/review-packet.md` exactly — setup (fast-forward onto the implementer branch), review checklist, fix rules, and final reply format. Also read `.scratch/ate-v1/escalate-to-opus.md`.
+Packet: `.scratch/ate-v1/issues/<NNx-file>.md`. Branch: `<branch>` (head <SHA>). Baseline <N> tests on integration.
+Spec ranges: <file> lines <ranges>. Don't read `.scratch/ate-v1/spec.md`.
+Look hard at: <risky areas: e.g. raw bytes at the lupa boundary, timeouts treated as success, socket cleanup>.
+<Re-review rounds: previous must-fix findings and what the rework says it did, one line each — check each fix and its test.>
 
-Spec ranges the packet cites: <same ranges as the implementer brief>.
-Things I want checked in particular: <risky areas: e.g. raw bytes at the lupa boundary, timeouts treated as success, socket cleanup>.
-
-Branch: `git checkout -b review-<NNx>` before the fast-forward. Baseline <N> tests on integration.
-```
-
-`review-packet.md` holds the checklist: packet criteria really done, correctness and leaks, tests that can't fail, fit with existing code; write findings before fixing; commit `packet NNx: review: …`; never rebase or touch the integration branch.
-
-### 5.2a Haiku reviewer brief
-
-```
-Haiku review of packet <NNx>. Follow /home/dev/projects/ate-ornith/.scratch/ate-v1/haiku-review.md exactly (read-only).
-Packet: .scratch/ate-v1/issues/<NNx-file>.md. Branch to review: <review-NNx> (head <SHA>).
-Spec ranges: <file> lines <ranges>.
-Already found and fixed by the worker reviewer (don't re-report unless the fix is wrong): <its findings, one line each>.
-Look hard at: <risky areas>.
+Final reply: findings most severe first, each with path:line, what, how you know, must-fix/note; then the pytest line you saw and `MUST-FIX: <n>`.
 ```
 
 ### 5.3 Haiku screenshot job
