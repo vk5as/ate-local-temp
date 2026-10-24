@@ -527,26 +527,31 @@ class LoopbackPeer:
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
 
-    When the peer records received bytes on reader threads, each connection is flagged in ``closed`` as
-    soon as its other end hits EOF/error, so we read that state directly; otherwise we fall back to
-    polling a short-timeout ``recv`` (the 16a open/close schedules with no readers). Returns True if
-    any recorded connection was seen to close; False on timeout."""
+    When the peer has reader threads for an accepted socket (not under fail_write mode), we rely only
+    on the ``closed`` set that the reader thread populates at EOF/error — no recv/fallback to avoid
+    racing with the reader and stealing bytes. For connections under ``fail_write`` that have no reader
+    thread, we fall back to polling recv (the 16a open/close schedules with no readers). Returns True
+    if any recorded connection was seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         for conn in list(peer.connections):
-            # Check peer.closed first - this is populated by the reader thread when it sees EOF
+            # Check peer.closed first — this is populated by the reader thread when it sees EOF
+            # For connections under fail_write (no reader thread), we must check closed anyway
             if conn in peer.closed:
                 return True
-            # Fall back to recv poll if we can't use closed set (e.g. no reader thread)
-            try:
-                conn.settimeout(0.05)
-                r = conn.recv(1)
-                if r == b"":  # an orderly close reads as EOF
+            # Connections with a reader thread should only use closed set (avoid recv racing).
+            # Only fallback to recv polling for connections under fail_write mode that lack reader threads.
+            if conn not in peer._readers:
+                # This connection has no reader — safe to poll recv
+                try:
+                    conn.settimeout(0.05)
+                    r = conn.recv(1)
+                    if r == b"":  # an orderly close reads as EOF
+                        return True
+                except socket.timeout:
+                    continue  # still open
+                except (ConnectionError, OSError):  # reset by the device side
                     return True
-            except socket.timeout:
-                continue  # still open
-            except (ConnectionError, OSError):  # reset by the device side
-                return True
         time.sleep(0.02)
     return False
 
