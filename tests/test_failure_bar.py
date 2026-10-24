@@ -148,13 +148,13 @@ def test_continue_button_keeps_the_run_going(qapp, tmp_path, monkeypatch):
     assert "WAITING" in screen.run_view.state_header.text()
 
     bar.continue_button.click()
-    _pump_finished(qapp, session)
-    _pump_report_written(qapp, session)
-
-    # The bar and the pause's display state are gone once the run resumes.
+    # The bar and the pause's display state are gone the moment the choice is made, not when
+    # the run finishes.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
     assert "WAITING" not in screen.run_view.state_header.text()
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
 
     store = session.store
     run = _run_row(store, session.run_uuid)
@@ -194,11 +194,11 @@ def test_retry_button_reruns_the_failed_step_as_attempt_two(qapp, tmp_path, monk
 
     # Answer the re-paused prompt with Continue so the run can end.
     bar.continue_button.click()
-    _pump_finished(qapp, session)
-    _pump_report_written(qapp, session)
-
+    # The pause's display clears the moment the choice is made.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
     store = session.store
     run = _run_row(store, session.run_uuid)
     assert run["result"] == "FAIL"
@@ -232,12 +232,12 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     assert "WAITING" in screen.run_view.state_header.text()
 
     bar.abort_button.click()
-    _pump_finished(qapp, session)
-    _pump_report_written(qapp, session)
-
+    # The bar and the pause's display state are gone the moment the choice is made.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
     assert "WAITING" not in screen.run_view.state_header.text()
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
 
     store = session.store
     run = _run_row(store, session.run_uuid)
@@ -272,12 +272,12 @@ def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tm
 
     # The header's Abort button (not the bar's) ends the paused run.
     screen.run_view.abort_button.click()
-    _pump_finished(qapp, session)
-    _pump_report_written(qapp, session)
-
+    # The bar and the pause's display state are gone the moment the choice is made.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
     assert "WAITING" not in screen.run_view.state_header.text()
+    _pump_finished(qapp, session)
+    _pump_report_written(qapp, session)
 
     store = session.store
     run = _run_row(store, session.run_uuid)
