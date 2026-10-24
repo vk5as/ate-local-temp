@@ -4,13 +4,14 @@ For the reviewer subagent. An implementer has finished a packet on its own branc
 
 ## Setup
 
-1. Your worktree starts at `integration/ate-v1`. Bring in the implementer's work with a fast-forward, so nothing is rewritten:
+1. Your worktree starts at `integration/ate-v1`. Start your own branch from the implementer's branch, then bring in anything newer on the integration branch with a normal merge (never rebase):
 
    ```
-   git merge --ff-only <implementer branch>
+   git checkout -b review-<NNx> <implementer branch>
+   git merge --no-edit integration/ate-v1
    ```
 
-   If that fails, stop and report it; don't rebase or merge any other way.
+   If the merge conflicts, resolve it if it's obvious, otherwise stop and report it.
 2. See the scope: `git log --oneline integration/ate-v1..HEAD` and `git diff --stat integration/ate-v1...HEAD`.
 3. Run the suite once to get a baseline:
    `source /home/dev/projects/ate-ornith/.venv/bin/activate && QT_QPA_PLATFORM=offscreen pytest -q -p no:cacheprovider | tail -3`

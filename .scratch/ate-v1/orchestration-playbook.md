@@ -118,7 +118,7 @@ pick packet ─► implementer ─► light check ─► reviewer ─► orchest
 
 ### 4.3 Dispatch the reviewer
 
-Same target and isolation. Title `Review packet NNx: …` (so the role logs as `reviewer`), `clientRequestId` `ate-v1-packet-NNx-review-r1`. Brief in 5.2. The reviewer runs `git merge --ff-only <implementer branch>` in its own worktree, so its branch ends up as the implementer's commits plus review fixes.
+Same target and isolation. Title `Review packet NNx: …` (so the role logs as `reviewer`), `clientRequestId` `ate-v1-packet-NNx-review-r1`. Brief in 5.2. The reviewer branches from the implementer branch (`git checkout -b review-NNx <branch>`) and merges in the integration tip, so its branch ends up as the implementer's commits plus review fixes. (`--ff-only` from the integration tip fails as soon as the orchestrator commits anything to the integration branch meanwhile.)
 
 ### 4.4 Orchestrator verification (on the reviewer's branch)
 
