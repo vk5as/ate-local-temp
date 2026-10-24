@@ -80,7 +80,7 @@ def _header_labels(model):
     """The view's friendly header labels read back from the model's horizontal header data."""
     n = len(HISTORY_COLUMNS)
     # This build exposes no HeaderDataRole enum, so pass the stable role value (10).
-    return [model.horizontalHeaderData(col, Qt.Orientation.Horizontal, 10) for col in range(n)]
+    return [model.headerData(col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) for col in range(n)]
 
 
 def _descendants(widget):

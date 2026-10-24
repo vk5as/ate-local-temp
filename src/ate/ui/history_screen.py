@@ -45,29 +45,6 @@ def _default_open_file(path: str | None) -> None:
 HISTORY_HEADER_LABELS = ("Start", "UUT Type", "Serial", "Result", "End Reason", "Test Schedule", "Project", "Operator")
 
 
-class _HistoryItemModel(QStandardItemModel):
-    """A QStandardItemModel that renders friendly column labels as its header row (spec 23d).
-
-    ``QStandardItemModel`` has no way to set horizontal header text, so the labels are served through
-    :meth:`horizontalHeaderData`. The view then draws them as a real header and excludes that row from the
-    body, so data starts at model row 0 — matching how :attr:`HistoryScreen._row_to_uuid` keys rows. This
-    keeps ``table_view.model()`` usable (selection reads back through it) unlike a bare ``QTableWidget``,
-    whose offscreen selection does not register on this Qt build.
-
-    This PyQt6 build exposes no ``ItemDataRole`` enum, so the header roles are matched on their stable
-    integer values: ``DisplayRole = 9`` and ``HeaderDataRole = 10``. Any Horizontal query returns the label.
-    """
-
-    def __init__(self, labels: tuple[str, ...]) -> None:
-        super().__init__()
-        self._header_labels = list(labels)
-
-    def horizontalHeaderData(self, column: int, orientation: Qt.Orientation, role: int) -> str | None:
-        if orientation == Qt.Orientation.Horizontal and role in (9, 10):
-            return self._header_labels[column]
-        return None
-
-
 class HistoryScreen(QWidget):
     """A flat table of past runs, newest first, with a summary panel for the selected run.
 
@@ -96,7 +73,8 @@ class HistoryScreen(QWidget):
         self.table_view = QTableView()
         # Friendly labels shown as the real header row; body data therefore starts at model row 0, so
         # selection and the running-row map address rows from 0 (no separate header row to skip).
-        model = _HistoryItemModel(HISTORY_HEADER_LABELS)
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(list(HISTORY_HEADER_LABELS))
         self.table_view.setModel(model)
         for column in HISTORY_COLUMNS:
             self._column_index[column] = HISTORY_COLUMNS.index(column)
