@@ -386,6 +386,22 @@ def test_abort_mid_step_during_retry_records_error_on_that_attempt(app: QCoreApp
     assert atts[1]["msg"] == "Aborted by Operator"
 
 
+def test_retry_not_offered_when_stop_on_fail_off(app: QCoreApplication) -> None:
+    """Packet 12c: with Stop on Fail off a failing step never pauses, so Retry is never offered —
+    the step keeps its single FAIL Attempt and the run moves on, ending COMPLETED / FAIL."""
+    store, row, prompts, _asks = _drive_with_choices(app, CONTINUE_ON_FAIL_SOURCE, [], stop_on_fail=False)
+
+    assert row is not None
+    assert prompts == []  # no failure prompt, so no Retry choice
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "COMPLETED"
+
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["result"] == "FAIL"
+    assert nodes["1."]["attempt_count"] == 1
+    assert nodes["2."]["result"] == "PASS"
+
+
 # --- schedules ----------------------------------------------------------------
 #
 # ``local attempts = 0`` is a schedule-level local; each action closure captures it as an upvalue,
@@ -515,5 +531,18 @@ return ScheduleParams("Retry then busy schedule", "first attempt fails, the retr
       end),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "ok") end),
+  })
+"""
+
+
+# ALWAYS_FAIL_SOURCE with Stop on Fail off: step 1 fails, step 2 still runs.
+CONTINUE_ON_FAIL_SOURCE = """\
+return ScheduleParams("Continue on fail schedule", "the step fails but the run continues")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("broken"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.FAIL, "still wrong", "Red", "Green") end),
+    StepParams("after"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "Blue", "Blue") end),
   })
 """
