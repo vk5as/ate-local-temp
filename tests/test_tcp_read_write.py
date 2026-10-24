@@ -41,6 +41,11 @@ def test_write_appends_term_and_transmits_raw_bytes_including_0xFF() -> None:
         # wait_for_connection gates on "a connection was accepted"; its return value is a bool, so grab the real socket for indexing received below.
         peer.wait_for_connection()
         conn = peer.connections[-1]
+        # Ensure peer has sent its echo payload before we write
+        # This fixes racing threads where recv() catches "Hi\n" but not "echo"
+        # by giving peer its send+recv setup time
+        import time
+        time.sleep(0.05)
         ok, count, err = dev.write({"data": b"Hi\xff", "writeTerm": b"\n"})
     finally:
         dev.close()
@@ -145,6 +150,9 @@ def test_write_term_appended_through_lua_and_count_includes_term(app: QCoreAppli
     finally:
         peer.stop()
 
+    # Give peer time to send payload and receive device data
+    import time
+    time.sleep(0.05)
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
     assert peer.received[conn] == b"preHi\n"  # "Hi" + appended "\n"; the 0xFF-free ASCII proves term append
