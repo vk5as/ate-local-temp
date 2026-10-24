@@ -385,6 +385,30 @@ class RunEngine(QThread):
         effective_enabled = self._overrides.get(seq, default_enabled)
         return int(default_enabled), int(effective_enabled)
 
+    def _close_open_devices(self, host: "LuaHost", run_uuid: str) -> None:
+        """Close every Device still open at run end and log one WARNING per device (packet 16a).
+
+        Each leftover handle is closed defensively (its own teardown swallows errors), then a single
+        ``WARNING`` line naming the device is recorded with source "ate" so it attaches to the run as
+        a whole rather than to any step. An empty registry is a no-op, so runs that close their
+        devices normally are unaffected."""
+        registry = getattr(host, "_devices", None)
+        if registry is None:
+            return
+        warnings: list[str] = []
+        for device in registry.snapshot():
+            try:
+                device.close()  # release the socket (TCP); safe to call twice at run end
+            except Exception:  # noqa: BLE001 - teardown at run end must never abort the run
+                pass
+            if hasattr(device, "describe"):
+                warnings.append(f"device {device.describe()} left open at end of run")
+        self._store.insert_log_lines(
+            run_uuid,
+            0,
+            [{"level": "WARNING", "source": "ate", "text": text} for text in warnings],
+        )
+
     def run(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
@@ -672,6 +696,13 @@ class RunEngine(QThread):
                 # A Post-test Action that raised fails the run (result FAIL) but keeps its End Reason.
                 failed = True
                 pass_fail = "FAIL"
+
+        # Packet 16a: close every Device still open at run end (including an aborted or errored run)
+        # and log one WARNING per device naming it — source "ate", so the run engine records them as
+        # run-level lines with no owning step. Done before the result is computed so a leftover
+        # device's socket is released even when the run fails; sockets are closed defensively in case
+        # teardown runs after an abort.
+        self._close_open_devices(host, run_uuid)
 
         # A Pre-test failure aborts before any step runs (packet 14b); a Stop-on-Fail pause that was
         # aborted ends STOPPED_ON_FAIL; a whole-run operator abort — whether between steps or already

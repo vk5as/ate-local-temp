@@ -43,6 +43,7 @@ def _sha256_hex(data: bytes) -> str:
     """SHA-256 of ``data`` as lowercase hex (packet 06b)."""
     return hashlib.sha256(data).hexdigest()
 
+from ..devices import DeviceRegistry, TcpDriver
 from ..errors import ATEError
 from .operator_input import OperatorInput
 from .step_inputs import InvalidStepInput, StepInput, validate_inputs
@@ -225,6 +226,12 @@ class _AteTable:
         # Criterion c's read-only ATE.run table. Built by :meth:`_LuaHost.__init__`; ``None`` until
         # then so a stray attribute probe surfaces the usual AttributeError rather than a table.
         self._run: Any = None
+        # Packet 16a: register ATE.open/ATE.close as finalized device wrappers (see _isolate_device).
+        # They are context-aware — load-time calls propagate instead of isolating, and step/pre/post
+        # errors isolate at source="ate" — so __getattr__ returns them directly rather than re-wrapping
+        # with the always-isolating _isolate. Registered here; they read self._host lazily when called.
+        self._extra["open"] = self._isolate_device(self._do_open, "open")
+        self._extra["close"] = self._isolate_device(self._do_close, "close")
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
@@ -292,6 +299,78 @@ class _AteTable:
         self._host.record_log(level, *args)
         return True
 
+    def _device_type_name(self, value: Any) -> str:
+        """Map a DeviceType enum member to its type name.
+
+        A schedule passes the specific member ``DeviceType.TCP``; with the flat enum tables in
+        :data:`_ENUMS` that resolves to the string label ``"TCP"``. The same call may also be given
+        a one-field enum-member table (e.g. ``{TCP="TCP"}``) whose single key equals its value — that
+        key is the type name. Both shapes resolve to the same name; passing the whole enum table or
+        anything else is rejected."""
+        if isinstance(value, str):
+            return value
+        table_cls = self._host._table_cls
+        if not isinstance(value, table_cls):
+            raise ValueError(
+                f"deviceType must be a DeviceType enum member, got {type(value).__name__}"
+            )
+        names = [key for key, val in value.items() if key == val]
+        if len(names) != 1:
+            raise ValueError(f"unknown DeviceType")
+        return names[0]
+
+    def _isolate_device(self, fn: Callable[..., Any], name: str) -> Callable[..., Any]:
+        """Wrap an ATE.open/ATE.close call (packet 16a).
+
+        Unlike :meth:`_isolate` this wrapper is *context-aware*: while loading it re-raises so a
+        load-time open/close propagates as a HostError (they are only legal after the schedule loads),
+        but in a step, Pre-test or Post-test Action it isolates like any other ATE function — logging
+        at source="ate" and returning graceful halves. The finalized wrapper is marked so :meth:`__getattr__`
+        returns it directly instead of re-wrapping with the always-isolating ``_isolate``."""
+        import traceback
+
+        def _wrapped(*args: Any) -> tuple[bool, Any]:
+            if self._host._context == "load":
+                # Only legal after loading; refuse before connecting so a load-time call surfaces as a HostError (not an isolated ERROR).
+                raise NotAllowedError(
+                    f"{self._host._location()} ATE.{name}: only legal after the schedule has loaded"
+                )
+            try:
+                return fn(*args)
+            except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
+                recorded = "".join(traceback.format_exception(exc))  # the full Python traceback
+                loc = self._host._location()
+                msg = str(exc).splitlines()[0] if str(exc) else "ATE error"
+                # Log at ERROR with source="ate" so a device failure attaches to the run as a whole rather than
+                # to any step; return graceful halves carrying just that prefix + message.
+                self._host.record_log("ERROR", f"{loc} ATE.{name}: {recorded}", source="ate")
+                return (False, f"{loc} ATE.{name}: {msg}")
+
+        _wrapped._isolate_device = True  # marker: __getattr__ returns this directly instead of re-wrapping
+        return _wrapped
+
+    def _do_open(self, device_type: Any, params: Any = None, error_handler: Any = None) -> Any:
+        """Open a Device of ``device_type`` with ``params``; returns an opaque handle (userdata).
+
+        The real logic behind :meth:`open`. The handle is only ever passed back to ``read``/``write``/``close``.
+        ``error_handler`` is accepted for the spec's signature but not routed this packet — onError handling lands in
+        16c. Param validation raises before connecting and never goes through ``error_handler``."""
+        registry = self._host._devices
+        name = self._device_type_name(device_type)
+        handle = registry.open_device(name, params or {})
+        return handle
+
+    def _do_close(self, device: Any = None, params: Any = None, error_handler: Any = None) -> Any:
+        """Close a Device and release it; the real logic behind :meth:`close`.
+
+        Returns a genuine Lua table ``{ok = true}`` (built by the runtime) so ``"closed "..r.ok`` reads "closed
+        true"; a plain dict/object would round-trip as userdata instead. Closing twice is a no-op: removing from
+        tracking returns False on the second call, but we still report success."""
+        registry = self._host._devices
+        # Removing from tracking is what makes a second close a no-op; if it was already closed this returns False.
+        _ = registry.close_device(device)
+        return self._host._runtime.table_from({"ok": True})
+
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         if name == "run":
             # Criterion c: ATE.run is a read-only metadata table (a real Lua table), not a function.
@@ -305,6 +384,10 @@ class _AteTable:
             fn = self._extra[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
+        # Packet 16a: ATE.open/ATE.close are finalized device wrappers (see _isolate_device); return them
+        # directly so their context-aware load-time propagation and source="ate" isolation take effect.
+        if getattr(fn, "_isolate_device", False):
+            return fn
         return self._isolate(fn, name)
 
     def publish_run(self, values: Mapping[str, Any]) -> Any:
@@ -519,6 +602,13 @@ class _LuaHost:
         # it to raise where a call isn't allowed (see criterion b).
         self._context = "load"
 
+        # Packet 16a: one DeviceRegistry per host/run. It maps each Device Type to its driver and
+        # tracks every device opened this run so leftovers can be closed at run end; the run engine
+        # reads it after the Post-test Actions (see RunEngine.run). The TCP driver is registered
+        # here; later packets add their drivers to the same registry.
+        self._devices = DeviceRegistry()
+        self._devices.register("TCP", TcpDriver)
+
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
         self._schedule_source = Path(path).read_text(encoding="utf-8")
@@ -634,12 +724,15 @@ class _LuaHost:
         """Record one ATE.report call from a running schedule."""
         self.reports.append((pass_fail, msg, actual, expected))
 
-    def record_log(self, level: Any, *args: Any) -> None:
-        """Append one schedule-sourced log line as ``(level, "schedule", text)``.
+    def record_log(self, level: Any, *args: Any, source: str = "schedule") -> None:
+        """Append one log line as ``(level, source, text)``.
 
-        Every argument goes through ``tostring`` and is joined with spaces; the global
-        ``print`` is wired to this so stray prints land at INFO (see :meth:`_bind_print`)."""
-        self.logs.append((str(level), "schedule", " ".join(str(a) for a in args)))
+        ``source`` defaults to ``"schedule"`` (ATE.log and the redirected print); device open/close
+        errors are isolated by :meth:`_AteTable._isolate_device` and recorded with ``source="ate"``
+        so they attach to the run as a whole rather than to any step. Every argument goes through
+        ``tostring`` and is joined with spaces; the global ``print`` is wired to this so stray prints
+        land at INFO (see :meth:`_bind_print`)."""
+        self.logs.append((str(level), source, " ".join(str(a) for a in args)))
 
     def _bind_print(self, ate: "_AteTable") -> None:
         """Redirect the global ``print`` to ``ATE.log(Log.INFO, ...)``.

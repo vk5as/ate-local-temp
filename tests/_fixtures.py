@@ -8,6 +8,7 @@ the headless session and CLI can be exercised end-to-end against real files — 
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from pathlib import Path
@@ -239,6 +240,151 @@ return ScheduleParams("Abortable schedule", "several passing steps; first blocks
   })
 """
 
+# --- Packet 16a: Device registry + TCP open/close ------------------------------------------
+
+
+# A step that opens a loopback TCP device (all required params) and leaves it open. The peer sees
+# the connection while the step runs; because nothing closes it, the run-end teardown must close
+# it with a WARNING log line and the peer must see the disconnect.
+OPEN_TCP = """\
+return ScheduleParams("Open TCP schedule", "opens a loopback TCP device and leaves it open")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        ATE.report(Result.PASS, "opened "..tostring(dev))
+      end),
+  })
+"""
+
+# A schedule that calls ATE.open at the top level while loading. Only the builders (including
+# ate.devices), require, ATE.log and the enums are legal then; open must raise so its step never runs.
+LOAD_OPEN = """\
+ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+return ScheduleParams("Load open schedule", "opens at load time and must be rejected")
+  :setSchedule({
+    StepParams("should not run"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS) end),
+  })
+"""
+
+# A step that opens with an unknown field (a typo). The error is isolated: it never goes through
+# onError, names the field, and is logged at ERROR — the step itself records no failure of its own.
+BAD_PARAMS = """\
+return ScheduleParams("Bad params schedule", "opens with an unknown field and must be isolated")
+  :setSchedule({
+    StepParams("bad"):setStepNo("1.")
+      :setAction(function() ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, buad=5025, timeout=5, readTerm="", writeTerm=""}) end),
+  })
+"""
+
+# A step that opens then closes the device and reports whether close returned {ok=true}. The peer
+# sees both the connect and the disconnect while the run is live (nothing left open at run end).
+CLOSE_TCP = """\
+return ScheduleParams("Close TCP schedule", "opens then closes a loopback TCP device")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        local r = ATE.close(dev)
+        -- tostring: this Lua build (lupa lua55) does not auto-convert booleans in string concat.
+        ATE.report(Result.PASS, "closed "..tostring(r.ok))
+      end),
+  })
+"""
+
+# A step that opens and closes the device twice. Both closes report {ok=true}; the second is a no-op.
+DOUBLE_CLOSE_TCP = """\
+return ScheduleParams("Double close TCP schedule", "opens then double-closes a loopback TCP device")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        ATE.close(dev)
+        ATE.close(dev)
+        ATE.report(Result.PASS, "double closed")
+      end),
+  })
+"""
+
+
+class LoopbackPeer:
+    """A controlled TCP listener on 127.0.0.1 that accepts connections in a background thread.
+
+    Each peer binds an ephemeral port (so sequential tests never collide), :meth:`start` begins
+    accepting, and each accepted socket is recorded so the test can assert a connection arrived;
+    :meth:`stop` closes everything. When a device closes its end of the socket (explicitly or at run
+    end) the peer's accepted socket errors on ``recv`` — :func:`wait_for_disconnect` polls for that."""
+
+    #: Placeholder substituted with the live peer port when writing a schedule to disk, so a static
+    #: Lua string can target whatever ephemeral port this run's peer chose.
+    PORT_PLACEHOLDER = "__PORT__"
+
+    def __init__(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self.port = self._sock.getsockname()[1]
+        self.connections: list[socket.socket] = []
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._running = False
+
+    def start(self) -> None:
+        """Begin accepting connections (bind/listen already happened in ``__init__``)."""
+        if not self._running:
+            self._running = True
+            self._thread.start()
+
+    def wait_for_connection(self, n: int = 1, timeout: float = 2.0) -> bool:
+        """Block until at least ``n`` connections have been accepted (or ``timeout`` elapses).
+
+        The accept loop runs on a background thread; the connection is established when the device's
+        :func:`socket.create_connection` returns but the append may not be visible yet, so callers
+        that assert immediately after connecting poll here instead of racing the thread."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if len(self.connections) >= n:
+                return True
+            time.sleep(0.02)
+        return len(self.connections) >= n
+
+    def _accept_loop(self) -> None:
+        while self._running:
+            try:
+                conn, _addr = self._sock.accept()
+            except OSError:
+                break  # stopped or the listen socket closed
+            self.connections.append(conn)
+
+    def stop(self) -> None:
+        """Stop accepting and close the listener."""
+        self._running = False
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
+    """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
+
+    Returns True if every recorded connection was seen to close; False on timeout. A still-open idle
+    socket blocks ``recv`` up to its short timeout, so we retry across connections."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        closed_any = False
+        for conn in list(peer.connections):
+            try:
+                conn.settimeout(0.2)
+                conn.recv(1)  # raises ConnectionResetError/BrokenPipe when the device side closed
+            except (ConnectionError, OSError):
+                closed_any = True
+        if closed_any:
+            return True
+        time.sleep(0.05)
+    return len(peer.connections) > 0
+
 
 def _drive(engine: "RunEngine", app, on_run_uuid=None) -> None:
     """Run the worker to completion, then deliver the signals it queued onto this thread.
@@ -286,6 +432,10 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
     (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
     (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
+
+    # Packet 16a schedules are exercised directly by the seam tests in
+    # test_device_registry_16a.py (which substitute the live peer port), so they are not part of
+    # this demo Test Definition.
 
     atedef = {
         "format": 1,
