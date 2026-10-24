@@ -60,7 +60,8 @@ def test_read_strips_readTerm_and_returns_raw_bytes() -> None:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "\n", "writeTerm": ""}
         )
-        conn = peer.wait_for_connection(2)
+        conn = peer.connections[-1]
+        assert peer.wait_for_connection()  # return value is True, confirms connection ready
         data, count, partial, err = dev.read({"size": 10, "readTerm": "\n"})
     finally:
         dev.close()
@@ -77,8 +78,9 @@ def test_read_stops_at_size() -> None:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
-        conn = peer.wait_for_connection(2)
+        peer.wait_for_connection()  # get past connection
         data, count, partial, err = dev.read({"size": 5})
+        conn = peer.connections[-1]
     finally:
         dev.close()
         peer.stop()
@@ -94,8 +96,9 @@ def test_partial_read_on_timeout_is_partial_and_carries_bytes() -> None:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
-        conn = peer.wait_for_connection(2)
+        peer.wait_for_connection()  # get past connection
         data, count, partial, err = dev.read({"size": 10, "timeout": 0.3})
+        conn = peer.connections[-1]
     finally:
         dev.close()
         peer.stop()
