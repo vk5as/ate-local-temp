@@ -138,8 +138,6 @@ class _TcpDevice:
                 sock.settimeout(float(to))  # block the send up to the timeout so a busy peer fails cleanly
             while payload[total_sent:]:
                 n = sock.send(payload[total_sent:])  # may return fewer than asked; loop until it drains
-                if n is None:  # only a non-blocking socket returns None; we are always blocking, so this never happens
-                    break
                 total_sent += n
             return True, len(payload), None
         except (socket.timeout, OSError) as exc:

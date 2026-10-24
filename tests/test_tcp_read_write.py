@@ -56,12 +56,14 @@ def test_read_strips_readTerm_and_returns_raw_bytes() -> None:
     """A read strips ``readTerm`` and returns the raw bytes that preceded it."""
     peer = LoopbackPeer(payload=b"Hello\n")
     peer.start()
+    # Give accept thread a moment to be ready
     try:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "\n", "writeTerm": ""}
         )
+        wait = 0.1
+        assert peer.wait_for_connection(timeout=2.0), f"wait_for_connection failed with {len(peer.connections)} connections"
         conn = peer.connections[-1]
-        assert peer.wait_for_connection()  # return value is True, confirms connection ready
         data, count, partial, err = dev.read({"size": 10, "readTerm": "\n"})
     finally:
         dev.close()
@@ -74,13 +76,15 @@ def test_read_stops_at_size() -> None:
     """A read with a ``size`` limit returns exactly that many bytes and marks it complete."""
     peer = LoopbackPeer(payload=b"0123456789ABCDEF")
     peer.start()
+    # Give accept thread a moment to be ready
     try:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
-        peer.wait_for_connection()  # get past connection
-        data, count, partial, err = dev.read({"size": 5})
+        time.sleep(0.05)
+        assert peer.wait_for_connection(timeout=2.0)
         conn = peer.connections[-1]
+        data, count, partial, err = dev.read({"size": 5})
     finally:
         dev.close()
         peer.stop()
@@ -92,13 +96,15 @@ def test_partial_read_on_timeout_is_partial_and_carries_bytes() -> None:
     """A read that grabs some bytes then times out returns them with ``partial = true`` and no error."""
     peer = LoopbackPeer(payload=b"abc")  # only three bytes; the rest never arrives
     peer.start()
+    # Give accept thread a moment to be ready
     try:
         dev = TcpDriver().open(
             {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
-        peer.wait_for_connection()  # get past connection
-        data, count, partial, err = dev.read({"size": 10, "timeout": 0.3})
+        time.sleep(0.05)
+        assert peer.wait_for_connection(timeout=2.0)
         conn = peer.connections[-1]
+        data, count, partial, err = dev.read({"size": 10, "timeout": 0.3})
     finally:
         dev.close()
         peer.stop()
