@@ -54,23 +54,31 @@ class _TcpDevice:
         deadline = time.monotonic() + to if to is not None else None
         data = bytearray(self._leftover)
         
-        # Check if we already have a complete read pending (already found a terminator or reached size)
-        if data and term and term in data:
-            idx = data.index(term)
-            return bytes(data[:idx]), len(data[:idx]), False, None
-        if data and size is not None and len(data) >= size:
-            return bytes(data[:size]), size, False, None
-        
         while True:
+            # Check if deadline reached with current data
             remaining = None if deadline is None else (deadline - time.monotonic())
-            remaining = 0.0 if remaining is None or remaining <= 0 else remaining  # clamp to avoid ValueError
+            if remaining is None or remaining <= 0:
+                # Timeout with what we have: if we have data, it's partial; if no data, it's timeout
+                if data:
+                    self._leftover = b""
+                    return bytes(data), len(data), True, None  # received some bytes but didn't finish
+                return None, 0, False, "timeout"  # nothing arrived and time ran out
             r, _, _ = select.select([sock], [], [], remaining)  # blocks until data or the timeout elapses
             if not r:
-                return None, 0, False, "timeout"  # nothing arrived and time ran out
+                # select timed out - if we have data, it's partial; otherwise timeout with no-bytes
+                if data:
+                    self._leftover = bytes(data)
+                    return bytes(data), len(data), True, None
+                return None, 0, False, "timeout"  # nothing arrived
             chunk = sock.recv(4096)
             if not chunk:  # the peer closed cleanly; whatever we have is a complete read
                 self._leftover = b""
-                return bytes(data), len(data), False, None
+                remaining = None if deadline is None else (deadline - time.monotonic())
+                if remaining is None or remaining <= 0:
+                    self._leftover = b""
+                    return bytes(data), len(data), False, None
+                self._leftover = bytes(data)
+                return bytes(data), len(data), True, None
             data.extend(chunk)
             
             # Check if we now have a complete read
