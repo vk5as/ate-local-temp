@@ -359,23 +359,51 @@ class _AteTable:
         """Open a Device of ``device_type`` with ``params``; returns an opaque handle (userdata).
 
         The real logic behind :meth:`open`. The handle is only ever passed back to ``read``/``write``/``close``.
-        ``error_handler`` is accepted for the spec's signature but not routed this packet — onError handling lands in
-        16c. Param validation raises before connecting and never goes through ``error_handler``."""
+        ``error_handler`` is stored on the device and used for read/write/close failures. Param validation
+        raises before connecting and never goes through ``error_handler``."""
         registry = self._host._devices
         name = self._device_type_name(device_type)
         handle = registry.open_device(name, self._raw_params(params, ("readTerm", "writeTerm")))
+        # Store error_handler on the device handle for later use in read/write/close
+        handle._on_error = error_handler
         return handle
 
     def _do_close(self, device: Any = None, params: Any = None, error_handler: Any = None) -> Any:
         """Close a Device and release it; the real logic behind :meth:`close`.
 
-        Returns a genuine Lua table ``{ok = true}`` (built by the runtime) so ``"closed "..r.ok`` reads "closed
-        true"; a plain dict/object would round-trip as userdata instead. Closing twice is a no-op: removing from
-        tracking returns False on the second call, but we still report success."""
+        ``error_handler`` can be provided for this call; if not, falls back to the device's stored
+        handler (from open), then uses the host's default None. If handler returns non-nil, that
+        value is returned; otherwise {ok=true} is returned even for failed closes.
+        """
         registry = self._host._devices
-        # Removing from tracking is what makes a second close a no-op; if it was already closed this returns False.
-        _ = registry.close_device(device)
-        return self._host._runtime.table_from({"ok": True})
+        # Use provided handler, device's handler, or None (returns default {ok=true})
+        handler = error_handler or getattr(device, "_on_error", None)
+        try:
+            # Removing from tracking - if already closed, this returns False
+            ok = registry.close_device(device)
+        except Exception as exc:  # noqa: BLE001
+            loc = self._host._location()
+            msg = str(exc).splitlines()[0] if str(exc) else "ATE error"
+            self._host.record_log("ERROR", f"{loc} ATE.close: {msg}", source="ate")
+            ok = False
+        
+        # Default result - close success
+        result = self._host._runtime.table_from({"ok": True})
+        
+        # If close_failed (ok is False) and there's a handler, call it
+        if not ok and handler is not None:
+            op_result = {"ok": False, "err": f"{loc} ATE.close: {msg}"}
+            try:
+                return_val = handler(op_result, params)
+                if return_val is not None:
+                    return return_val
+            except ValueError as ve:
+                self._host.record_log(
+                    "ERROR", f"{loc} ATE.close: onError handler raised: {ve}", source="ate"
+                )
+                pass  # fall through to return error table
+        
+        return result
 
     def _raw_params(self, params: Any, byte_fields: tuple[str, ...]) -> Any:
         """Copy a Lua params table into a dict, taking each of ``byte_fields`` as raw bytes.
@@ -399,7 +427,11 @@ class _AteTable:
         Validates the per-call override fields against the driver's read_fields and delegates to the
         device; I/O timeouts/failures come back from the device as result tables, never raised here —
         only a param-validation error raises, and that is isolated at source="ate" by _isolate_device.
-        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged."""
+        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged.
+        
+        If an error occurred (err != None) and onError was provided, the handler is called.
+        The handler's non-nil return value becomes the result; if it raises or returns nil,
+        the default error table is returned (not raised per spec)."""
         params = self._raw_params(params, ("readTerm",))
         validated = validate_params(TcpDriver(), params, TcpDriver.read_fields)  # names any bad field
         if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
@@ -409,27 +441,68 @@ class _AteTable:
             self._host.record_log(
                 "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
             )
-        return self._host._runtime.table_from({
+        # Build the result table - it may contain err on failures
+        result = self._host._runtime.table_from({
             "data": data,  # None -> nil on a timeout with no bytes or a failure
             "count": count,
             "partial": partial,
             "err": err,  # None -> nil unless the read failed
         })
+        
+        # If there was an error and a handler was provided, call it
+        if err is not None:
+            handler = error_handler or getattr(device, "_on_error", None)
+            if handler is not None:
+                # Build op_result dict for the handler
+                op_result = {"data": data, "count": count, "partial": partial, "err": err}
+                try:
+                    return_val = handler(op_result, params)
+                    # If handler returned a non-nil value, use it
+                    if return_val is not None:
+                        return return_val
+                except ValueError as ve:  # onError raising is treated as returning nil
+                    self._host.record_log(
+                        "ERROR", f"{self._host._location()} ATE.read: onError handler raised: {ve}", source="ate"
+                    )
+                    pass  # fall through to return the default error table
+        
+        return result
 
     def _do_write(self, device=None, params=None, error_handler=None):
         """Write to a Device (packet 16b); the real logic behind ATE.write.
 
         Validates the per-call fields against write_fields and delegates to the device; I/O
         timeouts/failures come back from the device as result tables, never raised here. ``count`` is
-        the number of bytes actually sent, terminator included."""
+        the number of bytes actually sent, terminator included.
+        
+        If an error occurred (ok=False err set) and onError was provided, the handler is called
+        and its non-nil return value is used; otherwise the default error table is returned."""
         params = self._raw_params(params, ("data", "writeTerm"))
         validated = validate_params(TcpDriver(), params, TcpDriver.write_fields)  # names any bad field
         ok, count, err = device.write(validated)
-        return self._host._runtime.table_from({
+        # Build result table
+        result = self._host._runtime.table_from({
             "ok": ok,
             "count": count,
             "err": err,  # None -> nil unless the write failed
         })
+        
+        # If there was an error and a handler was provided, call it
+        if err is not None:
+            handler = error_handler or getattr(device, "_on_error", None)
+            if handler is not None:
+                op_result = {"ok": ok, "count": count, "err": err}
+                try:
+                    return_val = handler(op_result, params)
+                    if return_val is not None:
+                        return return_val
+                except ValueError as ve:
+                    self._host.record_log(
+                        "ERROR", f"{self._host._location()} ATE.write: onError handler raised: {ve}", source="ate"
+                    )
+                    pass  # fall through to return error table
+        
+        return result
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         if name == "run":
