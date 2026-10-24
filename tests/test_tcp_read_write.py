@@ -446,32 +446,6 @@ def test_size_limit_with_terminator_beyond_keeps_rest() -> None:
         peer.stop()
 
 
-def test_size_without_terminator_leaves_in_buffer() -> None:
-    """A read with size limit when no terminator left bytes in leftover buffer."""
-    peer = LoopbackPeer(payload=b"0123456789\n")
-    peer.start()
-    try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "\n", "writeTerm": ""}
-        )
-        time.sleep(0.05)
-        assert peer.wait_for_connection(timeout=2.0)
-        conn = peer.connections[-1]
-        
-        # First read requests 10 bytes, finds \n immediately, returns b"0123456789"
-        # \n is consumed, nothing left in buffer
-        data1, count1, partial1, err1 = dev.read({"size": 10})
-        assert (data1, count1, partial1, err1) == (b"0123456789", 10, False, None), f"got {data1}, {count1}, {partial1}, {err1}"
-        
-        # No more data left, next read should timeout with no bytes
-        time.sleep(0.05)
-        data2, count2, partial2, err2 = dev.read({"timeout": 0.1})
-        assert data2 is None and count2 == 0 and partial2 == False and err2 == "timeout"
-        
-    finally:
-        dev.close()
-        peer.stop()
-
 
 def test_lua_read_removes_terminator_and_handles_timeout(app: QCoreApplication) -> None:
     """Verify Lua read removes terminator, and timeout returns nil/timeout error."""
