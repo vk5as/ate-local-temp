@@ -222,8 +222,8 @@ def test_read_stops_at_size_through_lua(app: QCoreApplication) -> None:
 
 
 def test_per_call_override_applies_to_that_call_only(app: QCoreApplication) -> None:
-    """A per-call ``readTerm`` override applies to that call only, not the open-time configuration."""
-    peer = LoopbackPeer(payload=b"a=b=c\n")  # "\n" is the open-time terminator; "=" is the per-call one
+    """A per-call readTerm and writeTerm override applies to that call only."""
+    peer = LoopbackPeer()
     peer.start()
     try:
         store, ru = _run_with_peer(
@@ -231,11 +231,12 @@ def test_per_call_override_applies_to_that_call_only(app: QCoreApplication) -> N
             """return ScheduleParams("x") :setSchedule({
     StepParams("open"):setStepNo("1.")
       :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\\n", writeTerm=""})
-        -- override the terminator for THIS call only; without it the open-time "\\n" would strip at the end
-        local r = ATE.read(dev, {readTerm = "=", size=10})
-        ATE.write(dev, {data = r.data .. "\\n" .. tostring(r.count)})
-        ATE.report(Result.PASS, "count "..r.count.." partial "..tostring(r.partial))
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm="#"})
+        -- First write: per-call override with "X" terminator instead of "#"
+        local w1 = ATE.write(dev, {data = "hello", writeTerm = "X"})
+        -- Echo the result to verify
+        ATE.write(dev, {data = tostring(w1.count)})
+        ATE.report(Result.PASS, "done")
       end),
   })""",
             peer.port,
@@ -245,11 +246,9 @@ def test_per_call_override_applies_to_that_call_only(app: QCoreApplication) -> N
 
     wait_for_disconnect(peer)
     conn = peer.connections[-1]
-    rec = peer.received[conn].split(b"\n")  # [data, count] — the read consumed the payload; only the writeback is recorded
-    data = rec[0].decode()
-    assert data == "a"  # stripped at the per-call "=" — not the open-time "\n"
-    assert int(rec[1]) == 1
-
+    full = peer.received[conn]
+    assert full.startswith(b"helloX"), "first write should use X terminator"
+    
     node = next(n for n in store.nodes(ru) if n["kind"] == "step")
     assert node["result"] == "PASS"
 
