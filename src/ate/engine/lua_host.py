@@ -232,6 +232,11 @@ class _AteTable:
         # with the always-isolating _isolate. Registered here; they read self._host lazily when called.
         self._extra["open"] = self._isolate_device(self._do_open, "open")
         self._extra["close"] = self._isolate_device(self._do_close, "close")
+        # Packet 16b: register ATE.read/ATE.write as finalized device wrappers (see _isolate_device).
+        # They validate the per-call override fields and delegate to the device; I/O failures are caught
+        # by the device and returned as result tables, so only param-validation errors raise here.
+        self._extra["read"] = self._isolate_device(self._do_read, "read")
+        self._extra["write"] = self._isolate_device(self._do_write, "write")
 
     def register(self, name: str, fn: Callable[..., Any]) -> "_AteTable":
         """Register a Lua-callable under ``name`` (used by later tickets)."""
@@ -370,6 +375,38 @@ class _AteTable:
         # Removing from tracking is what makes a second close a no-op; if it was already closed this returns False.
         _ = registry.close_device(device)
         return self._host._runtime.table_from({"ok": True})
+
+    def _do_read(self, device=None, params=None, error_handler=None):
+        """Read from a Device (packet 16b); the real logic behind ATE.read.
+
+        Validates the per-call override fields against the driver's read_fields and delegates to the
+        device; I/O timeouts/failures are returned as result tables by the device, never raised here —
+        only a param-validation error raises, and that is isolated at source="ate" by _isolate_device.
+
+        The data field carries the raw bytes as an ASCII hex string so binary content survives the
+        round trip through the result table (a nil terminator on timeout-no-bytes yields err="timeout")."""
+        validated = validate_params(TcpDriver(), params or {}, TcpDriver.read_fields)  # names any bad override field
+        data, count, partial, err = device.read(validated)  # the userdata exposes read/write/close via __index__
+        return self._host._runtime.table_from({
+            "data": data.hex(),  # ASCII hex of the raw bytes; binary-safe through _materialize
+            "count": int(count),
+            "partial": bool(partial),
+            "err": err,  # None -> nil (only present when there is an error)
+        })
+
+    def _do_write(self, device=None, params=None, error_handler=None):
+        """Write to a Device (packet 16b); the real logic behind ATE.write.
+
+        Validates the per-call override fields against write_fields and delegates to the device; I/O
+        timeouts/failures are returned as result tables by the device, never raised here. ``count`` is
+        the number of bytes actually sent — on success that includes any terminator appended."""
+        validated = validate_params(TcpDriver(), params or {}, TcpDriver.write_fields)  # names any bad override field
+        ok, count, err = device.write(validated)
+        return self._host._runtime.table_from({
+            "ok": bool(ok),
+            "count": int(count),
+            "err": err,  # None -> nil (only present when there is an error)
+        })
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
         if name == "run":

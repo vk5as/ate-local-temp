@@ -320,9 +320,12 @@ return ScheduleParams("Read complete schedule", "reads a full terminator-termina
   :setSchedule({
     StepParams("open"):setStepNo("1.")
       :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\\n", writeTerm=""})
         local r = ATE.read(dev, {size=20})
         ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+        -- Echo the result fields back to the peer as newline-delimited tokens so the test can assert
+        -- exact values through the recorded bytes (data/count/partial/err; data is hex, never nil here).
+        ATE.write(dev, {data = r.data .. "\n" .. tostring(r.count) .. "\n" .. tostring(r.partial) .. "\n" .. (r.err or "")})
       end),
   })
 """
@@ -336,9 +339,10 @@ return ScheduleParams("Binary echo schedule", "reads raw bytes (hex-encoded) and
   :setSchedule({
     StepParams("open"):setStepNo("1.")
       :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\\n", writeTerm=""})
         local r = ATE.read(dev, {size=64})
-        ATE.write(dev, {data=r.data, writeTerm=""})  # echo the hex string back for exact-content verification
+        -- Echo the result fields back to the peer so the test can decode exactly what read returned.
+        ATE.write(dev, {data = r.data .. "\n" .. tostring(r.count) .. "\n" .. tostring(r.partial) .. "\n" .. (r.err or "")})
         ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
       end),
   })
@@ -351,9 +355,11 @@ return ScheduleParams("Partial read schedule", "reads some bytes then times out 
   :setSchedule({
     StepParams("open"):setStepNo("1.")
       :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\\n", writeTerm=""})
         local r = ATE.read(dev, {size=10, timeout=0.5})
         ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+        -- Echo the result fields back to the peer so the test can assert exact values through recorded bytes.
+        ATE.write(dev, {data = r.data .. "\n" .. tostring(r.count) .. "\n" .. tostring(r.partial) .. "\n" .. (r.err or "")})
       end),
   })
 """
@@ -364,9 +370,11 @@ return ScheduleParams("Read timeout schedule", "times out waiting for any bytes"
   :setSchedule({
     StepParams("open"):setStepNo("1.")
       :setAction(function()
-        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\\n", writeTerm=""})
         local r = ATE.read(dev, {size=10, timeout=0.5})
         ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+        -- Echo the result fields back to the peer so the test can assert exact values through recorded bytes.
+        ATE.write(dev, {data = r.data .. "\n" .. tostring(r.count) .. "\n" .. tostring(r.partial) .. "\n" .. (r.err or "")})
       end),
   })
 """
@@ -379,7 +387,7 @@ return ScheduleParams("Write terminator schedule", "writes data with a per-call 
     StepParams("open"):setStepNo("1.")
       :setAction(function()
         local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
-        local w = ATE.write(dev, {data="cmd", writeTerm="\n"})
+        local w = ATE.write(dev, {data="cmd", writeTerm="\\n"})
         ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count.." err "..(w.err or ""))
       end),
   })

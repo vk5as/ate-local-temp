@@ -33,6 +33,20 @@ class _TcpDevice:
         """A one-line description of this device for log lines (host and port)."""
         return f"TCP {self.params['host']}:{self.params['port']}"
 
+    def __index__(self, name: str) -> Any:
+        """Expose this device's Lua-callable methods (packet 16b): read, write and close.
+
+        When the handle is returned to Lua it becomes userdata; without ``__index__`` only fields set
+        explicitly would be visible. This makes ``dev.read``, ``dev.write`` and ``dev.close`` callable
+        from a schedule action so a step can drive the socket directly."""
+        if name == "read":
+            return self.read
+        if name == "write":
+            return self.write
+        if name == "close":
+            return self.close
+        raise AttributeError(f"{type(self).__name__} has no field '{name}'")
+
     @staticmethod
     def _effective_timeout(override: Any, params: dict[str, Any]) -> float | None:
         """The timeout to use: the per-call override if given, else the open-time configuration."""
