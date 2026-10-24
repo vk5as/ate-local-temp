@@ -1,6 +1,6 @@
 # Orchestration playbook: implementing a spec with local-model subagents
 
-How the ATE v1 spec is being built. An Opus orchestrator coordinates Ornith-1.5 implementer and reviewer subagents running locally through OpenCode and LM Studio. Everything here reflects what has actually been run and adjusted during this project, including the rules added after things went wrong.
+How the ATE v1 spec is being built. An Opus orchestrator coordinates local-model implementer and reviewer subagents running through OpenCode. The worker model was Ornith-1.5 on LM Studio until 2026-10-24 (packets up to 16b), then Qwen3.5 9B FP8 on coder2 (vLLM). Everything here reflects what has actually been run and adjusted during this project, including the rules added after things went wrong.
 
 Companion files (all in `.scratch/ate-v1/`):
 
@@ -21,9 +21,9 @@ Companion files (all in `.scratch/ate-v1/`):
 | Role | Model / how it runs | Does | Never does |
 |---|---|---|---|
 | **Orchestrator** | Claude Opus (this session) | Picks the next packet, writes briefs, verifies, merges, logs usage, reports | Long implementation work (keeps its own context and usage lean) |
-| **Implementer** | Ornith-1.5 via T3 `delegate_task`, `providerInstanceId: opencode`, `model: lmstudio/ornith-1.5-9b`, `isolation: worktree` | Builds one packet test-first on its own branch | Touches the integration branch or main checkout, creates worktrees, rebases, pushes |
-| **Reviewer** | Fresh Ornith, same target, own worktree | Fast-forwards onto the implementer branch, reviews the diff, fixes findings | Refactors for taste, expands scope |
-| **Opus helper** | `claude -p --model claude-opus-5-5`, started by the Ornith subagent itself | Solves the one problem it was handed, in that subagent's worktree | Reports to the orchestrator (it reports to the Ornith that started it) |
+| **Implementer** | Qwen3.5 9B FP8 on coder2 via T3 `delegate_task`, `providerInstanceId: opencode`, `model: coder2/Qwen3.5-9B-FP8-dynamic`, `isolation: worktree` (formerly `lmstudio/ornith-1.5-9b`) | Builds one packet test-first on its own branch | Touches the integration branch or main checkout, creates worktrees, rebases, pushes |
+| **Reviewer** | Fresh worker-model session, same target, own worktree | Fast-forwards onto the implementer branch, reviews the diff, fixes findings | Refactors for taste, expands scope |
+| **Opus helper** | `claude -p --model claude-opus-5-5`, started by the worker subagent itself | Solves the one problem it was handed, in that subagent's worktree | Reports to the orchestrator (it reports to the worker that started it) |
 | **Haiku side jobs** | Agent tool, `model: haiku` | Screenshots of the app, mechanical chores | Code changes on the integration branch |
 
 **One subagent at a time.** LM Studio loses its prompt cache when two sessions interleave, and prefill then dominates run time. Never run an implementer and a reviewer together, or two implementers.
@@ -58,7 +58,7 @@ Companion files (all in `.scratch/ate-v1/`):
    ```
 
    `-p no:cacheprovider` stops worktrees fighting over `.pytest_cache`. `tail` keeps output out of the subagent's context.
-5. **LM Studio:** Ornith loaded with a 132,608-token context. OpenCode auto-compacts at roughly 85% (about 112k).
+5. **Model servers:** coder2 vLLM at `http://192.168.8.186:8000/v1`, Qwen3.5 9B FP8 with a 262,144-token window (`variant` option low/medium/high). Earlier: LM Studio at `http://192.168.8.94:1234` with Ornith loaded at 132,608 tokens. OpenCode auto-compacts at roughly 85% of the window. `collect.py` reads both servers for the window size.
 6. Commit `escalate-to-opus.md` and `review-packet.md` to the integration branch so every new worktree (which starts from the integration tip) has them.
 
 ---
@@ -99,7 +99,7 @@ pick packet ─► implementer ─► light check ─► reviewer ─► orchest
   "isolation": "worktree",
   "mode": "async",
   "clientRequestId": "ate-v1-packet-16b-impl-r1",
-  "target": {"providerInstanceId": "opencode", "model": "lmstudio/ornith-1.5-9b"},
+  "target": {"providerInstanceId": "opencode", "model": "coder2/Qwen3.5-9B-FP8-dynamic"},
   "task": "<brief, see 5.1>"
 }
 ```
@@ -237,7 +237,7 @@ Take screenshots of the ATE app as implemented on integration/ate-v1, to compare
 
 The orchestrator then views the PNGs, compares with the mockup, and records gaps in `review-notes.md`.
 
-### 5.4 Opus helper (written by the Ornith subagent, not the orchestrator)
+### 5.4 Opus helper (written by the worker subagent, not the orchestrator)
 
 See `escalate-to-opus.md`. In short: commit WIP, write `/tmp/handoff-<NNx>.md` with the handoff skill (packet, branch, worktree path, what's done, exact failing command and output, what's wanted back, and the verbatim "Rules for you" block), then:
 
@@ -248,7 +248,7 @@ echo $! > /tmp/opus-<NNx>.pid
 sleep 120; if kill -0 $(cat /tmp/opus-<NNx>.pid) 2>/dev/null; then echo running; else tail -40 /tmp/opus-<NNx>.out; fi
 ```
 
-Mandatory after two compactions or about 150 steps; recommended after two failed fix attempts, 30 minutes or 60 steps without progress, or before a long debugging hunt. At most two helpers per packet. The Ornith subagent verifies the helper's work (log, diff, full suite) before continuing.
+Mandatory after two compactions or about 150 steps; recommended after two failed fix attempts, 30 minutes or 60 steps without progress, or before a long debugging hunt. At most two helpers per packet. The worker subagent verifies the helper's work (log, diff, full suite) before continuing.
 
 ### 5.5 Final review fixer
 
