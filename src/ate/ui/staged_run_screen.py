@@ -22,8 +22,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -31,6 +33,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -195,6 +198,84 @@ class StepsOptionsStage(QWidget):
         self.continue_all_radio.setChecked(not value)
 
 
+class FailurePromptBar(QWidget):
+    """The Stop-on-Fail prompt bar shown while a failed step awaits the Operator's choice.
+
+    Rendered only while a prompt is pending — the screen shows it with :meth:`show_prompt` and
+    it hides itself once a choice is made — and it holds no run logic of its own: each button
+    only hides the bar and emits ``choice_made`` with CONTINUE, RETRY or ABORT, which the
+    screen sends on to the session. The layout follows the run-screen mockup (variant C): a
+    bold ``Step <no> <result>`` label, the step's message growing across the bar, then the
+    three buttons in order.
+    """
+
+    choice_made = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # A plain QWidget never paints its stylesheet background, so the bar showed up grey
+        # (packet 12d review): opt it into styled backgrounds, and give the labels their own
+        # colour rule because a stylesheet `color` does not cascade to child QLabels.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(12)
+
+        self.step_label = QLabel()
+        bold = self.step_label.font()
+        bold.setBold(True)
+        self.step_label.setFont(bold)
+        self.message_label = QLabel()
+        # The message grows to fill whatever width the labels leave, like the mockup's .grow.
+        self.message_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self.continue_button = QPushButton("Continue")
+        self.continue_button.setToolTip("Keep the result and move on")
+        self.retry_button = QPushButton("Retry")
+        self.retry_button.setToolTip("Run the step's action again")
+        self.abort_button = QPushButton("Abort")
+        self.abort_button.setToolTip("Run the Post-test Actions and end the run")
+        # Red bar, 15px type, and the mockup's button classes: plain Continue, primary Retry,
+        # danger Abort.
+        self.setStyleSheet(
+            "FailurePromptBar { background: #c62828; color: white; font-size: 15px; }"
+            "FailurePromptBar QLabel { color: white; }"
+            "FailurePromptBar QPushButton { background: #f5f5f5; color: black; font-size: 15px; "
+            "padding: 6px 18px; border: 1px solid #a9a9a9; border-radius: 3px; }"
+            "FailurePromptBar QPushButton:hover { background: #e6e6e6; }"
+            "FailurePromptBar QPushButton#retry { background: #0a64d6; color: white; border-color: #0850ad; }"
+            "FailurePromptBar QPushButton#abort { background: #c62828; color: white; border-color: #8e1c1c; }"
+        )
+        self.retry_button.setObjectName("retry")
+        self.abort_button.setObjectName("abort")
+
+        self.continue_button.clicked.connect(lambda: self._on_choice("CONTINUE"))
+        self.retry_button.clicked.connect(lambda: self._on_choice("RETRY"))
+        self.abort_button.clicked.connect(lambda: self._on_choice("ABORT"))
+
+        layout.addWidget(self.step_label)
+        layout.addWidget(self.message_label)
+        layout.addWidget(self.continue_button)
+        layout.addWidget(self.retry_button)
+        layout.addWidget(self.abort_button)
+
+        # Only shown while a prompt is pending; the screen shows it via show_prompt.
+        self.hide()
+
+    def show_prompt(self, step_number: str, result: str, message: str) -> None:
+        """Show the bar naming the failed step and its message, for the Operator to answer."""
+        self.step_label.setText(f"Step {step_number} {result}")
+        self.message_label.setText(message)
+        self.show()
+
+    def _on_choice(self, choice: str) -> None:
+        """A button was clicked: hide the bar first, then hand the choice to the screen."""
+        if not self.isVisible():
+            return  # a second click after the bar already hid itself must not answer twice
+        self.hide()
+        self.choice_made.emit(choice)
+
+
 class RunView(QWidget):
     """The view shown while and after a run: state header, live steps, Log/Summary.
 
@@ -219,6 +300,8 @@ class RunView(QWidget):
         # Full-width failure bar: a fixed-height label that spans the view's width in the layout.
         self.failure_bar = QLabel()
         self.failure_bar.setFixedHeight(24)
+        # The Stop-on-Fail prompt bar (packet 12d): hidden until the session pauses on a failure.
+        self.failure_prompt_bar = FailurePromptBar()
 
         self.tabs = QTabWidget()
         log_tab = QLabel()
@@ -236,6 +319,7 @@ class RunView(QWidget):
         layout.addWidget(self.abort_button)
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=1)
+        layout.addWidget(self.failure_prompt_bar)
         layout.addWidget(self.tabs)
         layout.addWidget(self.log_pane)
         layout.addWidget(self.debug_window)
@@ -322,6 +406,9 @@ class StagedRunScreen(QWidget):
         # cleared on FINISHED so a new start() captures fresh fields; ``None`` otherwise. Exposed so
         # tests can drive inputs (supply/click) through the engine reached via the session.
         self._engine: Optional[RunEngine] = None
+        # The step-list row carrying the pause highlight (packet 12d); ``None`` when no prompt is
+        # pending. Dropped before refresh() clears the list, which would delete the item.
+        self._failed_row: Optional[QListWidgetItem] = None
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage()
@@ -348,6 +435,11 @@ class StagedRunScreen(QWidget):
 
         # Bind to the session's observable state — the single source of run truth.
         self.session.state_changed.connect(self._on_state_changed)
+
+        # A Stop-on-Fail pause names its failing step in the prompt bar (packet 12d); the bar's
+        # buttons answer it. Both are display-only — the session's choose() is the only call out.
+        self.session.failure_prompt.connect(self._on_failure_prompt)
+        self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
 
         # Selecting a row records that selection on the session, so starting later resolves
         # exactly what the Operator picked; the notes label mirrors it for confirmation.
@@ -460,11 +552,16 @@ class StagedRunScreen(QWidget):
         self._reveal_run_view()
 
     def _request_abort(self) -> None:
-        """The Abort button asks the session to abort the current run.
+        """The Abort button ends the current run — answering a pending prompt or stopping between steps.
 
-        ``session.request_abort`` delegates to the worker, which stops at its next step boundary and
-        records ERROR / NOTRUN / ABORTED; it raises if there is no run in progress (the button is
-        disabled whenever one is not)."""
+        With a Stop-on-Fail prompt up the worker is blocked waiting for a choice, so the
+        step-boundary flag ``request_abort`` would set is never observed and the run hangs: answer
+        the pending prompt with ABORT instead (the bar's own Abort path). Otherwise the worker is
+        free to stop at its next step boundary (records ERROR / NOTRUN / ABORTED); ``request_abort``
+        raises if there is no run in progress (the button is disabled whenever one is not)."""
+        if self.run_view.failure_prompt_bar.isVisible():
+            self._on_prompt_choice("ABORT")
+            return
         self.session.request_abort()
 
     @property
@@ -486,6 +583,9 @@ class StagedRunScreen(QWidget):
             # Release the finished worker so a new start() captures fresh fields; the next run owns
             # its own engine again.
             self._engine = None
+            # refresh() clears the step list and deletes its items — drop the pause highlight's row
+            # reference before that so we never touch a deleted item (packet 12d).
+            self._failed_row = None
             # Read results from the store (never compute them here) and refresh the view.
             run_uuid = self.session.run_uuid
             nodes = self.session.store.nodes(run_uuid) if run_uuid else []
@@ -507,6 +607,11 @@ class StagedRunScreen(QWidget):
 
     def _update_header(self, state: Optional[SessionState] = None) -> None:
         """Refresh the header's state label and live elapsed timer."""
+        if self.run_view.failure_prompt_bar.isVisible():
+            # A failure prompt is pending: the header waits on the Operator, whatever the state
+            # (this also guards the one-second timer while paused) — packet 12d.
+            self.run_view.state_header.setText("WAITING")
+            return
         if state is None:
             state = self.state
         text = f"{state.value}"
@@ -514,6 +619,91 @@ class StagedRunScreen(QWidget):
             delta = datetime.now(timezone.utc) - self._started_at
             text += f"  ·  {_format_elapsed(delta)}"
         self.run_view.state_header.setText(text)
+
+    # -- Stop-on-Fail prompt (packet 12d) -------------------------------------
+
+    def _on_failure_prompt(self, node_seq: int, attempt_no: int) -> None:
+        """A failure is awaiting the Operator's choice: name it in the bar and pause the display.
+
+        The failing step's node row is not written yet (the engine writes it after the last
+        Attempt), so the step's number and name come from the schedule's expanded steps and its
+        result and message from the Attempt row the pause was raised on."""
+        step = self._step_identity(node_seq)
+        attempt = self._attempt_row(node_seq, attempt_no)
+        result = str(attempt.get("pass_fail") or "FAIL") if attempt else "FAIL"
+        message = str(attempt.get("msg") or "") if attempt else ""
+        self.run_view.failure_prompt_bar.show_prompt(str(getattr(step, "step_no", "") or ""), result, message)
+        self._render_paused_steps(node_seq, result)
+        self._set_paused_header()
+
+    def _step_identity(self, node_seq: int):
+        """The selected schedule's expanded step at ``node_seq`` (its number and name)."""
+        steps = self._load_schedule_steps(self.session.selected_schedule or "")
+        if 0 <= node_seq < len(steps):
+            return steps[node_seq]
+        return None
+
+    def _attempt_row(self, node_seq: int, attempt_no: int) -> Optional[dict]:
+        """The Attempt row a pause was raised on — its result and message, read from the store."""
+        run_uuid = self.session.run_uuid
+        if run_uuid is None:
+            return None
+        for row in self.session.store.attempts(run_uuid):
+            if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
+                return row
+        return None
+
+    def _render_paused_steps(self, node_seq: int, result: str) -> None:
+        """Rebuild the step list mid-run: done steps from the store, the failing one marked, the rest pending.
+
+        Rows normally only exist after FINISHED (refresh), so a pause renders its own list; the
+        failing step's row gets the pause highlight and is remembered so the choice can clear it."""
+        run_uuid = self.session.run_uuid
+        nodes = self.session.store.nodes(run_uuid) if run_uuid else []
+        done = {node.get("node_seq"): node for node in nodes if node.get("kind") == "step"}
+        steps = self._load_schedule_steps(self.session.selected_schedule or "")
+        self.run_view.step_list.clear()
+        self._failed_row = None
+        for seq, step in enumerate(steps):
+            number = str(getattr(step, "step_no", "") or "")
+            name = str(getattr(step, "name", "") or "")
+            if seq == node_seq:
+                state = result
+            elif seq in done:
+                state = str(done[seq].get("result", ""))
+            else:
+                state = "…"
+            item = QListWidgetItem(f"{number}  {name}  →  {state}")
+            if seq == node_seq:
+                # The pause highlight: a pale red row, cleared once the Operator chooses.
+                item.setBackground(QColor("#fff0f0"))
+                self._failed_row = item
+            self.run_view.step_list.addItem(item)
+
+    def _set_paused_header(self) -> None:
+        """While a prompt is pending the header goes red and reads WAITING (see _update_header)."""
+        self.run_view.state_header.setStyleSheet("background-color: #c62828; color: white;")
+        self._update_header()
+
+    def _on_prompt_choice(self, choice: str) -> None:
+        """A prompt was answered (a bar button, or the header Abort while one is up): clear the
+        pause's display, then answer the session.
+
+        Clearing first means a run that finishes straight away can refresh() without a highlight
+        still held on an item refresh() would delete; the session's worker unblocks on choose().
+        The bar hides itself in _on_choice, but the header-Abort path answers without the bar, so
+        hide it here too (a no-op when the bar already hid itself)."""
+        self.run_view.failure_prompt_bar.hide()
+        self._clear_paused_display()
+        self.session.choose(choice)
+
+    def _clear_paused_display(self) -> None:
+        """Drop the pause highlight and red header once the Operator has chosen."""
+        if self._failed_row is not None:
+            self._failed_row.setBackground(QBrush())
+            self._failed_row = None
+        self.run_view.state_header.setStyleSheet("")
+        self._update_header()
 
     # -- schedule list ------------------------------------------------------
 
