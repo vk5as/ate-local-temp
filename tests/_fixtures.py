@@ -308,27 +308,134 @@ return ScheduleParams("Double close TCP schedule", "opens then double-closes a l
 """
 
 
+# --- Packet 16b: TCP read/write ----------------------------------------------------------
+
+
+# The peer sends a full terminator-terminated message on accept (buffered by TCP). size=20 is generous
+# so one recv grabs everything and the open-time readTerm "\n" strips it -> complete read. r.data carries
+# the bytes as an ASCII hex string (binary-safe through the result table); the test decodes it and
+# compares to the known payload, and reports count/partial/err for inspection.
+READ_COMPLETE = """\
+return ScheduleParams("Read complete schedule", "reads a full terminator-terminated message")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local r = ATE.read(dev, {size=20})
+        ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+      end),
+  })
+"""
+
+# Same shape but the payload contains high bytes (>=128) that would break per-byte "\ddd" escapes.
+# read's result carries them as a hex string and the step echoes it back so the peer records exactly
+# what came through the result table; the test decodes those recorded bytes and checks they equal the
+# original payload, proving raw bytes survive the round trip. Reports count/partial/err for inspection.
+BINARY_ECHO = """\
+return ScheduleParams("Binary echo schedule", "reads raw bytes (hex-encoded) and echoes them back")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local r = ATE.read(dev, {size=64})
+        ATE.write(dev, {data=r.data, writeTerm=""})  # echo the hex string back for exact-content verification
+        ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+      end),
+  })
+"""
+
+# The peer sends only a few bytes then goes quiet; the read grabs them but times out before the rest,
+# so it returns partial=true with count = the bytes received. Also exercises the per-call timeout override.
+PARTIAL_TIMEOUT = """\
+return ScheduleParams("Partial read schedule", "reads some bytes then times out before the rest")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local r = ATE.read(dev, {size=10, timeout=0.5})
+        ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+      end),
+  })
+"""
+
+# The peer sends nothing; the read waits out its timeout with zero bytes -> {data=nil,count=0,err="timeout"}.
+TIMEOUT_NOBYTES = """\
+return ScheduleParams("Read timeout schedule", "times out waiting for any bytes")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""})
+        local r = ATE.read(dev, {size=10, timeout=0.5})
+        ATE.report(Result.PASS, "data "..r.data.." count "..r.count.." partial "..tostring(r.partial).." err "..(r.err or ""))
+      end),
+  })
+"""
+
+# Opens with no write terminator and appends one per-call; the peer records exactly what was sent so the
+# test can assert count includes the terminator (4 = "cmd" + "\n").
+WRITE_TERM = """\
+return ScheduleParams("Write terminator schedule", "writes data with a per-call terminator appended")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        local w = ATE.write(dev, {data="cmd", writeTerm="\n"})
+        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count.." err "..(w.err or ""))
+      end),
+  })
+"""
+
+# The peer closes its end right after accepting (fail_write); the write can't send and must fail with
+# ok=false + an error message, never raising. Closing in-step leaves nothing open at run end.
+WRITE_FAIL = """\
+return ScheduleParams("Write failure schedule", "writes to a connection the peer has closed")
+  :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""})
+        local w = ATE.write(dev, {data="x"})
+        ATE.close(dev)
+        ATE.report(Result.PASS, "ok "..tostring(w.ok).." count "..w.count.." err "..(w.err or ""))
+      end),
+  })
+"""
+
+
 class LoopbackPeer:
     """A controlled TCP listener on 127.0.0.1 that accepts connections in a background thread.
 
     Each peer binds an ephemeral port (so sequential tests never collide), :meth:`start` begins
     accepting, and each accepted socket is recorded so the test can assert a connection arrived;
-    :meth:`stop` closes everything. When a device closes its end of the socket (explicitly or at run
-    end) the peer's accepted socket errors on ``recv`` — :func:`wait_for_disconnect` polls for that."""
+    :meth:`stop` closes everything. Every accepted connection also gets a reader thread that records
+    the bytes the device sends back into ``received`` and flags the connection in ``closed`` when its
+    other end hits EOF or an error (a clean disconnect). A per-peer ``payload`` is sent to each new
+    connection on accept, so a schedule's read has data buffered the moment it connects;
+    :func:`wait_for_disconnect` polls for the disconnect."""
 
     #: Placeholder substituted with the live peer port when writing a schedule to disk, so a static
     #: Lua string can target whatever ephemeral port this run's peer chose.
     PORT_PLACEHOLDER = "__PORT__"
 
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = b"", fail_write: bool = False) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
+        # bytes the device sent back on each connection (device -> peer), keyed by the accepted socket.
+        self.received: dict[socket.socket, bytes] = {}
+        # connections whose other end has closed (the reader saw EOF/error).
+        self.closed: set[socket.socket] = set()
+        # accepted sockets and their reader thread; lets wait_for_disconnect reuse the recorded state.
+        self._readers: dict[socket.socket, threading.Thread] = {}
         self.connections: list[socket.socket] = []
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._running = False
+        # Sent to each accepted connection on accept (buffered by TCP), so a read has data ready.
+        self._payload = payload
+        # When true the peer closes its end of the socket right after accepting, so any device write
+        # gets EPIPE — a deterministic write failure (no reader thread is started for such connections).
+        self._fail_write = fail_write
 
     def start(self) -> None:
         """Begin accepting connections (bind/listen already happened in ``__init__``)."""
@@ -355,7 +462,48 @@ class LoopbackPeer:
                 conn, _addr = self._sock.accept()
             except OSError:
                 break  # stopped or the listen socket closed
-            self.connections.append(conn)
+            self.connections.append(conn)  # recorded first so wait_for_connection sees it immediately
+            if self._fail_write:
+                # Close the peer's end right away (synchronously here, before create_connection returns
+                # to the device) so any subsequent write gets EPIPE — a deterministic failure.
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            threading.Thread(target=self._handle_conn, args=(conn,), daemon=True).start()
+
+    def _handle_conn(self, conn: socket.socket) -> None:
+        """Send the peer's payload (if any), then record every byte the device sends until it closes."""
+        if self._payload:
+            try:
+                conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
+            except OSError:
+                pass  # connection already gone; nothing to send
+        buf = bytearray()
+        while self._running:
+            try:
+                chunk = conn.recv(4096)
+            except OSError:
+                break  # reset by the device side -> record what we have and stop
+            if not chunk:  # orderly close reads as EOF
+                break
+            buf.extend(chunk)
+        self.received[conn] = bytes(buf)
+        self.closed.add(conn)
+
+    def send_to_last(self, data: bytes, timeout: float = 2.0) -> bool:
+        """Wait for the latest connection to be recorded, then send ``data`` on it (for ad-hoc sends)."""
+        deadline = time.time() + timeout
+        while not self.connections and time.time() < deadline:
+            time.sleep(0.02)
+        if self.connections:
+            try:
+                self.connections[-1].sendall(data)
+                return True
+            except OSError:
+                return False
+        return False
 
     def stop(self) -> None:
         """Stop accepting and close the listener."""
@@ -369,19 +517,26 @@ class LoopbackPeer:
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
 
-    Returns True if every recorded connection was seen to close; False on timeout. A still-open idle
-    socket blocks ``recv`` up to its short timeout, so we retry across connections."""
+    When the peer records received bytes on reader threads, each connection is flagged in ``closed`` as
+    soon as its other end hits EOF/error, so we read that state directly; otherwise we fall back to
+    polling a short-timeout ``recv`` (the 16a open/close schedules with no readers). Returns True if
+    any recorded connection was seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for conn in list(peer.connections):
-            try:
-                conn.settimeout(0.05)
-                if conn.recv(1) == b"":  # an orderly close reads as EOF
+        if peer._readers:  # reader threads are recording -> use their closed set
+            for conn in list(peer.connections):
+                if conn in peer.closed:
                     return True
-            except socket.timeout:
-                continue  # still open
-            except (ConnectionError, OSError):  # reset by the device side
-                return True
+        else:  # no readers (e.g. the 16a open/close schedules) -> poll recv as before
+            for conn in list(peer.connections):
+                try:
+                    conn.settimeout(0.05)
+                    if conn.recv(1) == b"":  # an orderly close reads as EOF
+                        return True
+                except socket.timeout:
+                    continue  # still open
+                except (ConnectionError, OSError):  # reset by the device side
+                    return True
         time.sleep(0.02)
     return False
 
