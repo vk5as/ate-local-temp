@@ -213,6 +213,10 @@ class FailurePromptBar(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # A plain QWidget never paints its stylesheet background, so the bar showed up grey
+        # (packet 12d review): opt it into styled backgrounds, and give the labels their own
+        # colour rule because a stylesheet `color` does not cascade to child QLabels.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 10, 16, 10)
         layout.setSpacing(12)
@@ -235,6 +239,7 @@ class FailurePromptBar(QWidget):
         # danger Abort.
         self.setStyleSheet(
             "FailurePromptBar { background: #c62828; color: white; font-size: 15px; }"
+            "FailurePromptBar QLabel { color: white; }"
             "FailurePromptBar QPushButton { background: #f5f5f5; color: black; font-size: 15px; "
             "padding: 6px 18px; border: 1px solid #a9a9a9; border-radius: 3px; }"
             "FailurePromptBar QPushButton:hover { background: #e6e6e6; }"

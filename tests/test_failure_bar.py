@@ -15,7 +15,7 @@ import sqlite3
 from PyQt6.QtGui import QColor
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
-from ate.ui.staged_run_screen import StagedRunScreen
+from ate.ui.staged_run_screen import FailurePromptBar, StagedRunScreen
 
 from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
 
@@ -249,3 +249,31 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in _attempts_for(store, session.run_uuid, 0)] == [
         (1, "FAIL", "ABORT")
     ]
+
+
+def test_bar_paints_red_with_white_labels_offscreen(qapp):
+    """The bar must actually paint its red background and white labels.
+
+    A plain QWidget subclass does not paint a stylesheet background unless it sets
+    WA_StyledBackground (packet 12d review: a real screenshot shows it grey with black
+    text), so render it offscreen and inspect the pixels — an empty area of the bar is
+    its own background, and the label text is white."""
+    bar = FailurePromptBar()
+    bar.show_prompt("1.", "FAIL", "wrong colour")
+    bar.resize(800, 48)
+    bar.show()
+    img = bar.grab().toImage()
+    # A pixel in the bar's top margin is clear of every child widget.
+    assert img.pixelColor(100, 3).name() == "#c62828"
+    # The label text is white: scan the label zone (clear of the light-grey buttons on
+    # the right) for bright pixels only white-on-red can produce.
+    found_white = False
+    for y in range(12, 40):
+        for x in range(16, 420):
+            c = img.pixelColor(x, y)
+            if c.red() > 200 and c.green() > 200 and c.blue() > 200:
+                found_white = True
+                break
+        if found_white:
+            break
+    assert found_white, "no white label text found in the bar"
