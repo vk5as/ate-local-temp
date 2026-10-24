@@ -402,6 +402,8 @@ class _AteTable:
         ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged."""
         params = self._raw_params(params, ("readTerm",))
         validated = validate_params(TcpDriver(), params, TcpDriver.read_fields)  # names any bad field
+        if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
+            raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
         data, count, partial, err = device.read(validated)
         if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
             self._host.record_log(

@@ -9,6 +9,7 @@ stripping, size limits, per-call overrides and bad params — is verified agains
 The read/write driver logic lives in :mod:`ate.devices.tcp`; :func:`_do_read`/:func:`_do_write` are the
 ATE.read/ATE.write wrappers behind it; ``LoopbackPeer`` + ``_drive`` exercise the whole stack."""
 
+import re
 import select
 import socket
 import tempfile
@@ -409,7 +410,7 @@ def test_bad_call_params_isolated_and_name_field(app: QCoreApplication) -> None:
     try:
         store, ru = _run_with_peer(app, _step("""
         local out = {}
-        for _, p in ipairs({{size = "oops"}, {size = 5.0}, {size = true}, {sizee = 1}}) do
+        for _, p in ipairs({{size = "oops"}, {size = 5.0}, {size = true}, {sizee = 1}, {size = 0}, {size = -1}}) do
           local ok, msg = ATE.read(dev, p)
           out[#out + 1] = tostring(ok) .. " " .. msg
         end
@@ -420,15 +421,18 @@ def test_bad_call_params_isolated_and_name_field(app: QCoreApplication) -> None:
         peer.stop()
 
     lines = _step_message(store, ru).split("\n")
-    assert len(lines) == 5
-    assert all(ln.startswith("false ") for ln in lines)
+    assert len(lines) == 7
+    # each message starts with the schedule's own file:line, then the function (spec: ATE errors)
+    assert all(re.match(r"false \S*schedule\.tslua:\d+: ATE\.(read|write): ", ln) for ln in lines), lines
     assert "ATE.read: field 'size' must be one of int, got str" in lines[0]
     assert "ATE.read: field 'size' must be one of int, got float" in lines[1]
     assert "ATE.read: field 'size' must be one of int, got bool" in lines[2]
     assert "ATE.read: unknown field 'sizee'" in lines[3]
-    assert "ATE.write: missing required field 'data'" in lines[4]
+    assert "ATE.read: field 'size' must be a positive int, got 0" in lines[4]
+    assert "ATE.read: field 'size' must be a positive int, got -1" in lines[5]
+    assert "ATE.write: missing required field 'data'" in lines[6]
     error_logs = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR" and ln["source"] == "ate"]
-    assert len(error_logs) == 5
+    assert len(error_logs) == 7
 
 
 def test_lua_read_removes_terminator_and_handles_timeout(app: QCoreApplication) -> None:
