@@ -23,6 +23,8 @@ class _TcpDevice:
     def __init__(self, sock: socket.socket, params: dict[str, Any]) -> None:
         self.sock = sock
         self.params = params
+        # Bytes received but not yet consumed by a read (leftover past a terminator); carried to the next read.
+        self._leftover: bytes = b""
 
     def describe(self) -> str:
         """A one-line description of this device for log lines (host and port)."""
@@ -48,6 +50,21 @@ class TcpDriver(Driver):
         "timeout": ((int, float), True),  # connect timeout in seconds
         "readTerm": ((str, bytes), True),  # byte string stripped from reads; "" means none
         "writeTerm": ((str, bytes), True),  # byte string appended to writes; "" means none
+    }
+
+    # Per-call override fields for read/write (packet 16b). All optional — an absent field falls back
+    # to the open-time configuration. They are a subset of ``fields``: host/port stay required only at
+    # open, never here. A field this Device Type doesn't know (a typo such as "buad"), a missing
+    # required field ("data" for write), or a mistyped value always raises and names the field.
+    read_fields = {
+        "size": ((int, float), False),  # optional byte limit; None means read until terminator/timeout
+        "timeout": ((int, float), False),  # per-call timeout in seconds (falls back to open-time)
+        "readTerm": ((str, bytes), False),  # per-call terminator stripped from data ("" = none)
+    }
+    write_fields = {
+        "data": ((str, bytes), True),  # required; raw bytes sent (terminator appended separately)
+        "writeTerm": ((str, bytes), False),  # per-call terminator appended to data ("" = none)
+        "timeout": ((int, float), False),  # send timeout in seconds (falls back to open-time)
     }
 
     def open(self, params: dict[str, Any]) -> _TcpDevice:

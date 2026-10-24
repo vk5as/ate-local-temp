@@ -51,13 +51,17 @@ class Driver(ABC):
         teardown (packet 16a's TCP driver overrides this to close its socket)."""
 
 
-def validate_params(driver: Driver, params: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate ``params`` against ``driver.fields`` and return the cleaned field mapping.
+def validate_params(
+    driver: Driver, params: Mapping[str, Any], fields: dict | None = None
+) -> dict[str, Any]:
+    """Validate ``params`` against ``driver.fields`` (or an explicit ``fields`` mapping) and return the cleaned field mapping.
 
     Raises :class:`ValueError` naming the field for any unknown, missing or mistyped value — a
     schedule bug, never a Device failure (spec: "always raises, names the field"). Booleans are not
     accepted where a number is expected."""
-    known = set(driver.fields)
+    # ``fields`` lets read/write validate against their own subset; None means the driver's open fields.
+    field_specs = fields if fields is not None else driver.fields
+    known = set(field_specs)
 
     # Unknown fields trip first so a typo such as ``buad`` is caught before anything connects.
     for key in params.keys():
@@ -65,7 +69,7 @@ def validate_params(driver: Driver, params: Mapping[str, Any]) -> dict[str, Any]
             raise ValueError(f"unknown field '{key}' for {driver.name} device")
 
     cleaned: dict[str, Any] = {}
-    for field, (types, required) in driver.fields.items():
+    for field, (types, required) in field_specs.items():
         if field not in params:
             if required:
                 raise ValueError(f"missing required field '{field}' for {driver.name} device")
