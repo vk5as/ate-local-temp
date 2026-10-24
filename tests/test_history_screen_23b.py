@@ -83,13 +83,13 @@ def test_history_screen_renders_rows_and_selecting_shows_summary(qapp, tmp_path:
     screen, session = _screen(store)
     model = screen.table_view.model()
 
-    # Two runs -> two data rows (row 0 is the sticky header).
-    assert model.rowCount() == 3
-    texts = [model.item(r + 1, UUT_TYPE_COL).text() for r in range(2)]
+    # Two runs -> two data rows (body data starts at model row 0; there is no header row).
+    assert model.rowCount() == 2
+    texts = [model.item(r, UUT_TYPE_COL).text() for r in range(2)]
     assert sorted(texts) == ["MotorDriver", "PowerSupply"]
 
     # Selecting a run refreshes the summary panel from session.summary(run_uuid).
-    row = next(r for r in range(1, model.rowCount()) if model.item(r, UUT_TYPE_COL).text() == "PowerSupply")
+    row = next(r for r in range(model.rowCount()) if model.item(r, UUT_TYPE_COL).text() == "PowerSupply")
     screen.table_view.setCurrentIndex(model.index(row, 0))
     qapp.processEvents()
     panel = "\n".join([screen._summary_fields.text(), screen._result_counts.text(), screen._mismatches.text()])
@@ -115,7 +115,7 @@ def test_summary_panel_shows_result_counts(qapp, tmp_path: Path):
 
     screen, session = _screen(store)
     model = screen.table_view.model()
-    row = model.rowCount() - 1  # the single data row (header is row 0)
+    row = next(r for r in range(model.rowCount()) if model.item(r, STARTED_AT_COL).text() != "")
     screen.table_view.setCurrentIndex(model.index(row, 0))
     qapp.processEvents()
 
@@ -140,7 +140,7 @@ def test_paging_loads_the_next_page(qapp, tmp_path: Path):
 
     def page_serials():
         # Serial lives in column 2 (uut_serial), not started_at (column 0). Read only the data rows.
-        return [model.item(r + 1, SERIAL_COL).text() for r in range(model.rowCount() - 1)]
+        return [model.item(r, SERIAL_COL).text() for r in range(model.rowCount())]
 
     # Page 0 shows the three newest runs; Load more is visible while a next page exists.
     first = set(page_serials())
@@ -178,7 +178,7 @@ def test_filter_inputs_repopulate_and_apply(qapp, tmp_path: Path):
     # Picking a value drives set_filters and narrows the table to that UUT Type.
     screen.uut_type_combo.setCurrentText("MotorDriver")
     qapp.processEvents()
-    texts = [model.item(r + 1, UUT_TYPE_COL).text() for r in range(model.rowCount() - 1)]
+    texts = [model.item(r, UUT_TYPE_COL).text() for r in range(model.rowCount())]
     assert texts == ["MotorDriver"]
 
 
@@ -200,7 +200,7 @@ def test_header_click_sorts_by_the_column(qapp, tmp_path: Path):
     qapp.processEvents()
 
     assert session.sort_key == "started_at"
-    started_at = [model.item(r + 1, STARTED_AT_COL).text() for r in range(model.rowCount() - 1)]
+    started_at = [model.item(r, STARTED_AT_COL).text() for r in range(model.rowCount())]
     # Rows are ordered along the clicked column (ties make them equal, which is still sorted).
     assert started_at == sorted(started_at)
 
@@ -217,7 +217,7 @@ def test_new_run_signal_emits_the_prefill(qapp, tmp_path: Path):
 
     # Select the row (maps to its run_uuid), then click New run.
     model = screen.table_view.model()
-    row = next(r for r in range(1, model.rowCount()) if model.item(r, SERIAL_COL).text() == "PS7")
+    row = next(r for r in range(model.rowCount()) if model.item(r, SERIAL_COL).text() == "PS7")
     screen.table_view.setCurrentIndex(model.index(row, 0))
     qapp.processEvents()
     screen.new_run_button.click()
@@ -238,12 +238,12 @@ def test_show_all_runs_filters_to_the_selected_uut(qapp, tmp_path: Path):
     model = screen.table_view.model()
 
     # Select the PowerSupply row (not merely the newest), then click Show all runs of this UUT.
-    row = next(r for r in range(1, model.rowCount()) if model.item(r, UUT_TYPE_COL).text() == "PowerSupply")
+    row = next(r for r in range(model.rowCount()) if model.item(r, UUT_TYPE_COL).text() == "PowerSupply")
     screen.table_view.setCurrentIndex(model.index(row, 0))
     qapp.processEvents()
     screen.show_all_runs_button.click()
 
-    texts = [model.item(r + 1, UUT_TYPE_COL).text() for r in range(model.rowCount() - 1)]
+    texts = [model.item(r, UUT_TYPE_COL).text() for r in range(model.rowCount())]
     assert texts == ["PowerSupply"]
 
 
@@ -255,7 +255,7 @@ def test_row_to_uuid_map_tracks_rows(qapp, tmp_path: Path):
 
     screen, session = _screen(store)
     rows = {r["run_uuid"]: r for r in session.page(0)}
-    # Every data row (index 1..n, header is index 0) maps to a recorded run.
+    # Every displayed data row (model rows start at 0 now that headers are the real header row) maps to a recorded run.
     assert set(screen._row_to_uuid.values()) == {ru1, ru2}
     # A fresh fetch agrees with the map: every mapped run_uuid is a real fetched row.
     assert all(uuid in rows for uuid in screen._row_to_uuid.values())

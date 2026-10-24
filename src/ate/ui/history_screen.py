@@ -41,6 +41,33 @@ def _default_open_file(path: str | None) -> None:
     subprocess.Popen(["xdg-open", path])
 
 
+# Friendly labels shown as the table's real header row, one per :data:`HISTORY_COLUMNS` cell in order.
+HISTORY_HEADER_LABELS = ("Start", "UUT Type", "Serial", "Result", "End Reason", "Test Schedule", "Project", "Operator")
+
+
+class _HistoryItemModel(QStandardItemModel):
+    """A QStandardItemModel that renders friendly column labels as its header row (spec 23d).
+
+    ``QStandardItemModel`` has no way to set horizontal header text, so the labels are served through
+    :meth:`horizontalHeaderData`. The view then draws them as a real header and excludes that row from the
+    body, so data starts at model row 0 — matching how :attr:`HistoryScreen._row_to_uuid` keys rows. This
+    keeps ``table_view.model()`` usable (selection reads back through it) unlike a bare ``QTableWidget``,
+    whose offscreen selection does not register on this Qt build.
+
+    This PyQt6 build exposes no ``ItemDataRole`` enum, so the header roles are matched on their stable
+    integer values: ``DisplayRole = 9`` and ``HeaderDataRole = 10``. Any Horizontal query returns the label.
+    """
+
+    def __init__(self, labels: tuple[str, ...]) -> None:
+        super().__init__()
+        self._header_labels = list(labels)
+
+    def horizontalHeaderData(self, column: int, orientation: Qt.Orientation, role: int) -> str | None:
+        if orientation == Qt.Orientation.Horizontal and role in (9, 10):
+            return self._header_labels[column]
+        return None
+
+
 class HistoryScreen(QWidget):
     """A flat table of past runs, newest first, with a summary panel for the selected run.
 
@@ -67,12 +94,11 @@ class HistoryScreen(QWidget):
         self._status_label = QLabel("")
         layout.addWidget(self._status_label)
         self.table_view = QTableView()
-        model = QStandardItemModel()
+        # Friendly labels shown as the real header row; body data therefore starts at model row 0, so
+        # selection and the running-row map address rows from 0 (no separate header row to skip).
+        model = _HistoryItemModel(HISTORY_HEADER_LABELS)
         self.table_view.setModel(model)
         for column in HISTORY_COLUMNS:
-            header_item = QStandardItem(column)
-            header_item.setEditable(False)
-            model.setItem(0, HISTORY_COLUMNS.index(column), header_item)  # row 0 holds the headers
             self._column_index[column] = HISTORY_COLUMNS.index(column)
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -88,7 +114,10 @@ class HistoryScreen(QWidget):
         layout.addWidget(controls)
 
         self.summary_panel = QScrollArea()
-        summary_layout = QVBoxLayout(self.summary_panel.widget())
+        # Build the summary layout on a dedicated container first; setWidget after so the labels are
+        # parented into it (building before setWidget leaves them unparented and never shown).
+        self._summary_container = QWidget()
+        summary_layout = QVBoxLayout(self._summary_container)
         self._summary_fields = QLabel("")
         self._result_counts = QLabel("")
         self._mismatches = QLabel("")
@@ -99,6 +128,8 @@ class HistoryScreen(QWidget):
         summary_layout.addWidget(QLabel("Checksum mismatches"))
         summary_layout.addWidget(self._mismatches)
         layout.addWidget(self.summary_panel)
+        self.summary_panel.setWidget(self._summary_container)
+        self.summary_panel.setWidgetResizable(True)
 
         self._build_actions(control_layout)
 
@@ -183,22 +214,16 @@ class HistoryScreen(QWidget):
         """Fetch ``page`` and rebuild the table; hide 'Load more' once every row is shown."""
         rows = self.session.page(page)
         model = self.table_view.model()
-        # Drop any stale data/header rows first (a filter or sort change must not accumulate them).
+        # Drop any stale data rows first (a filter or sort change must not accumulate them).
         for r in range(model.rowCount() - 1, -1, -1):
             model.removeRow(r)
         self._row_to_uuid = {}
-        for column in HISTORY_COLUMNS:
-            header_item = QStandardItem(column)
-            header_item.setEditable(False)
-            model.setItem(0, self._column_index[column], header_item)
-        # ``session.page`` returns pure data rows (no header); the header lives at model row 0, so every
-        # page's data starts at model row 1 regardless of ``page`` — shifting by ``page`` would leave a
-        # gap and make later pages' early cells read back as None.
-        # A running row (no result / end_reason) is flagged here so its "running" status drives the
-        # result cell and disables report actions for it while selected.
+        # Headers are the model's horizontal header labels (set once in __init__), so body data starts at row 0.
+        # ``session.page`` returns pure data rows; a running row (no result / end_reason) is flagged here so its
+        # "running" status drives the result cell and disables report actions for it while selected.
         self._row_running = {}
         for offset, row in enumerate(rows):
-            abs_row = 1 + offset
+            abs_row = offset
             self._row_to_uuid[abs_row] = str(row.get("run_uuid") or "")
             running = self.session.is_running(row)
             self._row_running[abs_row] = running
@@ -212,8 +237,10 @@ class HistoryScreen(QWidget):
         # user can still try to advance until they've confirmed there is nothing further.
         load_more = self.load_more_button
         load_more.setVisible(bool(rows))
-        # Populate the dropdown filters from all runs (only on a fresh, unfiltered view).
-        if page == 0:
+        # Populate the dropdown filters from all runs (only on a fresh, unfiltered view). When a filter is
+        # already active we must not clear and repopulate the inputs here — set_filters has just written
+        # their values, and clearing them would drop the selection back to empty.
+        if page == 0 and not self._read_filters():
             self._refresh_filter_options()
 
     def next_page(self) -> None:
@@ -232,7 +259,7 @@ class HistoryScreen(QWidget):
         if not index:
             return None
         row = index[0].row()
-        if row == 0 or row not in self._row_to_uuid:  # the header row is never selectable
+        if row < 0 or row not in self._row_to_uuid:  # there is no header row; any valid data row maps to a run
             return None
         return self._row_to_uuid[row]
 
@@ -309,7 +336,9 @@ class HistoryScreen(QWidget):
         self.show_all_runs_button = QPushButton("Show all runs of this UUT")
         self.new_run_button = QPushButton("New run for this UUT")
 
+        # Spec (history-screen.md, test-report-format.md): regenerating includes the run log by default.
         self.include_run_log = QCheckBox("Include run log")
+        self.include_run_log.setChecked(True)
         self.regenerate_mode = QComboBox()
         self.regenerate_mode.addItem("HTML", "html-only")
         self.regenerate_mode.addItem("HTML + PDF", "html+pdf")
@@ -375,8 +404,8 @@ class HistoryScreen(QWidget):
             self.uut_type_combo.blockSignals(True)
             self.uut_type_combo.setCurrentText(filters["uut_type"])
             self.uut_type_combo.blockSignals(False)
-        if "serial" in filters:
-            self.serial_edit.setText(filters["serial"])
+        if "uut_serial" in filters:
+            self.serial_edit.setText(filters["uut_serial"])
         if "result" in filters:
             self.result_combo.blockSignals(True)
             self.result_combo.setCurrentText(filters["result"])

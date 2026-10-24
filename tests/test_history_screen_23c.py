@@ -36,13 +36,13 @@ def test_running_row_shows_running_and_disables_report_actions(qapp, tmp_path):
     screen = HistoryScreen(s)
     model = screen.table_view.model()
 
-    # The table still works: header + the single running data row.
-    assert model.rowCount() == 2
+    # The table still works: body data starts at model row 0 (the real header row is not a data row).
+    assert model.rowCount() == 1
     # Result column (index 3 of HISTORY_COLUMNS) shows "running" for the open run.
-    assert model.item(1, 3).text() == "running"
+    assert model.item(0, 3).text() == "running"
 
     # Selecting it disables Open report and Regenerate but leaves the row selectable.
-    screen.table_view.setCurrentIndex(model.index(1, 0))
+    screen.table_view.setCurrentIndex(model.index(0, 0))
     qapp.processEvents()
     assert screen.open_report_button.isEnabled() is False
     assert screen.regenerate_button.isEnabled() is False
