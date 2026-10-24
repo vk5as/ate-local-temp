@@ -34,6 +34,7 @@ Bridging facts (validated empirically against lupa 2.8):
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import weakref
 from pathlib import Path
@@ -321,6 +322,23 @@ class _AteTable:
                 f"{self._host._location()} ATE.input: only allowed in a step action"
             )
         return self._host.inputs(n)
+
+    def sleep(self, seconds: Any) -> bool:
+        """Sleep for ``seconds`` (int or float, fractions allowed), interruptible by an abort.
+
+        Waits on the shared abort flag, so an abort requested during the wait wakes it and raises
+        "aborted" into Lua immediately — the same path the count hook uses — and the running step
+        records ERROR "Aborted by Operator". A non-number, non-finite or negative argument raises
+        a clear error naming ATE.sleep, so a bad call errors the step (story 48)."""
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
+        flag = self._host._abort_flag
+        # An abort requested before the wait starts is no reason to keep sleeping: raise now.
+        if flag.aborted or flag.wait(seconds):
+            raise RuntimeError("aborted")
+        return True
 
     def log(self, level: Any, *args: Any) -> bool:
         """Record a schedule's own log line at ``level``. Returns ``true``."""
