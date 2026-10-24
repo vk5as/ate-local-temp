@@ -373,17 +373,17 @@ def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     socket blocks ``recv`` up to its short timeout, so we retry across connections."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        closed_any = False
         for conn in list(peer.connections):
             try:
-                conn.settimeout(0.2)
-                conn.recv(1)  # raises ConnectionResetError/BrokenPipe when the device side closed
-            except (ConnectionError, OSError):
-                closed_any = True
-        if closed_any:
-            return True
-        time.sleep(0.05)
-    return len(peer.connections) > 0
+                conn.settimeout(0.05)
+                if conn.recv(1) == b"":  # an orderly close reads as EOF
+                    return True
+            except socket.timeout:
+                continue  # still open
+            except (ConnectionError, OSError):  # reset by the device side
+                return True
+        time.sleep(0.02)
+    return False
 
 
 def _drive(engine: "RunEngine", app, on_run_uuid=None) -> None:
