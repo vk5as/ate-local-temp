@@ -6,9 +6,9 @@
 
 **Blocked by:** 23b (History screen)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Usable during a run unless `ui.allowHistoryDuringRun` is `false` (then shows "A Test Run is in progress"); a running run shows as "running" with report actions disabled
-- [ ] A pytest-qt test covers both settings
+- [x] Usable during a run unless `ui.allowHistoryDuringRun` is `false` (then shows "A Test Run is in progress"); a running run shows as "running" with report actions disabled
+- [x] A pytest-qt test covers both settings
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
