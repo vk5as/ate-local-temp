@@ -55,10 +55,25 @@ class _TcpDevice:
         return params.get("timeout")  # open-time connect/read timeout in seconds (or None = block)
 
     @staticmethod
-    def _effective_term(override: Any) -> bytes:
+    def _to_bytes(value: Any) -> bytes:
+        """Coerce a byte payload to ``bytes``.
+
+        A value coming straight from Python is already bytes; one arriving from a Lua schedule action
+        is a :class:`str` (lupa hands Lua strings back as text), so it is encoded — utf-8 first, latin-1
+        for raw content that isn't valid utf-8. Anything else is a genuine argument error."""
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        if isinstance(value, str):
+            try:
+                return value.encode("utf-8")
+            except UnicodeEncodeError:
+                return value.encode("latin-1")
+        raise TypeError(f"expected a string or bytes, got {type(value).__name__}")
+
+    def _effective_term(self, override: Any) -> bytes:
         """The terminator to strip/append: the per-call override if given, else the open-time config."""
         term = override if override is not None else self.params.get("readTerm")
-        return bytes(term) if term else b""
+        return self._to_bytes(term) if term else b""
 
     def read(self, params: dict[str, Any]) -> tuple[Any, int, bool, str | None]:
         """Read from the socket and return ``(data, count, partial, err_or_None)``.
@@ -108,8 +123,8 @@ class _TcpDevice:
         Sends the whole payload within ``timeout`` seconds; ``count`` is the number of bytes actually
         sent — on success that includes the terminator, on a timeout it is what went out before giving up."""
         sock = self.sock
-        data = params["data"]  # required by write_fields
-        payload = bytes(data) + self._effective_term(params.get("writeTerm"))
+        data = self._to_bytes(params["data"])  # required by write_fields; a Lua string is encoded here
+        payload = data + self._effective_term(params.get("writeTerm"))  # terminator appended to the raw bytes
         to = self._effective_timeout(params.get("timeout"), self.params)  # per-call override or open-time config
         total_sent = 0
         prev = sock.gettimeout()

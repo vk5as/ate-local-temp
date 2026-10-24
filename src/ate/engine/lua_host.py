@@ -44,6 +44,7 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 from ..devices import DeviceRegistry, TcpDriver
+from ..devices.registry import validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
 from .step_inputs import InvalidStepInput, StepInput, validate_inputs
@@ -387,8 +388,12 @@ class _AteTable:
         round trip through the result table (a nil terminator on timeout-no-bytes yields err="timeout")."""
         validated = validate_params(TcpDriver(), params or {}, TcpDriver.read_fields)  # names any bad override field
         data, count, partial, err = device.read(validated)  # the userdata exposes read/write/close via __index__
+        if partial:  # spec: a timeout after some bytes is partial and logs one WARNING (source ate)
+            self._host.record_log(
+                "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
+            )
         return self._host._runtime.table_from({
-            "data": data.hex(),  # ASCII hex of the raw bytes; binary-safe through _materialize
+            "data": data.hex() if data is not None else "",  # ASCII hex of the raw bytes; binary-safe through _materialize (None on a timeout-with-no-bytes stays nil)
             "count": int(count),
             "partial": bool(partial),
             "err": err,  # None -> nil (only present when there is an error)
