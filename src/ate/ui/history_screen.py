@@ -19,6 +19,7 @@ from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -28,10 +29,12 @@ from PyQt6.QtWidgets import (
     QTableView,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 from ..history.session import HistorySession
 from ..storage.store import HISTORY_COLUMNS
+from .export_log_dialog import ExportLogDialog
 
 
 def _default_open_file(path: str | None) -> None:
@@ -39,6 +42,11 @@ def _default_open_file(path: str | None) -> None:
     if path is None or not Path(path).exists():
         return
     subprocess.Popen(["xdg-open", path])
+
+
+def _default_file_dialog(title: str, default_path: str, filters: str) -> Optional[str]:
+    """The platform Save As (injected into tests)."""
+    return QFileDialog.getSaveFileName(QWidget(), title, default_path, filters)
 
 
 # Friendly labels shown as the table's real header row, one per :data:`HISTORY_COLUMNS` cell in order.
@@ -49,18 +57,28 @@ class HistoryScreen(QWidget):
     """A flat table of past runs, newest first, with a summary panel for the selected run.
 
     ``session`` supplies every row and action; ``open_file`` opens report files (injected so tests can
-    capture it instead of launching a viewer). Selecting a run refreshes the summary panel; its actions
-    are wired to :meth:`HistorySession.summary`, :meth:`report_files`, :meth:`regenerate`,
-    :meth:`uut_filter` and :meth:`new_run_prefill`.
+    capture it instead of launching a viewer), and ``file_dialog`` stands in for Save As (the Export
+    run log dialog's file picker). Selecting a run refreshes the summary panel; its actions are wired
+    to :meth:`HistorySession.summary`, :meth:`report_files`, :meth:`regenerate`, :meth:`uut_filter`,
+    :meth:`new_run_prefill`, :meth:`export_owner_choices` / :meth:`export_log_default_path` and
+    :meth:`HistorySession.export_log`.
     """
 
     # Prefill dict for a new run of this UUT (see :meth:`HistorySession.new_run_prefill`).
     new_run_requested = pyqtSignal(dict)
 
-    def __init__(self, session: HistorySession, *, open_file: Optional[Callable[[str | None], None]] = None) -> None:
+    def __init__(
+        self,
+        session: HistorySession,
+        *,
+        open_file: Optional[Callable[[str | None], None]] = None,
+        file_dialog: Optional[Callable[[str, str, str], Optional[str]]] = None,
+    ) -> None:
         super().__init__()
         self.session = session
         self._open_file = open_file or _default_open_file
+        self._file_dialog = file_dialog or _default_file_dialog
+        self._export_dialog: Optional[ExportLogDialog] = None  # the open export dialog, if any
         # column name -> model column index (built once in __init__, reused on every reload)
         self._column_index: dict[str, int] = {}
         # absolute page currently shown; "Load more" advances it and filter/sort changes reset it to 0
@@ -246,6 +264,9 @@ class HistoryScreen(QWidget):
         row = index[0].row() if index else 0
         running = row in self._row_to_uuid and self._row_running.get(row, False)
         run_uuid = self._selected_run_uuid()
+        # Export log: only a selected finished run (INTERRUPTED included) can be exported; nothing
+        # selected or a running row disables the button (spec 24b / history-screen.md).
+        self.export_log_button.setEnabled(bool(run_uuid) and not running)
         # A selected run still executing has no result yet: show "running" instead of a summary.
         if not run_uuid or running:
             self._summary_fields.setText("running" if running else "")
@@ -300,7 +321,8 @@ class HistoryScreen(QWidget):
     # -- actions -------------------------------------------------------------
 
     def _build_actions(self, parent: QVBoxLayout) -> None:
-        """Open report, Regenerate (HTML / HTML+PDF + Include run log), Show all runs of this UUT, New run for this UUT."""
+        """Open report, Regenerate, Export log (HTML / HTML+PDF + Include run log), Show all runs of
+        this UUT and New run for this UUT."""
         bar = QWidget()
         self._actions_bar = bar
         bar_layout = QVBoxLayout(bar)
@@ -311,6 +333,9 @@ class HistoryScreen(QWidget):
 
         self.open_report_button = QPushButton("Open report")
         self.regenerate_button = QPushButton("Regenerate")
+        # Disabled until a selected finished run; _refresh_summary owns the rest of the state.
+        self.export_log_button = QPushButton("Export log")
+        self.export_log_button.setEnabled(False)
         self.show_all_runs_button = QPushButton("Show all runs of this UUT")
         self.new_run_button = QPushButton("New run for this UUT")
 
@@ -324,6 +349,7 @@ class HistoryScreen(QWidget):
         bar_layout.addWidget(self.load_more_button)
         bar_layout.addWidget(self.open_report_button)
         bar_layout.addWidget(self.regenerate_button)
+        bar_layout.addWidget(self.export_log_button)
         bar_layout.addWidget(self.show_all_runs_button)
         bar_layout.addWidget(self.new_run_button)
         action_row = QHBoxLayout()
@@ -334,6 +360,7 @@ class HistoryScreen(QWidget):
 
         self.open_report_button.clicked.connect(self._on_open_report)
         self.regenerate_button.clicked.connect(self._on_regenerate)
+        self.export_log_button.clicked.connect(self._on_export_log)
         self.show_all_runs_button.clicked.connect(self._on_show_all_runs)
         self.new_run_button.clicked.connect(self._emit_new_run)
 
@@ -365,6 +392,40 @@ class HistoryScreen(QWidget):
             include_run_log=self.include_run_log.isChecked(),
             parent=self,
         )
+
+    def _on_export_log(self) -> None:
+        """Open the run log export dialog for the selected finished run (spec 24b)."""
+        index = self.table_view.selectedIndexes()
+        row = index[0].row() if index else None
+        if row is None or row not in self._row_to_uuid:
+            return
+        if self._row_running.get(row, False):  # a run still in progress can't be exported
+            return
+        dialog = ExportLogDialog(
+            self,
+            self.session.store,
+            self._row_to_uuid[row],
+            default_path=str(self.session.export_log_default_path(self._row_to_uuid[row])),
+            file_dialog=self._file_dialog,
+        )
+        dialog.set_owner_choices(self.session.export_owner_choices(self._row_to_uuid[row]))
+        dialog.reset()  # every box ticked each time the dialog opens
+        dialog.save_chosen.connect(self._on_export_save)
+        if self._export_dialog is not None and self._export_dialog.isVisible():
+            self._export_dialog.reject()
+        self._export_dialog = dialog
+        dialog.show()
+
+    def _on_export_save(self, path: str, fmt: str, filters: dict[str, Optional[set]]) -> None:
+        """Write the exported log to the chosen path and close the dialog (spec 24b)."""
+        dialog = self._export_dialog
+        if dialog is None:
+            return
+        try:
+            self.session.export_log(dialog.run_uuid, path, fmt, **filters)
+            dialog.accept()
+        except Exception as exc:  # noqa: BLE001 - surface it; the dialog stays open for the user
+            QMessageBox.warning(self, "Export run log", str(exc))
 
     def _on_show_all_runs(self) -> None:
         """Filter the table to every run of this UUT Type and serial."""
