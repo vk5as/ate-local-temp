@@ -9,7 +9,7 @@
 **Status:** ready-for-agent
 
 - [ ] `UDP` with `host`, `port`, `localPort`, `timeout`, no terminators; one datagram per read; never partial except when truncated by `size`; buffer is a queue of datagrams
-- [ ] (moved to 16d on 2026-10-26: the `Udp(host, port)` builder lives in the `ate.devices` module that 16d creates)
+(The `Udp(host, port)` builder moved to 16d on 2026-10-26: builders live in the `ate.devices` module that 16d creates.)
 - [ ] Seam-1 tests use a loopback UDP peer
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
