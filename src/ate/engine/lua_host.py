@@ -47,6 +47,7 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 from ..devices import DeviceRegistry, TcpDriver
+from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
@@ -448,6 +449,16 @@ class _AteTable:
         """The call's own ``onError`` if given, else the one given to ``open`` (or nil)."""
         return error_handler if error_handler is not None else self._open_handlers.get(device)
 
+    def _device_driver(self, device: Any) -> type:
+        """The driver class that opened ``device``, so ``read``/``write`` validate their per-call
+        fields against that Device Type rather than always TCP (packet 18a).
+
+        Anything that is not a device handle — a string, a number, a closed-over value — falls back
+        to TCP, which is what these wrappers used before, so a bad argument still raises and still
+        reports "device closed" exactly as it did."""
+        driver = getattr(device, "driver", None)
+        return driver if isinstance(driver, type) else TcpDriver
+
     def _do_open(self, device_type: Any, params: Any = None, error_handler: Any = None) -> Any:
         """Open a Device of ``device_type`` with ``params``; returns an opaque handle (userdata).
 
@@ -460,7 +471,11 @@ class _AteTable:
         try:
             handle = registry.open_device(name, raw)
         except OSError as exc:  # refused, unreachable, timed out: a Device failure, not a schedule bug
-            what = f"{name} {raw.get('host')}:{raw.get('port')}"
+            # TCP names itself host:port; SERIAL names the pyserial port it tried to open.
+            if name == "TCP":
+                what = f"{name} {raw.get('host')}:{raw.get('port')}"
+            else:
+                what = f"{name} {raw.get('port') or raw.get('host') or raw.get('resource') or ''}"
             return self._failure("open", what, {"ok": False, "err": str(exc)}, params, error_handler)
         if error_handler is not None:
             self._open_handlers[handle] = error_handler
@@ -510,7 +525,8 @@ class _AteTable:
         overflow carries ``overflow = true`` and logs one WARNING (source device) for it."""
         params, error_handler = self._split_args(params, error_handler)
         raw = self._raw_params(params, ("readTerm",)) or {}  # a skipped params table is the empty one
-        validated = validate_params(TcpDriver(), raw, TcpDriver.read_fields)
+        driver = self._device_driver(device)  # the Device Type that opened this handle
+        validated = validate_params(driver, raw, driver.read_fields)
         if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
             raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
         if self._host._devices.is_open(device):
@@ -548,9 +564,8 @@ class _AteTable:
         timeouts/failures come back from the device as result tables, never raised here, and go through
         ``onError``, as does writing to a closed Device. ``count`` is the number of bytes actually sent,
         terminator included."""
-        validated = validate_params(
-            TcpDriver(), self._raw_params(params, ("data", "writeTerm")), TcpDriver.write_fields
-        )
+        driver = self._device_driver(device)  # the Device Type that opened this handle
+        validated = validate_params(driver, self._raw_params(params, ("data", "writeTerm")), driver.write_fields)
         if self._host._devices.is_open(device):
             ok, count, err = device.write(validated)
         else:
@@ -571,7 +586,7 @@ class _AteTable:
         Device or one the reader marked failed returns the failure through ``onError``, like a
         read on a closed Device."""
         params, error_handler = self._split_args(params, error_handler)
-        validate_params(TcpDriver(), self._raw_params(params, ()) or {}, {})  # flush takes no fields
+        validate_params(self._device_driver(device), self._raw_params(params, ()) or {}, {})  # flush takes no fields
         if self._host._devices.is_open(device):
             ok, count, err = device.flush()
         else:
@@ -857,6 +872,7 @@ class _LuaHost:
         # Packet 17b: the run engine's callable that records pending device warnings; None until a run.
         self.device_warning_sink: Optional[Callable[[], None]] = None
         self._devices.register("TCP", TcpDriver)
+        self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
