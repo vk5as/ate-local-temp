@@ -350,6 +350,7 @@ class HeadlessRunSession(QObject):
             schedule_name=self._selected_name,
             utc_offset="+00:00",
             overrides={int(seq): bool(en) for seq, en in (self._pending_node_enables or {}).items()},
+            receive_buffer_bytes=self._config.receive_buffer_bytes,  # packet 17a: the per-device receive cap
         )
 
         # Announce STARTED on this thread before the worker runs. The worker's queued

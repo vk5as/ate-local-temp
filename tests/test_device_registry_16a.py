@@ -162,6 +162,11 @@ def test_open_registers_and_tracks_handle() -> None:
     assert len(peer.connections) == 1  # connected through real Lua execution
     assert host._devices.snapshot() == [handle]  # tracked for run-end teardown
 
+    # 17a: this test has no run, so nothing closes the device for it; closing it here joins the
+    # device's background reader thread so it can't survive the test (the 17a leak check trips
+    # otherwise).
+    handle.close()
+
 
 def test_close_returns_ok_table_and_double_close_noop() -> None:
     """ATE.close returns {ok = true}; a second close is still {ok = true} and removes nothing."""
@@ -197,6 +202,10 @@ def test_close_returns_ok_table_and_double_close_noop() -> None:
     assert type(ok2).__name__ == "_LuaTable"
     assert ok2.ok is True
     assert host._devices.snapshot() == []
+
+    # The handle was never tracked by the registry (opened directly), so ATE.close does not
+    # release it; close it here so its background reader thread (17a) can't survive the test.
+    handle.close()
 
 
 # --- Unit: generic param validation --------------------------------------------------------
