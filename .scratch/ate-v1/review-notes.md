@@ -131,3 +131,7 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - `report_stem_and_directory` doesn't sanitise its stem or the `<UUT Type>` directory, so `report_files` globbing (and the report directory itself) may not match a sanitised report name for a serial/UUT Type with Windows-illegal characters. The log's default name is now sanitised like the report's.
 - An INTERRUPTED run's default log name ends `_INTERRUPTED_log.csv` (matches the report writer; spec lists only PASS|FAIL).
 - The Owner list is flat; Sub-schedule header owners aren't representable yet (no header nodes recorded).
+
+## 31a — test-flake hardening (merged 3e9af9d, 2026-10-26)
+- Light review: asserted the 7 trigger writes; `_hang_up` now always closes and records its socket even if `sendall` raises; fixed the `wait_for_disconnect` docstring. `test_later_read_write_failures_add_no_further_warning` now writes the trigger before reading (a read first waited out the reset grace, then the write met the reset). Device files 10/10 clean; full suite 448 passed ×3.
+- Leftovers (Haiku notes): two device seam tests still use a fixed 150 ms `ATE.sleep`; the 1 s reset-grace fallback could mask a missing trigger byte (now covered by the asserted writes); a few pump loops still busy-wait.

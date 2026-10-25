@@ -9,7 +9,9 @@
 **Status:** ready-for-agent
 
 - [ ] `SERIAL` opens with pyserial `serial_for_url`, so `port` accepts COM/tty names and pyserial URLs; fields `port`, `baud`, `dataBits`, `stopBits`, `parity`, `flowControl`, `timeout`, `readTerm`, `writeTerm`
-- [ ] `Parity` and `FlowControl` enums; `Serial(port)` builder with the documented defaults
+- [ ] `parity` and `flowControl` take the `Parity` and `FlowControl` enum values (the enums already exist), `dataBits` 5–8 and `stopBits` 1, 1.5 or 2; a bad value raises and names the field
+
+(The `Serial(port)` builder moved to 16d on 2026-10-26: builders live in the `ate.devices` module that 16d creates.)
 - [ ] Seam-1 tests use `socket://localhost:<port>`
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.

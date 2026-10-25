@@ -10,5 +10,6 @@
 
 - [ ] `require("ate.devices")` gives `Tcp(host, port)`, `Read()`, `Write(data)` builders with defaults and chained setters; the builder is the params table
 - [ ] Seam-1 tests open, write and read through the builders
+- [ ] `Serial(port)` and `Udp(host, port)` builders with the documented defaults (moved here from 18a/18b on 2026-10-26)
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
