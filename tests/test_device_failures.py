@@ -124,7 +124,7 @@ def test_failure_records_one_warning_naming_device_and_error() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        dev.write({"data": "z", "timeout": 2})  # this byte is what makes the peer reset
+        assert dev.write({"data": "z", "timeout": 2})[0], "the trigger write must reach the peer"  # this byte is what makes the peer reset
         _wait_for(dev, lambda d: d._failed is not None)  # the reader saw the reset
         warnings = dev.take_warnings()
         assert len(warnings) == 1, f"exactly one warning per failure, got {len(warnings)}"
@@ -163,9 +163,11 @@ def test_later_read_write_failures_add_no_further_warning() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        first = dev.read({"timeout": 2})
-        dev.write({"data": "z", "timeout": 2})  # the device's first byte triggers the peer's reset
+        # Write first: the device's first byte triggers the peer's reset (a read first would wait out the
+        # peer's reset grace instead). The payload already arrived, so it is still readable after the failure.
+        assert dev.write({"data": "z", "timeout": 2})[0], "the trigger write must reach the peer"
         _wait_for(dev, lambda d: d._failed is not None)
+        first = dev.read({"timeout": 2})
         second = dev.read({"timeout": 2})
         write = dev.write({"data": "x", "timeout": 2})
         dev.close()
@@ -190,7 +192,7 @@ def test_closed_handle_is_dropped_once_its_warnings_are_drained() -> None:
         dev = registry.open_device(
             "TCP", {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
-        dev.write({"data": "z", "timeout": 2})  # triggers the peer's reset
+        assert dev.write({"data": "z", "timeout": 2})[0], "the trigger write must reach the peer"  # triggers the peer's reset
         _wait_for(dev, lambda d: d._failed is not None)
         registry.close_device(dev)
         host = type("_Host", (), {"_devices": registry})()

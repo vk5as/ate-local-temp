@@ -434,10 +434,13 @@ class LoopbackPeer:
                 except OSError:
                     pass  # no byte within the grace (or the peer side is already gone)
                 conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-            conn.close()
-            self.closed.add(conn)
         except OSError:
-            pass
+            pass  # the device already went away; still close and record it below
+        finally:
+            try:
+                conn.close()
+            finally:
+                self.closed.add(conn)
 
     def _handle_conn(self, conn: socket.socket) -> None:
         """Send the peer's payload (if any), then record every byte the device sends until it closes."""
@@ -468,7 +471,8 @@ class LoopbackPeer:
 
 
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
-    """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
+    """Poll until a recorded peer connection has closed (the device closed it, or a hang-up peer
+    closed/reset its side), or ``timeout`` elapses.
 
     Every accepted socket has a peer thread (reader, or hang-up) that adds it to ``closed`` when the
     connection ends, so this only reads that set — never recv, which would race the reader and steal

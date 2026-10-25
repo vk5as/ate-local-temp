@@ -194,7 +194,7 @@ def test_read_connection_reset_is_other_failure() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        dev.write({"data": b"z"})  # the byte that triggers the reset
+        assert dev.write({"data": b"z"})[0], "the trigger write must reach the peer"  # the byte that triggers the reset
         data, count, partial, err = dev.read({"timeout": 2})
         dev.close()
     finally:
@@ -210,7 +210,7 @@ def test_write_after_connection_reset_fails_with_message() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        dev.write({"data": b"z"})  # the byte that makes the peer send its RST
+        assert dev.write({"data": b"z"})[0], "the trigger write must reach the peer"  # the byte that makes the peer send its RST
         readable, _, _ = select.select([dev.sock], [], [], 2)  # the RST has arrived
         assert readable
         ok, count, err = dev.write({"data": b"x"})
