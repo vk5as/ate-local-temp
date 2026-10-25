@@ -165,6 +165,13 @@ class StepsOptionsStage(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.step_list = QListWidget()
+        # Checkboxes are per step (packet 11b): each row is checkable and a toggle is one call
+        # into session.toggle_node — the widget holds no logic of its own.
+        self._checkable = True  # setup state: the boxes stay checkable until a run starts
+        self._loading = False  # True while load_steps re-syncs check states, so itemChanged
+        # is not mistaken for an Operator toggle.
+        self._states: dict[int, bool] = {}  # each row's last-seen checked state
+        self.step_list.itemChanged.connect(self._on_check_toggled)
         self.stop_on_fail_radio = QRadioButton("Stop on first failure")
         self.continue_all_radio = QRadioButton("Run every step regardless of failures")
         # Default policy: stop on the first failure; :meth:`load_steps` re-applies it from the
@@ -178,19 +185,73 @@ class StepsOptionsStage(QWidget):
         layout.addWidget(self.run_button)
 
     def load_steps(self, steps: Iterable[object]) -> None:
-        """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) in the list.
+        """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) as checkable rows.
 
-        Also re-applies the selected schedule's Stop on Fail default to the radio pair so it is not
-        stuck at construction-time; the Operator can still toggle either choice."""
+        Every row carries its step's default ``enabled`` state, or — when the session carries
+        step-enable overrides for the selected schedule — the override that a next run would
+        record, so the boxes show what the run will record (spec 37: options carry over). A
+        toggle is one call into ``session.toggle_node(row, checked)`` (packet 11b), with the row's
+        position in the expanded step list as the runner seq. Also re-applies the selected
+        schedule's Stop on Fail default to the radio pair so it is not stuck at construction-
+        time; the Operator can still toggle either choice."""
+        self._loading = True
         self.step_list.clear()
+        self._states = {}
+        overrides = self.session.node_enables if self.session is not None else None
+        if overrides is not None:
+            overrides = dict(overrides)
         for step in steps:
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
             text = f"{number}  {label}" if number else str(label)
             item = QListWidgetItem(text)
+            # Always keep the row enabled and selectable and the box drawn; only
+            # ItemIsUserCheckable toggles with the run lock (a locked box still shows its
+            # check state). NoItemFlags would disable the row even in setup.
+            checkable = Qt.ItemFlag.ItemIsUserCheckable if self._checkable else Qt.ItemFlag.NoItemFlags
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | checkable)
             self.step_list.addItem(item)
+            row = self.step_list.row(item)
+            default = bool(getattr(step, "enabled", True))
+            checked = overrides.get(row, default) if overrides else default
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self._states[row] = checked
+        self._loading = False
         if self.session is not None:
             self._apply_stop_on_fail(self.session.selected_stop_on_fail)
+
+    def _on_check_toggled(self, item: QListWidgetItem, *_args: int) -> None:
+        """A checkbox toggle reaches the session as ``toggle_node(row, checked)`` — no logic here.
+
+        PyQt6's ``itemChanged`` signal passes only the row, so the handler reads the row's new
+        check state and compares it against the state it last saw; flag re-syncs (set_checkable),
+        same-state events and the load_steps re-sync are all ignored, so only a real toggle
+        reaches the session. A locked box (a run in progress) has no toggle: the handler
+        returns before touching the session."""
+        if self._loading or self.session is None or not self._checkable:
+            return
+        row = self.step_list.row(item)
+        checked = item.checkState() == Qt.CheckState.Checked
+        if self._states.get(row) == checked:
+            return
+        self._states[row] = checked
+        self.session.toggle_node(row, checked)
+
+    def set_checkable(self, checkable: bool) -> None:
+        """Lock or unlock the step checkboxes: toggle only ItemIsUserCheckable so the
+        boxes stay drawn with their check state and the row stays enabled and selectable
+        (the screen calls this from session state changes)."""
+        self._checkable = checkable
+        # Re-sync the last-seen state before the flag pass, so the flag events the pass emits
+        # are read back as the same state and never reach the session as phantom toggles.
+        for i in range(self.step_list.count()):
+            item = self.step_list.item(i)
+            self._states[i] = item.checkState() == Qt.CheckState.Checked
+        keep = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        flag = keep | (Qt.ItemFlag.ItemIsUserCheckable if checkable else Qt.ItemFlag.NoItemFlags)
+        for i in range(self.step_list.count()):
+            item = self.step_list.item(i)
+            item.setFlags(item.flags() & keep | flag)
 
     def _apply_stop_on_fail(self, value: bool) -> None:
         """Set the radio pair to ``value`` (True = stop on first failure)."""
@@ -599,6 +660,10 @@ class StagedRunScreen(QWidget):
             # Back on the setup stages; show them again and hide the Run view.
             self.run_view.hide()
             self.steps_stack.show()
+
+        # Step checkboxes (packet 11b): checkable in setup, locked once a run starts and kept
+        # locked until it ends; checkable again only for the next run's setup.
+        self.steps_options_stage.set_checkable(state in (SessionState.IDLE, SessionState.SELECTING))
 
         # The Abort button is only meaningful while a run is in progress.
         self.run_view.abort_button.setEnabled(state == SessionState.STARTED)

@@ -179,6 +179,16 @@ class HeadlessRunSession(QObject):
 
 
     @property
+    def node_enables(self) -> Optional[dict[int, bool]]:
+        """The Operator's step-enable overrides for the selected schedule, keyed by the
+        runner seq each step is assigned.
+
+        The Steps stage seeds its boxes from these so they show what a next run will record
+        (spec 37: options carry over). Returns a copy, so callers can read the state without
+        mutating the session's; ``None`` until a toggle has been made."""
+        return dict(self._pending_node_enables) if self._pending_node_enables is not None else None
+
+    @property
     def selected_stop_on_fail(self) -> bool:
         """The selected schedule's Stop on Fail default — ``True`` when it is unset or unknown.
 
@@ -191,9 +201,15 @@ class HeadlessRunSession(QObject):
         """Select a schedule by its loaded name and remember its Stop on Fail default.
 
         Loads the schedule once (the same host that runs it later) so the Steps stage can prefill
-        its radio from the declared default; a broken or unreadable schedule falls back to True."""
+        its radio from the declared default; a broken or unreadable schedule falls back to True.
+        Re-selecting from FINISHED returns to SELECTING so the step boxes unlock again (spec 37);
+        while a run is in progress the selection is remembered but not announced."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
+        # Switching schedules drops the previous schedule's step overrides; selecting
+        # the same one keeps them (spec 37: options carry over within a schedule).
+        if self._selected_name != name:
+            self._pending_node_enables = None
         self._selected_name = name
         stop_on_fail = True  # spec default when unset, unknown, or the schedule fails to load
         config = self._config
@@ -209,8 +225,10 @@ class HeadlessRunSession(QObject):
             except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
                 print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
         self._selected_stop_on_fail = stop_on_fail
-        # Only announce selection while idle; once running, the run owns the session.
-        if self._state in (SessionState.IDLE,):
+        # Announce selection while idle or just finished; the FINISHED release (engine cleared in
+        # _set_state) lets a re-select return to SELECTING, which unlocks the step boxes.
+        # While a run is in progress the run owns the session and no selection is announced.
+        if self._state in (SessionState.IDLE, SessionState.FINISHED):
             self._set_state(SessionState.SELECTING)
 
     def set_operator(self, operator: str) -> None:
