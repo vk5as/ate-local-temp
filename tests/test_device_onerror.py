@@ -184,6 +184,7 @@ def test_failed_device_returns_buffered_data_before_failing_through_handler(app:
     through onError, with the connection error."""
     store, ru = _run(app, f"""
         local dev = {_open('function(res) calls[#calls + 1] = res.err; return "failed" end', term=chr(92) + "n")}
+        ATE.write(dev, {{data = "z", timeout = 2}})  -- the peer resets on this first device byte
         local a = ATE.read(dev, {{timeout = 2}})
         local b = ATE.read(dev, {{timeout = 2}})
         local c = ATE.read(dev, {{timeout = 2}})

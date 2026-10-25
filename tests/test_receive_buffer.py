@@ -159,6 +159,7 @@ def test_reset_failure_leaves_buffered_bytes_readable_then_failed() -> None:
     peer.start()
     try:
         dev = _open(peer, read_term="\n")
+        dev.write({"data": "z"})  # the device's first byte is when the peer sends its RST
         first = dev.read({"timeout": 2})
         second = dev.read({"timeout": 2})
         dev.close()
@@ -459,6 +460,7 @@ def test_flush_on_failed_device_fails_with_the_connection_error() -> None:
     peer.start()
     try:
         dev = _open(peer)
+        dev.write({"data": "z"})  # the peer resets once the device sends this byte
         _wait_for(dev, lambda d: d._failed is not None)  # the reader saw the reset
         ok, count, err = dev.flush()
         dev.close()

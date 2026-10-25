@@ -120,10 +120,11 @@ def _device_warnings(store: RunStore, ru: str) -> list[dict]:
 def test_failure_records_one_warning_naming_device_and_error() -> None:
     """The reader's failure enqueues exactly one (time, message) warning naming the device, and
     take_warnings drains it once."""
-    peer = LoopbackPeer(payload=b"abc", hangup="reset")  # send bytes, then RST
+    peer = LoopbackPeer(payload=b"abc", hangup="reset")  # payload, then RST after the device's first byte
     peer.start()
     try:
         dev = _open(peer)
+        dev.write({"data": "z", "timeout": 2})  # this byte is what makes the peer reset
         _wait_for(dev, lambda d: d._failed is not None)  # the reader saw the reset
         warnings = dev.take_warnings()
         assert len(warnings) == 1, f"exactly one warning per failure, got {len(warnings)}"
@@ -163,6 +164,7 @@ def test_later_read_write_failures_add_no_further_warning() -> None:
     try:
         dev = _open(peer)
         first = dev.read({"timeout": 2})
+        dev.write({"data": "z", "timeout": 2})  # the device's first byte triggers the peer's reset
         _wait_for(dev, lambda d: d._failed is not None)
         second = dev.read({"timeout": 2})
         write = dev.write({"data": "x", "timeout": 2})
@@ -181,13 +183,14 @@ def test_later_read_write_failures_add_no_further_warning() -> None:
 def test_closed_handle_is_dropped_once_its_warnings_are_drained() -> None:
     """A closed device's failure warning is still drained after its close, and the registry then
     forgets the handle, so closed handles don't pile up for the whole run."""
-    peer = LoopbackPeer(hangup="reset")
+    peer = LoopbackPeer(hangup="reset")  # no payload: the reset follows the device's first byte
     peer.start()
     try:
         registry = DeviceRegistry().register("TCP", TcpDriver)
         dev = registry.open_device(
             "TCP", {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
         )
+        dev.write({"data": "z", "timeout": 2})  # triggers the peer's reset
         _wait_for(dev, lambda d: d._failed is not None)
         registry.close_device(dev)
         host = type("_Host", (), {"_devices": registry})()
@@ -253,13 +256,14 @@ def test_flush_attributes_a_between_action_failure_to_the_run() -> None:
 
 
 def test_seam_background_failure_warns_without_a_read_and_is_attributed_to_the_step(app: QCoreApplication) -> None:
-    """A peer that resets right after connect is seen by the reader during the step's sleep:
+    """A peer that resets after the device's first byte is seen by the reader during the step's sleep:
     the step still passes, and exactly one device WARNING (source device) lands owned by the
     step (node_seq 0, attempt 1), even though no ATE.read ran."""
     peer = LoopbackPeer(hangup="reset")  # no payload: the step never reads
     peer.start()
     try:
         store, ru = _run_with_peer(app, _step("""
+        ATE.write(dev, {data = "z"})  -- the peer resets on this first byte
         ATE.sleep(0.15)
         ATE.report(Result.PASS, "done")"""), peer.port)
     finally:
@@ -278,13 +282,14 @@ def test_seam_background_failure_warns_without_a_read_and_is_attributed_to_the_s
 def test_seam_pretest_failure_warning_is_action_owned(app: QCoreApplication) -> None:
     """A device opened in a Pre-test Action and left open fails while the Action runs: its device
     WARNING is owned by the Action (action_seq 0, node_seq None), not the run or a step."""
-    peer = LoopbackPeer(hangup="reset")  # resets on accept; nothing is read
+    peer = LoopbackPeer(hangup="reset")  # the reset follows the device's first byte; nothing is read
     peer.start()
     try:
         source = f"""
 return ScheduleParams("Pretest failure schedule", "a pretest opens a device that resets")
   :setPreTestAction(function()
     local dev = ATE.open(DeviceType.TCP, {{host="127.0.0.1", port={peer.port}, timeout=5, readTerm="", writeTerm=""}})
+    ATE.write(dev, {{data = "z"}})  -- this byte is what makes the peer reset
     ATE.sleep(0.15)
     dev = nil  -- left open; the engine closes it at run end
   end)
