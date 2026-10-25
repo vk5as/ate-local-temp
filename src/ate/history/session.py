@@ -196,9 +196,8 @@ class HistorySession:
         row = self.store.get_test_run(run_uuid)
         if row is None:
             raise ValueError(f"no test run recorded for {run_uuid!r}")
-        stem, result = report_stem_and_directory(self.store, run_uuid, self.config)[0].parent, result_label(row)  # noqa: E501
-        directory = report_stem_and_directory(self.store, run_uuid, self.config)[0]
-        return directory / f"{stem}_{result}_log.csv"
+        directory, stem = report_stem_and_directory(self.store, run_uuid, self.config)
+        return directory / f"{stem}_{result_label(row)}_log.csv"
 
     def export_log(
         self,
