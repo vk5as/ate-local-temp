@@ -44,6 +44,7 @@ def _pump_until_report_written(session: HeadlessRunSession, events: list[tuple[s
         app.processEvents()
         if time.time() > deadline:
             return False
+        time.sleep(0.002)  # pump in slices instead of burning the CPU on an empty loop
     return True
 
 
@@ -65,10 +66,12 @@ def _wait_finished(session: HeadlessRunSession) -> bool:
     app = QCoreApplication.instance()
     if app is None:
         app = QCoreApplication([])
-    for _ in range(2000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         app.processEvents()
         if session._state == SessionState.FINISHED:
             return True
+        time.sleep(0.005)
     return False
 
 
@@ -495,9 +498,10 @@ def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qa
 
     # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
     # Do not wait for FINISHED here: a bare pump would let the worker race through steps 2 & 3 first.
-    while not answered.is_set():
+    answered_deadline = time.monotonic() + 10.0  # a time bound, not a pump count
+    while not answered.is_set() and time.monotonic() < answered_deadline:
         qapp.processEvents()
-    assert answered.is_set()
+    assert answered.is_set(), "step 1 never announced its input within 10 s"
 
     # Abort between steps; then let the worker record ERROR / NOTRUN / ABORTED. request_abort runs on
     # this thread before any post-answer pump, so it wins the step boundary deterministically.

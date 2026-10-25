@@ -12,6 +12,7 @@ and no schedule is actually executed — results come back through the store as 
 
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -53,10 +54,12 @@ def _wait_finished(qapp, session):
         session.choose("CONTINUE")
 
     session.failure_prompt.connect(_continue_on_failure)
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if session._state == SessionState.FINISHED:
             return True
+        time.sleep(0.005)
     return False
 
 
@@ -434,9 +437,10 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
 
     # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
     # Do not wait for FINISHED here: a bare wait would let the worker race through steps 2 & 3 first.
-    while not answered.is_set():
+    answered_deadline = time.monotonic() + 10.0  # a time bound, not a pump count
+    while not answered.is_set() and time.monotonic() < answered_deadline:
         qapp.processEvents()
-    assert answered.is_set()  # announced and answered exactly once through the run session
+    assert answered.is_set(), "step 1 never announced its input within 10 s"  # announced and answered exactly once through the run session
 
     # Abort between steps while step 1 waits; then let the worker record ERROR / NOTRUN / ABORTED.
     screen.run_view.abort_button.click()
