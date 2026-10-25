@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Optional
 from ..config import Config
 from ..report.html import RESULT_LABELS
 from ..report.html import report_stem_and_directory
+from ..report.html import result_label
 from ..report.html import write_report
 from ..report.log_export import export_log
 from ..storage import HISTORY_SORT_KEYS
@@ -186,12 +187,18 @@ class HistorySession:
         return choices
 
     def export_log_default_path(self, run_uuid: str) -> Path:
-        """The default Save As path for this run's log: the report folder, the report stem and
-        ``_log.csv`` (spec 24b). Raises :class:`ValueError` without a config or an unknown run."""
+        """The default Save As path for this run's log: the report folder, the run's report
+        name (``<stem>_<RESULT>``) and ``_log.csv`` (spec 24b Saving) — the same name the
+        run's report gets, with ``_log`` added. Raises :class:`ValueError` without a config
+        or an unknown run."""
         if self.config is None:
             raise ValueError("export_log_default_path needs a HistorySession constructed with a config")
-        directory, stem = report_stem_and_directory(self.store, run_uuid, self.config)
-        return directory / f"{stem}_log.csv"
+        row = self.store.get_test_run(run_uuid)
+        if row is None:
+            raise ValueError(f"no test run recorded for {run_uuid!r}")
+        stem, result = report_stem_and_directory(self.store, run_uuid, self.config)[0].parent, result_label(row)  # noqa: E501
+        directory = report_stem_and_directory(self.store, run_uuid, self.config)[0]
+        return directory / f"{stem}_{result}_log.csv"
 
     def export_log(
         self,

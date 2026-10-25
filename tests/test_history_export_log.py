@@ -18,12 +18,13 @@ import pytest
 from ate.config import Config
 from ate.engine.run_engine import RunEngine
 from ate.history.session import HistorySession
+from ate.report.html import _local_stamp
 from ate.report.log_export import FIELDS
 from ate.storage.store import RunStore
 from ate.ui.export_log_dialog import ExportLogDialog
 from ate.ui.history_screen import HistoryScreen
 
-from ._fixtures import DOC_FIELDS, LOGGING, PRE_POST_PASS, _drive
+from ._fixtures import DOC_FIELDS, FAILING, LOGGING, PRE_POST_PASS, _drive
 
 SERIAL_COL = 2
 
@@ -127,6 +128,28 @@ def test_default_save_path_is_under_the_report_folder(qapp, tmp_path: Path):
     assert dialog.default_path == str(path)
     assert dialog.format_combo.currentText() == "CSV"
     assert dialog.format_combo.currentData() == "csv"
+
+
+def test_default_save_name_matches_the_report_name(qapp, tmp_path: Path):
+    """The default Save As name is the run's report name (``<stem>_<RESULT>``) with ``_log``
+    added (spec 24b Saving) — the full file name pinned for both a PASS and a FAIL run."""
+    store = RunStore(tmp_path / "ate.db")
+    cfg = _cfg(tmp_path / "reports")
+    s = HistorySession(store, config=cfg)
+
+    uuid = _record_run(tmp_path, qapp, DOC_FIELDS, serial="PS7")
+    row = store.get_test_run(uuid)
+    stamp = _local_stamp(row.get("started_at"), row.get("utc_offset") or "+00:00")
+    assert s.export_log_default_path(uuid) == (
+        tmp_path / "reports" / "PowerSupply" / f"PowerSupply_PS7_{stamp}_PASS_log.csv"
+    )
+
+    uuid2 = _record_run(tmp_path, qapp, FAILING, serial="PS8")
+    row2 = store.get_test_run(uuid2)
+    stamp2 = _local_stamp(row2.get("started_at"), row2.get("utc_offset") or "+00:00")
+    assert s.export_log_default_path(uuid2) == (
+        tmp_path / "reports" / "PowerSupply" / f"PowerSupply_PS8_{stamp2}_FAIL_log.csv"
+    )
 
 
 def test_session_export_log_wraps_the_exporter(qapp, tmp_path: Path):
