@@ -248,3 +248,15 @@ def test_custom_config_path_overrides_the_default(tmp_path):
     cfg.write_text(json.dumps({"format": 1, "station": {"name": "X", "uuid": "u"}}), encoding="utf-8")
     loaded = read_config(cfg)
     assert loaded.path == cfg.resolve()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_receive_buffer_bytes_is_rejected(tmp_path, value):
+    """devices.receiveBufferBytes caps the receive buffer, so it must be positive: 0 or less
+    refuses startup, naming the file and key (0 must not silently disable the cap)."""
+    bad = tmp_path / "config.json"
+    bad.write_text(json.dumps({"format": 1, "devices": {"receiveBufferBytes": value}}), encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        read_config(str(bad))
+    assert str(bad) in str(exc.value)
+    assert "'devices.receiveBufferBytes'" in str(exc.value)

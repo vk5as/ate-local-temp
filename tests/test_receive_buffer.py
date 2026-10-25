@@ -48,6 +48,26 @@ def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = "", limit: 
     return dev
 
 
+def _wait_for(dev, predicate, timeout: float = 2.0) -> None:
+    """Wait, under the device lock, until ``predicate(dev)`` holds; the reader notifies the
+    condition on every append and failure, so this polls the buffer state with a deadline
+    instead of sleeping for a guessed time."""
+    with dev._cond:
+        assert dev._cond.wait_for(lambda: predicate(dev), timeout), "reader never reached the expected state"
+
+
+class _SockProxy:
+    """Stands in for the device socket so a test can change one behaviour (``send``, ``close``,
+    ``fileno``) while everything else goes to the real socket."""
+
+    def __init__(self, real, **overrides) -> None:
+        self._real = real
+        self.__dict__.update(overrides)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 # --- Unit: the reader thread and buffer-first reads ------------------------------------------
 
 
@@ -172,50 +192,248 @@ def test_reader_thread_runs_until_close_and_is_gone_after() -> None:
 
 
 def test_overflow_drops_oldest_keeps_newest_and_flags_pending() -> None:
-    """With a 64-byte cap and 100 bytes arriving, the buffer keeps the newest 64; the overflow
-    flag is set (the next read reports it), and flush empties what remains and counts it."""
+    """With a 64-byte cap and 100 bytes arriving, the buffer keeps the newest 64 and the next read
+    takes them; take_overflow reports the episode (36 bytes dropped) once, then nothing."""
     peer = LoopbackPeer(payload=b"0123456789" * 10)  # 100 bytes
     peer.start()
     try:
         dev = _open(peer, limit=64)
-        time.sleep(0.05)  # let the reader thread drain the payload into the buffer
+        _wait_for(dev, lambda d: d._overflow_dropped == 36)  # the whole payload has arrived
         with dev._lock:
             assert len(dev._buffer) == 64, f"buffer holds {len(dev._buffer)} bytes, expected the newest 64"
-        assert dev._overflow_pending is True, "an overflow must be remembered for the next read"
         # the next read takes the newest 64 bytes (bytes 36..99 of the payload)
         result = dev.read({"size": 64, "timeout": 1})
         assert result == ((b"0123456789" * 10)[36:], 64, False, None), f"read returned {result!r}"
-        ok, count, err = dev.flush()
-        assert (ok, count, err) == (True, 0, None)  # the read consumed everything
-        with dev._lock:
-            assert len(dev._buffer) == 0
-        # flush is not a read: the overflow flag survives until the next read clears it
-        assert dev._overflow_pending is True
+        assert dev.take_overflow() == (True, 36)
+        assert dev.take_overflow() == (False, 0), "an episode is taken once"
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_flush_neither_reports_nor_cancels_an_overflow() -> None:
+    """A flush after an overflow discards the buffer but leaves the episode for the next read."""
+    peer = LoopbackPeer(payload=b"0123456789" * 10)
+    peer.start()
+    try:
+        dev = _open(peer, limit=64)
+        _wait_for(dev, lambda d: d._overflow_dropped == 36)
+        assert dev.flush() == (True, 64, None)
+        assert dev.take_overflow() == (True, 36), "flush must not clear the pending overflow"
         dev.close()
     finally:
         peer.stop()
 
 
 def test_overflow_flag_is_set_per_episode_and_cleared_by_the_next_read() -> None:
-    """A second overflow (new bytes arriving after the first was consumed) sets the flag again;
-    the flag is consumed once by a read, never twice."""
+    """A second overflow (new bytes arriving after the first was taken) is a new episode with its
+    own dropped count."""
     peer = LoopbackPeer(payload=b"0123456789" * 10)
     peer.start()
     try:
         dev = _open(peer, limit=64)
-        time.sleep(0.05)
+        _wait_for(dev, lambda d: d._overflow_dropped == 36)
         dev.read({"size": 64, "timeout": 1})
-        dev._overflow_pending = False  # consumed the way _do_read consumes it
+        assert dev.take_overflow() == (True, 36)
         conn = peer.connections[-1]
         conn.sendall(b"abcdefghij" * 10)  # another 100 bytes -> a new overflow episode
-        time.sleep(0.05)
-        assert dev._overflow_pending is True, "a new overflow must re-set the flag"
+        _wait_for(dev, lambda d: d._overflow_dropped == 36)
         result = dev.read({"size": 64, "timeout": 1})
-        dev._overflow_pending = False
         assert result[0] == (b"abcdefghij" * 10)[36:]
+        assert dev.take_overflow() == (True, 36), "a new overflow must re-set the flag"
         dev.close()
     finally:
         peer.stop()
+
+
+def test_take_overflow_holds_the_lock() -> None:
+    """take_overflow reads and resets the episode under the device lock, so it cannot interleave
+    with the reader recording a drop: while the lock is held it must not return."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer, limit=64)
+        dev._append(b"x" * 71)  # a real overflow: 7 bytes dropped
+        out = []
+        with dev._lock:
+            t = threading.Thread(target=lambda: out.append(dev.take_overflow()))
+            t.start()
+            t.join(0.2)
+            assert t.is_alive() and not out, "take_overflow returned without taking the lock"
+        t.join(1)
+        assert out == [(True, 7)]
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_exact_fit_chunk_is_not_an_overflow() -> None:
+    """A chunk exactly the size of the cap into an empty buffer drops nothing."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer, limit=64)
+        dev._append(b"x" * 64)
+        assert dev.take_overflow() == (False, 0)
+        with dev._lock:
+            assert bytes(dev._buffer) == b"x" * 64
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_small_chunks_overflow_a_partly_full_buffer() -> None:
+    """Chunks each smaller than the cap overflow a partly full buffer: the oldest bytes go, the
+    dropped count is the excess."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer, limit=64)
+        dev._append(b"a" * 40)
+        assert dev.take_overflow() == (False, 0)
+        dev._append(b"b" * 40)
+        with dev._lock:
+            assert bytes(dev._buffer) == b"a" * 24 + b"b" * 40
+        assert dev.take_overflow() == (True, 16)
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_terminator_arriving_at_the_deadline_is_not_returned_in_partial_data() -> None:
+    """The timeout branch decides under the lock: bytes arriving the instant the wait gives up
+    (simulated by appending as the read leaves its locked block) never leak into a partial read,
+    so a terminator is never handed back as data."""
+    peer = LoopbackPeer(payload=b"abc")
+    peer.start()
+    try:
+        dev = _open(peer, read_term="\n")
+        _wait_for(dev, lambda d: len(d._buffer) == 3)
+        real = dev._cond
+
+        class _LateArrival:
+            def __enter__(self):
+                return real.__enter__()
+
+            def __exit__(self, *exc):
+                real.__exit__(*exc)
+                dev._append(b"\n")  # the terminator lands right as the read leaves the lock
+                return False
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        dev._cond = _LateArrival()
+        result = dev.read({"timeout": 0.05})
+        dev._cond = real
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert result == (b"abc", 3, True, None), f"read returned {result!r}"
+
+
+def test_write_failure_wakes_a_waiting_read() -> None:
+    """A write that fails marks the device failed under the lock and wakes a read already waiting,
+    which returns the error at once instead of waiting out its timeout."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+
+        def _boom(_data):
+            raise OSError("boom")
+
+        real = dev.sock
+        out = []
+        reader = threading.Thread(target=lambda: out.append(dev.read({"timeout": 5})))
+        reader.start()
+        _wait_for(dev, lambda d: len(d._cond._waiters) == 1)  # the read is waiting on the condition
+        dev.sock = _SockProxy(real, send=_boom)
+        assert dev.write({"data": "x"}) == (False, 0, "boom")
+        reader.join(1)
+        dev.sock = real
+        assert not reader.is_alive(), "the waiting read was not woken by the write failure"
+        assert out == [(None, 0, False, "boom")]
+        assert dev.flush() == (False, 0, "boom")
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_close_sets_teardown_before_closing_the_socket() -> None:
+    """close stops the reader before it closes the socket, so the reader can never see the
+    close as a failure; a clean close records nothing."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+        real = dev.sock
+        seen = []
+
+        def _close():
+            seen.append((dev._teardown, dev._stop.is_set()))
+            real.close()
+
+        dev.sock = _SockProxy(real, close=_close)
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert seen == [(True, True)], f"socket closed with (teardown, stop) = {seen}"
+    assert dev._failed is None
+
+
+def test_close_keeps_a_reader_that_did_not_stop() -> None:
+    """If the reader join times out, close keeps the thread reference instead of losing track."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+        real_thread = dev._reader_thread
+        dev._stop.set()
+        real_thread.join(1)
+
+        class _Stuck:
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return True
+
+        stuck = _Stuck()
+        dev._reader_thread = stuck
+        dev._stop.clear()
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert dev._reader_thread is stuck
+
+
+def test_reader_select_error_marks_the_device_failed() -> None:
+    """A select error while the device is open is a real failure: the reader records it and wakes
+    the waiting read, instead of quietly exiting and leaving reads to time out."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+        real = dev.sock
+
+        def _bad_fileno():
+            raise OSError("bad descriptor")
+
+        dev.sock = _SockProxy(real, fileno=_bad_fileno)
+        start = time.monotonic()
+        result = dev.read({"timeout": 2})
+        elapsed = time.monotonic() - start
+        dev.sock = real
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert result == (None, 0, False, "bad descriptor")
+    assert elapsed < 1
 
 
 def test_flush_empties_buffer_and_counts_discarded_bytes() -> None:
@@ -225,9 +443,7 @@ def test_flush_empties_buffer_and_counts_discarded_bytes() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        time.sleep(0.05)  # let the reader drain the payload
-        with dev._lock:
-            assert len(dev._buffer) == 50
+        _wait_for(dev, lambda d: len(d._buffer) == 50)
         ok, count, err = dev.flush()
         assert (ok, count, err) == (True, 50, None)
         with dev._lock:
@@ -243,8 +459,7 @@ def test_flush_on_failed_device_fails_with_the_connection_error() -> None:
     peer.start()
     try:
         dev = _open(peer)
-        # let the reader thread see the reset and mark the device failed
-        time.sleep(0.1)
+        _wait_for(dev, lambda d: d._failed is not None)  # the reader saw the reset
         ok, count, err = dev.flush()
         dev.close()
     finally:
@@ -342,10 +557,15 @@ def test_seam_flush_reports_count_and_empties_buffer(app: QCoreApplication) -> N
     peer.start()
     try:
         source = _step("""
-        ATE.sleep(0.1)
-        local f = ATE.flush(dev)
+        local f, total = nil, 0
+        for _ = 1, 200 do  -- poll the buffer (2 s deadline) until the 5 bytes have arrived
+          f = ATE.flush(dev)
+          total = total + f.count
+          if total >= 5 then break end
+          ATE.sleep(0.01)
+        end
         local r = ATE.read(dev, {timeout = 0.2}, function(res) return res end)
-        ATE.report(Result.PASS, tostring(f.ok).." "..tostring(f.count).." "..tostring(f.err)
+        ATE.report(Result.PASS, tostring(f.ok).." "..tostring(total).." "..tostring(f.err)
           .."|"..tostring(r.data).." "..tostring(r.count).." "..tostring(r.err))""")
         store, ru = _run_with_peer_limited(app, source, peer.port)
     finally:

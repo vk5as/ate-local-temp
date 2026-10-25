@@ -68,8 +68,10 @@ class _TcpDevice:
         while not self._stop.is_set():
             try:
                 ready, _, _ = select.select([self.sock], [], [], 0.05)
-            except (OSError, ValueError):
-                break  # the socket was closed during teardown (fd -1) or is dead; nothing to record
+            except (OSError, ValueError) as exc:
+                if not self._teardown:  # closed under us by close() (fd -1) is not a failure
+                    self._fail(str(exc))
+                return
             if not ready:
                 continue
             try:
@@ -85,7 +87,7 @@ class _TcpDevice:
             self._append(chunk)
 
     def _fail(self, message: str) -> None:
-        """Mark the device failed and wake any waiting read (reader thread only)."""
+        """Mark the device failed and wake any waiting read (the reader thread, or a failed write)."""
         with self._lock:
             self._failed = message
             self._cond.notify_all()
@@ -94,20 +96,27 @@ class _TcpDevice:
         """Extend the buffer with ``chunk``, dropping the oldest bytes when the cap is exceeded;
         remembers that an overflow happened for the next read."""
         with self._lock:
-            if len(chunk) >= self._limit:  # the chunk alone holds more than the buffer can
-                drop = len(self._buffer) + len(chunk) - self._limit
-                del self._buffer[:]
-                self._buffer.extend(chunk[-self._limit:])  # only the newest bytes survive
+            drop = len(self._buffer) + len(chunk) - self._limit
+            if drop > 0:  # an exact fit drops nothing and is not an overflow
                 self._overflow_pending = True
                 self._overflow_dropped += drop
+            if len(chunk) >= self._limit:  # the chunk alone fills the buffer
+                del self._buffer[:]
+                self._buffer.extend(chunk[-self._limit:])  # only the newest bytes survive
             else:
-                if len(self._buffer) + len(chunk) > self._limit:
-                    drop = len(self._buffer) + len(chunk) - self._limit
+                if drop > 0:
                     del self._buffer[:drop]  # drop the oldest, keep the newest
-                    self._overflow_pending = True
-                    self._overflow_dropped += drop
                 self._buffer.extend(chunk)
             self._cond.notify_all()  # wake a read waiting on the buffer
+
+    def take_overflow(self) -> tuple[bool, int]:
+        """Return ``(overflowed, dropped)`` for the cap overflows since the previous call and reset
+        both, atomically under ``_lock`` so a drop the reader records concurrently is never lost."""
+        with self._lock:
+            overflowed, dropped = self._overflow_pending, self._overflow_dropped
+            self._overflow_pending = False
+            self._overflow_dropped = 0
+        return overflowed, dropped
 
     def read(self, params: dict[str, Any]) -> tuple[bytes | None, int, bool, str | None]:
         """Read and return ``(data, count, partial, err_or_None)``.
@@ -136,13 +145,12 @@ class _TcpDevice:
                     data = self._take(len(self._buffer))  # the connection ended after these bytes
                     return data, len(data), False, None
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+                if remaining <= 0:  # decide under the lock, on the same buffer just checked
+                    if not self._buffer:
+                        return None, 0, False, "timeout"
+                    data = self._take(len(self._buffer))
+                    return data, len(data), True, None
                 self._cond.wait(timeout=remaining)
-        if not self._buffer:
-            return None, 0, False, "timeout"
-        data = self._take(len(self._buffer))
-        return data, len(data), True, None
 
     def _take_complete(self, term: bytes, size: int | None) -> bytes | None:
         """Take a complete read from the buffer — up to a terminator within ``size`` bytes, or
@@ -169,9 +177,9 @@ class _TcpDevice:
         Packet 17a: the worker reports the overflow (if any) and clears its own flag on the next
         read, so a flush neither reports nor cancels one; failures go through ``onError`` in the
         same shape as read/write, and a device the reader marked failed reports its error."""
-        if self._failed is not None:
-            return False, 0, self._failed
         with self._lock:
+            if self._failed is not None:
+                return False, 0, self._failed
             count = len(self._buffer)
             del self._buffer[:]
             self._cond.notify_all()  # a reader waiting for room gets the socket promptly
@@ -182,9 +190,11 @@ class _TcpDevice:
 
         ``count`` is the bytes actually sent: the whole payload, terminator included, on success; what
         went out before the failure otherwise. A payload that can't be sent within ``timeout`` fails
-        with ``err = "timeout"``."""
-        if self._failed is not None:
-            return False, 0, self._failed
+        with ``err = "timeout"``. A send error marks the device failed and wakes a waiting read."""
+        with self._lock:
+            failed = self._failed
+        if failed is not None:
+            return False, 0, failed
         payload = self._to_bytes(params["data"]) + self._term(params, "writeTerm")
         deadline = time.monotonic() + self._timeout(params)
         sent = 0
@@ -195,8 +205,8 @@ class _TcpDevice:
             try:
                 sent += self.sock.send(payload[sent:])
             except OSError as exc:
-                self._failed = str(exc)
-                return False, sent, self._failed
+                self._fail(str(exc))
+                return False, sent, str(exc)
         return True, sent, None
 
     def _timeout(self, params: dict[str, Any]) -> float:
@@ -214,20 +224,21 @@ class _TcpDevice:
         return value.encode("utf-8") if isinstance(value, str) else bytes(value)
 
     def close(self) -> None:
-        """Stop the reader thread, join it, and close the socket. Safe to call twice — a second
-        close is a no-op (packet 16a)."""
-        # The socket goes first: a reader blocked in recv or select wakes immediately on it,
-        # the teardown flag keeps it from recording the error, and join is then prompt.
-        try:
-            self.sock.close()
-        except OSError:
-            pass  # already closed or a reset mid-close; nothing useful left to do
+        """Stop the reader thread, close the socket, and join the reader. Safe to call twice — a
+        second close only retries the join of a reader that had not stopped (packet 16a)."""
         if not self._stop.is_set():
+            # Teardown first, so the reader treats the closing socket as the end, not a failure;
+            # then the socket, which wakes a reader in select or recv so the join is prompt.
             self._teardown = True
             self._stop.set()
-            if self._reader_thread is not None:
-                self._reader_thread.join(timeout=2.0)
-                self._reader_thread = None
+            try:
+                self.sock.close()
+            except OSError:
+                pass  # already closed or a reset mid-close; nothing useful left to do
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2.0)
+            if not self._reader_thread.is_alive():
+                self._reader_thread = None  # a reader that did not stop stays referenced
 
 
 class TcpDriver(Driver):

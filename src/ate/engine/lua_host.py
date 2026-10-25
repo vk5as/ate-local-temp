@@ -495,10 +495,9 @@ class _AteTable:
             raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
         if self._host._devices.is_open(device):
             data, count, partial, err = device.read(validated)
-            overflow = device._overflow_pending  # the reader set it when the cap was exceeded
-            device._overflow_pending = False
+            overflow, dropped = device.take_overflow()  # the reader recorded it when the cap was exceeded
         else:
-            data, count, partial, err, overflow = None, 0, False, "device closed", False
+            data, count, partial, err, overflow, dropped = None, 0, False, "device closed", False, 0
         if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
             self._host.record_log(
                 "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
@@ -510,14 +509,13 @@ class _AteTable:
             "err": err,  # None -> nil unless the read failed
         }
         if overflow:
-            # The worker notices the overflow here: exactly one WARNING per episode, source device,
-            # and the dropped-byte count is read and reset with it (the next episode counts again).
+            # The worker notices the overflow here, not when the reader dropped the bytes: one WARNING
+            # (source device) per read that finds any overflow since the previous read, with every
+            # byte dropped in between summed into it; take_overflow reset both for the next episode.
             self._host.record_log(
-                "WARNING", f"{device.describe()}: receive buffer overflow - "
-                f"dropped {device._overflow_dropped} oldest byte(s)",
+                "WARNING", f"{device.describe()}: receive buffer overflow - dropped {dropped} oldest byte(s)",
                 source="device",
             )
-            device._overflow_dropped = 0
             result["overflow"] = True
         if err is not None:
             return self._failure("read", device.describe(), result, params, self._handler_for(device, error_handler))

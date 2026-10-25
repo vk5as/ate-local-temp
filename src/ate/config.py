@@ -223,6 +223,14 @@ def _validate_and_fill(raw: Any, path: str, hostname: str = "") -> dict[str, Any
         else:
             raise ConfigError(f"'{section}' must be an object in {path}")
 
+    # The receive buffer cap must be positive: 0 or less would disable or break the cap.
+    devices = raw.get("devices")
+    if isinstance(devices, dict) and devices.get("receiveBufferBytes", 1) <= 0:
+        raise ConfigError(
+            f"config file {path}: 'devices.receiveBufferBytes' must be a positive integer, "
+            f"got {devices['receiveBufferBytes']!r}"
+        )
+
     # Only sqlite is a supported backend in v1 (spec rule 24).
     database = raw.get("database")
     if isinstance(database, dict) and database.get("type") != "sqlite":
