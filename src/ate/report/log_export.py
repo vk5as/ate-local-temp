@@ -279,8 +279,11 @@ def _write_text(path: Any, rows: list[ExportRow], run_row: dict, owner_labels: d
     for r in rows:
         owner = f"Step {r.step_number or ''}#{r.attempt or 0}" if r.owner == "Step" else r.owner
         prefix = f"{r.time}  {r.level:<9}{r.source:<10}{owner:<12}"
-        lines.append(prefix + r.text)
-        for continuation in r.text.split("\n")[1:]:
+        # The text may carry a real newline: only its first physical line goes on the
+        # prefix line, the rest indented under the text (the spec's layout).
+        first, *rest = r.text.split("\n")
+        lines.append(prefix + first)
+        for continuation in rest:
             lines.append(" " * len(prefix) + continuation)
     with Path(path).open("w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
