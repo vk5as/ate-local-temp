@@ -1,3 +1,4 @@
+import time
 """Packet 11b seam test: the Steps & options stage checkboxes drive step enables.
 
 The widget holds no logic of its own: each checkbox toggle is one call into
@@ -22,11 +23,13 @@ def _drain_report(qapp, session) -> None:
     fully done before the test ends (the pattern test_failure_bar uses)."""
     done = []
     session.report_written.connect(lambda _html, _pdf: done.append(True))
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if done:
             return
-    raise AssertionError("report_written never fired")
+        time.sleep(0.005)
+    raise AssertionError("report_written never fired within 10 s")
 
 
 def _wait_finished(qapp, session) -> bool:
