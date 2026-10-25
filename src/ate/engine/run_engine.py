@@ -27,6 +27,7 @@ import enum
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -322,6 +323,37 @@ class RunEngine(QThread):
             return [actions]
         return [a for a in actions if a is not None]
 
+    def _flush_device_warnings(self, host: "LuaHost", run_uuid: str, *, in_window: tuple[float, float] | None = None,
+                               node_seq: int | None = None, attempt_no: int | None = None, action_seq: int | None = None) -> None:
+        """Drain the devices' failure warnings and record one WARNING (source device) each.
+
+        Packet 17b: the reader (or a failed read/write) enqueues exactly one (time, message)
+        warning per failure, promptly, and the engine drains it at a safe point. A warning whose
+        timestamp falls inside ``in_window`` (the action's own start..end) belongs to that action: a
+        step gets ``node_seq``/``attempt_no``, a Pre-/Post-test Action its ``action_seq``. A warning
+        from outside the window — the device failed in the gap between actions, or the drain is the
+        run-end one — attaches to the run as a whole (all three None)."""
+        pending = host.take_device_warnings()
+        if not pending:
+            return
+        if in_window is not None:
+            lo, hi = in_window
+            in_action = [text for t, text in pending if lo <= t <= hi]
+            run_level = [text for t, text in pending if not (lo <= t <= hi)]
+        else:
+            in_action, run_level = [], [text for _, text in pending]
+        if in_action:
+            self._store.insert_log_lines(
+                run_uuid, 0,
+                [{"level": "WARNING", "source": "device", "text": text} for text in in_action],
+                action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no,
+            )
+        if run_level:
+            self._store.insert_log_lines(
+                run_uuid, 0,
+                [{"level": "WARNING", "source": "device", "text": text} for text in run_level],
+            )
+
     def _record_phase_action(
         self, host: "_LuaHost", run_uuid: str, *, instance_seq: int, phase: str, fn: Callable[..., Any], pass_fail: str
     ) -> None:
@@ -333,6 +365,7 @@ class RunEngine(QThread):
         attributed to this action via ``action_seq`` so later packets can surface it. Returns
         ``(outcome, error)`` so the caller can abort on a Pre-test failure (packet 14b)."""
         started_at = _now_iso()
+        t_start = time.monotonic()  # packet 17b: the action's wall-clock window for device warnings
         outcome = "ok"
         error = None
         log_start = len(host.logs)
@@ -350,6 +383,11 @@ class RunEngine(QThread):
                 host.record_log("ERROR", str(exc))
         finally:
             ended_at = _now_iso()
+            t_end = time.monotonic()
+        # Packet 17b: a device failure inside this action's window is owned by it (action_seq);
+        # one outside goes to the run level. Drained before the action's own log lines so the
+        # WARNING lands in order with the action's other lines.
+        self._flush_device_warnings(host, run_uuid, in_window=(t_start, t_end), action_seq=instance_seq)
         new_logs = host.logs[log_start:]
         if new_logs:
             self._store.insert_log_lines(
@@ -578,6 +616,7 @@ class RunEngine(QThread):
                 start = len(host.reports)
                 log_start = len(host.logs)
                 error_text: Optional[str] = None
+                attempt_start = time.monotonic()  # packet 17b: this Attempt's wall-clock window for device warnings
                 try:
                     host._run_action(step.action, "step")  # runs the closure in Lua; may call ATE.report several times
                 except Exception as exc:  # noqa: BLE001 - a Lua error becomes an ERROR Attempt
@@ -597,6 +636,15 @@ class RunEngine(QThread):
                         self._record_abort(run_uuid, steps, seq, attempt_no=attempt_count)
                         break
                     host.record_log("ERROR", str(exc))
+                finally:
+                    # Packet 17b: a device failure inside this Attempt's window belongs to it
+                    # (node_seq/attempt_no); one in the gap between Attempts goes to the run level.
+                    # The finally also covers a mid-step abort, so a failure during a raised action
+                    # is still attributed to the Attempt that was running when it happened.
+                    self._flush_device_warnings(
+                        host, run_uuid, in_window=(attempt_start, time.monotonic()),
+                        node_seq=seq, attempt_no=attempt_count,
+                    )
 
                 # One attempt row per executed Attempt, carrying its final report's values — every
                 # Attempt is recorded (spec rule), and the step's result will be its last Attempt's.
@@ -727,6 +775,9 @@ class RunEngine(QThread):
                 failed = True
                 pass_fail = "FAIL"
 
+        # Packet 17b: drain any device failure warning no action's window claimed (a failure in the
+        # gap between the last action and run end) — it attaches to the run as a whole.
+        self._flush_device_warnings(host, run_uuid)
         # Packet 16a: close every Device still open at run end (including an aborted or errored run)
         # and log one WARNING per device naming it — source "ate", so the run engine records them as
         # run-level lines with no owning step. Done before the result is computed so a leftover

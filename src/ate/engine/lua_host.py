@@ -958,6 +958,26 @@ class _LuaHost:
         land at INFO (see :meth:`_bind_print`)."""
         self.logs.append((str(level), source, " ".join(str(a) for a in args)))
 
+    def take_device_warnings(self) -> list[tuple[float, str]]:
+        """Drain and return every device's (monotonic timestamp, message) failure warning(s).
+
+        Covers both still-open and already-closed devices (the registry keeps closed handles so a
+        warning enqueued before its close is never lost), and only drivers whose handles support it
+        (``getattr(..., "take_warnings", None)``), so a driver without a background reader adds
+        nothing. Called by the run engine at a safe point (end of an action / run end); the reader
+        thread only enqueues, never drains."""
+        out: list[tuple[float, str]] = []
+        seen: set[int] = set()
+        for device in [*self._devices.snapshot(), *self._devices.closed_handles()]:
+            key = id(device)
+            if key in seen:
+                continue
+            seen.add(key)
+            fn = getattr(device, "take_warnings", None)
+            if fn is not None:
+                out.extend(fn())
+        return out
+
     def _bind_print(self, ate: "_AteTable") -> None:
         """Redirect the global ``print`` to ``ATE.log(Log.INFO, ...)``.
 
