@@ -342,3 +342,9 @@ Reading the numbers:
 4. Clean up: `git worktree list`, remove every subagent worktree (`git worktree remove`, then `git worktree prune`), delete merged packet and review branches.
 5. Final report from `collect.py --report`: per ticket (implementer, reviewer, helper rows), plus the orchestrator line, with context, compactions and tokens.
 6. Report the integration branch to the user. Merging to `main` or pushing is their call.
+
+---
+
+## Update 2026-10-25: two reviewers, Ornith dropped
+
+The review round is now **saluki + Haiku** (both read-only, in parallel); Ornith is no longer used. Reasons: it rarely found anything Haiku missed, it was the slowest (~74 s/step, often last back, which gated triage), and its confident errors cost orchestrator triage time. saluki now runs the suite and stress probes, which was Ornith's one strength. Wherever this playbook says "three reviewers", read "saluki and Haiku". saluki runs on a 2-slot llama.cpp server (2×131k), so one slot can review while the other implements the next packet (pipelining); a second implementer only runs on a packet in a different code area.
