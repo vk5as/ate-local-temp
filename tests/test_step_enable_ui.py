@@ -1,0 +1,123 @@
+"""Packet 11b seam test: the Steps & options stage checkboxes drive step enables.
+
+The widget holds no logic of its own: each checkbox toggle is one call into
+``session.toggle_node(seq, enabled)`` (packet 11a), applied at start(). Toggles are
+locked while a run is in progress and stay locked until it ends.
+"""
+
+from PyQt6.QtCore import Qt
+
+from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.staged_run_screen import StagedRunScreen
+
+from ._fixtures import write_ate_env
+
+
+def _wait_finished(qapp, session) -> bool:
+    """Poll processEvents until the session reaches FINISHED (or times out).
+
+    A Stop-on-Fail pause blocks the worker until an operator answers a prompt; answer
+    Continue here while pumping, mirroring the headless drivers in test_staged_run_screen."""
+    def _continue_on_failure(_node_seq: int, _attempt_no: int) -> None:
+        session.choose("CONTINUE")
+
+    session.failure_prompt.connect(_continue_on_failure)
+    for _ in range(3000):
+        qapp.processEvents()
+        if session._state == SessionState.FINISHED:
+            return True
+    return False
+
+
+def _find_item(list_widget, substring: str):
+    """Return the row whose text contains ``substring`` (raising if none match)."""
+    for i in range(list_widget.count()):
+        if substring in list_widget.item(i).text():
+            return list_widget.item(i)
+    raise AssertionError(f"no schedule row containing {substring!r}")
+
+
+def _select_and_load(screen, schedule_name: str) -> None:
+    """Select ``schedule_name`` and load its steps into the Steps & options stage."""
+    item = _find_item(screen.test_schedule_stage.schedule_list, schedule_name)
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    screen._begin_run_from_selection()
+    assert screen.steps_stack.currentIndex() == 2
+
+
+def test_untick_default_on_step_records_disabled_notrun(qapp, tmp_path) -> None:
+    """Unticking a default-on step in stage 3 flips its recorded ``enabled`` to false.
+
+    "Enable/disable schedule" has a=0 (on), b=1 (:setEnable(false)), c=2 (on). Unticking row 0
+    (step a, default on) reaches the session as ``toggle_node(0, False)``; the run then
+    records a NOTRUN with (default_enabled, enabled) = (1, 0) and no Attempt, b stays NOTRUN,
+    and c runs."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_load(screen, "Enable/disable schedule")
+
+    first = screen.steps_options_stage.step_list.item(0)
+    assert first.checkState() == Qt.CheckState.Checked  # a defaults on
+
+    # The checkbox reflects the step's default enabled state: row 1 is off by default.
+    assert screen.steps_options_stage.step_list.item(1).checkState() == Qt.CheckState.Unchecked
+
+    # A toggle is one call into the session — no logic in the widget.
+    first.setCheckState(Qt.CheckState.Unchecked)
+    assert session._pending_node_enables == {0: False}
+
+    screen.steps_options_stage.run_button.click()
+    assert _wait_finished(qapp, session)
+
+    nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
+    assert nodes["1."]["result"] == "NOTRUN"
+    assert nodes["1."]["default_enabled"] == 1
+    assert nodes["1."]["enabled"] == 0
+    assert nodes["2."]["result"] == "NOTRUN"
+    assert nodes["3."]["result"] == "PASS"
+    # The disabled step records no Attempt row at all.
+    assert not any(a["node_seq"] == 0 for a in session.store.attempts(session.run_uuid))
+
+
+def test_boxes_lock_while_a_run_is_up_and_stay_locked(qapp, tmp_path) -> None:
+    """The step checkboxes are user-checkable in setup and lose the flag once the run starts.
+
+    While the run is in progress the boxes are not user-checkable (the check flag is gone)
+    and a toggle attempt is rejected: it changes nothing the run will record. The lock
+    stays until the run ends."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_load(screen, "Enable/disable schedule")
+
+    # Checkable before start.
+    first = screen.steps_options_stage.step_list.item(0)
+    assert first.flags() & Qt.ItemFlag.ItemIsUserCheckable
+
+    screen.steps_options_stage.run_button.click()
+    qapp.processEvents()  # deliver the STARTED signal to the screen
+    assert session._state == SessionState.STARTED
+
+    # Not user-checkable while the run is in progress.
+    assert not (first.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+
+    # A toggle attempt while the run is up is rejected — the box state changes but the
+    # override is never stored.
+    first.setCheckState(Qt.CheckState.Unchecked)
+    assert session._pending_node_enables is None
+
+    # Still locked once the run has finished.
+    assert _wait_finished(qapp, session)
+    assert not (first.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+
+    # The rejected toggle changed nothing: step a ran with its default enabled=1.
+    nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
+    assert nodes["1."]["enabled"] == 1
+    assert nodes["1."]["result"] == "PASS"
