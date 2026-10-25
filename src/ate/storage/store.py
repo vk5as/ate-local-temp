@@ -524,18 +524,19 @@ class RunStore:
     # -- log_line ------------------------------------------------------------
 
     @staticmethod
-    def _log_line_row(run_uuid: str, seq: int, level: str, source: str, text: str, *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> dict:
+    def _log_line_row(run_uuid: str, seq: int, level: str, source: str, text: str, *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None, at: Optional[str] = None) -> dict:
         """Build a :class:`schema.log_line` row from a ``level``/``source``/``text`` line.
 
         Ownership is expressed structurally through the foreign keys rather than a
         separate column: ``action_seq`` ties the line to an owning Pre-test/Post-test
         Action, while ``node_seq`` + ``attempt_no`` tie it to a step Attempt; a line with
-        neither belongs to the run as a whole.
+        neither belongs to the run as a whole. ``at`` defaults to now; a line recorded after the
+        fact (a device failure, packet 17b) passes the time it happened.
         """
         return {
             "run_uuid": run_uuid,
             "seq": seq,
-            "at": _now_iso(),
+            "at": at or _now_iso(),
             "level": level.upper(),
             "source": source,
             "action_seq": action_seq,
@@ -547,7 +548,8 @@ class RunStore:
     def insert_log_lines(self, run_uuid: str, seq: int, lines: list[dict[str, Any]], *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> None:
         """Insert a batch of log lines keyed by ``(run_uuid, seq)``.
 
-        ``lines`` is an ordered list; each entry needs ``level``, ``source`` and ``text``.
+        ``lines`` is an ordered list; each entry needs ``level``, ``source`` and ``text``, and may
+        carry ``at`` (ISO-8601 UTC) when the line happened before it is inserted.
         Ownership (which Action or Attempt owns the line) applies to every line in the
         batch — within one step's action all schedule lines are owned by that Attempt, so a
         single call batches them with shared ownership rather than writing one row per line.
@@ -558,7 +560,7 @@ class RunStore:
         sharing one value. The ``seq`` argument stays for call-site clarity; ownership is set
         through ``node_seq``/``attempt_no`` instead."""
         next_seq = self._log_seq.get(run_uuid, 0)
-        rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no) for line in lines]
+        rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no, at=line.get("at")) for line in lines]
         for i, row in enumerate(rows):
             row["seq"] = next_seq + i  # unique within this batch
             self._run(log_line.insert().values(**row))

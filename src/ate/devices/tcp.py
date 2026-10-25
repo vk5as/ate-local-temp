@@ -9,10 +9,14 @@ Received bytes a read didn't return (past a terminator or ``size``) stay in the 
 next read. The buffer is capped (``receiveBufferBytes``): overflow drops the oldest bytes and the
 reader remembers it, so the worker's next read reports ``overflow = true`` with one WARNING.
 Once the connection fails (peer closed, reset) the reader marks the device failed exactly as a
-read would: buffered bytes can still be read, after which every read and write returns that error."""
+read would: buffered bytes can still be read, after which every read and write returns that error —
+and the failure is recorded on the device as one (time, message) warning that the host drains
+promptly into a device WARNING stamped with that time (packet 17b). A write that times out fails
+only that call; a send error fails the device like a reader error."""
 
 from __future__ import annotations
 
+import queue
 import select
 import socket
 import threading
@@ -31,7 +35,9 @@ class _TcpDevice:
     every buffer access happens under ``_lock``, and ``read`` waits on ``_cond`` only for what the
     buffer doesn't already hold. ``_failed`` holds a connection failure (seen by the reader or a
     read/write); until then buffered bytes are always readable first. ``_overflow_pending`` marks
-    a cap overflow since the previous read so the next read can carry ``overflow = true``."""
+    a cap overflow since the previous read so the next read can carry ``overflow = true``.
+    ``_warnings`` holds the device's failure warning(s) — one (time, message) per failure, put
+    under the lock by ``_fail`` and drained by the host via ``take_warnings`` (packet 17b)."""
 
     def __init__(self, sock: socket.socket, params: dict[str, Any],
                  receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
@@ -42,6 +48,7 @@ class _TcpDevice:
         self._failed: str | None = None
         self._overflow_pending = False
         self._overflow_dropped = 0  # bytes dropped by the cap since the previous read
+        self._warnings: queue.Queue = queue.Queue()  # (monotonic timestamp, message), one per failure
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()  # set by close() so the reader stops
@@ -87,10 +94,31 @@ class _TcpDevice:
             self._append(chunk)
 
     def _fail(self, message: str) -> None:
-        """Mark the device failed and wake any waiting read (the reader thread, or a failed write)."""
+        """Mark the device failed and wake any waiting read (the reader thread, or a failed write).
+
+        The first failure wins: later calls (the race of a write error and the reader hitting the
+        same close) only wake the waiters and never touch the buffer again, so a device records
+        exactly one (time, message) warning in ``_warnings``."""
         with self._lock:
+            if self._failed is not None:
+                self._cond.notify_all()  # a read may still be waiting on the buffer
+                return
             self._failed = message
+            self._warnings.put((time.monotonic(), f"{self.describe()}: {message}"))
             self._cond.notify_all()
+
+    def take_warnings(self) -> list[tuple[float, str]]:
+        """Drain and return any (monotonic timestamp, message) failure warnings not yet taken.
+
+        Safe to call from the worker thread only: the host drains it at every ATE call, during a
+        pause, and at action and run end. The device itself never calls this — the reader only
+        enqueues."""
+        out: list[tuple[float, str]] = []
+        while True:
+            try:
+                out.append(self._warnings.get_nowait())  # blocking get() would hang on the last item
+            except queue.Empty:
+                return out
 
     def _append(self, chunk: bytes) -> None:
         """Extend the buffer with ``chunk``, dropping the oldest bytes when the cap is exceeded;
@@ -190,7 +218,9 @@ class _TcpDevice:
 
         ``count`` is the bytes actually sent: the whole payload, terminator included, on success; what
         went out before the failure otherwise. A payload that can't be sent within ``timeout`` fails
-        with ``err = "timeout"``. A send error marks the device failed and wakes a waiting read."""
+        only this call (err = "timeout"): the peer may drain later, so the device stays usable. A send
+        error (reset, broken pipe) is a connection failure and fails the device — one (time, message)
+        warning — and wakes a waiting read, so a later read fails through it too."""
         with self._lock:
             failed = self._failed
         if failed is not None:
@@ -201,7 +231,7 @@ class _TcpDevice:
         while sent < len(payload):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([], [self.sock], [], remaining)[1]:
-                return False, sent, "timeout"
+                return False, sent, "timeout"  # this call's failure only; the connection is intact
             try:
                 sent += self.sock.send(payload[sent:])
             except OSError as exc:
@@ -222,6 +252,10 @@ class _TcpDevice:
         """Byte payloads arrive as bytes from Lua (see ``_AteTable._raw_params``); a ``str`` from a
         Python caller is encoded as UTF-8."""
         return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+
+    def quiescent(self) -> bool:
+        """True once the reader has stopped for good, so no further warning can be enqueued."""
+        return self._stop.is_set() and self._reader_thread is None
 
     def close(self) -> None:
         """Stop the reader thread, close the socket, and join the reader. Safe to call twice — a
