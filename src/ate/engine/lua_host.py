@@ -259,6 +259,10 @@ class _AteTable:
         # by the device and returned as result tables, so only param-validation errors raise here.
         self._extra["read"] = self._isolate_device(self._do_read, "read")
         self._extra["write"] = self._isolate_device(self._do_write, "write")
+        # Packet 17a: register ATE.flush as a finalized device wrapper (same as read/write): it
+        # empties the Device's receive buffer and returns {ok = true, count = n}; a closed or
+        # failed Device goes through onError.
+        self._extra["flush"] = self._isolate_device(self._do_flush, "flush")
         # Packet 16c: each open Device's onError from ATE.open, the fallback for its read/write/close.
         self._open_handlers: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
         # Packet 16c: the Lua-wrapped device functions __getattr__ hands out, built on first use.
@@ -540,6 +544,27 @@ class _AteTable:
         }
         if err is not None:
             return self._failure("write", device.describe(), result, params, self._handler_for(device, error_handler))
+        return self._host._runtime.table_from(result)
+
+    def _do_flush(self, device=None, params=None, error_handler=None):
+        """Empty a Device's receive buffer; the real logic behind ATE.flush.
+
+        Returns a genuine Lua table ``{ok = true, count = n}`` (count = bytes discarded); a closed
+        Device or one the reader marked failed returns the failure through ``onError``, like a
+        read on a closed Device."""
+        params, error_handler = self._split_args(params, error_handler)
+        validate_params(TcpDriver(), self._raw_params(params, ()) or {}, {})  # flush takes no fields
+        if self._host._devices.is_open(device):
+            ok, count, err = device.flush()
+        else:
+            ok, count, err = False, 0, "device closed"
+        result = {
+            "ok": ok,
+            "count": count,
+            "err": err,  # None -> nil unless the flush failed
+        }
+        if err is not None:
+            return self._failure("flush", device.describe(), result, params, self._handler_for(device, error_handler))
         return self._host._runtime.table_from(result)
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821

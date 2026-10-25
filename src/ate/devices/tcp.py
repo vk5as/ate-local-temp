@@ -163,6 +163,20 @@ class _TcpDevice:
         del self._buffer[:n]
         return data
 
+    def flush(self) -> tuple[bool, int, str | None]:
+        """Empty the buffer and return ``(ok, count, err_or_None)`` with ``count`` = bytes discarded.
+
+        Packet 17a: the worker reports the overflow (if any) and clears its own flag on the next
+        read, so a flush neither reports nor cancels one; failures go through ``onError`` in the
+        same shape as read/write, and a device the reader marked failed reports its error."""
+        if self._failed is not None:
+            return False, 0, self._failed
+        with self._lock:
+            count = len(self._buffer)
+            del self._buffer[:]
+            self._cond.notify_all()  # a reader waiting for room gets the socket promptly
+        return True, count, None
+
     def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
         """Send ``data`` with ``writeTerm`` appended and return ``(ok, count, err_or_None)``.
 
