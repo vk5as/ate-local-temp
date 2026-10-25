@@ -125,3 +125,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - After a write timeout, the next write follows a truncated frame; worth a sentence in the spec.
 - `ATE.input` drains before its blocking wait but not during it.
 - The new closed-handle test still uses the shared `LoopbackPeer(hangup="reset")` (see the shared-helper flakes note).
+
+## 24b notes from review (not fixed)
+
+- `report_stem_and_directory` doesn't sanitise its stem or the `<UUT Type>` directory, so `report_files` globbing (and the report directory itself) may not match a sanitised report name for a serial/UUT Type with Windows-illegal characters. The log's default name is now sanitised like the report's.
+- An INTERRUPTED run's default log name ends `_INTERRUPTED_log.csv` (matches the report writer; spec lists only PASS|FAIL).
+- The Owner list is flat; Sub-schedule header owners aren't representable yet (no header nodes recorded).
