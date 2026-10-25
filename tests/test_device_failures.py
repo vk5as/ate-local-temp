@@ -12,6 +12,7 @@ action it happened in (a step's ``node_seq``/``attempt_no`` or a Pre-/Post-test 
 
 from __future__ import annotations
 
+import select
 import struct
 import threading
 import time
@@ -22,7 +23,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
 
-from ate.devices.tcp import TcpDriver
+from ate.devices.tcp import TcpDriver, _TcpDevice
 from ate.devices.registry import DeviceRegistry
 from ate.engine.lua_host import LuaHost
 from ate.engine.run_engine import RunEngine, RunStatus
@@ -526,22 +527,24 @@ def test_seam_write_failure_wake_read_and_device_failure_is_logged(app: QCoreApp
     assert device_warnings[0]["node_seq"] == 0 and device_warnings[0]["attempt_no"] == 1
 
 
-def test_send_error_still_fails_the_device() -> None:
+def test_send_error_still_fails_the_device(monkeypatch) -> None:
     """A real send error (the peer reset the connection) fails the device: one warning, and a
-    later read reports the same error. Driven at the unit level by writing until the RST bites."""
+    later read reports the same error. Driven at the unit level with no reader thread (so the
+    write, not the reader, meets the reset): wait until the RST has arrived, then write once."""
+    monkeypatch.setattr(_TcpDevice, "start_reader", lambda self: None)
     peer = _ManualPeer()
     try:
         dev, _conn = _open_small(peer)
-        dev._stop.set()  # park the reader so the write, not the reader, meets the reset
-        dev._reader_thread.join(2)
+        assert dev._reader_thread is None, "the reader must not run: the write has to meet the reset"
         peer.reset()
-        time.sleep(0.05)  # let the RST arrive
+        # The RST makes the socket readable (a pending ECONNRESET): wait on that, not a guessed time.
+        assert select.select([dev.sock], [], [], 2.0)[0], "the reset never arrived"
         result = dev.write({"data": "x", "timeout": 2})
-        if result[0]:  # the first send can land in the buffer before the RST is noticed
-            result = dev.write({"data": "x", "timeout": 2})
+        _wait_for(dev, lambda d: d._failed is not None)  # the write failed the device, under its condition
         read = dev.read({"timeout": 0.1})
         warnings = dev.take_warnings()
         dev.close()
+        assert dev.sock.fileno() == -1, "close() must close the socket"
     finally:
         peer.stop()
 
@@ -627,3 +630,62 @@ return ScheduleParams("x") :setSchedule({{
         f"a failure during the pause is run-level: {warning!r}"
     lag = _at(warning) - peer.reset_at
     assert -0.05 < lag < 0.3, f"the WARNING must carry the failure time, it lags the reset by {lag:.3f}s"
+
+
+# --- Seam: schedule lines and device warnings share one timeline -----------------------------
+
+
+def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: QCoreApplication) -> None:
+    """A line logged before a device failure is recorded before its WARNING, and one logged after
+    it, after it — ``seq`` follows emission order — and every line carries the time it was emitted,
+    not the time the step ended. The peer resets on the write, 0.3 s after ``first``; ``second``
+    comes 0.6 s after the reset."""
+    peer = _ManualPeer(reset_on_first_byte=True)
+    try:
+        store, ru = _run_with_peer(app, _step("""
+        ATE.log(Log.INFO, "first")
+        ATE.sleep(0.3)
+        ATE.write(dev, {data = "go"})  -- the peer resets once it sees this
+        ATE.sleep(0.6)
+        ATE.log(Log.INFO, "second")
+        ATE.report(Result.PASS, "done")"""), peer.port)
+    finally:
+        peer.stop()
+
+    lines = [ln for ln in store.log_lines(ru) if ln["text"] in ("first", "second") or ln["source"] == "device"]
+    assert [ln["text"] if ln["source"] != "device" else "WARNING" for ln in lines] == ["first", "WARNING", "second"], \
+        f"seq order must be emission order: {[(ln['seq'], ln['text']) for ln in lines]!r}"
+    first, warning, second = lines
+    assert all(ln["node_seq"] == 0 and ln["attempt_no"] == 1 for ln in lines), f"all owned by the step: {lines!r}"
+    for line, expected in ((first, peer.reset_at - 0.3), (warning, peer.reset_at), (second, peer.reset_at + 0.6)):
+        assert abs(_at(line) - expected) < 0.1, \
+            f"{line['text']!r} is stamped {_at(line) - expected:+.3f}s off the time it was emitted"
+
+
+def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCoreApplication) -> None:
+    """Several ATE.log lines in one step, no device: recorded in the order logged, each stamped
+    with its own emission time (0.3 s apart), not one shared end-of-step time."""
+    with tempfile.TemporaryDirectory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        path = Path(td) / "schedule.tslua"
+        path.write_text("""return ScheduleParams("x") :setSchedule({
+    StepParams("logs"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.INFO, "a")
+        ATE.sleep(0.3)
+        ATE.log(Log.WARNING, "b")
+        ATE.sleep(0.3)
+        print("c")
+        ATE.report(Result.PASS, "done")
+      end),
+  })""", encoding="utf-8")
+        engine = RunEngine(store, str(path))
+        captured = {}
+        engine.run_uuid_reported.connect(lambda ru: captured.setdefault("ru", ru))
+        _drive(engine, app)
+        lines = [ln for ln in store.log_lines(captured["ru"]) if ln["text"] in ("a", "b", "c")]
+
+    assert [ln["text"] for ln in lines] == ["a", "b", "c"], f"recorded order: {lines!r}"
+    assert [ln["seq"] for ln in lines] == sorted(ln["seq"] for ln in lines)
+    gaps = [_at(lines[i + 1]) - _at(lines[i]) for i in range(2)]
+    assert all(abs(gap - 0.3) < 0.1 for gap in gaps), f"each line keeps its own time; gaps were {gaps!r}"

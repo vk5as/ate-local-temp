@@ -834,6 +834,9 @@ class _LuaHost:
         # as ``(level, source="schedule", text)``. The run engine diffs this around each
         # step's action closure to attribute lines to that Attempt.
         self.logs: list[tuple[str, str, str]] = []
+        # The monotonic time each line in ``logs`` was emitted, index for index, so the run engine
+        # can stamp it with its own time and order it against device warnings (packet 17b).
+        self.log_times: list[float] = []
         # The step index currently running (set by the run engine before each action), used to
         # attribute an isolated ATE error to the schedule line where it was called. None outside
         # a run, when only the filename is known.
@@ -977,8 +980,9 @@ class _LuaHost:
         errors are isolated by :meth:`_AteTable._isolate_device` and recorded with ``source="ate"``
         so they attach to the run as a whole rather than to any step. Every argument goes through
         ``tostring`` and is joined with spaces; the global ``print`` is wired to this so stray prints
-        land at INFO (see :meth:`_bind_print`)."""
+        land at INFO (see :meth:`_bind_print`). The emission time goes to :attr:`log_times`."""
         self.logs.append((str(level), source, " ".join(str(a) for a in args)))
+        self.log_times.append(time.monotonic())
 
     def take_device_warnings(self) -> list[tuple[float, str]]:
         """Drain and return every device's (monotonic timestamp, message) failure warning(s).
