@@ -10,8 +10,9 @@ next read. The buffer is capped (``receiveBufferBytes``): overflow drops the old
 reader remembers it, so the worker's next read reports ``overflow = true`` with one WARNING.
 Once the connection fails (peer closed, reset) the reader marks the device failed exactly as a
 read would: buffered bytes can still be read, after which every read and write returns that error —
-and the failure is recorded on the device as one (time, message) warning that the host drains at a
-safe point into a device WARNING (packet 17b)."""
+and the failure is recorded on the device as one (time, message) warning that the host drains
+promptly into a device WARNING stamped with that time (packet 17b). A write that times out fails
+only that call; a send error fails the device like a reader error."""
 
 from __future__ import annotations
 
@@ -109,8 +110,9 @@ class _TcpDevice:
     def take_warnings(self) -> list[tuple[float, str]]:
         """Drain and return any (monotonic timestamp, message) failure warnings not yet taken.
 
-        Safe to call from the worker thread only: the host drains it at a safe point (end of an
-        action, run end). The device itself never calls this — the reader only enqueues."""
+        Safe to call from the worker thread only: the host drains it at every ATE call, during a
+        pause, and at action and run end. The device itself never calls this — the reader only
+        enqueues."""
         out: list[tuple[float, str]] = []
         while True:
             try:
@@ -215,9 +217,10 @@ class _TcpDevice:
         """Send ``data`` with ``writeTerm`` appended and return ``(ok, count, err_or_None)``.
 
         ``count`` is the bytes actually sent: the whole payload, terminator included, on success; what
-        went out before the failure otherwise. A payload that can't be sent within ``timeout`` or a
-        send error both fail the device — one (time, message) warning, err = "timeout" / the error —
-        and wake a waiting read, so a later read fails through it too."""
+        went out before the failure otherwise. A payload that can't be sent within ``timeout`` fails
+        only this call (err = "timeout"): the peer may drain later, so the device stays usable. A send
+        error (reset, broken pipe) is a connection failure and fails the device — one (time, message)
+        warning — and wakes a waiting read, so a later read fails through it too."""
         with self._lock:
             failed = self._failed
         if failed is not None:
@@ -228,8 +231,7 @@ class _TcpDevice:
         while sent < len(payload):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([], [self.sock], [], remaining)[1]:
-                self._fail("timeout")  # the peer won't accept it in time: fail the device, like a reset
-                return False, sent, "timeout"
+                return False, sent, "timeout"  # this call's failure only; the connection is intact
             try:
                 sent += self.sock.send(payload[sent:])
             except OSError as exc:
@@ -250,6 +252,10 @@ class _TcpDevice:
         """Byte payloads arrive as bytes from Lua (see ``_AteTable._raw_params``); a ``str`` from a
         Python caller is encoded as UTF-8."""
         return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+
+    def quiescent(self) -> bool:
+        """True once the reader has stopped for good, so no further warning can be enqueued."""
+        return self._stop.is_set() and self._reader_thread is None
 
     def close(self) -> None:
         """Stop the reader thread, close the socket, and join the reader. Safe to call twice — a

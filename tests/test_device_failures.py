@@ -12,15 +12,18 @@ action it happened in (a step's ``node_seq``/``attempt_no`` or a Pre-/Post-test 
 
 from __future__ import annotations
 
+import struct
+import threading
 import time
 import socket
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
 
 from ate.devices.tcp import TcpDriver
-from ate.engine.run_engine import RunEngine
+from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import (
@@ -45,6 +48,61 @@ def _wait_for(dev, predicate, timeout: float = 2.0) -> None:
     a guessed time."""
     with dev._cond:
         assert dev._cond.wait_for(lambda: predicate(dev), timeout), "device never reached the expected state"
+
+
+class _ManualPeer:
+    """A one-connection TCP peer the test drives by hand: it accepts in the background, records
+    the wall time it reset the connection (``reset_at``), and can shrink its receive buffer so a
+    small write fills the path (``rcvbuf``). ``reset_on_accept`` resets as soon as it accepts."""
+
+    def __init__(self, rcvbuf: int | None = None, reset_on_accept: bool = False) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if rcvbuf is not None:  # inherited by the accepted socket; must be set before listen
+            self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self.conn: socket.socket | None = None
+        self.reset_at: float | None = None
+        self._accepted = threading.Event()
+        self._reset_on_accept = reset_on_accept
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        try:
+            self.conn, _ = self._listener.accept()
+        except OSError:
+            return
+        if self._reset_on_accept:
+            self.reset()
+        self._accepted.set()
+
+    def wait_accepted(self, timeout: float = 2.0) -> socket.socket:
+        assert self._accepted.wait(timeout), "the peer never accepted"
+        return self.conn
+
+    def reset(self) -> None:
+        """Close the connection with an RST and remember when (wall time)."""
+        self.conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.reset_at = time.time()
+        self.conn.close()
+
+    def stop(self) -> None:
+        self._listener.close()
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+
+
+def _at(line: dict) -> float:
+    """A log line's ``at`` as a wall-clock timestamp."""
+    return datetime.fromisoformat(line["at"]).timestamp()
+
+
+def _device_warnings(store: RunStore, ru: str) -> list[dict]:
+    return [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
 
 
 # --- Unit: the reader's warning, and _fail idempotency -------------------------------------
@@ -287,70 +345,139 @@ return ScheduleParams("Buffer then fail then reopen", "two steps")
         f"step 2's failure is owned by step 2: {device_warnings[1]!r}"
 
 
+_SMALL_BUF = 4096  # both ends' socket buffers shrink to this, so a 256 KiB write can't fit
+
+
+def _open_small(peer: "_ManualPeer", timeout: float = 5):
+    """Open a TCP device on ``peer`` with a tiny send buffer; return ``(device, peer socket)``."""
+    dev = TcpDriver().open(
+        {"host": "127.0.0.1", "port": peer.port, "timeout": timeout, "readTerm": "", "writeTerm": ""}
+    )
+    dev.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _SMALL_BUF)
+    return dev, peer.wait_accepted()
+
+
+def _small_send_buffer(monkeypatch) -> None:
+    """Make every TCP device the engine opens use a tiny send buffer (see :func:`_open_small`)."""
+    real_open = TcpDriver.open
+
+    def _open(self, params, *args):
+        dev = real_open(self, params, *args)
+        dev.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _SMALL_BUF)
+        return dev
+
+    monkeypatch.setattr(TcpDriver, "open", _open)
+
+
 def test_write_honours_the_open_timeout_when_the_peer_stops_reading() -> None:
     """A write on a device whose peer stops reading must fail with the open-time timeout, not wait
-    forever: the device honours the per-call/open timeout and reports the bytes it did send."""
-    listener = socket.create_server(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
+    forever: the device honours the open timeout and reports the bytes it did send."""
+    peer = _ManualPeer(rcvbuf=_SMALL_BUF)
     try:
-        dev = TcpDriver().open(
-            {"host": "127.0.0.1", "port": port, "timeout": 0.4, "readTerm": "", "writeTerm": ""}
-        )
-        conn, _ = listener.accept()  # accepted but never read, so the send buffers fill
-        payload = b"\x00" * (16 * 1024 * 1024)  # 16 MiB: the kernel send buffer holds ~2.6 MiB, so it can't drain in 0.4 s
+        dev, _conn = _open_small(peer, timeout=0.3)
+        payload = b"\x00" * (256 * 1024)
         start = time.monotonic()
-        ok, sent, err = dev.write({"data": payload})  # no per-call timeout: uses the open-time 0.4 s
+        ok, sent, err = dev.write({"data": payload})  # no per-call timeout: uses the open-time 0.3 s
         elapsed = time.monotonic() - start
         dev.close()
-        conn.close()
     finally:
-        listener.close()
+        peer.stop()
 
     assert ok is False
     assert err == "timeout", f"the write must report a timeout, not an error: {err!r}"
     assert 0 < sent < len(payload), f"the write must report the bytes actually sent: {sent}"
-    assert elapsed < 1.0, f"the write must honour the 0.4 s timeout, it took {elapsed:.2f}s"
+    assert 0.25 < elapsed < 1.0, f"the write must honour the 0.3 s timeout, it took {elapsed:.2f}s"
 
 
-def test_seam_write_timeout_reports_count_and_err_through_onerror(app: QCoreApplication) -> None:
+def test_write_per_call_timeout_overrides_the_open_timeout() -> None:
+    """A per-call ``timeout = 0.3`` wins over the open-time 5 s: the stalled write returns well
+    under 5 s with err = "timeout"."""
+    peer = _ManualPeer(rcvbuf=_SMALL_BUF)
+    try:
+        dev, _conn = _open_small(peer, timeout=5)
+        start = time.monotonic()
+        ok, sent, err = dev.write({"data": b"\x00" * (256 * 1024), "timeout": 0.3})
+        elapsed = time.monotonic() - start
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert (ok, err) == (False, "timeout"), f"the stalled write must time out: {(ok, sent, err)!r}"
+    assert 0.25 < elapsed < 1.0, f"the per-call 0.3 s timeout must win over the open 5 s, took {elapsed:.2f}s"
+
+
+def test_write_timeout_does_not_fail_the_device() -> None:
+    """A write timeout is that call's failure only: once the peer drains, a later write and read
+    on the same device succeed, and no device warning is recorded (spec: only a connection error
+    fails the Device)."""
+    peer = _ManualPeer(rcvbuf=_SMALL_BUF)
+    try:
+        dev, conn = _open_small(peer)
+        ok, sent, err = dev.write({"data": b"a" * (256 * 1024), "timeout": 0.3})
+        assert (ok, err) == (False, "timeout") and 0 < sent, f"the first write must time out: {(ok, sent, err)!r}"
+
+        # The peer drains exactly what was sent, then the device must work again.
+        got = 0
+        conn.settimeout(2)
+        while got < sent:
+            got += len(conn.recv(65536))
+        later = dev.write({"data": b"ping", "timeout": 2})
+        echoed = b""
+        while len(echoed) < 4:
+            echoed += conn.recv(4 - len(echoed))
+        conn.sendall(b"pong")
+        read = dev.read({"size": 4, "timeout": 2})
+        warnings = dev.take_warnings()
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert later == (True, 4, None), f"a write after the drained timeout must succeed: {later!r}"
+    assert echoed == b"ping"
+    assert read == (b"pong", 4, False, None), f"a read after the write timeout must succeed: {read!r}"
+    assert warnings == [], f"a write timeout must not fail the device: {warnings!r}"
+
+
+def test_seam_write_timeout_reports_count_and_err_through_onerror(app: QCoreApplication, monkeypatch) -> None:
     """A write that the peer stops reading fails with {ok = false, count = n, err = 'timeout'}
-    through its onError, and the step reports those exact values (n between 0 and the payload)."""
-    listener = socket.create_server(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
+    through its onError, and the step reports those exact values (n between 0 and the payload).
+    The timeout doesn't fail the Device, so no device WARNING is logged."""
+    _small_send_buffer(monkeypatch)
+    peer = _ManualPeer(rcvbuf=_SMALL_BUF)
     try:
         source = _step(f"""
-        local big = string.rep("x", 16384*1024)
+        local big = string.rep("x", 256*1024)
         local w = ATE.write(dev, {{data = big, timeout = 0.3}}, function(res) return res end)
         ATE.report(Result.PASS, tostring(w.ok).." "..tostring(w.count).." "..tostring(w.err))""")
-        store, ru = _run_with_peer(app, source, port)
+        store, ru = _run_with_peer(app, source, peer.port)
     finally:
-        # The engine closed the device at run end; the listener's accepted socket may linger,
-        # so close it explicitly here for cleanliness.
-        listener.close()
+        peer.stop()
 
     msg = _step_message(store, ru)
     parts = msg.split(" ")
     assert len(parts) == 3 and parts[0] == "false" and parts[2] == "timeout", f"unexpected message: {msg!r}"
     n = int(parts[1])
-    assert 0 < n < 16384 * 1024, f"count must be the bytes actually sent (0 < n < 16MiB): {n}"
-    device_warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
-    # The device failed, so its reader (or the write) records one device WARNING, attributed to the step.
-    assert len(device_warnings) == 1, f"a write timeout that fails the device logs one device WARNING: {device_warnings!r}"
-    assert device_warnings[0]["node_seq"] == 0 and device_warnings[0]["attempt_no"] == 1
-    assert "timeout" in device_warnings[0]["text"].lower()
+    assert 0 < n < 256 * 1024, f"count must be the bytes actually sent (0 < n < 256 KiB): {n}"
+    assert _device_warnings(store, ru) == [], "a write timeout does not fail the device"
 
 
 # --- Seam: a write that fails mid-send marks the device failed ---------------------------------
 
 
 def test_seam_write_failure_wake_read_and_device_failure_is_logged(app: QCoreApplication) -> None:
-    """A write that errors (not just times out) marks the device failed: a following read returns
-    the error through its onError, and the device logs exactly one device WARNING."""
-    peer = LoopbackPeer(hangup="reset")  # resets on accept, so a write errors immediately
+    """A device whose connection was reset fails a write and a following read with the same error
+    through their onError, and logs exactly one device WARNING. The step waits (polling a zero-timeout
+    flush, which reports the failure once the reader has seen the RST) before writing, so the write
+    always meets the failed device rather than racing the reset."""
+    peer = LoopbackPeer(hangup="reset")  # resets on accept
     peer.start()
     try:
         source = _step("""
         local keep = function(res) return res end
+        for _ = 1, 200 do
+          if not ATE.flush(dev, keep).ok then break end
+          ATE.sleep(0.01)
+        end
         local w = ATE.write(dev, {data = "x"}, keep)
         local r = ATE.read(dev, {timeout = 2}, keep)
         ATE.report(Result.PASS, tostring(w.ok).." "..tostring(w.err).."|"..tostring(r.err))""")
@@ -364,6 +491,30 @@ def test_seam_write_failure_wake_read_and_device_failure_is_logged(app: QCoreApp
     assert ok == "false"
     assert werr and ("reset" in werr.lower() or "pipe" in werr.lower()), f"the write must report the failure: {werr!r}"
     assert rerr == werr, f"the read must report the same failure the write raised: {rerr!r}"
-    device_warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
+    device_warnings = _device_warnings(store, ru)
     assert len(device_warnings) == 1, f"exactly one device WARNING per failure: {device_warnings!r}"
     assert device_warnings[0]["node_seq"] == 0 and device_warnings[0]["attempt_no"] == 1
+
+
+def test_send_error_still_fails_the_device() -> None:
+    """A real send error (the peer reset the connection) fails the device: one warning, and a
+    later read reports the same error. Driven at the unit level by writing until the RST bites."""
+    peer = _ManualPeer()
+    try:
+        dev, _conn = _open_small(peer)
+        dev._stop.set()  # park the reader so the write, not the reader, meets the reset
+        dev._reader_thread.join(2)
+        peer.reset()
+        time.sleep(0.05)  # let the RST arrive
+        result = dev.write({"data": "x", "timeout": 2})
+        if result[0]:  # the first send can land in the buffer before the RST is noticed
+            result = dev.write({"data": "x", "timeout": 2})
+        read = dev.read({"timeout": 0.1})
+        warnings = dev.take_warnings()
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert result[0] is False and result[2] and result[2] != "timeout", f"the send must error: {result!r}"
+    assert read[3] == result[2], f"the read must report the write's failure: {read!r}"
+    assert len(warnings) == 1, f"a send error fails the device once: {warnings!r}"
