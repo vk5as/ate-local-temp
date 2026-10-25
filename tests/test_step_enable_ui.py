@@ -1,10 +1,11 @@
-import time
 """Packet 11b seam test: the Steps & options stage checkboxes drive step enables.
 
 The widget holds no logic of its own: each checkbox toggle is one call into
 ``session.toggle_node(seq, enabled)`` (packet 11a), applied at start(). Toggles are
 locked while a run is in progress and stay locked until it ends.
 """
+
+import time
 
 from PyQt6.QtCore import Qt
 
