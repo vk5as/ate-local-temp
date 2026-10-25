@@ -23,7 +23,11 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
-from ate.report.log_export import FIELDS, build_export_rows, export_log
+from ate.report.log_export import build_export_rows, export_log
+
+# The field names exactly as log-export.md lines 32-42 list them; pinned here (not imported from the
+# module) so a rename in the exporter fails the tests.
+SPEC_FIELDS = ["time", "level", "source", "owner", "schedule", "step_number", "step_name", "attempt", "text"]
 from ate.storage.store import RunStore
 
 from .test_tcp_read_write import LoopbackPeer
@@ -274,7 +278,7 @@ def test_combined_filters(export_run) -> None:
         assert export_log(store, uuid, path, fmt, levels={"DEBUG"}, sources={"device"}) == 0
 
     assert (Path(td) / "r.csv").read_bytes()[:3] == b"\xef\xbb\xbf"
-    assert (Path(td) / "r.csv").read_text(encoding="utf-8-sig").splitlines() == [",".join(FIELDS)]
+    assert (Path(td) / "r.csv").read_text(encoding="utf-8-sig").splitlines() == [",".join(SPEC_FIELDS)]
     assert (Path(td) / "r.jsonl").read_bytes() == b""
     text_lines = (Path(td) / "r.txt").read_text(encoding="utf-8").splitlines()
     assert text_lines[0].startswith("Run UUID: ")
@@ -308,7 +312,7 @@ def test_csv_output(export_run) -> None:
     # CRLF record ends are stripped so csv sees the fields the way the writer produced them;
     # the quoted text cell's embedded newline survives the round trip.
     rows = [list(r) for r in csv.reader(io.StringIO(text.replace("\r\n", "\n")))]
-    assert rows[0] == list(FIELDS)
+    assert rows[0] == SPEC_FIELDS
     rows = rows[1:]
     assert len(rows) == 11
     assert [r[3] for r in rows] == ["Pre-test"] + ["Step"] * 8 + ["Post-test", "Run"]
@@ -336,7 +340,7 @@ def test_jsonl_output(export_run) -> None:
     assert len(lines) == 11
 
     objs = [json.loads(line) for line in lines]
-    assert all(set(o) == set(FIELDS) for o in objs)
+    assert all(list(o) == SPEC_FIELDS for o in objs)  # names and order
 
     # Blanks are null, not empty strings.
     assert objs[0]["owner"] == "Pre-test" and objs[0]["step_number"] is None and objs[0]["attempt"] is None
