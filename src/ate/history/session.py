@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from ..config import Config
-from ..report.html import RESULT_LABELS
+from ..report.html import _sanitize_filename, RESULT_LABELS
 from ..report.html import report_stem_and_directory
 from ..report.html import result_label
 from ..report.html import write_report
@@ -197,7 +197,8 @@ class HistorySession:
         if row is None:
             raise ValueError(f"no test run recorded for {run_uuid!r}")
         directory, stem = report_stem_and_directory(self.store, run_uuid, self.config)
-        return directory / f"{stem}_{result_label(row)}_log.csv"
+        # Sanitised like the report name, so a serial with a Windows-illegal character gives the same name.
+        return directory / _sanitize_filename(f"{stem}_{result_label(row)}_log.csv")
 
     def export_log(
         self,

@@ -44,7 +44,7 @@ def _default_open_file(path: str | None) -> None:
     subprocess.Popen(["xdg-open", path])
 
 
-def _default_file_dialog(title: str, default_path: str, filters: str) -> Optional[str]:
+def _default_file_dialog(title: str, default_path: str, filters: str) -> Optional[tuple]:
     """The platform Save As (injected into tests)."""
     return QFileDialog.getSaveFileName(QWidget(), title, default_path, filters)
 
@@ -72,7 +72,7 @@ class HistoryScreen(QWidget):
         session: HistorySession,
         *,
         open_file: Optional[Callable[[str | None], None]] = None,
-        file_dialog: Optional[Callable[[str, str, str], Optional[str]]] = None,
+        file_dialog: Optional[Callable[[str, str, str], Optional[tuple]]] = None,
     ) -> None:
         super().__init__()
         self.session = session

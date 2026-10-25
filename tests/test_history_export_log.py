@@ -413,3 +413,31 @@ def test_export_button_disabled_for_a_running_run(qapp, tmp_path: Path):
     assert screen._export_dialog is None
     screen._on_export_log()  # the handler itself refuses a running selection
     assert screen._export_dialog is None
+
+
+def test_the_filter_wins_over_a_typed_extension(qapp, tmp_path: Path):
+    """Save As returning ("x.txt", "CSV (*.csv)") writes CSV into x.txt: the format comes from the
+    chosen file type, not from the extension the Operator typed (spec 24b Saving)."""
+    store = RunStore(tmp_path / "ate.db")
+    _record_run(tmp_path, qapp, LOGGING, serial="PS9")
+    cfg = _cfg(tmp_path / "reports")
+    screen, _s = _screen(
+        store, cfg=cfg, file_dialog=lambda _t, _d, _f: (tmp_path / "x.txt", "CSV (*.csv)")
+    )
+    _select(screen, qapp, "PS9")
+    dialog = _open_dialog(screen, qapp)
+    dialog.export_button.click()
+    qapp.processEvents()
+
+    head = (tmp_path / "x.txt").read_text(encoding="utf-8-sig").splitlines()
+    assert head[0] == "time,level,source,owner,schedule,step_number,step_name,attempt,text"
+
+
+def test_default_log_name_is_sanitised_like_the_report_name(qapp, tmp_path: Path):
+    """A serial with Windows-illegal characters gives the same sanitised name as the report."""
+    store = RunStore(tmp_path / "ate.db")
+    uuid = _record_run(tmp_path, qapp, LOGGING, serial="PS:9*x")
+    session = HistorySession(store, config=_cfg(tmp_path / "reports"))
+    name = session.export_log_default_path(uuid).name
+    assert not any(ch in name for ch in ':/\\*?"<>|'), name
+    assert name.endswith("_PASS_log.csv") and "PS_9_x" in name, name  # ":" and "*" replaced

@@ -61,7 +61,7 @@ class ExportLogDialog(QDialog):
         run_uuid: str,
         *,
         default_path: str,
-        file_dialog: Optional[Callable[[str, str, str], Optional[str]]] = None,
+        file_dialog: Optional[Callable[[str, str, str], Optional[tuple]]] = None,
     ) -> None:
         super().__init__(parent)
         self.store = store
