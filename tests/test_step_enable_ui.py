@@ -192,3 +192,77 @@ def test_boxes_lock_while_a_run_is_up_and_unlock_after_reselect(qapp, tmp_path) 
     # And toggle_node accepts again.
     session.toggle_node(0, False)
     assert session._pending_node_enables == {0: False}
+
+
+def test_same_schedule_reselction_carries_overrides_and_seeds_boxes(qapp, tmp_path) -> None:
+    """Re-selecting the same schedule carries its step overrides, and the boxes show them.
+
+    Unticking row 0 of "Enable/disable schedule" stores {0: False}; running it then
+    re-selecting the same schedule keeps that override on the session (spec 37: options
+    carry over) and the Steps stage seeds its boxes from it, so row 0 shows unchecked
+    while the untouched row 2 keeps its default-checked state."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_load(screen, "Enable/disable schedule")
+
+    first = screen.steps_options_stage.step_list.item(0)
+    first.setCheckState(Qt.CheckState.Unchecked)
+    assert session._pending_node_enables == {0: False}
+
+    screen.steps_options_stage.run_button.click()
+    assert _wait_finished(qapp, session)
+    _drain_report(qapp, session)
+
+    # Re-select the same schedule; the override must survive.
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Enable/disable schedule")
+    screen.test_schedule_stage.schedule_list.selectionModel().clearSelection()
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    qapp.processEvents()
+    assert session._state == SessionState.SELECTING
+    assert session._pending_node_enables == {0: False}
+
+    # The Steps stage seeds its boxes from the carried override: row 0 unchecked,
+    # row 2 (never touched) still at its default-on state.
+    screen._begin_run_from_selection()
+    assert screen.steps_options_stage.step_list.item(0).checkState() == Qt.CheckState.Unchecked
+    assert screen.steps_options_stage.step_list.item(2).checkState() == Qt.CheckState.Checked
+
+
+def test_different_schedule_selection_clears_overrides_and_uses_defaults(qapp, tmp_path) -> None:
+    """Switching to another schedule clears the previous schedule's step overrides.
+
+    Unticking row 0 of "Enable/disable schedule" stores {0: False}; switching to
+    "Passing schedule" clears that so a next run records the new schedule's own defaults
+    (a single enabled step, checked box) rather than the stale override."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_load(screen, "Enable/disable schedule")
+
+    first = screen.steps_options_stage.step_list.item(0)
+    first.setCheckState(Qt.CheckState.Unchecked)
+    assert session._pending_node_enables == {0: False}
+
+    screen.steps_options_stage.run_button.click()
+    assert _wait_finished(qapp, session)
+    _drain_report(qapp, session)
+
+    # Switching schedules clears the previous schedule's overrides.
+    other = _find_item(screen.test_schedule_stage.schedule_list, "Passing schedule")
+    screen.test_schedule_stage.schedule_list.selectionModel().clearSelection()
+    screen.test_schedule_stage.schedule_list.setCurrentItem(other)
+    qapp.processEvents()
+    assert session._state == SessionState.SELECTING
+    assert session.selected_schedule == "Passing schedule"
+    assert session._pending_node_enables is None
+
+    # The Steps stage seeds its boxes from the new schedule's defaults.
+    screen._begin_run_from_selection()
+    assert screen.steps_options_stage.step_list.item(0).checkState() == Qt.CheckState.Checked

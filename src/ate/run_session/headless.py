@@ -206,6 +206,10 @@ class HeadlessRunSession(QObject):
         while a run is in progress the selection is remembered but not announced."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
+        # Switching schedules drops the previous schedule's step overrides; selecting
+        # the same one keeps them (spec 37: options carry over within a schedule).
+        if self._selected_name != name:
+            self._pending_node_enables = None
         self._selected_name = name
         stop_on_fail = True  # spec default when unset, unknown, or the schedule fails to load
         config = self._config
