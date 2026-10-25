@@ -187,24 +187,35 @@ class StepsOptionsStage(QWidget):
     def load_steps(self, steps: Iterable[object]) -> None:
         """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) as checkable rows.
 
-        Every row carries its step's default ``enabled`` state; a toggle is one call into
-        ``session.toggle_node(row, checked)`` (packet 11b), with the row's position in the
-        expanded step list as the runner seq. Also re-applies the selected schedule's Stop on
-        Fail default to the radio pair so it is not stuck at construction-time; the Operator can
-        still toggle either choice."""
+        Every row carries its step's default ``enabled`` state, or — when the session carries
+        step-enable overrides for the selected schedule — the override that a next run would
+        record, so the boxes show what the run will record (spec 37: options carry over). A
+        toggle is one call into ``session.toggle_node(row, checked)`` (packet 11b), with the row's
+        position in the expanded step list as the runner seq. Also re-applies the selected
+        schedule's Stop on Fail default to the radio pair so it is not stuck at construction-
+        time; the Operator can still toggle either choice."""
         self._loading = True
         self.step_list.clear()
         self._states = {}
+        overrides = self.session.node_enables if self.session is not None else None
+        if overrides is not None:
+            overrides = dict(overrides)
         for step in steps:
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
             text = f"{number}  {label}" if number else str(label)
             item = QListWidgetItem(text)
-            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable if self._checkable else Qt.ItemFlag.NoItemFlags)
-            checked = bool(getattr(step, "enabled", True))
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            # Always keep the row enabled and selectable and the box drawn; only
+            # ItemIsUserCheckable toggles with the run lock (a locked box still shows its
+            # check state). NoItemFlags would disable the row even in setup.
+            checkable = Qt.ItemFlag.ItemIsUserCheckable if self._checkable else Qt.ItemFlag.NoItemFlags
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | checkable)
             self.step_list.addItem(item)
-            self._states[self.step_list.row(item)] = checked
+            row = self.step_list.row(item)
+            default = bool(getattr(step, "enabled", True))
+            checked = overrides.get(row, default) if overrides else default
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self._states[row] = checked
         self._loading = False
         if self.session is not None:
             self._apply_stop_on_fail(self.session.selected_stop_on_fail)
@@ -227,18 +238,20 @@ class StepsOptionsStage(QWidget):
         self.session.toggle_node(row, checked)
 
     def set_checkable(self, checkable: bool) -> None:
-        """Lock or unlock the step checkboxes: ``False`` removes ItemIsUserCheckable so the
-        boxes are not user-checkable (the screen calls this from session state changes)."""
+        """Lock or unlock the step checkboxes: toggle only ItemIsUserCheckable so the
+        boxes stay drawn with their check state and the row stays enabled and selectable
+        (the screen calls this from session state changes)."""
         self._checkable = checkable
         # Re-sync the last-seen state before the flag pass, so the flag events the pass emits
         # are read back as the same state and never reach the session as phantom toggles.
         for i in range(self.step_list.count()):
             item = self.step_list.item(i)
             self._states[i] = item.checkState() == Qt.CheckState.Checked
-        flag = Qt.ItemFlag.ItemIsUserCheckable if checkable else Qt.ItemFlag.NoItemFlags
+        keep = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        flag = keep | (Qt.ItemFlag.ItemIsUserCheckable if checkable else Qt.ItemFlag.NoItemFlags)
         for i in range(self.step_list.count()):
             item = self.step_list.item(i)
-            item.setFlags(item.flags() & flag)
+            item.setFlags(item.flags() & keep | flag)
 
     def _apply_stop_on_fail(self, value: bool) -> None:
         """Set the radio pair to ``value`` (True = stop on first failure)."""

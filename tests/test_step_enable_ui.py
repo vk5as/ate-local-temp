@@ -13,6 +13,22 @@ from ate.ui.staged_run_screen import StagedRunScreen
 from ._fixtures import write_ate_env
 
 
+def _drain_report(qapp, session) -> None:
+    """Pump events until the run-end PDF helper reports back (ticket 22b).
+
+    A finished run with a config starts a helper process in a session-owned QProcess; if
+    the test drops the session while it is still running, the later signal delivery reaches
+    a dead object and aborts the interpreter. Draining ``report_written`` leaves the helper
+    fully done before the test ends (the pattern test_failure_bar uses)."""
+    done = []
+    session.report_written.connect(lambda _html, _pdf: done.append(True))
+    for _ in range(3000):
+        qapp.processEvents()
+        if done:
+            return
+    raise AssertionError("report_written never fired")
+
+
 def _wait_finished(qapp, session) -> bool:
     """Poll processEvents until the session reaches FINISHED (or times out).
 
@@ -72,6 +88,7 @@ def test_untick_default_on_step_records_disabled_notrun(qapp, tmp_path) -> None:
 
     screen.steps_options_stage.run_button.click()
     assert _wait_finished(qapp, session)
+    _drain_report(qapp, session)
 
     nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
     assert nodes["1."]["result"] == "NOTRUN"
@@ -81,6 +98,44 @@ def test_untick_default_on_step_records_disabled_notrun(qapp, tmp_path) -> None:
     assert nodes["3."]["result"] == "PASS"
     # The disabled step records no Attempt row at all.
     assert not any(a["node_seq"] == 0 for a in session.store.attempts(session.run_uuid))
+
+
+def test_boxes_stay_enabled_and_selectable_with_check_state(qapp, tmp_path) -> None:
+    """A row keeps ItemIsEnabled and ItemIsSelectable even when locked; only
+    ItemIsUserCheckable toggles with the run lock, and the box keeps showing its
+    check state (packet 11b fix: dropping ItemIsEnabled disabled the row in setup)."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+
+    screen.uut_operator_stage.operator_edit.setText("Ada")
+    screen._advance(1)
+    _select_and_load(screen, "Enable/disable schedule")
+
+    first = screen.steps_options_stage.step_list.item(0)
+    # In setup the row is enabled, selectable and user-checkable; the boxes show the defaults.
+    assert first.flags() & Qt.ItemFlag.ItemIsEnabled
+    assert first.flags() & Qt.ItemFlag.ItemIsSelectable
+    assert first.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert first.checkState() == Qt.CheckState.Checked
+    second = screen.steps_options_stage.step_list.item(1)
+    assert second.checkState() == Qt.CheckState.Unchecked
+
+    screen.steps_options_stage.run_button.click()
+    qapp.processEvents()  # deliver the STARTED signal to the screen
+    assert session._state == SessionState.STARTED
+
+    # The lock removes only ItemIsUserCheckable: the box still shows its check state
+    # and the row stays enabled and selectable.
+    assert not (first.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+    assert first.checkState() == Qt.CheckState.Checked
+    assert first.flags() & Qt.ItemFlag.ItemIsEnabled
+    assert first.flags() & Qt.ItemFlag.ItemIsSelectable
+    assert second.checkState() == Qt.CheckState.Unchecked
+
+    # Let the run finish and drain its PDF helper before the test drops the session.
+    assert _wait_finished(qapp, session)
+    _drain_report(qapp, session)
 
 
 def test_boxes_lock_while_a_run_is_up_and_stay_locked(qapp, tmp_path) -> None:

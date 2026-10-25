@@ -179,6 +179,16 @@ class HeadlessRunSession(QObject):
 
 
     @property
+    def node_enables(self) -> Optional[dict[int, bool]]:
+        """The Operator's step-enable overrides for the selected schedule, keyed by the
+        runner seq each step is assigned.
+
+        The Steps stage seeds its boxes from these so they show what a next run will record
+        (spec 37: options carry over). Returns a copy, so callers can read the state without
+        mutating the session's; ``None`` until a toggle has been made."""
+        return dict(self._pending_node_enables) if self._pending_node_enables is not None else None
+
+    @property
     def selected_stop_on_fail(self) -> bool:
         """The selected schedule's Stop on Fail default — ``True`` when it is unset or unknown.
 
