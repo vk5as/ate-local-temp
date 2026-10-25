@@ -359,6 +359,14 @@ def test_everything_ticked_exports_every_line(qapp, tmp_path: Path):
     assert {o["step_number"] for o in objs} == {"1.", "2.", "3."}
 
 
+def test_export_log_dialog_imports_qwidget():
+    """``parent: QWidget`` is only a string annotation until QWidget is imported: resolving the
+    hints of ``__init__`` raises NameError while the import is missing."""
+    from typing import get_type_hints
+
+    assert get_type_hints(ExportLogDialog.__init__)["parent"] is QWidget
+
+
 # --- Item 3: the History screen button ------------------------------------------
 
 

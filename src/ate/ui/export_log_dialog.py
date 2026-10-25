@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..report.log_export import LEVELS, SOURCES, build_export_rows
