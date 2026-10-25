@@ -42,10 +42,12 @@ def _wait_finished(qapp, session) -> bool:
         session.choose("CONTINUE")
 
     session.failure_prompt.connect(_continue_on_failure)
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if session._state == SessionState.FINISHED:
             return True
+        time.sleep(0.005)
     return False
 
 

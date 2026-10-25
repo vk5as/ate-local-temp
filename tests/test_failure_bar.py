@@ -12,6 +12,7 @@ is left unwired.
 """
 
 import sqlite3
+import time
 
 from PyQt6.QtGui import QColor
 
@@ -55,20 +56,24 @@ def _latch_prompts(session) -> list:
 
 def _pump_prompts(qapp, prompts: list, count: int) -> None:
     """Pump the event loop until ``count`` prompts have been latched (or the deadline)."""
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if len(prompts) >= count:
             return
-    raise AssertionError(f"only {len(prompts)} prompt(s) arrived, wanted {count}")
+        time.sleep(0.005)
+    raise AssertionError(f"only {len(prompts)} prompt(s) arrived in 10 s, wanted {count}")
 
 
 def _pump_finished(qapp, session) -> None:
     """Pump the event loop until the run reaches FINISHED (or the deadline)."""
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if session._state == SessionState.FINISHED:
             return
-    raise AssertionError(f"run did not finish; state is {session._state}")
+        time.sleep(0.005)
+    raise AssertionError(f"run did not finish in 10 s; state is {session._state}")
 
 
 def _pump_report_written(qapp, session) -> None:
@@ -79,11 +84,13 @@ def _pump_report_written(qapp, session) -> None:
     fake the helper, then wait for report_written)."""
     done: list = []
     session.report_written.connect(lambda html, pdf: done.append((html, pdf)))
-    for _ in range(3000):
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count: load-independent
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if done:
             return
-    raise AssertionError("report_written never fired")
+        time.sleep(0.005)
+    raise AssertionError("report_written never fired within 10 s")
 
 
 def _run_row(store, run_uuid: str) -> dict:

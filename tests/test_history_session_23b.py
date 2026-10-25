@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import time
+
 import pytest
+
+from PyQt6.QtCore import QCoreApplication
 
 from ate.config import Config
 from ate.engine.run_engine import RunEngine
@@ -23,13 +27,19 @@ from ._fixtures import DOC_FIELDS, _drive
 
 
 
-def _pump(app: object) -> None:
-    """Pump an application's event loop so queued QProcess signals are delivered."""
-    from PyQt6.QtCore import QCoreApplication
+def _pump_until(app: object, predicate, deadline: float = 10.0) -> bool:
+    """Pump an application's event loop until ``predicate()`` holds, within a time bound.
 
+    Queued QProcess signals only arrive while the loop is pumped; a fixed pump count fails
+    under CPU load, so the wait is bounded by wall clock instead."""
     app = QCoreApplication.instance() or QCoreApplication([])
-    for _ in range(5000):
+    until = time.monotonic() + deadline
+    while time.monotonic() < until:
         app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
 
 
 def _record_open(tmp_path: Path, app: object, source: str = DOC_FIELDS) -> tuple[RunStore, Path, str]:
@@ -105,7 +115,7 @@ def test_report_files_lists_written_reports_newest_first(tmp_path: Path, app: ob
     from ate.report.pdf_job import start_pdf_job
 
     start_pdf_job(None, html_path=html_path, pdf_path=html_path.with_suffix(".pdf"))
-    _pump(app)
+    assert _pump_until(app, lambda: html_path.with_suffix(".pdf").exists()), "the PDF helper never finished"
 
     s = HistorySession(store, config=config)
     rp = s.report_files(ru)
@@ -153,7 +163,7 @@ def test_regenerate_html_and_pdf_fires_on_done_success(tmp_path: Path, app: obje
 
     result = s.regenerate(ru, html=True, pdf=True, on_done=done)
     assert result["pdf_started"] is True
-    _pump(app)
+    assert _pump_until(app, lambda: events), "the PDF job never reported back"
     assert events == ["ok"]  # the stub helper wrote a non-empty PDF -> success
 
 
@@ -174,7 +184,7 @@ def test_regenerate_pdf_failure_reports_error(tmp_path: Path, app: object, monke
 
     result = s.regenerate(ru, html=True, pdf=True, on_done=done)
     assert Path(result["html"]).exists()  # HTML written regardless
-    _pump(app)
+    assert _pump_until(app, lambda: events), "the failing PDF job never reported back"
     assert len(events) == 1 and events[0]  # one error string reported
 
 

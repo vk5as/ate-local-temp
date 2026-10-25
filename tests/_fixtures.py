@@ -356,6 +356,11 @@ class LoopbackPeer:
     #: Lua string can target whatever ephemeral port this run's peer chose.
     PORT_PLACEHOLDER = "__PORT__"
 
+    #: How long a "reset" peer waits for the device's first byte before hanging up anyway. The RST
+    #: must not go out straight on accept: it can land before the client's connect() returns, so the
+    #: open itself fails instead of the connection dying later.
+    RESET_GRACE = 1.0
+
     def __init__(self, payload: bytes = b"", hangup: str | None = None) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -373,9 +378,10 @@ class LoopbackPeer:
         self._running = False
         # Sent to each accepted connection on accept (buffered by TCP), so a read has data ready.
         self._payload = payload
-        # Hang up right after sending the payload: "close" is an orderly close (the device reads EOF),
-        # "reset" sets SO_LINGER 0 so the close sends an RST (the device's next recv/send fails). No
-        # reader thread is started for such connections.
+        # Hang up after sending the payload: "close" is an orderly close (the device reads EOF),
+        # "reset" sets SO_LINGER 0 so the close sends an RST (the device's next recv/send fails) —
+        # but only once the device's first byte has arrived or RESET_GRACE has elapsed, so the RST
+        # can never beat the client's connect(). No byte-recording reader thread for these.
         self._hangup = hangup
 
     def start(self) -> None:
@@ -405,18 +411,36 @@ class LoopbackPeer:
                 break  # stopped or the listen socket closed
             self.connections.append(conn)  # recorded first so wait_for_connection sees it immediately
             if self._hangup:
-                try:
-                    if self._payload:
-                        conn.sendall(self._payload)
-                    if self._hangup == "reset":
-                        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-                    conn.close()
-                except OSError:
-                    pass
+                # Hung up on a thread of its own so a delayed RST never blocks the accept loop.
+                th = threading.Thread(target=self._hang_up, args=(conn,), daemon=True)
+                self._readers[conn] = th
+                th.start()
                 continue
             th = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
             self._readers[conn] = th
             th.start()
+
+    def _hang_up(self, conn: socket.socket) -> None:
+        """Send the payload, then hang up: "close" is an orderly close (the device reads EOF),
+        "reset" sends an RST — but only after the device has sent its first byte, which proves the
+        client's connect() returned. A device that never writes gets the reset after RESET_GRACE."""
+        try:
+            if self._payload:
+                conn.sendall(self._payload)
+            if self._hangup == "reset":
+                try:
+                    conn.settimeout(self.RESET_GRACE)
+                    conn.recv(1)  # the device's first byte: the open is confirmed
+                except OSError:
+                    pass  # no byte within the grace (or the peer side is already gone)
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        except OSError:
+            pass  # the device already went away; still close and record it below
+        finally:
+            try:
+                conn.close()
+            finally:
+                self.closed.add(conn)
 
     def _handle_conn(self, conn: socket.socket) -> None:
         """Send the peer's payload (if any), then record every byte the device sends until it closes."""
@@ -447,32 +471,18 @@ class LoopbackPeer:
 
 
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
-    """Poll until a recorded peer connection closes (device side closed it), or ``timeout`` elapses.
+    """Poll until a recorded peer connection has closed (the device closed it, or a hang-up peer
+    closed/reset its side), or ``timeout`` elapses.
 
-    When the peer has reader threads for an accepted socket (not hung up on accept), we rely only
-    on the ``closed`` set that the reader thread populates at EOF/error — no recv/fallback to avoid
-    racing with the reader and stealing bytes. For hung-up connections that have no reader
-    thread, we fall back to polling recv (the 16a open/close schedules with no readers). Returns True
-    if any recorded connection was seen to close; False on timeout."""
+    Every accepted socket has a peer thread (reader, or hang-up) that adds it to ``closed`` when the
+    connection ends, so this only reads that set — never recv, which would race the reader and steal
+    bytes. Returns True if any recorded connection was seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         for conn in list(peer.connections):
-            # Check peer.closed first — this is populated by the reader thread when it sees EOF
+            # peer.closed is populated by the reader/hang-up thread when the connection ends.
             if conn in peer.closed:
                 return True
-            # Connections with a reader thread should only use closed set (avoid recv racing).
-            # Only fall back to recv polling for hung-up connections, which have no reader thread.
-            if conn not in peer._readers:
-                # This connection has no reader — safe to poll recv
-                try:
-                    conn.settimeout(0.05)
-                    r = conn.recv(1)
-                    if r == b"":  # an orderly close reads as EOF
-                        return True
-                except socket.timeout:
-                    continue  # still open
-                except (ConnectionError, OSError):  # reset by the device side
-                    return True
         time.sleep(0.02)
     return False
 

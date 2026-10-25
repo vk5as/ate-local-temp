@@ -190,10 +190,11 @@ def test_bytes_then_peer_close_is_complete_then_next_read_fails() -> None:
 
 def test_read_connection_reset_is_other_failure() -> None:
     """A connection reset is a read 'other failure': ``data = nil``, ``count = 0``, ``err = <message>``."""
-    peer = LoopbackPeer(hangup="reset")
+    peer = LoopbackPeer(hangup="reset")  # the peer resets as soon as the device sends a byte
     peer.start()
     try:
         dev = _open(peer)
+        assert dev.write({"data": b"z"})[0], "the trigger write must reach the peer"  # the byte that triggers the reset
         data, count, partial, err = dev.read({"timeout": 2})
         dev.close()
     finally:
@@ -209,6 +210,7 @@ def test_write_after_connection_reset_fails_with_message() -> None:
     peer.start()
     try:
         dev = _open(peer)
+        assert dev.write({"data": b"z"})[0], "the trigger write must reach the peer"  # the byte that makes the peer send its RST
         readable, _, _ = select.select([dev.sock], [], [], 2)  # the RST has arrived
         assert readable
         ok, count, err = dev.write({"data": b"x"})
@@ -384,11 +386,12 @@ def test_timeout_no_bytes_reports_err_timeout(app: QCoreApplication) -> None:
 def test_read_other_failure_through_lua(app: QCoreApplication) -> None:
     """A reset connection reaches Lua as ``{data = nil, count = 0, partial = false, err = <message>}``,
     and the following write returns ``{ok = false, count = 0, err = <same message>}``."""
-    peer = LoopbackPeer(hangup="reset")
+    peer = LoopbackPeer(hangup="reset")  # the peer resets after the device's first byte
     peer.start()
     try:
         store, ru = _run_with_peer(app, _step("""
         local keep = function(res) return res end  -- onError hands back the failure table
+        ATE.write(dev, {data = "p"}, keep)  -- this first byte makes the peer reset
         local r = ATE.read(dev, {timeout=2}, keep)
         local w = ATE.write(dev, {data = "x"}, keep)
         ATE.report(Result.PASS, tostring(r.data).."|"..r.count.."|"..tostring(r.partial).."|"..r.err
