@@ -6,9 +6,10 @@ shared registry validator before touching the network. From `open` until `close`
 reader thread drains the socket into a buffer, so nothing is lost between ATE calls: a `read`
 takes from the buffer first and only waits (honouring the read timeout) for what isn't there yet.
 Received bytes a read didn't return (past a terminator or ``size``) stay in the buffer for the
-next read. Once the connection fails (peer closed, reset) the reader marks the device failed
-exactly as a read would: buffered bytes can still be read, after which every read and write
-returns that error."""
+next read. The buffer is capped (``receiveBufferBytes``): overflow drops the oldest bytes and the
+reader remembers it, so the worker's next read reports ``overflow = true`` with one WARNING.
+Once the connection fails (peer closed, reset) the reader marks the device failed exactly as a
+read would: buffered bytes can still be read, after which every read and write returns that error."""
 
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import threading
 import time
 from typing import Any
 
-from .registry import Driver, validate_params
+from .registry import DEFAULT_RECEIVE_BUFFER_BYTES, Driver, validate_params
 
 
 class _TcpDevice:
@@ -29,13 +30,18 @@ class _TcpDevice:
     (packets 16b, 17a). A background reader thread moves bytes from the socket into ``_buffer``;
     every buffer access happens under ``_lock``, and ``read`` waits on ``_cond`` only for what the
     buffer doesn't already hold. ``_failed`` holds a connection failure (seen by the reader or a
-    read/write); until then buffered bytes are always readable first."""
+    read/write); until then buffered bytes are always readable first. ``_overflow_pending`` marks
+    a cap overflow since the previous read so the next read can carry ``overflow = true``."""
 
-    def __init__(self, sock: socket.socket, params: dict[str, Any]) -> None:
+    def __init__(self, sock: socket.socket, params: dict[str, Any],
+                 receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
         self.sock = sock
         self.params = params
         self._buffer = bytearray()
+        self._limit = int(receive_buffer_bytes)
         self._failed: str | None = None
+        self._overflow_pending = False
+        self._overflow_dropped = 0  # bytes dropped by the cap since the previous read
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()  # set by close() so the reader stops
@@ -85,9 +91,22 @@ class _TcpDevice:
             self._cond.notify_all()
 
     def _append(self, chunk: bytes) -> None:
-        """Extend the buffer with ``chunk`` (reader thread only)."""
+        """Extend the buffer with ``chunk``, dropping the oldest bytes when the cap is exceeded;
+        remembers that an overflow happened for the next read."""
         with self._lock:
-            self._buffer.extend(chunk)
+            if len(chunk) >= self._limit:  # the chunk alone holds more than the buffer can
+                drop = len(self._buffer) + len(chunk) - self._limit
+                del self._buffer[:]
+                self._buffer.extend(chunk[-self._limit:])  # only the newest bytes survive
+                self._overflow_pending = True
+                self._overflow_dropped += drop
+            else:
+                if len(self._buffer) + len(chunk) > self._limit:
+                    drop = len(self._buffer) + len(chunk) - self._limit
+                    del self._buffer[:drop]  # drop the oldest, keep the newest
+                    self._overflow_pending = True
+                    self._overflow_dropped += drop
+                self._buffer.extend(chunk)
             self._cond.notify_all()  # wake a read waiting on the buffer
 
     def read(self, params: dict[str, Any]) -> tuple[bytes | None, int, bool, str | None]:
@@ -201,6 +220,7 @@ class TcpDriver(Driver):
     """Opens and closes TCP Devices (DeviceType.TCP)."""
 
     name = "TCP"
+    accepts_receive_buffer_bytes = True  # 17a: the reader thread caps its buffer from the config
     fields = {
         "host": ((str,), True),  # the instrument's host, e.g. "127.0.0.1" or a hostname
         "port": ((int, float), True),  # the port to connect to, e.g. 5025
@@ -224,13 +244,14 @@ class TcpDriver(Driver):
         "timeout": ((int, float), False),  # send timeout in seconds (falls back to open-time)
     }
 
-    def open(self, params: dict[str, Any]) -> _TcpDevice:
+    def open(self, params: dict[str, Any],
+             receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> _TcpDevice:
         """Validate ``params`` and connect a TCP socket. Raises :class:`ValueError` naming any bad
         field before connecting."""
         validated = validate_params(self, params)
         host = validated["host"]
         port = int(validated["port"])  # normalise to an integer port for the address tuple
         sock = socket.create_connection((host, port), timeout=validated["timeout"])
-        device = _TcpDevice(sock, validated)
+        device = _TcpDevice(sock, validated, receive_buffer_bytes)
         device.start_reader()  # packet 17a: the reader runs from open to close
         return device

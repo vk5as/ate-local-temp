@@ -33,6 +33,7 @@ from typing import Any, Callable, Mapping, Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..errors import ATEError
+from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES
 from ..storage._uuid import new_uuid7
 from ..storage.store import RunStore, _now_iso
 from .lua_host import _AbortFlag, _sha256_hex, LuaHost
@@ -96,6 +97,7 @@ class RunEngine(QThread):
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
         operator_input: Optional[OperatorInput] = None,
+        receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -125,6 +127,9 @@ class RunEngine(QThread):
         # load-time and step-time requires resolve against it (one host per Test Run). ``None`` means
         # no replacement require is installed.
         self._modules = dict(modules) if modules is not None else None
+        # Packet 17a: the per-device receive buffer cap, forwarded to the host (and thus to each
+        # device's open) so a chatty device can't exhaust memory; the config sets it at the session.
+        self._receive_buffer_bytes = receive_buffer_bytes
         # Packet 06b: the resolved Media Release that owns this run, forwarded from the session so we
         # can record its media_release row (seq 0) and every file used with expected/computed checksums.
         # ``None`` means a bare schedule test — nothing extra is recorded then.
@@ -428,6 +433,7 @@ class RunEngine(QThread):
             operator_input=self._op,
             aborted_flag=self._abort_flag,  # the count hook reads this; see request_abort/aborted
             modules=self._modules,  # packet 06a: forward the require'd module map to the host
+            receive_buffer_bytes=self._receive_buffer_bytes,  # packet 17a: the cap, per Device
         )
         self._host = host  # kept on the engine so per-step input values can be typed from declarations
         for name, fn in self._ate_fns.items():
