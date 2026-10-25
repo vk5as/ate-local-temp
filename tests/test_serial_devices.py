@@ -284,6 +284,27 @@ def test_peer_hang_up_fails_the_device_once_and_later_calls_report_it() -> None:
         peer.stop()
 
 
+def test_an_unexpected_reader_error_still_fails_the_device() -> None:
+    """An exception the transport didn't translate must not kill the reader silently: the device is
+    marked failed with one warning, so reads fail instead of timing out forever."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+
+        def boom():
+            raise RuntimeError("boom")
+
+        dev._recv = boom  # the reader looks _recv up on each poll
+        _wait_for(dev, lambda d: d._failed is not None)
+        assert dev._failed == "RuntimeError: boom"
+        assert dev.read({"timeout": 1})[3] == "RuntimeError: boom"
+        assert len(dev.take_warnings()) == 1
+        dev.close()
+    finally:
+        peer.stop()
+
+
 def test_a_write_that_cannot_get_out_times_out_that_call_only() -> None:
     """pyserial's write raises SerialTimeoutException without reporting how far it got, so the
     payload is sent in pieces and ``count`` is the pieces that made it out whole; the device itself
@@ -331,10 +352,13 @@ def test_open_with_every_field_then_write_and_read(app: QCoreApplication) -> Non
 
 
 def test_data_that_arrives_before_the_read_is_buffered(app: QCoreApplication) -> None:
-    peer = LoopbackPeer(payload=b"early")
+    # The peer sends and hangs up before the read: only the background buffer still has the bytes
+    # (a read straight off pyserial's socket:// port would hit the EOF and drop them).
+    peer = LoopbackPeer(payload=b"early", hangup="close")
     peer.start()
     try:
         store, ru = _run_with_peer(app, _step("""
+        ATE.sleep(0.3)  -- let the peer hang up first
         local r = ATE.read(dev, {size = 100, timeout = 1})
         ATE.report(Result.PASS, r.data.." "..r.count)"""), peer.port)
     finally:

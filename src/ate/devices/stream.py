@@ -135,6 +135,10 @@ class _StreamDevice:
                 if not self._teardown:  # closed under us by close() is not a failure
                     self._fail(str(exc))
                 return
+            except Exception as exc:  # an error the transport didn't translate still fails the device
+                if not self._teardown:
+                    self._fail(f"{type(exc).__name__}: {exc}")
+                return
             if chunk:
                 self._append(chunk)
 
