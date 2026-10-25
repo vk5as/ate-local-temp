@@ -138,12 +138,14 @@ def test_boxes_stay_enabled_and_selectable_with_check_state(qapp, tmp_path) -> N
     _drain_report(qapp, session)
 
 
-def test_boxes_lock_while_a_run_is_up_and_stay_locked(qapp, tmp_path) -> None:
+def test_boxes_lock_while_a_run_is_up_and_unlock_after_reselect(qapp, tmp_path) -> None:
     """The step checkboxes are user-checkable in setup and lose the flag once the run starts.
 
     While the run is in progress the boxes are not user-checkable (the check flag is gone)
     and a toggle attempt is rejected: it changes nothing the run will record. The lock
-    stays until the run ends."""
+    holds until the run ends, but not past it: re-selecting the schedule returns the session
+    to SELECTING, so the boxes are checkable again and accept the next run's toggles (spec
+    37: the schedule and options carry over into the next run)."""
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
@@ -168,11 +170,25 @@ def test_boxes_lock_while_a_run_is_up_and_stay_locked(qapp, tmp_path) -> None:
     first.setCheckState(Qt.CheckState.Unchecked)
     assert session._pending_node_enables is None
 
-    # Still locked once the run has finished.
+    # The run finishes with the box still locked...
     assert _wait_finished(qapp, session)
     assert not (first.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+    _drain_report(qapp, session)
 
     # The rejected toggle changed nothing: step a ran with its default enabled=1.
     nodes = {n["step_number"]: n for n in session.store.nodes(session.run_uuid)}
     assert nodes["1."]["enabled"] == 1
     assert nodes["1."]["result"] == "PASS"
+
+    # Re-selecting the same schedule returns the session to SELECTING...
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Enable/disable schedule")
+    screen.test_schedule_stage.schedule_list.selectionModel().clearSelection()
+    screen.test_schedule_stage.schedule_list.setCurrentItem(item)
+    qapp.processEvents()
+    assert session._state == SessionState.SELECTING
+    # ...and the boxes are checkable again.
+    assert first.flags() & Qt.ItemFlag.ItemIsUserCheckable
+
+    # And toggle_node accepts again.
+    session.toggle_node(0, False)
+    assert session._pending_node_enables == {0: False}

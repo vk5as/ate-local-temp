@@ -201,7 +201,9 @@ class HeadlessRunSession(QObject):
         """Select a schedule by its loaded name and remember its Stop on Fail default.
 
         Loads the schedule once (the same host that runs it later) so the Steps stage can prefill
-        its radio from the declared default; a broken or unreadable schedule falls back to True."""
+        its radio from the declared default; a broken or unreadable schedule falls back to True.
+        Re-selecting from FINISHED returns to SELECTING so the step boxes unlock again (spec 37);
+        while a run is in progress the selection is remembered but not announced."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
         self._selected_name = name
@@ -219,8 +221,10 @@ class HeadlessRunSession(QObject):
             except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
                 print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
         self._selected_stop_on_fail = stop_on_fail
-        # Only announce selection while idle; once running, the run owns the session.
-        if self._state in (SessionState.IDLE,):
+        # Announce selection while idle or just finished; the FINISHED release (engine cleared in
+        # _set_state) lets a re-select return to SELECTING, which unlocks the step boxes.
+        # While a run is in progress the run owns the session and no selection is announced.
+        if self._state in (SessionState.IDLE, SessionState.FINISHED):
             self._set_state(SessionState.SELECTING)
 
     def set_operator(self, operator: str) -> None:
