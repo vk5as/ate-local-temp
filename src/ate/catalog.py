@@ -16,6 +16,7 @@ any device driver.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -64,7 +65,6 @@ class Definition:
 
 
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
-_COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|=|\^|~)?\s*(.+)$")
 _PARTIAL_SEMVER_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
 _COMPARATOR_PART_RE = re.compile(
     r"((?:>=|<=|>|<|=|\^|~))?\s*(\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"
@@ -83,22 +83,12 @@ def parse_version(text: str) -> Optional[tuple[int, int, int, tuple]]:
     return (major, minor, patch, prerelease)
 
 
-def _version_key(version: tuple[int, int, int, tuple]) -> tuple:
-    """A sort key for versions so :func:`max` picks the highest; a release outranks its pre-release.
-
-    Numeric pre-release identifiers sort before alphanumeric ones (RFC 2.0.0 §11), and a shorter
-    set of identifiers sorts lower when all preceding are equal (§11).
-    """
-    major, minor, patch, prerelease = version
-    if not prerelease:
-        return (major, minor, patch, 1)
-    return (
-        major,
-        minor,
-        patch,
-        0,
-        tuple((-int(x), "") if x.isdigit() else (0, x) for x in prerelease),
-    )
+def _version_key(version: tuple[int, int, int, tuple]):
+    """A sort key for versions so :func:`max` picks the highest, by the same precedence as
+    :func:`_compare` (semver 2.0.0 §11): a release outranks its pre-releases, numeric identifiers
+    compare numerically and rank below alphanumeric ones, and a shorter identifier list ranks
+    lower when all preceding identifiers are equal."""
+    return functools.cmp_to_key(_compare)(version)
 
 
 def _compare(a: tuple[int, int, int, tuple], b: tuple[int, int, int, tuple]) -> int:
@@ -123,11 +113,8 @@ def _compare(a: tuple[int, int, int, tuple], b: tuple[int, int, int, tuple]) -> 
             if xi != yi:
                 return -1 if xi < yi else 1
         else:
-            # A numeric identifier always sorts before a non-numeric one.
-            if xi is None:
-                return -1
-            if yi is None:
-                return 1
+            # A numeric identifier always ranks below a non-numeric one (§11.4.3).
+            return 1 if xi is None else -1
     return 0 if len(a_pre) == len(b_pre) else (-1 if len(a_pre) < len(b_pre) else 1)
 
 

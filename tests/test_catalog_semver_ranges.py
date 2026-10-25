@@ -21,7 +21,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from ate.catalog import find_definitions, matches_range
+from ate.catalog import _version_key, find_definitions, matches_range, parse_version
 
 from .test_catalog_definitions import _valid_tslua, build_env
 
@@ -350,3 +350,23 @@ def test_seam_transitive_dependency_chain_resolves(tmp_path):
     assert "MR-C218" in b219_chain, f"B219's ~2.1 dependency must resolve to C=2.1.8, chain={b219_chain}"
     assert "MR-B215" not in a_chain and "MR-C217" not in b219_chain
     assert by_media["MR-C218"].broken is None
+
+
+def test_prerelease_precedence_follows_semver_11():
+    """The ordering example from semver 2.0.0 §11.4: numeric identifiers compare numerically and
+    rank below alphanumeric ones, and a longer identifier list wins when the prefix is equal."""
+    ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2",
+               "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"]
+    assert sorted(reversed(ordered), key=lambda v: _version_key(parse_version(v))) == ordered
+
+
+def test_seam_highest_numeric_prerelease_is_picked(tmp_path):
+    """With 1.0.1-beta.2, beta.4, beta.9 and beta.10 installed, ``>=1.0.1-beta`` resolves to
+    beta.10: numeric identifiers compare as numbers, not as text or in reverse."""
+    installed = [("MR-B2", "1.0.1-beta.2"), ("MR-B4", "1.0.1-beta.4"),
+                 ("MR-B9", "1.0.1-beta.9"), ("MR-B10", "1.0.1-beta.10")]
+    by_media = _scan_with_main_range(tmp_path, ">=1.0.1-beta", installed)
+    main = by_media["MR-MAIN"]
+    assert main.broken is None, f">=1.0.1-beta must resolve: {main.broken}"
+    chain = getattr(main, "_chain", ())
+    assert "MR-B10" in chain and not {"MR-B2", "MR-B4", "MR-B9"} & set(chain), chain
