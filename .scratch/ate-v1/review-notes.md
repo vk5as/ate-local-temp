@@ -56,6 +56,7 @@ Pre-existing, not 16b: roughly 1 full-suite run in 8 fails one Qt test, a differ
 - `RunEngine.choose()` silently ignores a choice when nothing is pending; its docstring (and the session's) says it raises.
 - Mockup polish still missing: the highlighted row's red left edge (`box-shadow: inset 4px 0 #c62828`), the amber `FAIL?` result chip while paused, the bar sits below the step list rather than under the header, and the old finished-run `failure_bar` QLabel leaves an empty 24px gap. Part of the general "UI doesn't match the mockup" rework.
 - Flake list: add `test_tcp_read_write.py::test_read_other_failure_through_lua` (1 in 3 full-suite runs during the 12d light review; 0/30 alone). Likely reset-vs-data timing under load.
+- Flake list: add `test_staged_run_screen.py::test_abort_button_between_steps_records_error_notrun_and_aborted` (1 in 4 full-suite runs after the 11b merge while 17b ran suites concurrently; 0/30 alone before and after 11b).
 
 ## 13b notes from review (not fixed)
 
@@ -96,3 +97,21 @@ Pre-existing, not 16b: roughly 1 full-suite run in 8 fails one Qt test, a differ
 - `select_schedule` during a run updates `_selected_name` without announcing state (API-only edge; the UI hides the list during a run).
 - Header rows get checkboxes that do nothing; header cascade / tri-state is packet 15d.
 - Locked boxes during a run were not screenshotted.
+
+## 24a notes from review (not fixed)
+
+- Owner filter can't express Sub-schedule headers yet (no header nodes are recorded); 24b's dialog must expand a header into its steps' keys, or the exporter needs a helper.
+- Real runs still record `utc_offset="+00:00"` (`headless.py` ~369, known), so exported "local" times equal UTC until that is fixed.
+- `schedule` is always the top-level schedule name; lines owned by a future Sub-schedule would show the wrong name.
+- Tests cover only the +10:30 offset end to end, not the Text header's owners line, and not a run with no steps (probes showed all three correct).
+- `r.attempt or 0` would print `Step 1.#0` if a step line lacked `attempt_no` (unreachable today).
+
+## Test suite under load (seen 2026-10-25)
+
+With another agent running pytest loops on the same machine, the Qt/timing seam tests fail often: integration itself failed 5/10 runs of headless_session + failure_bar + device_onerror under that load (0/10 when idle). The suite is sensitive to CPU contention — worth hardening (longer deadlines, event-driven waits) before CI.
+
+## Shared test helpers that cause flakes (found by the 17b Opus rework, 2026-10-26)
+
+- `LoopbackPeer(hangup="reset")` can send its RST before the client's `connect` returns, so `ATE.open` itself sometimes fails; tests using it in test_device_onerror / test_tcp_read_write / test_device_failures fail ~2 in 8 runs even on base. Fix: reset only after the device's first byte (the 17b tests now do this).
+- `test_headless_session._wait_finished` pumps events a fixed 2000 times with no time bound, so it fails under load (4/10 on base when paired with TCP tests). Fix: a time-bounded wait (as done in test_step_enable_ui).
+- Candidate small "test hardening" packet before the final review.
