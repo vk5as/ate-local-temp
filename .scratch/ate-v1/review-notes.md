@@ -109,3 +109,9 @@ Pre-existing, not 16b: roughly 1 full-suite run in 8 fails one Qt test, a differ
 ## Test suite under load (seen 2026-10-25)
 
 With another agent running pytest loops on the same machine, the Qt/timing seam tests fail often: integration itself failed 5/10 runs of headless_session + failure_bar + device_onerror under that load (0/10 when idle). The suite is sensitive to CPU contention — worth hardening (longer deadlines, event-driven waits) before CI.
+
+## Shared test helpers that cause flakes (found by the 17b Opus rework, 2026-10-26)
+
+- `LoopbackPeer(hangup="reset")` can send its RST before the client's `connect` returns, so `ATE.open` itself sometimes fails; tests using it in test_device_onerror / test_tcp_read_write / test_device_failures fail ~2 in 8 runs even on base. Fix: reset only after the device's first byte (the 17b tests now do this).
+- `test_headless_session._wait_finished` pumps events a fixed 2000 times with no time bound, so it fails under load (4/10 on base when paired with TCP tests). Fix: a time-bounded wait (as done in test_step_enable_ui).
+- Candidate small "test hardening" packet before the final review.
