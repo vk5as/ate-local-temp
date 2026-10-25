@@ -16,6 +16,7 @@ any device driver.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -64,7 +65,10 @@ class Definition:
 
 
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
-_COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|=|\^|~)?\s*(.+)$")
+_PARTIAL_SEMVER_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+_COMPARATOR_PART_RE = re.compile(
+    r"((?:>=|<=|>|<|=|\^|~))?\s*(\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"
+)
 
 
 def parse_version(text: str) -> Optional[tuple[int, int, int, tuple]]:
@@ -79,22 +83,12 @@ def parse_version(text: str) -> Optional[tuple[int, int, int, tuple]]:
     return (major, minor, patch, prerelease)
 
 
-def _version_key(version: tuple[int, int, int, tuple]) -> tuple:
-    """A sort key for versions so :func:`max` picks the highest; a release outranks its pre-release.
-
-    Numeric pre-release identifiers sort before alphanumeric ones (RFC 2.0.0 §11), and a shorter
-    set of identifiers sorts lower when all preceding are equal (§11).
-    """
-    major, minor, patch, prerelease = version
-    if not prerelease:
-        return (major, minor, patch, 1)
-    return (
-        major,
-        minor,
-        patch,
-        0,
-        tuple((-int(x), "") if x.isdigit() else (0, x) for x in prerelease),
-    )
+def _version_key(version: tuple[int, int, int, tuple]):
+    """A sort key for versions so :func:`max` picks the highest, by the same precedence as
+    :func:`_compare` (semver 2.0.0 §11): a release outranks its pre-releases, numeric identifiers
+    compare numerically and rank below alphanumeric ones, and a shorter identifier list ranks
+    lower when all preceding identifiers are equal."""
+    return functools.cmp_to_key(_compare)(version)
 
 
 def _compare(a: tuple[int, int, int, tuple], b: tuple[int, int, int, tuple]) -> int:
@@ -119,11 +113,8 @@ def _compare(a: tuple[int, int, int, tuple], b: tuple[int, int, int, tuple]) -> 
             if xi != yi:
                 return -1 if xi < yi else 1
         else:
-            # A numeric identifier always sorts before a non-numeric one.
-            if xi is None:
-                return -1
-            if yi is None:
-                return 1
+            # A numeric identifier always ranks below a non-numeric one (§11.4.3).
+            return 1 if xi is None else -1
     return 0 if len(a_pre) == len(b_pre) else (-1 if len(a_pre) < len(b_pre) else 1)
 
 
@@ -140,47 +131,92 @@ def _satisfies(op: str, comparison: int) -> bool:
     return comparison == 0  # "="
 
 
-def _expand_caret_tilde(op: str, version: tuple[int, int, int, tuple]) -> list[tuple[str, tuple]]:
-    """Expand a caret/tilde range into an inclusive lower and exclusive upper comparator."""
-    major, minor, patch = version[0], version[1], version[2]
+def _parse_range_version(text: str) -> Optional[tuple[int, int, int, tuple]]:
+    """Parse a range bound: a full semver string or a partial one (``3`` or ``3.1``).
+
+    Missing minor/patch components become ``None`` (they pad to 0 at the lower bound); build
+    metadata is ignored, matching the packet's rule. A string that is not semver at all returns
+    ``None``.
+    """
+    match = _PARTIAL_SEMVER_RE.match(text)
+    if not match:
+        return None
+    minor = int(match.group(2)) if match.group(2) is not None else None
+    patch = int(match.group(3)) if match.group(3) is not None else None
+    prerelease = tuple(match.group(4).split(".")) if match.group(4) else ()
+    return (int(match.group(1)), minor, patch, prerelease)
+
+
+def _expand_caret_tilde(op: str, bound: tuple[int, int, int, tuple]) -> list[tuple[str, tuple]]:
+    """Expand a caret/tilde range into an inclusive lower and exclusive upper comparator.
+
+    ``bound`` is a partial version (``None`` for a missing component), per npm:
+    ^X.Y.Z / ^X.Y / ^X := >=X.Y.Z <(X+1).0.0 ; ^0.Y := >=0.Y.0 <0.(Y+1).0 ;
+    ^0.0.Z := >=0.0.Z <0.0.(Z+1) ; ^0 / ^0.0 := >=0.0.0 <1.0.0 ;
+    ~X.Y.Z / ~X.Y := >=X.Y.0 <X.(Y+1).0 ; ~X := >=X.0.0 <(X+1).0.0.
+    """
+    major, minor, patch, prerelease = bound
+    lower = (major, minor or 0, patch or 0, prerelease)
     if op == "^":
-        # ^X.Y.Z := >=X.Y.Z <(X+1).0.0 ; ^X.Y := >=X.Y.0 <(X+1).0.0 ; ^X := >=X.0.0 <(X+1).0.0
-        upper = ((major + 1), 0, 0)
+        if major > 0:
+            upper = (major + 1, 0, 0)
+        elif (minor or 0) > 0:
+            upper = (0, (minor or 0) + 1, 0)
+        elif patch is not None:
+            upper = (0, 0, patch + 1)  # ^0.0.Z keeps the patch
+        else:
+            upper = (1, 0, 0)  # ^0 and ^0.0
     else:  # "~"
-        # ~X.Y.Z := >=X.Y.Z <X.(Y+1).0 ; ~X.Y := >=X.Y.0 <X.(Y+1).0
-        upper = (major, minor + 1, 0)
-    return [(">=", version), ("<", upper)]
+        # ~X.Y.Z / ~X.Y keep the minor; ~X (major only) keeps the major.
+        upper = (major, (minor or 0) + 1, 0) if minor is not None else (major + 1, 0, 0)
+    upper += ((),)  # the upper bound names no pre-release
+    return [(">=", lower), ("<", upper)]
 
 
 def matches_range(version_text: str, range_text: str) -> bool:
     """Whether ``version_text`` satisfies the npm-style ``range_text``.
 
     Supports exact versions, comma-joined comparators (``>=3.0 <4``), and caret/tilde ranges
-    (``^3.1``, ``~3.1.2``). A pre-release version only matches if a comparator names that same
-    pre-release; an unparseable range or comparator never matches anything.
+    (``^3.1``, ``~3.1.2``), including partial versions and the npm zero-major caret rules
+    (``^0.x`` keeps the minor, ``^0.0.x`` keeps the patch). Build metadata is ignored on both
+    sides. A pre-release candidate only matches if the range names a pre-release on the same
+    major.minor.patch tuple; an unparseable range or comparator never matches anything.
     """
     version = parse_version(version_text)
     if version is None:
         return False
 
+    # Comparators join with commas or whitespace (>=3.0 <4); parse one comparator at a time.
     comparators: list[tuple[str, tuple]] = []
-    for part in range_text.split(","):
-        match = _COMPARATOR_RE.match(part.strip())
+    text = range_text.strip()
+    pos = 0
+    if not text:
+        return False
+    while pos < len(text):
+        match = _COMPARATOR_PART_RE.match(text, pos)
         if not match:
             return False
         op = match.group(1) or "="
-        bound = parse_version(match.group(2))
+        bound = _parse_range_version(match.group(2))
         if bound is None:
             return False
-        comparators.extend(_expand_caret_tilde(op, bound) if op in ("^", "~") else [(op, bound)])
+        if op in ("^", "~"):
+            comparators.extend(_expand_caret_tilde(op, bound))
+        else:
+            # A comparison bound pads missing components to 0 (>=3.0 means >=3.0.0).
+            comparators.append((op, (bound[0], bound[1] or 0, bound[2] or 0, bound[3])))
+        pos = match.end()
+        while pos < len(text) and text[pos] in " ,\t\n":
+            pos += 1
 
     for op, bound in comparators:
         if not _satisfies(op, _compare(version, bound)):
             return False
 
-    # A pre-release candidate only matches a range that names the same pre-release.
+    # npm pre-release rule: a candidate with a pre-release only matches a range that names
+    # a pre-release on the same major.minor.patch (the identifiers may differ).
     if version[3]:
-        named = any(bound[3] and tuple(bound[3]) == version[3] for _, bound in comparators)
+        named = any(bound[3] and bound[:3] == version[:3] for _, bound in comparators)
         if not named:
             return False
     return True
