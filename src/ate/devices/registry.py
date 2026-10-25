@@ -21,6 +21,10 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+#: The per-device receive buffer cap in bytes (app config receiveBufferBytes, default 16 MiB).
+DEFAULT_RECEIVE_BUFFER_BYTES = 16_777_216
+
+
 def _matches(value: Any, types: tuple[type, ...]) -> bool:
     """Whether ``value`` has one of the accepted Python types.
 
@@ -39,6 +43,9 @@ class Driver(ABC):
 
     #: The Device Type name this driver serves, e.g. ``"TCP"`` (matches a DeviceType enum member).
     name: ClassVar[str] = "driver"
+    #: True when the driver's ``open`` takes a ``receive_buffer_bytes`` cap (17a). False by default:
+    #: drivers without a background reader open from ``params`` alone.
+    accepts_receive_buffer_bytes: ClassVar[bool] = False
     #: Each field maps to ``(accepted types, required)``; unknown fields are always rejected.
     fields: ClassVar[dict[str, tuple[tuple[type, ...], bool]]] = {}
 
@@ -91,10 +98,12 @@ class DeviceRegistry:
     object) matches the one stored at open time; objects without custom equality hash by identity,
     which is exactly what we want for opaque handles."""
 
-    def __init__(self) -> None:
+    def __init__(self, receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
         self._drivers: dict[str, type[Driver]] = {}
         # id(handle) -> handle still open this run.
         self._open: dict[int, Any] = {}
+        # The per-device receive buffer cap (app config) passed to every driver's open (17a).
+        self._receive_buffer_bytes = receive_buffer_bytes
 
     def register(self, name: str, driver_cls: type[Driver]) -> "DeviceRegistry":
         """Register a driver class under ``name`` (a Device Type name like ``"TCP"``)."""
@@ -106,7 +115,10 @@ class DeviceRegistry:
         if name not in self._drivers:
             raise ValueError(f"unknown DeviceType '{name}'")
         driver_cls = self._drivers[name]
-        handle = driver_cls().open(dict(params))  # validate + connect before tracking anything
+        if driver_cls.accepts_receive_buffer_bytes:  # 17a: the buffer-cap rides on the driver's open
+            handle = driver_cls().open(dict(params), self._receive_buffer_bytes)
+        else:
+            handle = driver_cls().open(dict(params))
         self._open[id(handle)] = handle
         return handle
 

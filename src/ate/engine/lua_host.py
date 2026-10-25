@@ -46,7 +46,7 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 from ..devices import DeviceRegistry, TcpDriver
-from ..devices.registry import validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
+from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
 from .step_inputs import InvalidStepInput, StepInput, validate_inputs
@@ -259,6 +259,10 @@ class _AteTable:
         # by the device and returned as result tables, so only param-validation errors raise here.
         self._extra["read"] = self._isolate_device(self._do_read, "read")
         self._extra["write"] = self._isolate_device(self._do_write, "write")
+        # Packet 17a: register ATE.flush as a finalized device wrapper (same as read/write): it
+        # empties the Device's receive buffer and returns {ok = true, count = n}; a closed or
+        # failed Device goes through onError.
+        self._extra["flush"] = self._isolate_device(self._do_flush, "flush")
         # Packet 16c: each open Device's onError from ATE.open, the fallback for its read/write/close.
         self._open_handlers: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
         # Packet 16c: the Lua-wrapped device functions __getattr__ hands out, built on first use.
@@ -481,15 +485,19 @@ class _AteTable:
         device; I/O timeouts/failures come back from the device as result tables, never raised here —
         only a param-validation error raises, and that is isolated at source="ate" by _isolate_device.
         A timeout with no bytes, a failed connection or a closed Device goes through ``onError``.
-        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged."""
+        ``data`` is handed to Lua as bytes, which lupa passes as a Lua string unchanged.
+        Packet 17a: the buffer cap is remembered by the reader thread; the first read after an
+        overflow carries ``overflow = true`` and logs one WARNING (source device) for it."""
         params, error_handler = self._split_args(params, error_handler)
-        validated = validate_params(TcpDriver(), self._raw_params(params, ("readTerm",)), TcpDriver.read_fields)
+        raw = self._raw_params(params, ("readTerm",)) or {}  # a skipped params table is the empty one
+        validated = validate_params(TcpDriver(), raw, TcpDriver.read_fields)
         if validated.get("size") is not None and validated["size"] < 1:  # a byte limit must be positive
             raise ValueError(f"field 'size' must be a positive int, got {validated['size']}")
         if self._host._devices.is_open(device):
             data, count, partial, err = device.read(validated)
+            overflow, dropped = device.take_overflow()  # the reader recorded it when the cap was exceeded
         else:
-            data, count, partial, err = None, 0, False, "device closed"
+            data, count, partial, err, overflow, dropped = None, 0, False, "device closed", False, 0
         if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
             self._host.record_log(
                 "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
@@ -500,6 +508,15 @@ class _AteTable:
             "partial": partial,
             "err": err,  # None -> nil unless the read failed
         }
+        if overflow:
+            # The worker notices the overflow here, not when the reader dropped the bytes: one WARNING
+            # (source device) per read that finds any overflow since the previous read, with every
+            # byte dropped in between summed into it; take_overflow reset both for the next episode.
+            self._host.record_log(
+                "WARNING", f"{device.describe()}: receive buffer overflow - dropped {dropped} oldest byte(s)",
+                source="device",
+            )
+            result["overflow"] = True
         if err is not None:
             return self._failure("read", device.describe(), result, params, self._handler_for(device, error_handler))
         return self._host._runtime.table_from(result)
@@ -525,6 +542,27 @@ class _AteTable:
         }
         if err is not None:
             return self._failure("write", device.describe(), result, params, self._handler_for(device, error_handler))
+        return self._host._runtime.table_from(result)
+
+    def _do_flush(self, device=None, params=None, error_handler=None):
+        """Empty a Device's receive buffer; the real logic behind ATE.flush.
+
+        Returns a genuine Lua table ``{ok = true, count = n}`` (count = bytes discarded); a closed
+        Device or one the reader marked failed returns the failure through ``onError``, like a
+        read on a closed Device."""
+        params, error_handler = self._split_args(params, error_handler)
+        validate_params(TcpDriver(), self._raw_params(params, ()) or {}, {})  # flush takes no fields
+        if self._host._devices.is_open(device):
+            ok, count, err = device.flush()
+        else:
+            ok, count, err = False, 0, "device closed"
+        result = {
+            "ok": ok,
+            "count": count,
+            "err": err,  # None -> nil unless the flush failed
+        }
+        if err is not None:
+            return self._failure("flush", device.describe(), result, params, self._handler_for(device, error_handler))
         return self._host._runtime.table_from(result)
 
     def __getattr__(self, name: str) -> Callable[..., Any]:  # noqa: F821
@@ -664,6 +702,7 @@ class _LuaHost:
         operator_input: Optional[OperatorInput] = None,
         aborted_flag: Optional[_AbortFlag] = None,
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
+        receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
     ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
@@ -789,8 +828,9 @@ class _LuaHost:
         # Packet 16a: one DeviceRegistry per host/run. It maps each Device Type to its driver and
         # tracks every device opened this run so leftovers can be closed at run end; the run engine
         # reads it after the Post-test Actions (see RunEngine.run). The TCP driver is registered
-        # here; later packets add their drivers to the same registry.
-        self._devices = DeviceRegistry()
+        # here; later packets add their drivers to the same registry. The receive buffer cap (17a)
+        # is held by the registry, which hands it to each driver's open.
+        self._devices = DeviceRegistry(receive_buffer_bytes=receive_buffer_bytes)
         self._devices.register("TCP", TcpDriver)
 
         # Load and validate the schedule file. Runs in this runtime's global env,
