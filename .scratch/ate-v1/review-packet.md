@@ -1,6 +1,6 @@
 # Reviewing a finished packet (read-only)
 
-For the reviewer subagents. An implementer has finished a packet on its own branch. Three reviewers look at it at the same time, each on a different model: Qwen (coder2), Ornith (LM Studio) and Haiku. You **report findings only**. You don't fix, commit or push anything, because the others are reviewing the same branch. The orchestrator collects all three reports and decides what gets reworked and by whom.
+For the reviewer subagents. An implementer has finished a packet on its own branch. Two reviewers look at it at the same time, on different models: saluki (coder2, local) and Haiku. You **report findings only**. You don't fix, commit or push anything, because the others are reviewing the same branch. The orchestrator collects both reports and decides what gets reworked and by whom.
 
 ## Setup
 
@@ -38,7 +38,7 @@ A list, most severe first, under about 40 lines. For each finding:
 - how you know: the line, the spec line, the input that breaks it, or a command and its output;
 - severity: **must-fix** (wrong behaviour, a test that can't fail, a spec gap, a false claim) or **note**.
 
-End with the pytest summary line you saw (Qwen and Ornith only), and the line `MUST-FIX: <n>`. If there are none, say `MUST-FIX: 0` plainly.
+End with the pytest summary line you saw (saluki only), and the line `MUST-FIX: <n>`. If there are none, say `MUST-FIX: 0` plainly.
 
 ## Rules
 
