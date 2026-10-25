@@ -16,7 +16,7 @@ import base64
 import datetime as _dt
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
@@ -238,6 +238,14 @@ def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optio
     return pretest_error, posttest_error
 
 
+def result_label(row: Mapping[str, Any]) -> str:
+    """The run's result as it goes into the report file name (``PASS`` when the row has none).
+
+    The HTML report and the export dialog's ``_log`` default both name files from this
+    (spec 21a / 24b Saving), so it lives here rather than being repeated."""
+    return (row.get("result") or "PASS").upper()
+
+
 def report_stem_and_directory(store: RunStore, run_uuid: str, config: Config) -> tuple[Path, str]:
     """Return ``(directory, stem)`` for this run's report files (spec 21a naming).
 
@@ -270,7 +278,7 @@ def write_report(store: RunStore, run_uuid: str, config: Config, *, include_run_
     uut_type = (row.get("uut_type") or "").strip() or "Report"
     serial = (row.get("uut_serial") or "").strip()
     stamp = _local_stamp(row.get("started_at"), row.get("utc_offset") or "+00:00") or "0000-00-00-000000"
-    result = (row.get("result") or "PASS").upper()
+    result = result_label(row)
 
     directory = Path(config.reports_directory)
     target_dir = directory / uut_type
