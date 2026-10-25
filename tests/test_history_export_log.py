@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PyQt6.QtWidgets import QWidget
 
 from ate.config import Config
 from ate.engine.run_engine import RunEngine
@@ -111,8 +112,8 @@ def test_owner_choices_are_run_phases_and_steps_in_tree_order(qapp, tmp_path: Pa
 
 
 def test_default_save_path_is_under_the_report_folder(qapp, tmp_path: Path):
-    """The default path is the report directory + stem + ``_log.csv``; the dialog starts there
-    with CSV selected."""
+    """The default path is the report directory + stem + result + ``_log.csv``, and it is the
+    start point Save As is handed."""
     store = RunStore(tmp_path / "ate.db")
     uuid = _record_run(tmp_path, qapp, DOC_FIELDS, serial="PS7")
     cfg = _cfg(tmp_path / "reports")
@@ -126,8 +127,6 @@ def test_default_save_path_is_under_the_report_folder(qapp, tmp_path: Path):
     _select(screen, qapp, "PS7")
     dialog = _open_dialog(screen, qapp)
     assert dialog.default_path == str(path)
-    assert dialog.format_combo.currentText() == "CSV"
-    assert dialog.format_combo.currentData() == "csv"
 
 
 def test_default_save_name_matches_the_report_name(qapp, tmp_path: Path):
@@ -229,12 +228,14 @@ def test_unticking_every_level_disables_export_and_reenables(qapp, tmp_path: Pat
 
 
 def test_filtered_export_writes_a_csv_honouring_the_ticks(qapp, tmp_path: Path):
-    """With some boxes unticked, the written CSV carries only the ticked lines; the extension
-    follows the chosen (default) format even though Save As picked a .txt name."""
+    """With some boxes unticked, the written CSV carries only the ticked lines; Save As picked a
+    name with no extension, so the CSV filter's extension is added (spec 24b Saving)."""
     store = RunStore(tmp_path / "ate.db")
     uuid = _record_run(tmp_path, qapp, LOGGING, serial="PS9")
     cfg = _cfg(tmp_path / "reports")
-    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _title, _default, _filters: tmp_path / "exported.txt")
+    screen, _s = _screen(
+        store, cfg=cfg, file_dialog=lambda _title, _default, _filters: (tmp_path / "exported", "CSV (*.csv)")
+    )
     _select(screen, qapp, "PS9")
     dialog = _open_dialog(screen, qapp)
 
@@ -261,16 +262,71 @@ def test_filtered_export_writes_a_csv_honouring_the_ticks(qapp, tmp_path: Path):
     assert "warn step" not in text and "error step" not in text
 
 
+def test_save_as_filter_decides_the_format_and_the_name_is_kept(qapp, tmp_path: Path):
+    """Save As returning ("x.txt", "Text (*.txt)") writes Text to x.txt — the filter's format,
+    the name as typed, no extra extension (spec 24b Saving)."""
+    store = RunStore(tmp_path / "ate.db")
+    uuid = _record_run(tmp_path, qapp, LOGGING, serial="PS9")
+    cfg = _cfg(tmp_path / "reports")
+    screen, _s = _screen(
+        store, cfg=cfg, file_dialog=lambda _t, _d, _f: (tmp_path / "x.txt", "Text (*.txt)")
+    )
+    _select(screen, qapp, "PS9")
+    dialog = _open_dialog(screen, qapp)
+    dialog.export_button.click()
+    qapp.processEvents()
+
+    out = tmp_path / "x.txt"
+    assert out.exists()
+    assert not (tmp_path / "x.txt.csv").exists() and not (tmp_path / "x.txt.jsonl").exists()
+    head = out.read_text(encoding="utf-8").splitlines()
+    assert head[0].startswith("Run UUID:")  # the Text layout, not a CSV header or JSON lines
+    assert len(head) >= 6
+
+
+def test_a_bare_name_takes_the_extension_of_the_chosen_filter(qapp, tmp_path: Path):
+    """Save As returning ("x", "JSON Lines (*.jsonl)") writes JSON Lines to x.jsonl."""
+    store = RunStore(tmp_path / "ate.db")
+    uuid = _record_run(tmp_path, qapp, LOGGING, serial="PS9")
+    cfg = _cfg(tmp_path / "reports")
+    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _t, _d, _f: (tmp_path / "x", "JSON Lines (*.jsonl)"))
+    _select(screen, qapp, "PS9")
+    dialog = _open_dialog(screen, qapp)
+    dialog.export_button.click()
+    qapp.processEvents()
+
+    out = tmp_path / "x.jsonl"
+    assert out.exists()
+    objs = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert all(tuple(o) == FIELDS for o in objs)
+    assert len(objs) == len(store.log_lines(uuid))
+
+
+def test_save_as_offers_csv_first_then_json_lines_then_text(qapp, tmp_path: Path):
+    """The Save As file-type list itself decides the format: CSV, JSON Lines and Text are offered,
+    in that order, CSV being the filter the dialog starts with (spec 24b Saving)."""
+    store = RunStore(tmp_path / "ate.db")
+    _record_run(tmp_path, qapp, LOGGING, serial="PS9")
+    cfg = _cfg(tmp_path / "reports")
+    asked: list[str] = []
+    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _t, _d, filters: asked.append(filters) or None)
+    _select(screen, qapp, "PS9")
+    dialog = _open_dialog(screen, qapp)
+    dialog.export_button.click()
+    qapp.processEvents()
+
+    assert asked == ["CSV (*.csv);;JSON Lines (*.jsonl);;Text (*.txt)"]
+    assert not hasattr(dialog, "format_combo")  # the extra Format picker is gone
+
+
 def test_everything_ticked_exports_every_line(qapp, tmp_path: Path):
     """With all boxes ticked, every recorded line is exported (count matches the store)."""
     store = RunStore(tmp_path / "ate.db")
     uuid = _record_run(tmp_path, qapp, LOGGING, serial="PS9")
     cfg = _cfg(tmp_path / "reports")
-    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _title, _default, _filters: tmp_path / "all.jsonl")
+    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _t, _d, _f: (tmp_path / "all", "JSON Lines (*.jsonl)"))
     _select(screen, qapp, "PS9")
     dialog = _open_dialog(screen, qapp)
-    jsonl_index = next(i for i in range(dialog.format_combo.count()) if dialog.format_combo.itemData(i) == "jsonl")
-    dialog.format_combo.setCurrentIndex(jsonl_index)
     dialog.export_button.click()
     qapp.processEvents()
 

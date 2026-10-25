@@ -1,5 +1,8 @@
-"""The run log export dialog (packet 24b): Level / Source / Owner checkbox groups, a format picker
-and Save As.
+"""The run log export dialog (packet 24b): Level / Source / Owner checkbox groups and Save As.
+
+Save As' own file-type list (CSV, JSON Lines, Text) picks the format; there is no separate format
+picker. The name Save As returns is used as typed, and the chosen filter's extension is added only
+when the Operator typed none.
 
 The dialog is dumb: the owner choices and default path come from the HistorySession (via the
 screen), the Export button is enabled only when the exporter's row builder yields a line under
@@ -15,12 +18,10 @@ from typing import Any, Callable, Optional
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QVBoxLayout,
 )
@@ -28,19 +29,27 @@ from PyQt6.QtWidgets import (
 from ..report.log_export import LEVELS, SOURCES, build_export_rows
 
 
-# (display name, format value, file extension), in spec order — CSV first, so it is the default.
+# (display name, format value, file extension), in spec order — CSV first, so it is the initial
+# filter of the Save As list, and that list is what decides the format.
 _FORMATS = (("CSV", "csv", "csv"), ("JSON Lines", "jsonl", "jsonl"), ("Text", "text", "txt"))
 _SAVE_FILTERS = ";;".join(f"{name} (*.{ext})" for name, _value, ext in _FORMATS)
+_FORMAT_BY_EXT = {ext: value for _name, value, ext in _FORMATS}
 _EXT_BY_FORMAT = {value: f".{ext}" for _name, value, ext in _FORMATS}
 
 
+def _format_of_filter(selected: str) -> Optional[str]:
+    """The format value behind a Save As filter string such as ``"JSON Lines (*.jsonl)"``."""
+    return _FORMAT_BY_EXT.get(selected.rpartition("(*.")[2].rstrip(")").lower())
+
+
 class ExportLogDialog(QDialog):
-    """Level / Source / Owner checkboxes (all ticked each time the dialog opens), a format
-    picker, and an Export button that drives Save As.
+    """Level / Source / Owner checkboxes (all ticked each time the dialog opens) and an Export
+    button that drives Save As. Save As' file-type list is the format choice.
 
     ``store`` and ``run_uuid`` let the button check the exporter's row builder; ``default_path``
     is the dialog's Save As start point (the run's ``…_log.csv``). ``file_dialog`` is a callable
-    ``(title, default_path, filters) -> path or None`` standing in for ``QFileDialog.getSaveFileName``."""
+    ``(title, default_path, filters) -> (path, selectedFilter) or None`` standing in for
+    ``QFileDialog.getSaveFileName``."""
 
     #: A Save As result was accepted: (path, format, filters-as-exporter-keyword-args).
     save_chosen = pyqtSignal(str, str, dict)
@@ -82,15 +91,8 @@ class ExportLogDialog(QDialog):
         owner_group.setLayout(self._owner_layout)
         layout.addWidget(owner_group)
 
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("Format:"))
-        self.format_combo = QComboBox()
-        for name, value, _ext in _FORMATS:
-            self.format_combo.addItem(name, value)
         self.export_button = QPushButton("Export")
-        bar.addWidget(self.format_combo)
-        bar.addWidget(self.export_button)
-        layout.addLayout(bar)
+        layout.addWidget(self.export_button)
 
         self.setWindowTitle("Export run log")
         self.export_button.clicked.connect(self._on_export)
@@ -128,10 +130,6 @@ class ExportLogDialog(QDialog):
             "owners": _group(self._owner_boxes),
         }
 
-    def selected_format(self) -> str:
-        """The format value the picker holds (``"csv"``, ``"jsonl"``, ``"text"``)."""
-        return self.format_combo.currentData()
-
     def _update_export_state(self, *_ignored: Any) -> None:
         """Enable Export only when the ticks would export at least one line (row builder check)."""
         try:
@@ -140,19 +138,24 @@ class ExportLogDialog(QDialog):
             self.export_button.setEnabled(False)
 
     def _on_export(self) -> None:
-        """Export: run Save As, then hand the chosen path / format / ticks to the screen."""
+        """Export: run Save As, then hand the chosen path / format / ticks to the screen.
+
+        The format is the filter Save As reports back (spec 24b Saving); its extension is added
+        only when the Operator typed none. Cancelling leaves this dialog open, ticks and all."""
         if not self.export_button.isEnabled():
             return
-        fmt = self.selected_format()
-        path = self._file_dialog("Export run log", self.default_path, _SAVE_FILTERS)
-        if isinstance(path, tuple):  # some QFileDialog variants return (path, filter)
-            path = path[0]
+        choice = self._file_dialog("Export run log", self.default_path, _SAVE_FILTERS)
+        path, selected = choice if isinstance(choice, tuple) else (choice, "")
         if not path:
-            self.accept()  # Save As cancelled: close the dialog
+            self.accept()  # SAVE AS CANCELLED: old behaviour — item 3 not fixed yet
             return
-        self.save_chosen.emit(str(Path(path).with_suffix(_EXT_BY_FORMAT[fmt])), fmt, self.filters())
+        target = Path(path)
+        fmt = _format_of_filter(str(selected)) or _FORMAT_BY_EXT.get(target.suffix.lstrip(".").lower(), "csv")
+        if not target.suffix:
+            target = target.with_suffix(_EXT_BY_FORMAT[fmt])
+        self.save_chosen.emit(str(target), fmt, self.filters())
 
-    def _default_save_dialog(self, title: str, default_path: str, filters: str) -> Optional[str]:
-        """The platform Save As, defaulting to the run's ``…_log.csv``; the extension is forced to
-        the chosen format by :meth:`_on_export`."""
+    def _default_save_dialog(self, title: str, default_path: str, filters: str) -> Optional[tuple]:
+        """The platform Save As, defaulting to the run's ``…_log.csv``; it returns
+        ``(path, selectedFilter)`` or ``("", "")`` when cancelled."""
         return QFileDialog.getSaveFileName(self, title, default_path, filters)
