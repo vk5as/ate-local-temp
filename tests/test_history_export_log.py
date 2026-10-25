@@ -319,6 +319,26 @@ def test_save_as_offers_csv_first_then_json_lines_then_text(qapp, tmp_path: Path
     assert not hasattr(dialog, "format_combo")  # the extra Format picker is gone
 
 
+def test_cancelling_save_as_keeps_the_export_dialog_open(qapp, tmp_path: Path):
+    """Save As cancelled: the export dialog is still visible, the unticked Level box stays
+    unticked, Export is still enabled (spec 24b — the Operator can try again)."""
+    store = RunStore(tmp_path / "ate.db")
+    _record_run(tmp_path, qapp, LOGGING, serial="PS9")
+    cfg = _cfg(tmp_path / "reports")
+    screen, _s = _screen(store, cfg=cfg, file_dialog=lambda _t, _d, _f: None)
+    _select(screen, qapp, "PS9")
+    dialog = _open_dialog(screen, qapp)
+    dialog._level_boxes["ERROR"].setChecked(False)
+    dialog.export_button.click()
+    qapp.processEvents()
+
+    assert dialog.isVisible() is True
+    assert screen._export_dialog is dialog
+    assert dialog._level_boxes["ERROR"].isChecked() is False
+    assert all(box.isChecked() for box in dialog._owner_boxes.values())
+    assert dialog.export_button.isEnabled() is True
+
+
 def test_everything_ticked_exports_every_line(qapp, tmp_path: Path):
     """With all boxes ticked, every recorded line is exported (count matches the store)."""
     store = RunStore(tmp_path / "ate.db")

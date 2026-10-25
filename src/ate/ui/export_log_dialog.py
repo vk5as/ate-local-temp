@@ -147,8 +147,7 @@ class ExportLogDialog(QDialog):
         choice = self._file_dialog("Export run log", self.default_path, _SAVE_FILTERS)
         path, selected = choice if isinstance(choice, tuple) else (choice, "")
         if not path:
-            self.accept()  # SAVE AS CANCELLED: old behaviour — item 3 not fixed yet
-            return
+            return  # Save As cancelled: the export dialog stays open, ticks and all
         target = Path(path)
         fmt = _format_of_filter(str(selected)) or _FORMAT_BY_EXT.get(target.suffix.lstrip(".").lower(), "csv")
         if not target.suffix:
