@@ -14,6 +14,7 @@ from ..config import Config
 from ..report.html import RESULT_LABELS
 from ..report.html import report_stem_and_directory
 from ..report.html import write_report
+from ..report.log_export import export_log
 from ..storage import HISTORY_SORT_KEYS
 from ..storage import RunStore
 
@@ -149,6 +150,63 @@ class HistorySession:
         htmls = sorted(directory.glob(f"{stem}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
         pdfs = sorted(directory.glob(f"{stem}*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         return sorted([*htmls, *pdfs], key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # -- run log export -------------------------------------------------------
+
+    def export_owner_choices(self, run_uuid: str) -> list[tuple[str, str]]:
+        """This run's export-dialog Owner checkboxes, in tree order: Run, each Pre-/Post-test
+        Action, then the steps.
+
+        Each entry is the exporter's owner key — ``"run"``, ``"pretest:<n>"``, ``"posttest:<n>"`` or
+        ``"step:<n>"`` — with its display label; a step reads ``"<Step Number> <Step Name>"`` (e.g.
+        ``"1. Step name"``) and brings all of its Attempts through its key. Raises
+        :class:`ValueError` if no run is recorded for ``run_uuid``."""
+        row = self.store.get_test_run(run_uuid)
+        if row is None:
+            raise ValueError(f"no test run recorded for {run_uuid!r}")
+        choices = [("run", "Run")]
+        for phase in ("pre", "post"):
+            phase_actions = [a for a in self.store.actions(run_uuid) if a.get("phase") == phase]
+            phase_actions.sort(key=lambda a: a["seq"])  # recorded execution order within the phase
+            for i, action in enumerate(phase_actions, 1):
+                label = "Pre-test" if phase == "pre" else "Post-test"
+                if len(phase_actions) > 1:
+                    label = f"{label} {i}"
+                key = f"{'pretest' if phase == 'pre' else 'posttest'}:{action['instance_seq']}"
+                choices.append((key, label))
+        nodes = [n for n in self.store.nodes(run_uuid) if n.get("kind") == "step" and n.get("node_seq") is not None]
+        nodes.sort(key=lambda n: n["node_seq"])  # tree order as the schedule expanded them
+        for node in nodes:
+            number = (node.get("step_number") or "").strip()
+            name = (node.get("step_name") or "").strip()
+            label = f"{number} {name}".strip()
+            if not label:
+                label = f"Step {node['node_seq']}"
+            choices.append((f"step:{node['node_seq']}", label))
+        return choices
+
+    def export_log_default_path(self, run_uuid: str) -> Path:
+        """The default Save As path for this run's log: the report folder, the report stem and
+        ``_log.csv`` (spec 24b). Raises :class:`ValueError` without a config or an unknown run."""
+        if self.config is None:
+            raise ValueError("export_log_default_path needs a HistorySession constructed with a config")
+        directory, stem = report_stem_and_directory(self.store, run_uuid, self.config)
+        return directory / f"{stem}_log.csv"
+
+    def export_log(
+        self,
+        run_uuid: str,
+        path: str,
+        fmt: str,
+        *,
+        levels: Optional[Iterable[str]] = None,
+        sources: Optional[Iterable[str]] = None,
+        owners: Optional[Iterable[str]] = None,
+    ) -> int:
+        """Write this run's exported log to ``path`` in ``fmt`` (the dialog's chosen format); the
+        dialog's ticks are the filters. Passes straight through to the exporter and returns the
+        row count."""
+        return export_log(self.store, run_uuid, path, fmt, levels=levels, sources=sources, owners=owners)
 
     def regenerate(
         self,
