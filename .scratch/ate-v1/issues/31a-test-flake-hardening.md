@@ -6,8 +6,8 @@
 
 **Blocked by:** none
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `LoopbackPeer(hangup="reset")` (tests/_fixtures.py) can no longer send its RST before the client's `connect` returns: reset only after the device's first byte (or after accept is observed), and every test using it still checks the same behaviour
-- [ ] Event-loop waits that pump a fixed number of times (e.g. `_wait_finished` in tests/test_headless_session.py, and any similar helper) wait on a time bound instead
-- [ ] The full suite passes 10/10 runs, and 10/10 with another full suite running in parallel
+- [x] `LoopbackPeer(hangup="reset")` (tests/_fixtures.py) can no longer send its RST before the client's `connect` returns: reset only after the device's first byte (or after accept is observed), and every test using it still checks the same behaviour
+- [x] Event-loop waits that pump a fixed number of times (e.g. `_wait_finished` in tests/test_headless_session.py, and any similar helper) wait on a time bound instead
+- [x] The full suite passes 10/10 runs, and 10/10 with another full suite running in parallel
