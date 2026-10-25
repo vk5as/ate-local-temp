@@ -6,10 +6,10 @@
 
 **Blocked by:** 24a (Run log exporter), 23b (History screen)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] An export dialog with Level, Source and Owner checkboxes (all ticked each time); Export disabled when nothing would be exported
-- [ ] Save As offering CSV (default), JSON Lines and Text, defaulting to the report folder with `_log` added
-- [ ] A pytest-qt test covers the dialog
+- [x] An export dialog with Level, Source and Owner checkboxes (all ticked each time); Export disabled when nothing would be exported
+- [x] Save As offering CSV (default), JSON Lines and Text, defaulting to the report folder with `_log` added
+- [x] A pytest-qt test covers the dialog
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
