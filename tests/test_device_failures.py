@@ -2,10 +2,10 @@
 
 Seam-1 coverage of a failed TCP Device (peer close or reset) against a loopback TCP peer (no
 mocks). A background reader failure is recorded on the device as exactly one (time, message)
-warning, drained by the host at a safe point, and logged as one WARNING (source device) naming
-the device; the already-buffered bytes stay readable, after which every read and write fails
+warning, drained at the next ATE call (or through a pause) and logged as one WARNING (source
+device) naming the device and stamped with the failure time; the already-buffered bytes stay readable, after which every read and write fails
 through its ``onError``; a close + a fresh open recovers; and a write honours the open-time and
-per-call ``timeout`` reporting the bytes actually sent. The device side lives in
+per-call ``timeout`` reporting the bytes actually sent — a timeout fails only that call. The device side lives in
 :mod:`ate.devices.tcp`; :func:`RunEngine._flush_device_warnings` attributes each failure to the
 action it happened in (a step's ``node_seq``/``attempt_no`` or a Pre-/Post-test Action's
 ``action_seq``) or to the run when it happened between actions."""
@@ -23,6 +23,8 @@ from pathlib import Path
 from PyQt6.QtCore import QCoreApplication
 
 from ate.devices.tcp import TcpDriver
+from ate.devices.registry import DeviceRegistry
+from ate.engine.lua_host import LuaHost
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
@@ -53,9 +55,11 @@ def _wait_for(dev, predicate, timeout: float = 2.0) -> None:
 class _ManualPeer:
     """A one-connection TCP peer the test drives by hand: it accepts in the background, records
     the wall time it reset the connection (``reset_at``), and can shrink its receive buffer so a
-    small write fills the path (``rcvbuf``). ``reset_on_accept`` resets as soon as it accepts."""
+    small write fills the path (``rcvbuf``). ``reset_on_first_byte`` resets as soon as the device
+    sends anything: unlike a reset on accept, that can't race the device's own connect (an RST that
+    lands before ``connect`` returns fails the open itself)."""
 
-    def __init__(self, rcvbuf: int | None = None, reset_on_accept: bool = False) -> None:
+    def __init__(self, rcvbuf: int | None = None, reset_on_first_byte: bool = False) -> None:
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if rcvbuf is not None:  # inherited by the accepted socket; must be set before listen
             self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
@@ -65,7 +69,7 @@ class _ManualPeer:
         self.conn: socket.socket | None = None
         self.reset_at: float | None = None
         self._accepted = threading.Event()
-        self._reset_on_accept = reset_on_accept
+        self._reset_on_first_byte = reset_on_first_byte
         threading.Thread(target=self._accept, daemon=True).start()
 
     def _accept(self) -> None:
@@ -73,9 +77,13 @@ class _ManualPeer:
             self.conn, _ = self._listener.accept()
         except OSError:
             return
-        if self._reset_on_accept:
-            self.reset()
         self._accepted.set()
+        if self._reset_on_first_byte:
+            try:
+                self.conn.recv(1)
+                self.reset()
+            except OSError:
+                pass
 
     def wait_accepted(self, timeout: float = 2.0) -> socket.socket:
         assert self._accepted.wait(timeout), "the peer never accepted"
@@ -167,6 +175,27 @@ def test_later_read_write_failures_add_no_further_warning() -> None:
     assert (write[0], write[1]) == (False, 0), f"a write after the failure fails with no bytes: {write!r}"
     assert write[2] == second[3], "the write reports the same failure message as the read"
     assert len(dev.take_warnings()) == 1, f"a late read/write adds no further warning: {dev.take_warnings()!r}"
+
+
+def test_closed_handle_is_dropped_once_its_warnings_are_drained() -> None:
+    """A closed device's failure warning is still drained after its close, and the registry then
+    forgets the handle, so closed handles don't pile up for the whole run."""
+    peer = LoopbackPeer(hangup="reset")
+    peer.start()
+    try:
+        registry = DeviceRegistry().register("TCP", TcpDriver)
+        dev = registry.open_device(
+            "TCP", {"host": "127.0.0.1", "port": peer.port, "timeout": 5, "readTerm": "", "writeTerm": ""}
+        )
+        _wait_for(dev, lambda d: d._failed is not None)
+        registry.close_device(dev)
+        host = type("_Host", (), {"_devices": registry})()
+        drained = LuaHost.take_device_warnings(host)
+    finally:
+        peer.stop()
+
+    assert len(drained) == 1 and "reset" in drained[0][1].lower(), f"the closed device's warning is drained: {drained!r}"
+    assert registry.closed_handles() == [], "a drained, quiescent closed handle is dropped"
 
 
 # --- Unit: RunEngine._flush_device_warnings ----------------------------------------------
@@ -466,14 +495,15 @@ def test_seam_write_timeout_reports_count_and_err_through_onerror(app: QCoreAppl
 
 def test_seam_write_failure_wake_read_and_device_failure_is_logged(app: QCoreApplication) -> None:
     """A device whose connection was reset fails a write and a following read with the same error
-    through their onError, and logs exactly one device WARNING. The step waits (polling a zero-timeout
-    flush, which reports the failure once the reader has seen the RST) before writing, so the write
-    always meets the failed device rather than racing the reset."""
-    peer = LoopbackPeer(hangup="reset")  # resets on accept
-    peer.start()
+    through their onError, and logs exactly one device WARNING. The peer resets only after the
+    device's first write (so the open can't race the RST), and the step waits — polling flush, which
+    reports the failure once the reader has seen the RST — before writing again, so that write always
+    meets the failed device rather than racing the reset."""
+    peer = _ManualPeer(reset_on_first_byte=True)
     try:
         source = _step("""
         local keep = function(res) return res end
+        ATE.write(dev, {data = "go"})  -- the peer resets once it sees this
         for _ = 1, 200 do
           if not ATE.flush(dev, keep).ok then break end
           ATE.sleep(0.01)
@@ -518,3 +548,82 @@ def test_send_error_still_fails_the_device() -> None:
     assert result[0] is False and result[2] and result[2] != "timeout", f"the send must error: {result!r}"
     assert read[3] == result[2], f"the read must report the write's failure: {read!r}"
     assert len(warnings) == 1, f"a send error fails the device once: {warnings!r}"
+
+
+# --- Seam: the WARNING carries the failure time, logged promptly ------------------------------
+
+
+def test_seam_device_warning_is_stamped_with_the_failure_time(app: QCoreApplication) -> None:
+    """A reset early in a long step is logged with the time it happened, not the time the step
+    ended: the step keeps running for 0.6 s after the failure, and the WARNING's ``at`` is within a
+    small tolerance of the reset."""
+    peer = _ManualPeer(reset_on_first_byte=True)
+    try:
+        store, ru = _run_with_peer(app, _step("""
+        ATE.write(dev, {data = "go"})  -- the peer resets once it sees this
+        ATE.sleep(0.6)
+        ATE.report(Result.PASS, "done")"""), peer.port)
+    finally:
+        peer.stop()
+
+    (warning,) = _device_warnings(store, ru)
+    assert warning["node_seq"] == 0 and warning["attempt_no"] == 1, f"owned by the step: {warning!r}"
+    lag = _at(warning) - peer.reset_at
+    assert -0.05 < lag < 0.3, f"the WARNING must carry the failure time, it lags the reset by {lag:.3f}s"
+
+
+def test_seam_failure_during_a_pause_is_logged_at_once_with_its_own_time(app: QCoreApplication) -> None:
+    """A device that fails while a Stop-on-Fail pause waits for the Operator is logged during the
+    pause (before the Operator answers) with its own failure time, at the run level (the failed
+    Attempt's action had already ended)."""
+    peer = _ManualPeer()
+    source = f"""
+return ScheduleParams("x") :setSchedule({{
+    StepParams("io"):setStepNo("1.")
+      :setAction(function()
+        DEV = ATE.open(DeviceType.TCP, {{host="127.0.0.1", port={peer.port}, timeout=5, readTerm="", writeTerm=""}})
+        ATE.report(Result.FAIL, "fails")
+      end),
+  }})"""
+    seen_during_pause: list[dict] = []
+    captured: dict = {}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            store = RunStore(Path(td) / "ate.db")
+            schedule_path = Path(td) / "schedule.tslua"
+            schedule_path.write_text(source, encoding="utf-8")
+            engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
+            engine.run_uuid_reported.connect(lambda u: captured.setdefault("ru", u))
+            prompted = threading.Event()
+            engine.failure_prompt.connect(lambda *_: prompted.set())
+            finished = threading.Event()
+            engine.state_changed.connect(lambda st: finished.set() if st == RunStatus.FINISHED else None)
+
+            engine.start()
+            deadline = time.time() + 10.0
+            while not prompted.is_set():
+                app.processEvents()
+                assert time.time() < deadline, "no failure prompt within 10 s"
+            peer.wait_accepted()
+            peer.reset()  # the device fails while the run is paused
+            while time.time() < peer.reset_at + 2.0 and not seen_during_pause:
+                app.processEvents()
+                seen_during_pause = _device_warnings(store, captured["ru"])
+                time.sleep(0.02)
+            time.sleep(0.3)  # the Operator answers well after the failure
+            engine.choose("CONTINUE")
+            while not finished.is_set():
+                app.processEvents()
+                assert time.time() < deadline, "engine did not finish within 10 s"
+            assert engine.wait(5_000)
+            ru = captured["ru"]
+            warnings = _device_warnings(store, ru)
+    finally:
+        peer.stop()
+
+    assert seen_during_pause, "the device WARNING must be logged during the pause, not after it"
+    (warning,) = warnings
+    assert warning["node_seq"] is None and warning["attempt_no"] is None and warning["action_seq"] is None, \
+        f"a failure during the pause is run-level: {warning!r}"
+    lag = _at(warning) - peer.reset_at
+    assert -0.05 < lag < 0.3, f"the WARNING must carry the failure time, it lags the reset by {lag:.3f}s"

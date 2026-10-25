@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import math
 import threading
+import time
 import weakref
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -144,6 +145,8 @@ ATE_RUN_READONLY = "ATE.run: read-only"
 # Packet 16c: the first value a Device function returns to its Lua wrapper when the operation failed
 # (see ``_LuaHost._device_wrapper``). A string so Lua can compare it; schedules never see it.
 _DEVICE_FAILURE = "\0ate-device-failure\0"
+#: The longest ATE.sleep waits between device-warning drains (packet 17b), in seconds.
+_DRAIN_SLICE = 0.05
 
 
 def _build_readonly_table_source(mapping: Mapping[str, Any]) -> str:
@@ -285,6 +288,7 @@ class _AteTable:
         import traceback
 
         def _wrapped(*args: Any) -> tuple[bool, Any]:
+            self._host.drain_device_warnings()
             try:
                 return fn(*args)
             except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
@@ -307,6 +311,7 @@ class _AteTable:
         # the file is loading (only the builders, require, log and the enums are). Refuse there
         # first with an error that carries the caller's file:line and names the function — exactly
         # like ATE.input.
+        self._host.drain_device_warnings()
         if self._host._context != "step":
             raise NotAllowedError(
                 f"{self._host._location()} ATE.report: only allowed in a step action"
@@ -321,6 +326,7 @@ class _AteTable:
         # ATE.input reads the Operator's answer for the running step; it is not legal in a Pre-test
         # or Post-test Action (or while loading). Refuse there first with an error that carries the
         # caller's file:line and names the function.
+        self._host.drain_device_warnings()
         if self._host._context != "step":
             raise NotAllowedError(
                 f"{self._host._location()} ATE.input: only allowed in a step action"
@@ -333,7 +339,8 @@ class _AteTable:
         Waits on the shared abort flag, so an abort requested during the wait wakes it and raises
         "aborted" into Lua immediately — the same path the count hook uses — and the running step
         records ERROR "Aborted by Operator". A non-number, non-finite or negative argument raises
-        a clear error naming ATE.sleep, so a bad call errors the step (story 48)."""
+        a clear error naming ATE.sleep, so a bad call errors the step (story 48). The wait is sliced
+        so a device failure during a long sleep is still logged at once (packet 17b)."""
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
             raise ValueError(f"ATE.sleep: seconds must be a number >= 0, got {seconds!r}")
         if not math.isfinite(seconds) or seconds < 0:
@@ -342,14 +349,22 @@ class _AteTable:
             raise ValueError(f"ATE.sleep: seconds must be at most {threading.TIMEOUT_MAX:.0f}, got {seconds!r}")
         flag = self._host._abort_flag
         # An abort requested before the wait starts is no reason to keep sleeping: raise now.
-        if flag.aborted or flag.wait(seconds):
+        if flag.aborted:
             raise RuntimeError("aborted")
-        return True
+        deadline = time.monotonic() + seconds
+        while True:
+            self._host.drain_device_warnings()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if flag.wait(min(remaining, _DRAIN_SLICE)):
+                raise RuntimeError("aborted")
 
     def log(self, level: Any, *args: Any) -> bool:
         """Record a schedule's own log line at ``level``. Returns ``true``."""
         # The host appends every call in order with source "schedule"; the run engine
         # attributes each batch to the step whose action closure just ran (see below).
+        self._host.drain_device_warnings()
         self._host.record_log(level, *args)
         return True
 
@@ -392,6 +407,9 @@ class _AteTable:
                 raise NotAllowedError(
                     f"{self._host._location()} ATE.{name}: only legal after the schedule has loaded"
                 )
+            # Packet 17b: drain before (a failure since the last call) and after (one this call met,
+            # e.g. during a read that waited out its timeout), so each WARNING lands at once.
+            self._host.drain_device_warnings()
             try:
                 return fn(*args)
             except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
@@ -402,6 +420,8 @@ class _AteTable:
                 # to any step; return graceful halves carrying just that prefix + message.
                 self._host.record_log("ERROR", f"{loc} ATE.{name}: {recorded}", source="ate")
                 return (False, f"{loc} ATE.{name}: {msg}")
+            finally:
+                self._host.drain_device_warnings()
 
         _wrapped._isolate_device = True  # marker: __getattr__ wraps this for Lua instead of re-wrapping
         return _wrapped
@@ -831,6 +851,8 @@ class _LuaHost:
         # here; later packets add their drivers to the same registry. The receive buffer cap (17a)
         # is held by the registry, which hands it to each driver's open.
         self._devices = DeviceRegistry(receive_buffer_bytes=receive_buffer_bytes)
+        # Packet 17b: the run engine's callable that records pending device warnings; None until a run.
+        self.device_warning_sink: Optional[Callable[[], None]] = None
         self._devices.register("TCP", TcpDriver)
 
         # Load and validate the schedule file. Runs in this runtime's global env,
@@ -964,19 +986,32 @@ class _LuaHost:
         Covers both still-open and already-closed devices (the registry keeps closed handles so a
         warning enqueued before its close is never lost), and only drivers whose handles support it
         (``getattr(..., "take_warnings", None)``), so a driver without a background reader adds
-        nothing. Called by the run engine at a safe point (end of an action / run end); the reader
-        thread only enqueues, never drains."""
+        nothing. Called on the worker thread through :meth:`drain_device_warnings` and by the run
+        engine; the reader thread only enqueues, never drains. A closed handle whose reader has
+        stopped can enqueue nothing more, so it is dropped from the registry once drained."""
         out: list[tuple[float, str]] = []
-        seen: set[int] = set()
-        for device in [*self._devices.snapshot(), *self._devices.closed_handles()]:
-            key = id(device)
-            if key in seen:
-                continue
-            seen.add(key)
+        for device in self._devices.snapshot():
             fn = getattr(device, "take_warnings", None)
             if fn is not None:
                 out.extend(fn())
+        for device in self._devices.closed_handles():
+            quiescent = getattr(device, "quiescent", None)
+            done = quiescent() if quiescent is not None else True  # checked before draining: no late warning slips past
+            fn = getattr(device, "take_warnings", None)
+            if fn is not None:
+                out.extend(fn())
+            if done:
+                self._devices.forget_closed(device)
         return out
+
+    def drain_device_warnings(self) -> None:
+        """Hand any pending device failure warnings to the run engine's sink, if one is set.
+
+        Called at every ATE call (and through a long ATE.sleep) so a background failure is logged
+        at once; the engine's sink attributes and records them (packet 17b). No sink, no-op."""
+        sink = self.device_warning_sink
+        if sink is not None:
+            sink()
 
     def _bind_print(self, ate: "_AteTable") -> None:
         """Redirect the global ``print`` to ``ATE.log(Log.INFO, ...)``.

@@ -104,7 +104,7 @@ class DeviceRegistry:
         self._open: dict[int, Any] = {}
         # Handles the schedule closed this run. Kept (not freed here) so the host can still drain
         # a device's failure warning after its handle went away (packet 17b: one WARNING per
-        # failure, none lost on close).
+        # failure, none lost on close); the host drops each one once drained (forget_closed).
         self._closed: dict[int, Any] = {}
         # The per-device receive buffer cap (app config) passed to every driver's open (17a).
         self._receive_buffer_bytes = receive_buffer_bytes
@@ -142,6 +142,10 @@ class DeviceRegistry:
     def closed_handles(self) -> list[Any]:
         """Every handle the schedule closed this run, still available to drain (packet 17b)."""
         return list(self._closed.values())
+
+    def forget_closed(self, handle: Any) -> None:
+        """Drop a closed handle once its warnings are drained and it can enqueue no more."""
+        self._closed.pop(id(handle), None)
 
     def is_open(self, handle: Any) -> bool:
         """Whether ``handle`` is still open this run (not yet closed)."""
