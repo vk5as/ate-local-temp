@@ -566,7 +566,7 @@ class RunStore:
 
     def log_lines(self, run_uuid: str) -> list[dict]:
         """Return this run's recorded log lines as dicts (empty when the run is unknown)."""
-        stmt = log_line.select().where(log_line.c.run_uuid == run_uuid)
+        stmt = log_line.select().where(log_line.c.run_uuid == run_uuid).order_by(log_line.c.seq)  # recorded order
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
