@@ -115,3 +115,13 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - `LoopbackPeer(hangup="reset")` can send its RST before the client's `connect` returns, so `ATE.open` itself sometimes fails; tests using it in test_device_onerror / test_tcp_read_write / test_device_failures fail ~2 in 8 runs even on base. Fix: reset only after the device's first byte (the 17b tests now do this).
 - `test_headless_session._wait_finished` pumps events a fixed 2000 times with no time bound, so it fails under load (4/10 on base when paired with TCP tests). Fix: a time-bounded wait (as done in test_step_enable_ui).
 - Candidate small "test hardening" packet before the final review.
+
+## 17b notes from review (not fixed)
+
+- Log lines are now written at every drain point (each ATE call with new lines → one `insert_log_lines` call); 1000–2000 `ATE.log` calls cost ~+40–70 ms per run. Acceptable; batch if it ever matters.
+- The wall-clock `at` uses `time.time() - time.monotonic()` recomputed at each drain; an NTP step between drains could make `at` non-monotonic in seq. Compute the offset once per run.
+- Top-level `print` in the schedule body (outside any action) is never recorded (pre-existing).
+- A failure while one device call is blocked (e.g. a read waiting out its timeout) is logged when that call returns.
+- After a write timeout, the next write follows a truncated frame; worth a sentence in the spec.
+- `ATE.input` drains before its blocking wait but not during it.
+- The new closed-handle test still uses the shared `LoopbackPeer(hangup="reset")` (see the shared-helper flakes note).
