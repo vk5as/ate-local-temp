@@ -248,7 +248,7 @@ def test_selecting_a_mismatched_schedule_shows_the_flag_line(qapp, tmp_path):
     item = next(list_widget.item(i) for i in range(list_widget.count()) if "Checksum schedule" in list_widget.item(i).text())
     list_widget.setCurrentItem(item)
     flag = screen.test_schedule_stage.mismatch_label.text()
-    assert "Checksum mismatch" in flag and "helper.lua" in flag
+    assert "Checksum mismatch in REL-06C · Mismatch release 2.3.0: helper.lua." in flag, flag
     assert "The files on disk are not the released files" in flag
 
 
@@ -269,7 +269,10 @@ def test_start_with_a_mismatch_shows_the_confirmation(qapp, tmp_path):
     assert len(asked) == 1
     dialog = asked[0]
     text = dialog.file_lines.text()
-    assert f"expected {WRONG_SHA}, found {_sha(HELPER_SRC)}" in text
+    computed = _sha(HELPER_SRC)
+    assert f"helper.lua expected 000000…00, found {computed[:6]}…{computed[-2:]}" in text, "hashes abbreviated as in the mockup"
+    assert WRONG_SHA in dialog.file_lines.toolTip() and computed in dialog.file_lines.toolTip(), "full hashes in the tooltip"
+    assert dialog.release == "REL-06C · Mismatch release 2.3.0"
     assert dialog.store_checkbox is not None and dialog.store_checkbox.isChecked()
     assert _files(session)["helper.lua"]["content"] == HELPER_SRC.encode("utf-8")
 
@@ -339,6 +342,52 @@ def test_always_and_never_confirm_without_a_checkbox(qapp, tmp_path):
         assert dialog.store_checkbox is None
         assert ("will be stored" in dialog.store_note.text()) == stored
         assert (_files(session)["helper.lua"]["content"] is not None) == stored
+
+
+def test_a_sibling_schedules_mismatch_does_not_flag_this_schedule(qapp, tmp_path):
+    """Only files a run of the selected schedule can load count: its own .tslua and the release's
+    modules. A sibling schedule's mismatched .tslua flags the sibling, not this schedule, so this one
+    starts with no confirmation and no choice needed."""
+    env = _write_release(tmp_path, mismatch=False)
+    other_src = 'return ScheduleParams("Other schedule", "a sibling") :setSchedule({})\n'
+    (env["defs"] / "other.tslua").write_text(other_src, encoding="utf-8")
+    atedef = json.loads((env["defs"] / "demo.atedef").read_text(encoding="utf-8"))
+    atedef["files"].append({"path": "other.tslua", "sha256": WRONG_SHA})
+    (env["defs"] / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+
+    session = HeadlessRunSession(env["config"])
+    session.select_schedule("Checksum schedule")
+    assert session.pending_mismatches() == [], "a sibling's file is not this schedule's mismatch"
+    session.select_schedule("Other schedule")
+    assert [m[0] for m in session.pending_mismatches()] == ["other.tslua"]
+
+    screen = StagedRunScreen(session)
+    rows = [screen.test_schedule_stage.schedule_list.item(i).text()
+            for i in range(screen.test_schedule_stage.schedule_list.count())]
+    assert any(r.startswith("⚠ Other schedule") for r in rows), rows
+    assert any(r.startswith("Checksum schedule") for r in rows), rows
+
+
+def test_stored_bytes_are_the_bytes_loaded_not_a_re_read(qapp, tmp_path, monkeypatch):
+    """The file changes on disk after it loaded and before the run records it: the stored content is
+    still the bytes that loaded (the ones its computed checksum covers), not what is on disk now."""
+    from ate.engine.run_engine import RunEngine
+
+    env = _write_release(tmp_path)
+    original = RunEngine._record_files
+
+    def edit_then_record(self, *args, **kwargs):
+        (env["defs"] / "helper.lua").write_text("-- changed after it loaded\nreturn {}\n", encoding="utf-8")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunEngine, "_record_files", edit_then_record)
+    session = HeadlessRunSession(env["config"])
+    session.select_schedule("Checksum schedule")
+    session.start(store_mismatched=True)
+    assert _finish(qapp, session)
+    helper = _files(session)["helper.lua"]
+    assert helper["content"] == HELPER_SRC.encode("utf-8"), "the loaded bytes, not a re-read"
+    assert helper["computed_sha256"] == _sha(HELPER_SRC)
 
 
 def _select_and_run(screen: StagedRunScreen, session: HeadlessRunSession) -> None:

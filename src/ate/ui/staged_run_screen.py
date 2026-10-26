@@ -19,6 +19,8 @@ and the GUI stays responsive while a schedule runs.
 
 from __future__ import annotations
 
+import html
+
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
@@ -44,7 +46,7 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import find_definitions, list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
 
@@ -454,15 +456,26 @@ class RunView(QWidget):
         self.failure_bar.setStyleSheet("background-color: #b71c1c; color: white;")
 
 
-def _mismatch_flag_text(mismatches: list[tuple[str, Optional[str], str, str]]) -> str:
+#: The mockup's ``.flag`` box (amber), used for the mismatch flag line and the confirmation's file list.
+_FLAG_STYLE = "background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px;"
+
+
+def _short_sha(value: Optional[str]) -> str:
+    """A SHA-256 abbreviated the way the mockup shows it (``3f9a0c…e1``); the full value goes in a tooltip."""
+    if not value:
+        return "none"
+    return value if len(value) <= 9 else f"{value[:6]}…{value[-2:]}"
+
+
+def _mismatch_flag_text(mismatches: list[tuple[str, Optional[str], str, str]], release: str = "") -> str:
     """The line the Run screen shows under the picker for a schedule with mismatched files.
 
-    Names the Media Release and every file whose bytes differ from its Test Definition checksum,
-    matching the mockup's flag: `⚠ Checksum mismatch in <release>: <files>. The files on disk are not
-    the released files.` Empty when nothing mismatched."""
+    Names the Media Release (``MR-… · name version`` when known) and every file whose bytes differ
+    from its Test Definition checksum, matching the mockup's flag: `⚠ Checksum mismatch in <release>:
+    <files>. The files on disk are not the released files.` Empty when nothing mismatched."""
     if not mismatches:
         return ""
-    release = mismatches[0][3] or "the Test Definition"
+    release = release or mismatches[0][3] or "the Test Definition"
     files = ", ".join(rel_path for rel_path, _expected, _computed, _media in mismatches)
     return f"⚠ Checksum mismatch in {release}: {files}. The files on disk are not the released files."
 
@@ -482,9 +495,11 @@ class MismatchConfirmation(QDialog):
         release: str,
         mismatches: list[tuple[str, Optional[str], str, str]],
         store_setting: str = "ask",
+        run_details: str = "",
     ) -> None:
         super().__init__()
         self.setWindowTitle("Start Test Run")
+        self.setMinimumWidth(460)  # room for "path expected …, found …" on one line
         self.schedule_name = schedule_name
         self.release = release
         self.mismatches = list(mismatches)
@@ -492,12 +507,21 @@ class MismatchConfirmation(QDialog):
         self._accepted = False
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"{schedule_name}\n{release}"))
+        header = QLabel(f"<b>{html.escape(schedule_name)}</b><br><span style='color:#666'>{html.escape(release)}</span>")
+        layout.addWidget(header)
+        if run_details:  # the mockup's "UUT …, Project …, Operator …" line
+            layout.addWidget(QLabel(run_details))
         lines = "\n".join(
-            f"{rel_path} expected {expected}, found {computed}"
+            f"{rel_path} expected {_short_sha(expected)}, found {_short_sha(computed)}"
             for rel_path, expected, computed, _media in self.mismatches
         )
         self.file_lines = QLabel(f"⚠ These files do not match their Test Definition checksums:\n{lines}")
+        self.file_lines.setStyleSheet(_FLAG_STYLE)
+        self.file_lines.setWordWrap(True)
+        self.file_lines.setToolTip("\n".join(
+            f"{rel_path}\n  expected {expected or 'none'}\n  found    {computed}"
+            for rel_path, expected, computed, _media in self.mismatches
+        ))
         layout.addWidget(self.file_lines)
 
         if store_setting == "ask":
@@ -517,6 +541,7 @@ class MismatchConfirmation(QDialog):
 
         self.cancel_button = QPushButton("Cancel")
         self.ok_button = QPushButton("Start")
+        self.ok_button.setDefault(True)  # the mockup's primary button
         buttons = QHBoxLayout()
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.ok_button)
@@ -561,6 +586,7 @@ class StagedRunScreen(QWidget):
         self._confirm_dialog: Optional[MismatchConfirmation] = None
         # Mismatches per schedule name, refreshed with the list: the ⚠ prefix and the flag line read it.
         self._mismatch_flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
+        self._release_labels: dict[str, str] = {}
         # Captured when STARTED fires; ``None`` before the first run or after FINISHED.
         self._started_at: Optional[datetime] = None
         # The RunEngine worker for the current run, set by :meth:`_begin_run_from_selection` and
@@ -655,7 +681,10 @@ class StagedRunScreen(QWidget):
                 self.session.select_schedule(name)
             self.test_schedule_stage.notes_label.setText(item.text())
             # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
-            self.test_schedule_stage.mismatch_label.setText(_mismatch_flag_text(self._mismatch_flags.get(name, [])))
+            flagged = self._mismatch_flags.get(name, [])
+            label = self.test_schedule_stage.mismatch_label
+            label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
+            label.setStyleSheet(_FLAG_STYLE if flagged else "")
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
@@ -696,9 +725,15 @@ class StagedRunScreen(QWidget):
         OK/Cancel itself instead of a human, so no test ever blocks on ``exec()``."""
         if not mismatches:
             return None
-        release = mismatches[0][3] or ""
+        release = self._release_labels.get(mismatches[0][3], mismatches[0][3] or "")
         setting = self.session.config.store_mismatched_files if self.session.config is not None else "ask"
-        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting)
+        stage = self.uut_operator_stage
+        details = ", ".join(part for part in (
+            f"UUT {stage.serial_edit.text().strip()}" if stage.serial_edit.text().strip() else "",
+            f"Project {stage.project_edit.text().strip()}" if stage.project_edit.text().strip() else "",
+            f"Operator {stage.operator_edit.text().strip()}" if stage.operator_edit.text().strip() else "",
+        ) if part)
+        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting, details)
         self._confirm_dialog = dialog
         if self.confirm_choice is not None:
             self.confirm_choice(dialog)
@@ -913,6 +948,9 @@ class StagedRunScreen(QWidget):
             for name, description, media_number in list_schedules(*config.test_definition_dirs)
         ]
         self._mismatch_flags = list_schedule_mismatches(*config.test_definition_dirs)
+        # "MR-10422 · PSU-200 Tests 2.3.0", as the mockup names a release in the flag and the dialog.
+        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}"
+                                for d in find_definitions(*config.test_definition_dirs)}
         self.test_schedule_stage.schedule_list.clear()
         for name, description, media_number in summaries:
             flag = "⚠ " if name in self._mismatch_flags else ""

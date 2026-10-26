@@ -115,7 +115,8 @@ class HeadlessRunSession(QObject):
         return self._selected_name
 
     def pending_mismatches(self) -> list[tuple[str, Optional[str], str, str]]:
-        """Every checksum mismatch of the selected schedule's Media Release.
+        """Every checksum mismatch a run of the selected schedule can load (its own ``.tslua`` and its
+        release's modules; not sibling schedules' files).
 
         Each entry is ``(rel_path, expected_sha256, computed_sha256, media_number)`` for a file the
         run would load whose bytes on disk differ from what its Test Definition recorded — the set
@@ -127,7 +128,7 @@ class HeadlessRunSession(QObject):
         definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=self._selected_name)
         if definition is None:
             return []
-        return definition_mismatches(definition)
+        return definition_mismatches(definition, self._selected_name)
 
     def store_mismatched_files(self, choice: Optional[bool], mismatches: Optional[list[tuple[str, Optional[str], str, str]]] = None) -> bool:
         """Decide whether this run stores the bytes of its mismatched files.
@@ -382,7 +383,7 @@ class HeadlessRunSession(QObject):
         modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the run
         # Packet 06c: the Operator's answer to the run-start confirmation decides whether the bytes of
         # a file whose checksum differs are recorded on its run_file row.
-        store = self.store_mismatched_files(store_mismatched, definition_mismatches(definition))
+        store = self.store_mismatched_files(store_mismatched, definition_mismatches(definition, self._selected_name))
 
         pending = {
             "operator": getattr(self, "_pending_operator", "") or "",
