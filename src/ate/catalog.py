@@ -701,3 +701,39 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
             if host.schedule.name == schedule_name:
                 return definition
     return None
+
+
+# --- checksum mismatches ------------------------------------------------------
+
+
+def definition_mismatches(definition: Definition) -> list[tuple[str, Optional[str], str, str]]:
+    """Return ``(rel_path, expected_sha256, computed_sha256, media_number)`` for every mismatch.
+
+    The files checked are exactly the ones this Test Definition lists — its schedules and every
+    module :func:`module_map` can reach — so the flag names what a run of this release actually
+    loads. A file with no ``sha256`` in the ``.atedef`` counts as a mismatch (there is nothing to
+    match it against, the same rule packet 06b records on ``run_file``); `ate definition update`
+    is what fills those in (see `test-definition-format.md`)."""
+    return [
+        (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, definition.media_number)
+        for entry in definition.files
+        if (entry.expected_sha256 or None) != entry.computed_sha256
+    ]
+
+
+def list_schedule_mismatches(*directories: str | Path) -> dict[str, list[tuple[str, Optional[str], str, str]]]:
+    """Map every visible schedule name to its Media Release's checksum mismatches.
+
+    Schedules with nothing to flag are absent from the map, so the Run screen only prefixes the rows
+    it finds here with ⚠ (ticket 06c). Broken definitions contribute nothing: their schedules cannot
+    run, so there is nothing to confirm."""
+    flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
+    for definition in find_definitions(*directories):
+        if definition.broken:
+            continue
+        mismatches = definition_mismatches(definition)
+        if not mismatches:
+            continue
+        for name, _description, _media_number in _schedule_summaries(definition):
+            flags[name] = mismatches
+    return flags

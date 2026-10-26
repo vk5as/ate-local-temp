@@ -236,6 +236,13 @@ def _validate_and_fill(raw: Any, path: str, hostname: str = "") -> dict[str, Any
     if isinstance(database, dict) and database.get("type") != "sqlite":
         raise ConfigError(f"config file {path}: 'database.type' must be 'sqlite', got {database['type']!r}")
 
+    # Whether mismatched Lua bytes are stored with a run is one of three words (ticket 06c).
+    if isinstance(database, dict) and database.get("storeMismatchedFiles", "ask") not in ("ask", "always", "never"):
+        raise ConfigError(
+            f"config file {path}: 'database.storeMismatchedFiles' must be 'ask', 'always' or 'never', "
+            f"got {database.get('storeMismatchedFiles')!r}"
+        )
+
     return result
 
 

@@ -479,13 +479,15 @@ class RunStore:
         expected_sha256: Optional[str] = None,
         computed_sha256: Optional[str] = None,
         mismatch: bool = False,
+        content: Optional[bytes] = None,
     ) -> dict:
         """Insert one file-used row keyed by ``(run_uuid, seq)``.
 
         ``kind`` is ``tslua``, ``lua`` or ``ate-module``; bundled ``ate.`` modules carry a null
         ``media_number`` and ``expected_sha256`` (only this build records release files, so both are
-        set here). ``mismatch`` stores as 0/1; the raw bytes of a mismatched file are left null —
-        storing them is ticket 06c."""
+        set here). ``mismatch`` stores as 0/1. ``content`` is the raw bytes of a mismatched file
+        (ticket 06c): it is recorded only when the row is flagged, so a matching file never carries
+        bytes and an ``ate.`` module never can."""
         now = self._runfile_seq.get(run_uuid, 0)
         row = {
             "run_uuid": run_uuid,
@@ -496,6 +498,7 @@ class RunStore:
             "expected_sha256": expected_sha256 if kind != "ate-module" else None,
             "computed_sha256": computed_sha256 or None,
             "mismatch": _as_int(mismatch),
+            "content": content if (mismatch and content is not None) else None,
         }
         self._run(run_file.insert().values(**row))
         next_seq = now + 1

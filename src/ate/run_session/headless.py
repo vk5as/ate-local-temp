@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
-from ..catalog import module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import definition_mismatches, module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
 from .._version import __version__  # packet 06d: the version written to test_run.ate_version
 from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
@@ -113,6 +113,58 @@ class HeadlessRunSession(QObject):
     def selected_schedule(self) -> Optional[str]:
         """The schedule name the Operator last selected, if any."""
         return self._selected_name
+
+    def pending_mismatches(self) -> list[tuple[str, Optional[str], str, str]]:
+        """Every checksum mismatch of the selected schedule's Media Release.
+
+        Each entry is ``(rel_path, expected_sha256, computed_sha256, media_number)`` for a file the
+        run would load whose bytes on disk differ from what its Test Definition recorded — the set
+        the Run screen flags with ⚠ and the confirmation lists before the run starts (ticket 06c).
+        Empty when nothing is selected or everything matches."""
+        config = self._config
+        if config is None or self._selected_name is None:
+            return []
+        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=self._selected_name)
+        if definition is None:
+            return []
+        return definition_mismatches(definition)
+
+    def store_mismatched_files(self, choice: Optional[bool], mismatches: Optional[list[tuple[str, Optional[str], str, str]]] = None) -> bool:
+        """Decide whether this run stores the bytes of its mismatched files.
+
+        `always` stores and `never` does not, whatever the Operator chose; `ask` takes the
+        confirmation's checkbox, and with mismatches pending and no choice given there is nothing to
+        start — :class:`ValueError`. With no mismatch there is nothing to store, so the choice is
+        ignored (spec: the confirmation only appears on a mismatch). ``mismatches`` is the pending
+        list; it is resolved from the selected schedule when omitted."""
+        setting = self._config.store_mismatched_files if self._config is not None else "ask"
+        if mismatches is None:
+            mismatches = self.pending_mismatches()
+        if not mismatches:
+            return False
+        if setting == "always":
+            return True
+        if setting == "never":
+            return False
+        if choice is None:
+            raise ValueError(
+                "database.storeMismatchedFiles is 'ask' and this schedule has checksum mismatches: "
+                "start() needs store_mismatched=True or False"
+            )
+        return bool(choice)
+        setting = self._config.store_mismatched_files if self._config is not None else "ask"
+        if not self.pending_mismatches():
+            return False
+        if setting == "always":
+            return True
+        if setting == "never":
+            return False
+        if choice is None:
+            raise ValueError(
+                "database.storeMismatchedFiles is 'ask' and this schedule has checksum mismatches: "
+                "start() needs store_mismatched=True or False"
+            )
+        return bool(choice)
 
     @property
     def run_uuid(self) -> Optional[str]:
@@ -310,12 +362,17 @@ class HeadlessRunSession(QObject):
 
     # -- start ---------------------------------------------------------------
 
-    def start(self) -> RunEngine:
+    def start(self, store_mismatched: Optional[bool] = None) -> RunEngine:
         """Recover interrupted runs, resolve the selected schedule, and launch it.
 
         Returns the :class:`RunEngine` worker; call ``start()`` from the owning thread
         (typically after ``qapp.processEvents()`` delivers queued signals). Raises
         :class:`SessionError` if no config or an unresolvable schedule selection.
+
+        ``store_mismatched`` answers the run-start confirmation for a schedule whose files no longer
+        match their recorded checksums (ticket 06c): with `database.storeMismatchedFiles` = `ask` it
+        is required when there is a mismatch, and `always`/`never` ignore it. A clean schedule needs
+        no answer at all.
         """
         # Rule 98: close any run left open by a crash before starting a new one.
         assert self._store is not None, "session was constructed without a config"
@@ -336,6 +393,9 @@ class HeadlessRunSession(QObject):
         path = resolve_schedule_path(definition, self._selected_name)
         assert path is not None, "resolved schedule has no matching file"
         modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the run
+        # Packet 06c: the Operator's answer to the run-start confirmation decides whether the bytes of
+        # a file whose checksum differs are recorded on its run_file row.
+        store = self.store_mismatched_files(store_mismatched, definition_mismatches(definition))
 
         pending = {
             "operator": getattr(self, "_pending_operator", "") or "",
@@ -366,6 +426,7 @@ class HeadlessRunSession(QObject):
             media_number="",
             modules=modules,  # packet 06a: forward the release's require'd module map to this run
             definition=definition,  # packet 06b: record the owning Media Release and files used with checksums
+            store_mismatched_files=store,  # packet 06c: keep the bytes of a mismatched file when asked to
             schedule_name=self._selected_name,
             utc_offset="+00:00",
             overrides={int(seq): bool(en) for seq, en in (self._pending_node_enables or {}).items()},

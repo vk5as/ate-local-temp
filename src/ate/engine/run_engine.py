@@ -96,6 +96,7 @@ class RunEngine(QThread):
         overrides: Optional[Mapping[int, bool]] = None,  # packet 11a: per-step enable/disable Operator toggles
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
         definition: Optional[Any] = None,  # packet 06b: the resolved Media Release that owns this run (records media_release/run_file rows)
+        store_mismatched_files: bool = False,  # packet 06c: store the raw bytes of a file whose checksum differs
         parent: Optional[object] = None,
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
         operator_input: Optional[OperatorInput] = None,
@@ -136,6 +137,10 @@ class RunEngine(QThread):
         # can record its media_release row (seq 0) and every file used with expected/computed checksums.
         # ``None`` means a bare schedule test — nothing extra is recorded then.
         self._definition = definition
+        # Packet 06c: whether this run stores the raw bytes of a file whose checksum differs from the
+        # Test Definition's. The Run screen's confirmation (or `database.storeMismatchedFiles`) decides
+        # it at the session; a run started without one stores nothing.
+        self._store_mismatched_files = bool(store_mismatched_files)
         self._op = operator_input or OperatorInput()
         # Whole-run abort, requested by the Operator (the staged Run screen's Abort button calls
         # :meth:`request_abort` through the session). It is checked between steps so a clean stop
@@ -883,6 +888,11 @@ class RunEngine(QThread):
             if entry is None:
                 continue
             mismatch = (entry.expected_sha256 or None) != computed
+            # Packet 06c: only a file that mismatched, and only when this run was told to store them,
+            # carries the bytes it was checksummed from — never a re-read of the file.
+            content = None
+            if mismatch and self._store_mismatched_files:
+                content = getattr(host, "_file_bytes", {}).get(str(Path(path)))
             self._store.insert_run_file(
                 run_uuid,
                 path=entry.rel_path,
@@ -891,11 +901,13 @@ class RunEngine(QThread):
                 expected_sha256=entry.expected_sha256 or None,
                 computed_sha256=computed,
                 mismatch=mismatch,
+                content=content,
             )
             if mismatch:
-                mismatches.append((entry.rel_path, entry.expected_sha256, computed))
-        for rel_path, expected, computed in mismatches:
+                mismatches.append((entry.rel_path, entry.expected_sha256, computed, content is not None))
+        for rel_path, expected, computed, stored in mismatches:
+            note = " (file stored with this Test Run)" if stored else ""
             self._store.insert_log_lines(
                 run_uuid, 0,
-                [{"level": "WARNING", "source": "ate", "text": f"checksum mismatch for {rel_path} (expected {expected}, got {computed})"}],
+                [{"level": "WARNING", "source": "ate", "text": f"checksum mismatch for {rel_path} (expected {expected}, got {computed}){note}"}],
             )

@@ -782,6 +782,11 @@ class _LuaHost:
         # rows (and flags mismatches) when the run ends. Packet 06d: a bundled ``ate.`` module is
         # recorded with kind "ate-module" and the module NAME in place of a path.
         self._files_used: list[tuple[str, str, str]] = []
+        # Packet 06c: the exact bytes each of those files loaded from, keyed by the same path string,
+        # so a mismatched file can be stored with the run as it was read rather than re-read later.
+        # Bundled `ate.` modules are deliberately not held here — they ship with ATE and are never
+        # stored.
+        self._file_bytes: dict[str, bytes] = {}
         # Cache of already-loaded module return values; keyed by module name. A nil return caches as
         # ``True`` (stock Lua), and every later require of the same name returns this without re-running.
         self._require_cache: dict[str, Any] = {}
@@ -964,6 +969,7 @@ class _LuaHost:
             module_path = Path(modules[name])
             data = module_path.read_bytes()  # checksum the raw bytes before decoding (packet 06b)
             self._files_used.append((str(module_path), "lua", _sha256_hex(data)))
+            self._file_bytes[str(module_path)] = data  # packet 06c: kept for a mismatched file's content
             source = data.decode("utf-8")
             try:
                 value = self._runtime.execute(source, name=f"@{modules[name]}", mode="t")
@@ -1135,6 +1141,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         before decoding for execution — the first file used by this host, so it always lands first."""
         data = Path(path).read_bytes()
         self._files_used.append((str(path), "tslua", _sha256_hex(data)))
+        self._file_bytes[str(path)] = data  # packet 06c: kept for a mismatched file's content
         code = data.decode("utf-8")
         try:
             schedule = self._runtime.execute(
