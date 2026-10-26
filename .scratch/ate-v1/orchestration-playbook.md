@@ -308,7 +308,7 @@ Reading the numbers:
 
 ## 7. Safety and process rules (put the relevant ones in every brief)
 
-- Never push. Never touch `main`.
+- Subagents never push. The orchestrator pushes to the private remote `github` (vk5as/ate-local-temp) after every merge: `ATE_ORCHESTRATOR=1 GIT_TERMINAL_PROMPT=0 git push github --all` (user, 2026-10-27). The PAT lives outside the repo in `~/.config/ate-github/credentials`; local `pre-commit`/`pre-push` hooks refuse tokens. Never touch `main`.
 - Only the orchestrator moves the integration branch, with `ATE_ORCHESTRATOR=1`.
 - Subagents: their own worktree and branch only; never `/home/dev/projects/ate-ornith`; no new worktrees; no rebase; no merges except the reviewer's `--ff-only`.
 - Never run real `groupadd`, `chown`, `icacls` or other system-changing commands; tests mock them.
