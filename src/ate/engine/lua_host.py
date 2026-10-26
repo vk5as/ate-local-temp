@@ -48,6 +48,7 @@ def _sha256_hex(data: bytes) -> str:
 
 from ..devices import DeviceRegistry, TcpDriver
 from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
+from ..devices.udp import UdpDriver  # packet 18b: UDP datagrams, registered like the other streams
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
@@ -534,10 +535,21 @@ class _AteTable:
             overflow, dropped = device.take_overflow()  # the reader recorded it when the cap was exceeded
         else:
             data, count, partial, err, overflow, dropped = None, 0, False, "device closed", False, 0
-        if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
-            self._host.record_log(
-                "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
-            )
+        if partial:  # spec: a partial read logs a WARNING — for a stream the deadline caught it
+            # mid-bytes; for a Device Type that reads whole messages (UDP) `size` cut a datagram
+            # short, and saying "timed out" there is a lie. The device says which it is.
+            if getattr(device, "partial_read_is_truncation", False):
+                self._host.record_log(
+                    "WARNING",
+                    f"{self._host._location()} ATE.read: datagram truncated to {count} byte(s)",
+                    source="ate",
+                )
+            else:
+                self._host.record_log(
+                    "WARNING",
+                    f"{self._host._location()} ATE.read: timed out after {count} byte(s)",
+                    source="ate",
+                )
         result = {
             "data": data,  # None -> nil on a timeout with no bytes or a failure
             "count": count,
@@ -873,6 +885,7 @@ class _LuaHost:
         self.device_warning_sink: Optional[Callable[[], None]] = None
         self._devices.register("TCP", TcpDriver)
         self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
+        self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.

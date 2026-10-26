@@ -470,6 +470,129 @@ class LoopbackPeer:
             pass
 
 
+class UdpLoopbackPeer:
+    """A UDP peer on 127.0.0.1 that records the device's datagrams and answers with its own.
+
+    Like :class:`LoopbackPeer` it binds an ephemeral port in ``__init__`` so tests never collide on a
+    fixed one. UDP has no connection, so it learns the device's address from the source of the first
+    datagram it receives and :meth:`send` replies to that - which is exactly the address the device
+    accepts datagrams from, since its socket is connected to this peer's port. ``datagrams`` are sent
+    in order as soon as the device first writes to the peer, so a schedule that writes and then reads
+    finds the queue already filled. :meth:`unbind` and :meth:`rebind` take the port out of service and
+    put it back: Linux answers a send to an unbound port with an ICMP port-unreachable, which is the
+    ConnectionRefusedError a connected UDP socket then raises."""
+
+    #: Placeholder substituted with the live peer port when writing a schedule to disk.
+    PORT_PLACEHOLDER = "__PORT__"
+
+    #: How long a drain waits for a datagram before waking to check the stop flag. Closing a socket
+    #: from another thread does not wake a recvfrom already blocked on it, so the drain can only be
+    #: stopped by a recv that times out (packet 18b review).
+    RECV_POLL_SECONDS = 0.05
+
+    def __init__(self, datagrams: list[bytes] | None = None) -> None:
+        self.received: list[bytes] = []  # datagrams the device sent, in arrival order
+        self.peer_addr: tuple[str, int] | None = None  # the device's local address, from its first datagram
+        self._burst = list(datagrams or [])  # sent once, as soon as the device first talks to us
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self.bind()
+
+    def bind(self, port: int | None = None) -> int:
+        """Bind the peer's socket - on ``port`` when given, so a peer can return to a port a device is
+        already connected to - and remember it as ``self.port``.
+
+        The socket is given a short timeout so the drain loop wakes on the stop flag: closing a socket
+        from another thread does not wake a recvfrom already blocked on it (packet 18b)."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port if port is not None else 0))
+        sock.settimeout(self.RECV_POLL_SECONDS)
+        self._sock = sock
+        self.port = sock.getsockname()[1]
+        return self.port
+
+    def start(self) -> None:
+        """Start draining the device's datagrams on a background thread."""
+        if not self._running:
+            self._running = True
+            self._thread = threading.Thread(target=self._recv_loop, daemon=True)
+            self._thread.start()
+
+    def unbind(self) -> None:
+        """Close the socket so nothing listens on the port any more, which is what makes Linux refuse
+        the device's sends, and end the drain so it is not left polling a dead socket."""
+        self._running = False
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._sock = None
+        self._join_drain()
+
+    def rebind(self) -> None:
+        """Bind again on the same port and start a fresh drain, since unbind() ended the old one."""
+        self.bind(self.port)
+        if self._thread is None or not self._thread.is_alive():
+            self._running = True
+            self._thread = threading.Thread(target=self._recv_loop, daemon=True)
+            self._thread.start()
+
+    def send(self, data: bytes) -> None:
+        """Send one datagram to the device, from this peer's port (the only one it accepts)."""
+        if self.peer_addr is None:
+            raise RuntimeError("the peer has not seen a datagram from the device yet")
+        self._sock.sendto(data, self.peer_addr)
+
+    def _join_drain(self) -> None:
+        """Wait for the drain thread to finish (it wakes on the stop flag within RECV_POLL_SECONDS)."""
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            assert not self._thread.is_alive(), "the drain thread outlived the peer's socket"
+
+    def _recv_loop(self) -> None:
+        while self._running:
+            sock = self._sock
+            if sock is None:
+                break  # unbind() took the port out of service; rebind() starts a fresh loop
+            try:
+                data, addr = sock.recvfrom(65536)  # one recv is one datagram
+            except socket.timeout:
+                continue  # nothing in this poll window: loop and check the stop flag again
+            except OSError:
+                break  # unbind() or stop() closed the socket
+            self.peer_addr = addr  # the device's local address: replies go back to it
+            self.received.append(data)
+            for datagram in self._burst:  # reply to the first datagram with the whole burst
+                try:
+                    sock.sendto(datagram, addr)  # the same socket we just read from
+                except OSError:
+                    pass
+            self._burst = []
+
+    def wait_for_datagram(self, n: int = 1, timeout: float = 2.0) -> bool:
+        """Block until at least ``n`` datagrams have arrived (or ``timeout`` elapses)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if len(self.received) >= n:
+                return True
+            time.sleep(0.02)
+        return len(self.received) >= n
+
+    def stop(self) -> None:
+        """Stop draining, close the socket (already closed by unbind() is fine), and wait for the
+        drain thread to be gone so the port is really free."""
+        self._running = False
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._join_drain()
+
+
 def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
     """Poll until a recorded peer connection has closed (the device closed it, or a hang-up peer
     closed/reset its side), or ``timeout`` elapses.
