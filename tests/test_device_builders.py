@@ -81,8 +81,9 @@ def test_tcp_builders_open_write_and_read_through_a_step(app: QCoreApplication) 
 
 def test_serial_builders_open_write_and_read_through_a_step(app: QCoreApplication) -> None:
     """The same through a pyserial port reached over ``socket://``, with ``setBaud`` and
-    ``setParity(Parity.EVEN)`` on the builder."""
-    peer = LoopbackPeer(payload=b"ping\n")
+    ``setParity(Parity.EVEN)`` on the builder. The peer answers only after the device's write: pyserial
+    clears the port's input inside ``open``, so a reply sent on accept could be lost (packet 31b)."""
+    peer = LoopbackPeer(payload=b"ping\n", after_first_byte=True)
     peer.start()
     try:
         store, ru = _run_with_peer(app, _schedule("""

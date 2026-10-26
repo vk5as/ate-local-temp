@@ -539,28 +539,32 @@ def test_a_small_receive_buffer_overflows_once_with_a_warning() -> None:
     assert "SERIAL" in warnings[0][2] and "overflow" in warnings[0][2].lower()
 
 
-def test_a_peer_that_hangs_up_fails_the_device_once_and_later_calls_error() -> None:
+def test_a_peer_that_hangs_up_fails_the_device_once_and_later_calls_error(app: QCoreApplication) -> None:
     """One WARNING (source device) at the hang-up, the buffered reply is still readable, and every
-    read and write after it fails with that error through onError."""
-    peer = LoopbackPeer(hangup="close")
+    read and write after it fails with that error through onError. Driven through the run engine, so
+    the WARNING checked is the one the engine drains into the run's log. The peer replies and hangs up
+    only after the device's first write, which is after pyserial's input reset in open (packet 31b)."""
+    peer = LoopbackPeer(payload=b"buffered\n", hangup="close", after_first_byte=True)
     peer.start()
     try:
-        host = _run_two_steps(peer, _two_step("", """
+        source = _step("""
         local keep = function(res) return res.err end
-        local r1 = ATE.read(dev, {readTerm = "\\n", timeout = 1})
-        local r2 = ATE.read(dev, {timeout = 1}, keep)
+        ATE.write(dev, {data = "go"})
+        local r1 = ATE.read(dev, {readTerm = "\\n", timeout = 5})
+        local r2 = ATE.read(dev, {timeout = 5}, keep)
         local w = ATE.write(dev, {data = "x"}, keep)
-        ATE.report(Result.PASS, r1.count.."|"..r2.."|"..w)"""), _reply_and_hang_up(b"buffered\n", 8))
+        ATE.report(Result.PASS, r1.count.."|"..r2.."|"..w)""")
+        store, ru = _run_with_peer(app, source, peer.port)
     finally:
         peer.stop()
 
-    msg = _host_message(host)
+    msg = _step_message(store, ru)
     count, r2, w = msg.split("|", 2)
     assert count == "8", f"the buffered reply is readable after the failure: {msg!r}"
     assert "disconnect" in r2.lower() and w == r2, f"read and write carry the same failure: {msg!r}"
-    warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
+    warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
     assert len(warnings) == 1, f"one warning for one failure, got {len(warnings)}"
-    assert f"SERIAL socket://127.0.0.1:{peer.port}" in warnings[0][2]
+    assert f"SERIAL socket://127.0.0.1:{peer.port}" in warnings[0]["text"]
     assert wait_for_disconnect(peer)
 
 

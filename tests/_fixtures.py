@@ -355,7 +355,9 @@ class LoopbackPeer:
     pyserial's ``socket://`` handler clears the port's input buffer inside ``open``, so bytes sent on
     accept can be flushed away before the Device's reader ever starts (packet 31b). A SERIAL test
     that wants bytes in the buffer hands them over with :meth:`send` after the open has returned,
-    which is provably after that flush."""
+    which is provably after that flush; or, for a test driven through the run engine (where the test
+    can't act between ATE calls), passes ``after_first_byte=True`` so the payload goes out only once
+    the device has written, which also proves the open returned."""
 
     #: Placeholder substituted with the live peer port when writing a schedule to disk, so a static
     #: Lua string can target whatever ephemeral port this run's peer chose.
@@ -370,7 +372,7 @@ class LoopbackPeer:
     #: hanging up anyway: the wait is a safety net for a test that never sends, not a timing guess.
     HANGUP_GRACE = 10.0
 
-    def __init__(self, payload: bytes = b"", hangup: str | None = None) -> None:
+    def __init__(self, payload: bytes = b"", hangup: str | None = None, after_first_byte: bool = False) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -394,6 +396,25 @@ class LoopbackPeer:
         self._hangup = hangup
         # Set by send(): a "close" peer with no payload of its own hangs up only after this.
         self._sent = threading.Event()
+        # Hold the payload until the device's first byte arrives (it is recorded in ``received``):
+        # pyserial's input reset inside open can't discard a reply sent after the device wrote.
+        self._after_first_byte = after_first_byte
+
+    def _first_byte(self, conn: socket.socket) -> bytes:
+        """Wait (up to HANGUP_GRACE) for the device's first bytes when ``after_first_byte`` is set;
+        return what arrived so the caller records it."""
+        if not (self._payload and self._after_first_byte):
+            return b""
+        try:
+            conn.settimeout(self.HANGUP_GRACE)
+            return conn.recv(4096)
+        except OSError:
+            return b""
+        finally:
+            try:
+                conn.settimeout(None)
+            except OSError:
+                pass
 
     def start(self) -> None:
         """Begin accepting connections (bind/listen already happened in ``__init__``)."""
@@ -453,6 +474,9 @@ class LoopbackPeer:
         beat the reader (see :meth:`send`)."""
         try:
             if self._payload:
+                first = self._first_byte(conn)
+                if first:
+                    self.received[conn] = first
                 conn.sendall(self._payload)
             elif self._hangup == "close":
                 self._sent.wait(self.HANGUP_GRACE)  # the test sends the reply itself
@@ -473,12 +497,12 @@ class LoopbackPeer:
 
     def _handle_conn(self, conn: socket.socket) -> None:
         """Send the peer's payload (if any), then record every byte the device sends until it closes."""
+        buf = bytearray(self._first_byte(conn))  # empty unless after_first_byte holds the payload back
         if self._payload:
             try:
                 conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
             except OSError:
                 pass  # connection already gone; nothing to send
-        buf = bytearray()
         while self._running:
             try:
                 chunk = conn.recv(4096)
