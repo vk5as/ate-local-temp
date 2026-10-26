@@ -14,13 +14,19 @@ flush, the per-call timeout arriving in milliseconds, and one bad call not poiso
 
 from __future__ import annotations
 
+import contextlib
+import socket
 import tempfile
+import threading
+import time
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 import pyvisa
 from PyQt6.QtCore import QCoreApplication
 from pyvisa import constants, errors
+from pyvisa_py.tcpip import TCPIPSocketSession
 
 from ate.devices import visa
 from ate.devices.registry import DeviceRegistry
@@ -39,22 +45,30 @@ from .test_tcp_read_write import _run_with_peer, _step_message
 class _FakeResource:
     """A stand-in pyvisa resource: every call is recorded and the reads are scripted.
 
-    ``replies`` are consumed one per ``read_raw`; an exhausted script answers with a VISA timeout,
-    and a reply that is a :class:`pyvisa.errors.VisaIOError` raises it."""
+    ATE reads with the low-level ``visalib.read(session, count)``, so the fake is its own visalib.
+    ``replies`` are consumed one per read, each answered with END; an exhausted script answers with
+    a VISA timeout, and a reply that is a :class:`pyvisa.errors.VisaIOError` raises it."""
+
+    resource_class = "INSTR"
+    session = 1
 
     def __init__(self, replies: list) -> None:
         self.calls: list[tuple] = []
         self.replies = list(replies)
         self.timeout: int | None = None
+        self.visalib = self
 
-    def read_raw(self, size: int | None = None) -> bytes:
-        self.calls.append(("read_raw", size, self.timeout))
+    def read(self, session: int, count: int) -> tuple[bytes, constants.StatusCode]:
+        self.calls.append(("read", count, self.timeout))
         reply = self.replies.pop(0) if self.replies else None
         if isinstance(reply, errors.VisaIOError):
             raise reply
         if reply is None:
             raise errors.VisaIOError(constants.StatusCode.error_timeout)
-        return reply
+        return reply, constants.StatusCode.success
+
+    def ignore_warning(self, *codes):
+        return contextlib.nullcontext()
 
     def write_raw(self, data: bytes) -> int:
         self.calls.append(("write_raw", data, self.timeout))
@@ -78,19 +92,9 @@ class _FakeManager:
         self.resource = resource
         self.opened: list[tuple] = []
 
-    def open_resource(self, resource: str, timeout: int | None = None,
-                     read_termination=None, write_termination=None) -> _FakeResource:
-        self.opened.append((resource, timeout, read_termination, write_termination))
-        self.resource.timeout = timeout
+    def open_resource(self, resource: str, open_timeout: int | None = None) -> _FakeResource:
+        self.opened.append((resource, open_timeout))
         return self.resource
-
-
-class _FailingManager:
-    """A manager whose open always fails, the way an unreachable instrument does."""
-
-    def open_resource(self, resource: str, timeout: int | None = None,
-                     read_termination=None, write_termination=None) -> None:
-        raise errors.VisaIOError(constants.StatusCode.error_connection_lost)
 
 
 def _fake_driver_class(manager: _FakeManager) -> type[VisaDriver]:
@@ -261,20 +265,36 @@ def test_the_visa_builder_open_write_and_read(app: QCoreApplication) -> None:
     assert peer.received[peer.connections[-1]] == b"*IDN?", "setWriteTerm(\"\") writes without a terminator"
 
 
-def test_a_resource_that_cannot_be_opened_fails_through_onerror(app: QCoreApplication) -> None:
-    """An instrument ATE cannot reach is a Device failure like a refused TCP connect, not a raise."""
+class _HalfOpenResource(_FakeResource):
+    """A resource that opens, then fails while ATE sets it up - what a real backend does only on
+    an odd instrument, so the fake scripts it."""
+
+    @property
+    def timeout(self) -> int | None:
+        return None
+
+    @timeout.setter
+    def timeout(self, value: int | None) -> None:
+        if value is not None:
+            raise RuntimeError("the backend rejected the timeout")
+
+
+def test_a_resource_that_fails_during_setup_is_closed_and_fails_through_onerror(app: QCoreApplication) -> None:
+    """A failure after the resource opened is still an open failure through onError, and the
+    half-opened resource is closed rather than leaked."""
+    resource = _HalfOpenResource([])
     store, ru = _run_fake(app, """return ScheduleParams("x") :setSchedule({
     StepParams("io"):setStepNo("1.")
       :setAction(function()
-        local msg = ATE.open(DeviceType.VISA, {resource="TCPIP0::dead-instrument::SOCKET",
+        local msg = ATE.open(DeviceType.VISA, {resource="GPIB0::5::INSTR",
           timeout=1, readTerm="\\n", writeTerm="\\n"},
           function(res) return tostring(res.ok) .. " " .. res.err end)
         ATE.report(Result.PASS, msg)
       end),
-  })""", _FailingManager())
+  })""", _FakeManager(resource))
 
-    message = _step_message(store, ru)
-    assert message.startswith("false VI_ERROR_CONN_LOST"), message
+    assert _step_message(store, ru) == "false GPIB0::5::INSTR: the backend rejected the timeout"
+    assert ("close",) in resource.calls, "the half-opened resource must be closed"
 
 
 # --- the scripted fake: what ATE actually calls -------------------------------------------------
@@ -285,7 +305,9 @@ def test_the_fake_registered_in_the_registry_open_write_read_and_close() -> None
     manager = _FakeManager(_FakeResource([b"OK\n"]))
     dev = _open_fake(manager)
 
-    assert manager.opened == [("TCPIP0::1::INSTR", 5000, None, None)], "pyvisa gets the timeout in ms, terminators off"
+    assert manager.opened == [("TCPIP0::1::INSTR", 5000)], "pyvisa gets the timeout in ms"
+    assert (manager.resource.timeout, manager.resource.read_termination, manager.resource.write_termination) == (
+        5000, None, None), "the timeout is set in ms and pyvisa's terminators are off"
     assert dev.describe() == "VISA TCPIP0::1::INSTR"
     assert dev.write({"data": "*IDN?"}) == (True, 6, None)
     assert dev.read({}) == (b"OK", 2, False, None)
@@ -313,8 +335,8 @@ def test_no_background_reader_and_flush_never_clears(app: QCoreApplication) -> N
 
     assert _step_message(store, ru) == "5", "the terminator was stripped by ATE, not pyvisa"
     kinds = [call[0] for call in resource.calls]
-    assert kinds.count("read_raw") == 1, f"one read for one ATE.read: {kinds!r}"
-    assert kinds.index("read_raw") > kinds.index("write_raw"), "nothing reads before the schedule asks"
+    assert kinds.count("read") == 1, f"one read for one ATE.read: {kinds!r}"
+    assert kinds.index("read") > kinds.index("write_raw"), "nothing reads before the schedule asks"
     assert "clear" not in kinds, "flush must never send an instrument clear"
 
 
@@ -326,7 +348,7 @@ def test_per_call_timeouts_reach_the_resource_in_milliseconds() -> None:
     dev.read({"timeout": 2.5})
 
     writes = [c for c in resource.calls if c[0] == "write_raw"]
-    reads = [c for c in resource.calls if c[0] == "read_raw"]
+    reads = [c for c in resource.calls if c[0] == "read"]
     assert writes == [("write_raw", b"x\n", 500)], writes
     assert reads[0][2] == 2500, f"a 2.5 s read timeout must reach pyvisa as 2500 ms: {reads!r}"
 
@@ -439,3 +461,272 @@ def test_the_visa_builder_carries_the_defaults_and_chains_setters() -> None:
     assert isinstance(_builder_fields('local t = devices.Visa("h")')["timeout"], float)
     # The metatable is locked, like every other builder's.
     assert _builder_fields("local t = {} t[1] = tostring(getmetatable(devices.Visa('h')))") == {1: "false"}
+
+
+# --- the real pyvisa-py path: reads, writes and opens against a live socket ------------------------
+
+
+class _ScriptedPeer:
+    """A one-connection TCP peer that runs ``script(conn, done)`` on its own thread, for what
+    LoopbackPeer has no knob for: a reply dribbled out a byte at a time, or a peer that never reads.
+
+    ``rcvbuf`` shrinks the accepted socket's receive buffer, so a peer that never reads fills up
+    after little data. ``done`` is set by :meth:`stop` and is what a script waits on."""
+
+    def __init__(self, script: Callable[[socket.socket, threading.Event], None], rcvbuf: int | None = None) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if rcvbuf:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(1)
+        self.port = self._sock.getsockname()[1]
+        self.conn: socket.socket | None = None
+        self.done = threading.Event()
+        self._script = script
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            self.conn, _addr = self._sock.accept()
+            self._script(self.conn, self.done)
+        except OSError:
+            pass  # stopped, or the device went away
+
+    def stop(self) -> None:
+        self.done.set()
+        for sock in (self.conn, self._sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self._thread.join(2)
+
+
+def _open_real(port: int, **fields: Any) -> Any:
+    """Open a VISA Device on ``127.0.0.1:port`` through the real backend pyvisa finds (pyvisa-py here)."""
+    params = {"resource": f"TCPIP0::127.0.0.1::{port}::SOCKET", "timeout": 2.0, "readTerm": "\n", "writeTerm": "\n"}
+    return VisaDriver().open({**params, **fields})
+
+
+def _count_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every read ATE makes of the instrument: each viRead into pyvisa-py's TCPIP SOCKET
+    session, and each wait ATE does on the session's socket itself. The list grows by one per read."""
+    calls: list[str] = []
+    session_read = TCPIPSocketSession.read
+
+    def counted_read(self, count):
+        calls.append("viRead")
+        return session_read(self, count)
+
+    monkeypatch.setattr(TCPIPSocketSession, "read", counted_read)
+    socket_wait = getattr(visa, "_wait_readable", None)
+    if socket_wait is not None:
+        def counted_wait(*args):
+            calls.append("socket")
+            return socket_wait(*args)
+
+        monkeypatch.setattr(visa, "_wait_readable", counted_wait)
+    return calls
+
+
+@pytest.fixture(params=["socket", "viRead"])
+def read_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Each real-backend read test runs both ways ATE can read pyvisa-py: on the TCPIP SOCKET
+    session's own socket (the default) and through ``visalib.read`` (what any other backend gets)."""
+    if request.param == "viRead":
+        monkeypatch.setattr(visa, "_socket_session", lambda resource: None, raising=False)
+    return request.param
+
+
+def test_an_exact_size_read_with_no_terminator_returns_at_once(read_path: str) -> None:
+    """``size`` bytes in hand ends the read: no terminator needed, nothing read past it, no timeout."""
+    peer = LoopbackPeer(payload=b"ABCD", after_first_byte=True)
+    peer.start()
+    try:
+        dev = _open_real(peer.port, timeout=2.0)
+        dev.write({"data": "Q"})
+        started = time.monotonic()
+        result = dev.read({"size": 4})
+        elapsed = time.monotonic() - started
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert result == (b"ABCD", 4, False, None), "exactly size bytes is a complete read"
+    assert elapsed < 1.0, f"the read must not wait out the 2 s timeout: {elapsed:.2f} s"
+
+
+def test_a_size_read_on_a_long_reply_reads_only_that_much(read_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4-byte read of a 2001-byte reply takes 4 bytes in a bounded number of reads, and the rest of
+    the reply is still the instrument's to give - the next read gets it."""
+    peer = LoopbackPeer(payload=b"X" * 2000 + b"\n", after_first_byte=True)
+    peer.start()
+    try:
+        dev = _open_real(peer.port)
+        dev.write({"data": "Q"})
+        calls = _count_reads(monkeypatch)
+        first = dev.read({"size": 4})
+        reads_for_first = len(calls)
+        rest = dev.read({})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"XXXX", 4, False, None)
+    assert 1 <= reads_for_first <= 2, f"a 4-byte read made {reads_for_first} reads: {calls[:5]}..."
+    assert rest == (b"X" * 1996, 1996, False, None), "the rest of the reply is not lost"
+
+
+def _dribble(conn: socket.socket, done: threading.Event) -> None:
+    """Wait for the command, then send a byte every 0.1 s - never a terminator - until stopped, or
+    for 3 s at most, so a read that ignores its deadline still ends (and fails on its time)."""
+    conn.recv(64)
+    for _ in range(30):
+        if done.wait(0.1):
+            return
+        conn.send(b"d")
+
+
+def test_a_dribbling_reply_comes_back_partial_at_the_deadline() -> None:
+    """A reply still arriving when the timeout is up is returned as it stands, ``partial = true``,
+    on time - not after the instrument stops talking.
+
+    Socket path only: pyvisa-py's own viRead checks its timeout only when the line goes quiet, so a
+    byte every 0.1 s holds it for as long as the instrument keeps talking. That is why ATE reads a
+    pyvisa-py SOCKET session's socket itself; the viRead fallback relies on the backend honouring
+    the timeout, as NI-VISA does."""
+    peer = _ScriptedPeer(_dribble)
+    try:
+        dev = _open_real(peer.port)
+        dev.write({"data": "Q"})
+        started = time.monotonic()
+        data, count, partial, err = dev.read({"timeout": 1.0})
+        elapsed = time.monotonic() - started
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert elapsed < 1.4, f"a 1 s read took {elapsed:.2f} s"
+    assert (partial, err) == (True, None) and count >= 3 and data == b"d" * count, (data, count, partial, err)
+
+
+def test_a_timed_out_read_with_nothing_pending_is_one_blocking_read(read_path: str,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec: VISA never polls. A read the instrument never answers is ONE blocking read for the whole
+    timeout, not a string of short ones (each of which a SCPI instrument would log as -420)."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        dev = _open_real(peer.port)
+        calls = _count_reads(monkeypatch)
+        started = time.monotonic()
+        result = dev.read({"timeout": 0.5})
+        elapsed = time.monotonic() - started
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert result == (None, 0, False, "timeout")
+    assert len(calls) == 1, f"one read, not a poll: {calls!r}"
+    assert 0.45 <= elapsed < 0.9, f"the one read lasts the timeout: {elapsed:.2f} s"
+
+
+def test_a_write_the_peer_never_reads_times_out_on_time() -> None:
+    """Spec: a write that can't send everything within ``timeout`` fails with ``err = "timeout"``,
+    on time, with ``count`` the bytes that did go out, and only that call fails."""
+    peer = _ScriptedPeer(lambda conn, done: done.wait(), rcvbuf=4096)
+    dev = _open_real(peer.port)
+    outcome: list = []
+    writer = threading.Thread(target=lambda: outcome.append(dev.write({"data": b"W" * (16 << 20), "timeout": 0.5})))
+    started = time.monotonic()
+    writer.start()
+    writer.join(3.0)
+    elapsed = time.monotonic() - started
+    stuck = writer.is_alive()
+    peer.stop()  # unblocks a write that ignored its timeout
+    writer.join(5.0)
+    dev.close()
+
+    assert not stuck, "the write blocked past its timeout"
+    ok, count, err = outcome[0]
+    assert (ok, err) == (False, "timeout"), outcome
+    assert 0 < count < (16 << 20), f"count is what was sent: {count}"
+    assert elapsed < 1.0, f"a 0.5 s write took {elapsed:.2f} s"
+
+
+def _closed_port() -> int:
+    """A loopback port nothing listens on: bound once to pick it, then released."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.mark.parametrize("resource, expected", [
+    ("TCPIP0::no-such-host.invalid::5025::SOCKET", "could not connect"),  # pyvisa-py's bare Exception
+    ("TCPIP0::127.0.0.1::5025::BOGUS", "TCPIP0::127.0.0.1::5025::BOGUS"),  # a ValueError from pyvisa
+    ("USB0::0x1234::0x5678::SN1::INSTR", "USB0::0x1234::0x5678::SN1::INSTR"),  # no USB backend here
+    ("TCPIP0::127.0.0.1::__CLOSED__::SOCKET", "refused"),  # nothing listening: fails at open, not at read
+])
+def test_a_resource_pyvisa_cannot_open_fails_through_onerror(app: QCoreApplication, resource: str,
+                                                            expected: str) -> None:
+    """Whatever pyvisa raises opening a resource, it is a Device failure: onError gets it and the
+    step decides, with no traceback and no "opened" device."""
+    resource = resource.replace("__CLOSED__", str(_closed_port()))
+    store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
+    StepParams("io"):setStepNo("1.")
+      :setAction(function()
+        local calls = 0
+        local msg = ATE.open(DeviceType.VISA, {{resource="{resource}", timeout=1, readTerm="\\n", writeTerm="\\n"}},
+          function(res) calls = calls + 1; return tostring(res.ok) .. " " .. res.err end)
+        ATE.report(Result.PASS, calls .. " " .. tostring(msg))
+      end),
+  }})""", 0)
+
+    message = _step_message(store, ru)
+    assert message.startswith("1 false "), message
+    assert expected in message, message
+    errors_logged = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR"]
+    assert not errors_logged, f"an open failure is not an isolated error: {errors_logged!r}"
+
+
+def test_flush_discards_nothing_and_a_read_after_it_gets_no_stale_bytes(app: QCoreApplication) -> None:
+    """Flush is a no-op: the rest of a reply is still the instrument's to give, and once it is read
+    a further read finds nothing - ATE kept no bytes of its own to hand back."""
+    peer = LoopbackPeer(payload=b"ONE\n", after_first_byte=True)
+    peer.start()
+    try:
+        store, ru = _run_with_peer(app, _visa_step("""
+        ATE.write(dev, {data = "*IDN?"})
+        local a = ATE.read(dev, {size = 2})
+        local f = ATE.flush(dev)
+        local b = ATE.read(dev)
+        local c = ATE.read(dev, {timeout = 0.3}, function(res) return res end)
+        ATE.report(Result.PASS, a.data.." "..f.count.." "..b.data.." "..c.err.." "..c.count)"""), peer.port)
+    finally:
+        peer.stop()
+
+    assert _step_message(store, ru) == "ON 0 E timeout 0"
+
+
+@pytest.mark.parametrize("value", ["math.huge", "0/0", "0", "-1"])
+def test_a_bad_per_call_timeout_raises_naming_the_field(app: QCoreApplication, value: str) -> None:
+    """A per-call ``timeout`` must be finite and > 0, like the open-time one: anything else is a
+    schedule bug that raises naming the field and never reaches onError, on read and write alike."""
+    peer = LoopbackPeer()
+    peer.start()
+    try:
+        store, ru = _run_with_peer(app, _visa_step(f"""
+        local calls = 0
+        local mark = function() calls = calls + 1 end
+        local r = select(2, ATE.read(dev, {{timeout = {value}}}, mark))
+        local w = select(2, ATE.write(dev, {{data = "x", timeout = {value}}}, mark))
+        ATE.report(Result.PASS, calls.." | "..tostring(r).." | "..tostring(w))"""), peer.port)
+    finally:
+        peer.stop()
+
+    calls, read_msg, write_msg = _step_message(store, ru).split(" | ")
+    assert calls == "0", "onError must never run for a schedule bug"
+    assert "field 'timeout'" in read_msg, read_msg
+    assert "field 'timeout'" in write_msg, write_msg

@@ -13,11 +13,16 @@ that fails fails **that call only**: nothing saw a break between calls, so the D
 failed and no device warning is queued.
 
 ATE handles the terminators itself. The resource is opened with pyvisa's own ``read_termination``
-and ``write_termination`` off, and every call is a raw byte call (``write_raw``/``read_raw``), so
-the terminator the schedule gave is appended and stripped by ATE, never by pyvisa. The one VISA
-attribute ATE does set is where a reply ends (``VI_ATTR_TERMCHAR``), so a read stops at the
-terminator instead of waiting out the whole timeout, and ``VI_ATTR_SUPPRESS_END_EN`` is cleared on
-open so a backend that got bytes but no terminator hands them back rather than dropping them.
+and ``write_termination`` off, and every call moves raw bytes, so the terminator the schedule gave
+is appended and stripped by ATE, never by pyvisa. Reads are exact: each backend read asks for no
+more than the call still needs and stops at the terminator (``VI_ATTR_TERMCHAR``), so nothing is
+read past what the call returns and ATE keeps no bytes between calls. ``VI_ATTR_SUPPRESS_END_EN``
+is cleared on open so a backend that got bytes but no terminator hands them back rather than
+dropping them.
+
+On pyvisa-py's TCPIP SOCKET session, which honours neither a write timeout nor a read deadline
+while bytes keep arriving, ATE does the socket I/O itself (see :func:`_socket_session`); every
+other backend and session goes through ``viRead`` and ``write_raw``.
 
 pyvisa's timeout is in milliseconds; ATE's is in seconds, and it is converted per open and per call.
 """
@@ -25,6 +30,9 @@ pyvisa's timeout is in milliseconds; ATE's is in seconds, and it is converted pe
 from __future__ import annotations
 
 import math
+import os
+import select
+import socket
 import time
 from typing import Any, Callable
 
@@ -74,6 +82,21 @@ def _milliseconds(seconds: float) -> int:
     return max(1, int(round(float(seconds) * 1000)))
 
 
+def _check_connected(resource: Any) -> None:
+    """Raise if a pyvisa-py SOCKET resource's TCP connect failed.
+
+    pyvisa-py's connect waits only for the socket to be ready, and a refused connect is ready too, so
+    the open "succeeds" and the refusal would surface at the first read. The socket's pending error
+    is the connect's result; any other backend reports a failed connect from ``open_resource``.
+    """
+    session = _socket_session(resource)
+    if session is None:
+        return
+    code = session.interface.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    if code:
+        raise OSError(code, os.strerror(code))
+
+
 def _error_text(exc: Exception) -> str:
     """A VISA error as a short, readable string: ``VI_ERROR_CONN_LOST: The connection ... lost``."""
     abbreviation = getattr(exc, "abbreviation", "")
@@ -81,21 +104,112 @@ def _error_text(exc: Exception) -> str:
     return f"{abbreviation}: {description}" if abbreviation and description else (abbreviation or str(exc))
 
 
+#: What one backend read says about the reply: more may follow, the instrument signalled END, or
+#: the instrument hung up.
+_MORE, _END, _EOF = object(), object(), object()
+
+
+class _ReadTimeout(Exception):
+    """Nothing arrived on the socket before the deadline."""
+
+
+def _socket_session(resource: Any) -> Any:
+    """The pyvisa-py TCPIP SOCKET session under ``resource``, or None for any other backend or session.
+
+    pyvisa-py's SOCKET session does not honour a deadline: its write waits for the socket with no
+    timeout at all, and its read checks the timeout only when the line goes quiet, so a reply
+    dribbling in faster than its poll interval holds a read far past it. On that session ATE does
+    the socket I/O itself, with its own deadline.
+
+    This couples ATE to pyvisa-py internals (as of pyvisa-py 0.8 / pyvisa 1.16.2,
+    ``pyvisa_py/tcpip.py``): the backend keeps its sessions in ``visalib.sessions`` keyed by the
+    resource's session handle, and a ``TCPIPSocketSession`` keeps its connected socket in
+    ``interface`` and the bytes it received past a terminator in ``_pending_buffer``. If any of
+    that is missing - NI-VISA, a USB or VXI-11 session, a pyvisa-py that changed - this returns None
+    and ATE falls back to the VISA calls (``viRead``, ``write_raw``).
+    """
+    try:
+        session = resource.visalib.sessions[resource.session]
+    except Exception:  # noqa: BLE001 - NI-VISA has no ``sessions``; a closed resource has no session
+        return None
+    if not isinstance(getattr(session, "interface", None), socket.socket):
+        return None
+    if not isinstance(getattr(session, "_pending_buffer", None), bytearray):
+        return None
+    return session
+
+
+def _cut(data: bytes | bytearray, want: int, term_byte: bytes) -> bytes:
+    """The first ``want`` bytes of ``data``, or fewer: through the first ``term_byte`` if there is one."""
+    data = bytes(data[:want])
+    end = data.find(term_byte) if term_byte else -1
+    return data if end < 0 else data[:end + 1]
+
+
+def _wait_readable(sock: socket.socket, seconds: float) -> bool:
+    """Block until ``sock`` has something to read (or hung up), for at most ``seconds``."""
+    return bool(select.select([sock], [], [], seconds)[0])
+
+
+def _socket_read(session: Any, want: int, term_byte: bytes, seconds: float) -> tuple[bytes, object]:
+    """One read on a pyvisa-py SOCKET session's socket: ``(chunk, status)``, raising ``_ReadTimeout``
+    when nothing arrives within ``seconds``.
+
+    Byte-exact: at most ``want`` bytes, and none past ``term_byte``. The socket is peeked first, so
+    only what the call keeps is taken off it and the rest of the reply stays in the socket. Bytes
+    pyvisa-py itself already took off the socket come first. One wait covers the whole of
+    ``seconds``, so an instrument with nothing to say sees a single read, not a poll.
+    """
+    pending = session._pending_buffer
+    if pending:
+        chunk = _cut(pending, want, term_byte)
+        del pending[:len(chunk)]
+        return chunk, _MORE
+    sock = session.interface
+    if not _wait_readable(sock, seconds):
+        raise _ReadTimeout()
+    peeked = sock.recv(want, socket.MSG_PEEK)
+    if not peeked:
+        return b"", _EOF
+    return sock.recv(len(_cut(peeked, want, term_byte))), _MORE
+
+
+def _socket_write(sock: socket.socket, payload: bytes, seconds: float) -> tuple[bool, int, str | None]:
+    """Send ``payload`` on ``sock`` within ``seconds``: ``(ok, count, err_or_None)``, ``count`` the
+    bytes that went out. The socket's own timeout bounds each send and is put back afterwards."""
+    deadline = time.monotonic() + seconds
+    view = memoryview(payload)
+    sent = 0
+    previous = sock.gettimeout()
+    try:
+        while sent < len(payload):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False, sent, "timeout"
+            sock.settimeout(remaining)
+            try:
+                sent += sock.send(view[sent:])
+            except TimeoutError:
+                return False, sent, "timeout"
+    finally:
+        sock.settimeout(previous)
+    return True, sent, None
+
+
 class _VisaDevice:
     """Opaque handle for an instrument read on demand: no reader thread, no buffer.
 
     Lua sees it as userdata and only ever passes it back to ``read``/``write``/``flush``/``close``.
     ``driver`` is the driver class that opened it, which is what the ATE wrappers validate the
-    per-call fields against. ``_leftover`` is what one read took past the terminator or past
-    ``size``: there is no background buffer, but a read that pulled more than the schedule asked for
-    must not lose the rest either.
+    per-call fields against. There is no ``_leftover``: every read asks the backend for exactly what
+    the call still needs and stops at the terminator, so nothing is ever taken past what the call
+    returns - the rest of a reply stays the instrument's (or the backend's) to give.
     """
 
     def __init__(self, resource: Any, params: dict[str, Any], driver: type[Driver]) -> None:
         self.resource = resource
         self.params = params
         self.driver = driver
-        self._leftover = bytearray()
         self._closed = False
 
     def describe(self) -> str:
@@ -110,77 +224,93 @@ class _VisaDevice:
     def read(self, params: dict[str, Any]) -> tuple[bytes | None, int, bool, str | None]:
         """Read on demand and return ``(data, count, partial, err_or_None)``.
 
-        Ends on ``readTerm`` (stripped) or on ``size`` bytes, whichever comes first; if neither is
-        reached before ``timeout``, the bytes that did arrive are returned as ``partial = true`` and
-        nothing arriving at all is the ``err = "timeout"`` failure. A VISA error that is not a
-        timeout fails this call only, with the error's name as ``err``.
+        Ends on ``readTerm`` (stripped), on ``size`` bytes, or on an END from an instrument whose
+        bus has one, whichever comes first; if none is reached before ``timeout``, the bytes that did
+        arrive are returned as ``partial = true`` and nothing arriving at all is the
+        ``err = "timeout"`` failure. A VISA error that is not a timeout fails this call only, with
+        the error's name as ``err``.
+
+        Each backend read asks for no more than the call still needs and stops at the terminator's
+        last byte, so a read never takes bytes past what it returns, and none is issued once the
+        call's goal is met. A read with nothing pending is one blocking read for the whole timeout:
+        VISA never polls.
         """
         size = params.get("size")
         term = self._term(params, "readTerm")
         deadline = time.monotonic() + self._timeout(params)
-        self._set_termchar(term)
-        buffer = self._leftover
+        session = _socket_session(self.resource)
+        exact = session is not None or self._set_termchar(term)
+        # A raw socket has no END: pyvisa-py's "success" (and NI-VISA's with SUPPRESS_END off) only
+        # means a TCP segment ended, which says nothing about where the reply ends.
+        has_end = session is None and getattr(self.resource, "resource_class", "") != "SOCKET"
+        buffer = bytearray()
+        status = _MORE
         while True:
-            data = self._take_complete(term, size)
-            if data is not None:
+            if term and buffer.endswith(term):  # exact reads: a terminator can only be at the end
+                data = bytes(buffer[:-len(term)])
                 return data, len(data), False, None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:  # decided on the buffer we just looked at, same as the streams
+            if size is not None and len(buffer) >= size:
+                return bytes(buffer), len(buffer), False, None
+            if status is _END and has_end:
+                return bytes(buffer), len(buffer), False, None
+            if status is _EOF:  # the instrument hung up: what came before it is this call's partial
                 if buffer:
-                    data = bytes(buffer)
-                    del buffer[:]
-                    return data, len(data), True, None
-                return None, 0, False, "timeout"
-            self.resource.timeout = _milliseconds(remaining)
+                    break
+                return None, 0, False, "connection closed by the instrument"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             want = READ_CHUNK if size is None else size - len(buffer)
+            if term and not exact:
+                want = 1  # the backend cannot stop at the terminator, so take one byte at a time
             try:
-                chunk = self.resource.read_raw(want)
+                if session is not None:
+                    chunk, status = _socket_read(session, want, term[-1:], remaining)
+                else:
+                    chunk, status = self._visa_read(want, remaining)
+            except _ReadTimeout:
+                break
             except errors.VisaIOError as exc:
                 if exc.error_code == constants.StatusCode.error_timeout:
-                    if buffer:
-                        data = bytes(buffer)
-                        del buffer[:]
-                        return data, len(data), True, None
-                    return None, 0, False, "timeout"
+                    break
                 return None, 0, False, _error_text(exc)
             except OSError as exc:  # the instrument went away: this call fails, the Device does not
                 return None, 0, False, str(exc)
-            if chunk:
-                buffer.extend(chunk)
+            buffer.extend(chunk)
+        if buffer:
+            return bytes(buffer), len(buffer), True, None
+        return None, 0, False, "timeout"
 
-    def _take_complete(self, term: bytes, size: int | None) -> bytes | None:
-        """Take a complete read from what is already in hand - up to a terminator or ``size`` bytes -
-        or return None if neither is there yet (the caller holds no lock: there is no reader)."""
-        buffer = self._leftover
-        end = len(buffer) if size is None else min(len(buffer), size + len(term))
-        idx = buffer.find(term, 0, end) if term else -1
-        if idx >= 0:
-            data = bytes(buffer[:idx])
-            del buffer[:idx + len(term)]
-            return data
-        if size is not None and len(buffer) >= size:
-            data = bytes(buffer[:size])
-            del buffer[:size]
-            return data
-        return None
+    def _visa_read(self, want: int, seconds: float) -> tuple[bytes, object]:
+        """One viRead of at most ``want`` bytes, waiting at most ``seconds``: ``(chunk, status)``.
 
-    def _set_termchar(self, term: bytes) -> None:
-        """Tell the backend where a reply ends so a read stops at the terminator.
+        The low-level call, not ``read_raw``: ``read_raw`` keeps reading while the backend reports
+        a full count (so ``size`` would read on past the limit) and throws away everything it had if
+        a later read fails. ``status`` is ``_END`` when the backend reported END.
+        """
+        self.resource.timeout = _milliseconds(seconds)
+        with self.resource.ignore_warning(constants.StatusCode.success_max_count_read,
+                                          constants.StatusCode.success_device_not_present):
+            chunk, status = self.resource.visalib.read(self.resource.session, want)
+        return bytes(chunk), _END if status == constants.StatusCode.success else _MORE
 
-        A backend that refuses the attribute (or a resource type that has no terminator) just reads
-        unterminated: the deadline still bounds the read, and the terminator is found in the bytes
-        that came back.
+    def _set_termchar(self, term: bytes) -> bool:
+        """Tell the backend where a reply ends so a read stops at the terminator; True if it took it.
+
+        A backend that refuses the attribute (or a resource type that has no terminator) cannot stop
+        at the terminator, and :meth:`read` then reads a byte at a time rather than read past it.
         """
         setter = getattr(self.resource, "set_visa_attribute", None)
         if setter is None:
-            return
+            return not term
         try:
             setter(constants.ResourceAttribute.termchar_enabled,
                    constants.VI_TRUE if term else constants.VI_FALSE)
             if term:
                 setter(constants.ResourceAttribute.termchar, term[-1])
         except errors.VisaIOError:
-            pass
+            return not term
+        return True
 
     def flush(self) -> tuple[bool, int, str | None]:
         """VISA has no receive buffer, so flush discards nothing: ``(True, 0, None)``.
@@ -197,16 +327,28 @@ class _VisaDevice:
     def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
         """Send ``data`` with ``writeTerm`` appended and return ``(ok, count, err_or_None)``.
 
-        ``count`` is the bytes pyvisa sent, terminator included. pyvisa-py's socket write is
-        blocking, so a send that cannot complete surfaces as a VISA error rather than as
-        ``err = "timeout"``; NI-VISA honours the timeout attribute and reports it as one. Either
-        way only this call fails.
+        ``count`` is the bytes sent, terminator included. A write that cannot send everything within
+        ``timeout`` fails with ``err = "timeout"``, and only this call fails.
+
+        pyvisa-py's TCPIP SOCKET write waits for the socket with no timeout at all, so on that
+        session ATE sends on the session's socket itself with its own deadline, and ``count`` is
+        what went out before it. Every other backend gets ``write_raw`` with the timeout set on the
+        resource, which NI-VISA honours (``VI_ATTR_TMO_VALUE``); its timeout error carries no count.
         """
         payload = self._to_bytes(params["data"]) + self._term(params, "writeTerm")
-        self.resource.timeout = _milliseconds(self._timeout(params))
+        seconds = self._timeout(params)
+        session = _socket_session(self.resource)
+        if session is not None:
+            try:
+                return _socket_write(session.interface, payload, seconds)
+            except OSError as exc:
+                return False, 0, str(exc)
+        self.resource.timeout = _milliseconds(seconds)
         try:
             count = self.resource.write_raw(payload)
         except errors.VisaIOError as exc:
+            if exc.error_code == constants.StatusCode.error_timeout:
+                return False, 0, "timeout"
             return False, 0, _error_text(exc)
         except OSError as exc:
             return False, 0, str(exc)
@@ -223,8 +365,14 @@ class _VisaDevice:
             pass  # already gone; there is nothing left to release
 
     def _timeout(self, params: dict[str, Any]) -> float:
-        """The per-call ``timeout`` if given, else the open-time one."""
-        return float(params.get("timeout", self.params["timeout"]))
+        """The per-call ``timeout`` if given, else the open-time one.
+
+        NaN and infinity can never be met and 0 or less would be a silent instant timeout, so they
+        are schedule bugs that raise naming the field - the rule the driver applies at open."""
+        value = params.get("timeout", self.params["timeout"])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"field 'timeout' must be a positive finite number, got {value!r}")
+        return float(value)
 
     def _term(self, params: dict[str, Any], field: str) -> bytes:
         """The per-call terminator ``field`` if given, else the open-time one, as bytes."""
@@ -257,8 +405,10 @@ class VisaDriver(Driver):
         """Validate ``params`` and open the resource.
 
         Raises :class:`ValueError` naming any bad field before anything is opened, and
-        :class:`OSError` when the instrument cannot be reached - an open failure like a refused TCP
-        connect, which the host reports through ``onError``.
+        :class:`OSError` naming the resource for anything that stops it opening - an unreachable or
+        refusing instrument, a resource string the backend cannot parse, a resource class with no
+        backend installed - which the host reports through ``onError``. Whatever pyvisa raised, a
+        resource that did open before the failure is closed again.
         """
         validated = validate_params(self, params)
         timeout = float(validated["timeout"])
@@ -266,25 +416,33 @@ class VisaDriver(Driver):
             raise ValueError(f"field 'timeout' must be a positive finite number, got {validated['timeout']!r}")
 
         manager = get_resource_manager(self._manager_factory)
+        name = validated["resource"]
+        milliseconds = _milliseconds(timeout)
         try:
-            resource = manager.open_resource(
-                validated["resource"],
-                timeout=_milliseconds(timeout),
-                read_termination=None,  # ATE appends and strips the terminators, pyvisa does not
-                write_termination=None,
-            )
-        except errors.VisaIOError as exc:
-            raise OSError(_error_text(exc)) from exc
-
-        device = _VisaDevice(resource, validated, type(self))
-        # pyvisa-py's TCPIP SOCKET sets SUPPRESS_END, which makes an unterminated read wait out the
-        # whole timeout and then throw away the bytes it already had. Clearing it is what lets a
-        # read report the partial bytes that arrived before the deadline.
+            # open_timeout bounds pyvisa-py's TCP connect, which would otherwise wait 10 s.
+            resource = manager.open_resource(name, open_timeout=milliseconds)
+        except Exception as exc:  # noqa: BLE001 - pyvisa-py raises bare Exception, ValueError, ...
+            raise OSError(f"{name}: {_error_text(exc)}") from exc
         try:
-            resource.set_visa_attribute(constants.ResourceAttribute.suppress_end_enabled, constants.VI_FALSE)
-        except (errors.VisaIOError, AttributeError):
-            pass
-        return device
+            if not hasattr(resource, "write_raw"):
+                raise OSError("not a message-based resource")
+            resource.timeout = milliseconds
+            resource.read_termination = None  # ATE appends and strips the terminators, pyvisa does not
+            resource.write_termination = None
+            _check_connected(resource)
+            # SUPPRESS_END (pyvisa-py's SOCKET default) makes an unterminated viRead wait out the
+            # whole timeout and then throw away the bytes it had; with it off the bytes come back.
+            try:
+                resource.set_visa_attribute(constants.ResourceAttribute.suppress_end_enabled, constants.VI_FALSE)
+            except (errors.VisaIOError, AttributeError):
+                pass
+        except Exception as exc:  # noqa: BLE001 - whatever failed, the half-opened resource is released
+            try:
+                resource.close()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+            raise OSError(f"{name}: {_error_text(exc)}") from exc
+        return _VisaDevice(resource, validated, type(self))
 
     def close(self, device: Any) -> None:
         """Release the resource; the handle's own ``close`` is idempotent."""
