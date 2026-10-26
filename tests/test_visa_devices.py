@@ -558,6 +558,45 @@ def test_an_exact_size_read_with_no_terminator_returns_at_once(read_path: str) -
     assert elapsed < 1.0, f"the read must not wait out the 2 s timeout: {elapsed:.2f} s"
 
 
+def test_a_terminator_mid_segment_ends_the_read_and_the_rest_stays_for_the_next(read_path: str) -> None:
+    """``AB\\nCD`` arrives as one segment: the first read stops at the terminator (stripped), and ``CD``
+    is not taken off the instrument with it; the next read gets it (partial: no terminator follows)."""
+    peer = LoopbackPeer(payload=b"AB\nCD", after_first_byte=True)
+    peer.start()
+    try:
+        dev = _open_real(peer.port, timeout=2.0)
+        dev.write({"data": "Q"})
+        first = dev.read({})
+        second = dev.read({"timeout": 0.5})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"AB", 2, False, None), "the read ends at the terminator, with nothing past it"
+    assert second == (b"CD", 2, True, None), "the bytes after the terminator are still there"
+
+
+def test_bytes_pyvisa_py_already_buffered_come_first_and_in_order() -> None:
+    """pyvisa-py keeps its own ``_pending_buffer`` of bytes it pulled off the socket; ATE's socket path
+    serves those before the socket, in order, and still stops at a terminator inside them."""
+    peer = LoopbackPeer(payload=b"EF\n", after_first_byte=True)
+    peer.start()
+    try:
+        dev = _open_real(peer.port, timeout=2.0)
+        session = visa._socket_session(dev.resource)
+        assert session is not None, "this test needs pyvisa-py's TCPIP SOCKET session"
+        session._pending_buffer.extend(b"AB\nCD")  # as if pyvisa-py had over-read earlier
+        dev.write({"data": "Q"})
+        first = dev.read({})
+        second = dev.read({})
+        dev.close()
+    finally:
+        peer.stop()
+
+    assert first == (b"AB", 2, False, None), "buffered bytes first, up to the terminator"
+    assert second == (b"CDEF", 4, False, None), "then the rest of the buffer, then the socket"
+
+
 def test_a_size_read_on_a_long_reply_reads_only_that_much(read_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """A 4-byte read of a 2001-byte reply takes 4 bytes in a bounded number of reads, and the rest of
     the reply is still the instrument's to give - the next read gets it."""
@@ -647,9 +686,11 @@ def test_a_write_the_peer_never_reads_times_out_on_time() -> None:
     stuck = writer.is_alive()
     peer.stop()  # unblocks a write that ignored its timeout
     writer.join(5.0)
+    restored = [visa._socket_session(dev.resource).interface.gettimeout()]  # pyvisa-py leaves it blocking (None)
     dev.close()
 
     assert not stuck, "the write blocked past its timeout"
+    assert restored == [None], f"the session socket's own timeout is put back afterwards: {restored}"
     ok, count, err = outcome[0]
     assert (ok, err) == (False, "timeout"), outcome
     assert 0 < count < (16 << 20), f"count is what was sent: {count}"

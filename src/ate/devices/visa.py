@@ -276,6 +276,8 @@ class _VisaDevice:
                 return None, 0, False, _error_text(exc)
             except OSError as exc:  # the instrument went away: this call fails, the Device does not
                 return None, 0, False, str(exc)
+            except Exception as exc:  # noqa: BLE001 - e.g. a torn-down session: still this call's failure, not a crash
+                return None, 0, False, f"{type(exc).__name__}: {exc}"
             buffer.extend(chunk)
         if buffer:
             return bytes(buffer), len(buffer), True, None
@@ -352,6 +354,8 @@ class _VisaDevice:
             return False, 0, _error_text(exc)
         except OSError as exc:
             return False, 0, str(exc)
+        except Exception as exc:  # noqa: BLE001 - whatever the backend raised fails this call only
+            return False, 0, f"{type(exc).__name__}: {exc}"
         return True, count, None
 
     def close(self) -> None:
