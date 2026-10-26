@@ -48,6 +48,7 @@ def _sha256_hex(data: bytes) -> str:
 
 from ..devices import DeviceRegistry, TcpDriver
 from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
+from ..devices.udp import UdpDriver  # packet 18b: UDP datagrams, registered like the other streams
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
@@ -873,6 +874,7 @@ class _LuaHost:
         self.device_warning_sink: Optional[Callable[[], None]] = None
         self._devices.register("TCP", TcpDriver)
         self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
+        self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
