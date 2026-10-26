@@ -701,3 +701,47 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
             if host.schedule.name == schedule_name:
                 return definition
     return None
+
+
+# --- checksum mismatches ------------------------------------------------------
+
+
+def definition_mismatches(
+    definition: Definition, schedule_name: Optional[str] = None
+) -> list[tuple[str, Optional[str], str, str]]:
+    """Return ``(rel_path, expected_sha256, computed_sha256, media_number)`` for every mismatch.
+
+    With ``schedule_name``, only the files a run of that schedule can load are checked: its own
+    ``.tslua`` and the release's ``.lua`` modules (any of which it may ``require``; which ones it
+    actually loads is only known at run time). Other schedules' files are left out, so a schedule
+    is never flagged for a sibling's mismatch. Without it, every listed file is checked.
+    (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always set here.)"""
+    own = None
+    if schedule_name is not None:
+        path = resolve_schedule_path(definition, schedule_name)
+        own = path.relative_to(definition.path).as_posix() if path is not None else None
+    return [
+        (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, definition.media_number)
+        for entry in definition.files
+        if (entry.expected_sha256 or None) != entry.computed_sha256
+        and (schedule_name is None or not entry.is_schedule or Path(entry.rel_path).as_posix() == own)
+    ]
+
+
+def list_schedule_mismatches(*directories: str | Path) -> dict[str, list[tuple[str, Optional[str], str, str]]]:
+    """Map every visible schedule name to the checksum mismatches a run of it can load.
+
+    Schedules with nothing to flag are absent from the map, so the Run screen only prefixes the rows
+    it finds here with ⚠ (ticket 06c). Broken definitions contribute nothing: their schedules cannot
+    run, so there is nothing to confirm."""
+    flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
+    for definition in find_definitions(*directories):
+        if definition.broken:
+            continue
+        if not definition_mismatches(definition):
+            continue
+        for name, _description, _media_number in _schedule_summaries(definition):
+            mismatches = definition_mismatches(definition, name)
+            if mismatches:
+                flags[name] = mismatches
+    return flags

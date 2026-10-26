@@ -280,8 +280,10 @@ class HistoryScreen(QWidget):
         self._summary_fields.setText(fields)
         counts = ", ".join(f"{label}={count}" for label, count in summary["result_counts"].items())
         self._result_counts.setText(counts)
-        mismatches = [f.path for f in summary["checksum_mismatches"]] or "none"
-        self._mismatches.setText(mismatches)
+        # Rows come back as dicts, so the mismatched paths are joined into one label; a list would
+        # never display (ticket 06c).
+        paths = ", ".join(str(row.get("path")) for row in summary["checksum_mismatches"] if row.get("path"))
+        self._mismatches.setText(paths or "none")
 
     def _update_actions_for_selected(self) -> None:
         """Disable report actions for a selected run still executing (spec 23c)."""

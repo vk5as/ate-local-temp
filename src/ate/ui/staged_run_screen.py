@@ -19,8 +19,10 @@ and the GUI stays responsive while a schedule runs.
 
 from __future__ import annotations
 
+import html
+
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
@@ -38,11 +40,13 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QCheckBox,
+    QDialog,
 )
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import find_definitions, list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
 
@@ -140,11 +144,15 @@ class TestScheduleStage(QWidget):
 
         self.schedule_list = QListWidget()
         self.notes_label = QLabel()
+        # The ⚠ line naming the mismatched files of the selected schedule (ticket 06c); empty when
+        # the schedule's checksums all match.
+        self.mismatch_label = QLabel("")
         self.rescan_button = QPushButton("Rescan schedules")
         self.run_button = QPushButton("Run this schedule")
 
         layout.addWidget(self.schedule_list)
         layout.addWidget(self.notes_label)
+        layout.addWidget(self.mismatch_label)
         layout.addWidget(self.rescan_button)
         layout.addWidget(self.run_button)
 
@@ -448,6 +456,115 @@ class RunView(QWidget):
         self.failure_bar.setStyleSheet("background-color: #b71c1c; color: white;")
 
 
+#: The mockup's ``.flag`` box (amber), used for the mismatch flag line and the confirmation's file list.
+_FLAG_STYLE = "background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px;"
+
+
+def _short_sha(value: Optional[str]) -> str:
+    """A SHA-256 abbreviated the way the mockup shows it (``3f9a0c…e1``); the full value goes in a tooltip."""
+    if not value:
+        return "none"
+    return value if len(value) <= 9 else f"{value[:6]}…{value[-2:]}"
+
+
+def _mismatch_flag_text(mismatches: list[tuple[str, Optional[str], str, str]], release: str = "") -> str:
+    """The line the Run screen shows under the picker for a schedule with mismatched files.
+
+    Names the Media Release (``MR-… · name version`` when known) and every file whose bytes differ
+    from its Test Definition checksum, matching the mockup's flag: `⚠ Checksum mismatch in <release>:
+    <files>. The files on disk are not the released files.` Empty when nothing mismatched."""
+    if not mismatches:
+        return ""
+    release = release or mismatches[0][3] or "the Test Definition"
+    files = ", ".join(rel_path for rel_path, _expected, _computed, _media in mismatches)
+    return f"⚠ Checksum mismatch in {release}: {files}. The files on disk are not the released files."
+
+
+class MismatchConfirmation(QDialog):
+    """The run-start confirmation a checksum mismatch requires (ticket 06c).
+
+    It lists each file as ``path expected …, found …``. Only when
+    ``database.storeMismatchedFiles`` is ``ask`` does it offer the "Store mismatched files with this
+    Test Run" checkbox, ticked by default; `always` and `never` just state what will happen.
+    ``ok_button``/``cancel_button`` are public so a test can decide without ``exec()``: clicking OK
+    records the choice and :meth:`store_choice` then reports it (`None` when cancelled)."""
+
+    def __init__(
+        self,
+        schedule_name: str,
+        release: str,
+        mismatches: list[tuple[str, Optional[str], str, str]],
+        store_setting: str = "ask",
+        run_details: str = "",
+    ) -> None:
+        super().__init__()
+        self.setWindowTitle("Start Test Run")
+        self.setMinimumWidth(460)  # room for "path expected …, found …" on one line
+        self.schedule_name = schedule_name
+        self.release = release
+        self.mismatches = list(mismatches)
+        self.store_setting = store_setting
+        self._accepted = False
+
+        layout = QVBoxLayout(self)
+        header = QLabel(f"<b>{html.escape(schedule_name)}</b><br><span style='color:#666'>{html.escape(release)}</span>")
+        layout.addWidget(header)
+        if run_details:  # the mockup's "UUT …, Project …, Operator …" line
+            layout.addWidget(QLabel(run_details))
+        lines = "\n".join(
+            f"{rel_path} expected {_short_sha(expected)}, found {_short_sha(computed)}"
+            for rel_path, expected, computed, _media in self.mismatches
+        )
+        self.file_lines = QLabel(f"⚠ These files do not match their Test Definition checksums:\n{lines}")
+        self.file_lines.setStyleSheet(_FLAG_STYLE)
+        self.file_lines.setWordWrap(True)
+        self.file_lines.setToolTip("\n".join(
+            f"{rel_path}\n  expected {expected or 'none'}\n  found    {computed}"
+            for rel_path, expected, computed, _media in self.mismatches
+        ))
+        layout.addWidget(self.file_lines)
+
+        if store_setting == "ask":
+            self.store_checkbox = QCheckBox("Store mismatched files with this Test Run")
+            self.store_checkbox.setChecked(True)
+            layout.addWidget(self.store_checkbox)
+            self.store_note = None
+        else:
+            # Nothing to ask: the setting already decided, so the dialog only says so.
+            self.store_checkbox = None
+            self.store_note = QLabel(
+                "Mismatched files will be stored with this Test Run."
+                if store_setting == "always"
+                else "Mismatched files will not be stored with this Test Run."
+            )
+            layout.addWidget(self.store_note)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.ok_button = QPushButton("Start")
+        self.ok_button.setDefault(True)  # the mockup's primary button
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
+
+        # accept()/reject() work without exec(), which is what keeps the dialog testable.
+        self.accepted.connect(lambda: setattr(self, "_accepted", True))
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def is_accepted(self) -> bool:
+        """True once Start was clicked; False if Cancel was (or nothing was)."""
+        return self._accepted
+
+    def store_choice(self) -> Optional[bool]:
+        """Whether this run stores the mismatched bytes, or ``None`` if the run was cancelled."""
+        if not self._accepted:
+            return None
+        if self.store_checkbox is not None:
+            return self.store_checkbox.isChecked()
+        return self.store_setting == "always"
+
+
 class StagedRunScreen(QWidget):
     """A staged Run screen bound to one :class:`HeadlessRunSession`.
 
@@ -457,10 +574,19 @@ class StagedRunScreen(QWidget):
     blocks this thread — the worker reports progress through queued signals that land here.
     """
 
-    def __init__(self, session: HeadlessRunSession) -> None:
+    def __init__(self, session: HeadlessRunSession, confirm_choice: Optional[Callable[[MismatchConfirmation], None]] = None) -> None:
         super().__init__()
         self.session = session
         self.state = SessionState.IDLE
+        # Injected decision-maker for the run-start confirmation (ticket 06c). Tests supply one that
+        # clicks OK/Cancel on the dialog instead of a real Operator; without it the dialog is exec()'d
+        # as usual. The screen never blocks on it in a test.
+        self.confirm_choice = confirm_choice
+        # The mismatch confirmation built by the most recent Start, or None when none was needed.
+        self._confirm_dialog: Optional[MismatchConfirmation] = None
+        # Mismatches per schedule name, refreshed with the list: the ⚠ prefix and the flag line read it.
+        self._mismatch_flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
+        self._release_labels: dict[str, str] = {}
         # Captured when STARTED fires; ``None`` before the first run or after FINISHED.
         self._started_at: Optional[datetime] = None
         # The RunEngine worker for the current run, set by :meth:`_begin_run_from_selection` and
@@ -554,6 +680,11 @@ class StagedRunScreen(QWidget):
             if name:
                 self.session.select_schedule(name)
             self.test_schedule_stage.notes_label.setText(item.text())
+            # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
+            flagged = self._mismatch_flags.get(name, [])
+            label = self.test_schedule_stage.mismatch_label
+            label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
+            label.setStyleSheet(_FLAG_STYLE if flagged else "")
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
@@ -582,6 +713,34 @@ class StagedRunScreen(QWidget):
         self.run_view.show()
         self.show()
 
+    def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
+        """Ask the Operator what to do with mismatched files before the run starts.
+
+        No mismatch means no confirmation at all (spec: the run-start confirmation only appears on a
+        mismatch), so this returns ``None`` and Start runs straight through. Otherwise the dialog lists
+        every file as `expected …, found …` and, with `database.storeMismatchedFiles` = `ask`, offers
+        the "Store mismatched files with this Test Run" checkbox ticked by default; `always`/`never`
+        have no checkbox, only what will happen. Returns the store decision, or ``None`` if the
+        Operator cancelled — in which case no run starts. ``self.confirm_choice`` lets a test click
+        OK/Cancel itself instead of a human, so no test ever blocks on ``exec()``."""
+        if not mismatches:
+            return None
+        release = self._release_labels.get(mismatches[0][3], mismatches[0][3] or "")
+        setting = self.session.config.store_mismatched_files if self.session.config is not None else "ask"
+        stage = self.uut_operator_stage
+        details = ", ".join(part for part in (
+            f"UUT {stage.serial_edit.text().strip()}" if stage.serial_edit.text().strip() else "",
+            f"Project {stage.project_edit.text().strip()}" if stage.project_edit.text().strip() else "",
+            f"Operator {stage.operator_edit.text().strip()}" if stage.operator_edit.text().strip() else "",
+        ) if part)
+        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting, details)
+        self._confirm_dialog = dialog
+        if self.confirm_choice is not None:
+            self.confirm_choice(dialog)
+        else:
+            dialog.exec()
+        return dialog.store_choice()
+
     def begin_run(self) -> None:
         """Capture the Operator's fields and start a run. Clears nothing on purpose.
 
@@ -606,7 +765,11 @@ class StagedRunScreen(QWidget):
         if serial:
             self.session.set_uut_serial(serial)
 
-        engine = self.session.start()  # returns the RunEngine; start is already queued
+        mismatches = self.session.pending_mismatches()
+        store = self._confirm_store_choice(mismatches)
+        if mismatches and store is None:
+            return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
+        engine = self.session.start(store_mismatched=store)
         self._engine = engine
         self._started_at = datetime.now(timezone.utc)
         # Switch to the Run view and hide the setup stages for the duration of the run.
@@ -773,7 +936,10 @@ class StagedRunScreen(QWidget):
     # -- schedule list ------------------------------------------------------
 
     def _refresh_schedule_list(self) -> None:
-        """Populate the schedule list from the catalog and clear the notes label."""
+        """Populate the schedule list from the catalog and clear the notes label.
+
+        A schedule whose Media Release has a checksum mismatch gets a ⚠ prefix in the row (ticket 06c)
+        so the Operator can see it before picking it."""
         config = self.session.config
         if config is None:
             return
@@ -781,9 +947,14 @@ class StagedRunScreen(QWidget):
             (name, description, media_number)
             for name, description, media_number in list_schedules(*config.test_definition_dirs)
         ]
+        self._mismatch_flags = list_schedule_mismatches(*config.test_definition_dirs)
+        # "MR-10422 · PSU-200 Tests 2.3.0", as the mockup names a release in the flag and the dialog.
+        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}"
+                                for d in find_definitions(*config.test_definition_dirs)}
         self.test_schedule_stage.schedule_list.clear()
         for name, description, media_number in summaries:
-            item = QListWidgetItem(f"{name} — {description}")
+            flag = "⚠ " if name in self._mismatch_flags else ""
+            item = QListWidgetItem(f"{flag}{name} — {description}")
             # Carry the exact selected name so a later selection can hand it to the session.
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setToolTip(media_number or "")

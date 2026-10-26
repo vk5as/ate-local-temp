@@ -6,10 +6,10 @@
 
 **Blocked by:** 06b (SHA-256 checks and `media_release`/`run_file` rows)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A mismatched schedule is flagged on the Run screen
-- [ ] A run-start confirmation appears only when there is a mismatch, listing the files; with `database.storeMismatchedFiles` = `ask` it has a "Store mismatched files with this Test Run" checkbox ticked by default; `always`/`never` behave as named; stored bytes go on the `run_file` row
-- [ ] Seam-1 tests cover each storage setting through the run session (the dialog choice is injected, not clicked)
+- [x] A mismatched schedule is flagged on the Run screen
+- [x] A run-start confirmation appears only when there is a mismatch, listing the files; with `database.storeMismatchedFiles` = `ask` it has a "Store mismatched files with this Test Run" checkbox ticked by default; `always`/`never` behave as named; stored bytes go on the `run_file` row
+- [x] Seam-1 tests cover each storage setting through the run session (the dialog choice is injected, not clicked)
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
