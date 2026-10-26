@@ -37,8 +37,8 @@ where = ["src"]
 
 # Ship the bundled Jinja2 report template (and any other data files) inside the package.
 [tool.setuptools.package-data]
-ate.report = ["templates/*.j2"]
-ate.lua = ["*.lua"]  # packet 06d: the modules `require("ate.<name>")` resolves to
+"ate.report" = ["templates/*.j2"]
+"ate.lua" = ["*.lua"]  # packet 06d: the modules `require("ate.<name>")` resolves to
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

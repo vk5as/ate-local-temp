@@ -9,8 +9,10 @@ mismatch. The run also records the ATE version. Seam 1: real files, a real lupa 
 import hashlib
 import importlib.resources
 import json
+import os
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication, Qt
@@ -200,7 +202,35 @@ def test_headless_run_records_the_ate_version(app: QCoreApplication, tmp_path: P
 
 
 def test_bundled_modules_ship_inside_the_package() -> None:
-    """``ate/lua/*.lua`` is package data, so an installed wheel still has it."""
+    """``ate/lua/*.lua`` is package data. The tests run from the source tree, so this checks the
+    config a wheel is built from: the keys must be quoted, because a bare dotted key (``ate.lua =``)
+    is a nested TOML table that setuptools rejects, and then no wheel builds at all."""
     assert _bundled_bytes("devices"), "ATE ships a bundled devices module"
     lua_dir = importlib.resources.files("ate") / "lua"
     assert (lua_dir / "devices.lua").is_file()
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    package_data = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]
+    assert package_data.get("ate.lua") == ["*.lua"], f"package-data must ship ate/lua/*.lua: {package_data}"
+    assert package_data.get("ate.report") == ["templates/*.j2"], f"and the report template: {package_data}"
+    assert all(isinstance(v, list) for v in package_data.values()), f"no nested tables: {package_data}"
+
+
+def test_an_ate_name_cannot_walk_out_of_the_bundled_directory(app: QCoreApplication) -> None:
+    """A planted .lua outside ``ate/lua`` reached by a ``..`` path is never loaded: only ``ate.<word>``
+    is a bundled name, whatever exists on disk."""
+    lua_dir = Path(str(importlib.resources.files("ate") / "lua"))
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "escape.lua").write_text('ESCAPED = true\nreturn true\n', encoding="utf-8")
+        bad = "ate." + os.path.relpath(Path(td) / "escape", lua_dir)
+        src = (
+            'return ScheduleParams("Escape", "requires a file outside ate/lua") :setSchedule({\n'
+            '  StepParams("escape"):setStepNo("1.")\n'
+            f'    :setAction(function() require("{bad}") ATE.report(Result.PASS, "loaded") end),\n'
+            "})\n"
+        )
+        defs_dir, definition = _write_release(Path(td), src)
+        row, files, logs = _run(app, defs_dir, definition)
+
+    assert row["result"] != "PASS", f"require('{bad}') must not load a file outside ate/lua"
+    assert any(f"require: unknown module '{bad}'" in ln["text"] for ln in logs)
+    assert not [f for f in files if f["kind"] == "ate-module"], f"nothing recorded as bundled: {files}"
