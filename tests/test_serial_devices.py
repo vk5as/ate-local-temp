@@ -14,23 +14,31 @@ arrived and stops at its timeout, so ``b""`` means "nothing yet", not end of str
 really goes away the handler raises ``SerialException('socket disconnected')``. Its ``write`` raises
 ``SerialTimeoutException`` without saying how many bytes got out, so writes go out in pieces and
 ``count`` counts the pieces that made it out whole.
+
+One more pyserial behaviour the tests have to respect (packet 31b): ``open()`` calls
+``reset_input_buffer()``, which drains whatever the peer already sent. A payload handed to the peer
+at accept can therefore be flushed away before the reader starts - on a loaded machine, where the
+peer thread gets to run inside that window. So every test here sends its reply with ``peer.send()``
+after the open has returned and then waits for the Device's own buffer, never for a guessed sleep.
 """
 
 from __future__ import annotations
 
 import socket
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 import serial
 from PyQt6.QtCore import QCoreApplication
 
 from ate.devices.serial import SerialDriver
+from ate.engine.lua_host import LuaHost
 
 from ._fixtures import LoopbackPeer, wait_for_disconnect
 from .test_device_onerror import _dead_port
-from .test_receive_buffer import _run_with_peer_limited
 from .test_tcp_read_write import _run_with_peer, _step_message
 
 
@@ -54,13 +62,17 @@ def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = "", limit: 
     """Open a SERIAL device on ``peer`` (driver level) and wait until the peer accepted it."""
     params = _params(peer, read_term, write_term)
     dev = SerialDriver().open(params, limit) if limit is not None else SerialDriver().open(params)
-    assert peer.wait_for_connection()
+    assert peer.wait_for_connection(timeout=10.0), "the peer never accepted the connection"
     return dev
 
 
-def _wait_for(dev, predicate, timeout: float = 2.0) -> None:
+def _wait_for(dev, predicate, timeout: float = 10.0) -> None:
     """Wait, under the device lock, until ``predicate(dev)`` holds (the reader notifies on every
-    append and failure)."""
+    append and failure).
+
+    The deadline is a safety net, not a guess: the predicate is the Device's own state, and the
+    reader and the peer are threads a loaded machine can starve for a second or two. 10 s is far
+    past anything a loopback connection needs, so a real bug still trips it."""
     with dev._cond:
         assert dev._cond.wait_for(lambda: predicate(dev), timeout), "device never reached the expected state"
 
@@ -86,6 +98,92 @@ def _step(body: str, read_term: str = "", write_term: str = "") -> str:
         ATE.close(dev)
       end),
   }})"""
+
+
+def _two_step(first: str, second: str, read_term: str = "", write_term: str = "") -> str:
+    """A two-step schedule: step 1 opens the SERIAL Device on the peer as ``dev`` and runs ``first``,
+    step 2 runs ``second`` and closes it.
+
+    The steps are driven one at a time (packet 18b's overflow seam), so the test can wait on the
+    Device's own state in the gap instead of trusting a fixed sleep to be long enough."""
+    open_call = (
+        'ATE.open(DeviceType.SERIAL, {port="socket://127.0.0.1:__PORT__", baud=9600, dataBits=8, '
+        f'stopBits=1, parity=Parity.NONE, flowControl=FlowControl.NONE, timeout=5, '
+        f'readTerm="{_lua_term(read_term)}", writeTerm="{_lua_term(write_term)}"}})'
+    )
+    return f"""return ScheduleParams("x") :setSchedule({{
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        dev = {open_call}
+{first}
+      end),
+    StepParams("io"):setStepNo("2.")
+      :setAction(function()
+{second}
+        ATE.close(dev)
+      end),
+  }})"""
+
+
+def _run_two_steps(peer: LoopbackPeer, source: str, between, limit: int | None = None) -> LuaHost:
+    """Drive ``source`` step by step, calling ``between(dev)`` in the gap between the two steps.
+
+    ``between`` hands the peer its reply and waits for the reader to have it in the buffer, so step
+    2's reads can only find a buffer that is already filled. The host is driven directly, as 18b's
+    seam does; a warning sink records device failures in ``host.logs`` the way the run engine would."""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "schedule.tslua"
+        path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(peer.port)), encoding="utf-8")
+        kwargs = {"receive_buffer_bytes": limit} if limit is not None else {}
+        host = LuaHost(str(path), **kwargs)
+        host.device_warning_sink = lambda: [
+            host.record_log("WARNING", text, source="device")
+            for _, text in host.take_device_warnings()
+        ]
+        steps = host.schedule.steps
+        host._current_step = 0
+        host._run_action(steps[0].action, "step")
+        # The accept runs on the peer's thread: the open's connect has returned, but the peer has to
+        # have taken the connection before it can send anything.
+        assert peer.wait_for_connection(timeout=10.0), "the peer never accepted the connection"
+        between(peer, host._devices.snapshot()[0])
+        host._current_step = 1
+        host._run_action(steps[1].action, "step")
+    return host
+
+
+def _host_message(host: LuaHost) -> str:
+    """The message the driven schedule reported, asserting the report was a PASS."""
+    pass_fail, msg = host.reports[-1][:2]
+    assert pass_fail == "PASS", f"the step must report PASS, got {pass_fail!r}"
+    return msg
+
+
+def _reply(data: bytes, count: int):
+    """The gap between the two steps: the peer sends ``data``, then the test waits - on the Device's
+    own buffer - until the reader has all ``count`` bytes of it."""
+    def between(peer: LoopbackPeer, dev) -> None:
+        peer.send(data)
+        _wait_for(dev, lambda d: len(d._buffer) >= count)
+    return between
+
+
+def _reply_and_hang_up(data: bytes, count: int):
+    """Same, but on a peer that hangs up: the reader must have the reply *and* the disconnect before
+    step 2 runs. A FIN cannot overtake the bytes sent before it, so both are true together."""
+    def between(peer: LoopbackPeer, dev) -> None:
+        peer.send(data)
+        _wait_for(dev, lambda d: d._failed is not None and len(d._buffer) >= count)
+    return between
+
+
+def _reply_until_dropped(data: bytes, dropped: int):
+    """Send ``data`` and wait until ``dropped`` bytes have fallen out of the capped buffer: that many
+    drops is only possible once the whole payload has been read, so the buffer holds the right bytes."""
+    def between(peer: LoopbackPeer, dev) -> None:
+        peer.send(data)
+        _wait_for(dev, lambda d: d._overflow_dropped == dropped)
+    return between
 
 
 class _StuckPeer:
@@ -198,11 +296,12 @@ def test_every_enum_value_maps_onto_pyserial() -> None:
 
 def test_bytes_are_buffered_before_the_read_and_a_write_appends_its_terminator() -> None:
     """The reader drains the port from open onward, so a read right after open finds the peer's
-    payload without waiting; a write gets ``writeTerm`` appended and reports the bytes sent."""
-    peer = LoopbackPeer(payload=b"OK\n")
+    reply without waiting; a write gets ``writeTerm`` appended and reports the bytes sent."""
+    peer = LoopbackPeer()
     peer.start()
     try:
         dev = _open(peer, read_term="\n", write_term="\n")
+        peer.send(b"OK\n")  # after the open: pyserial flushes the port inside open()
         _wait_for(dev, lambda d: len(d._buffer) >= 3)
         assert dev.read({"timeout": 1}) == (b"OK", 2, False, None)
         ok, count, err = dev.write({"data": "PING"})
@@ -217,10 +316,11 @@ def test_bytes_are_buffered_before_the_read_and_a_write_appends_its_terminator()
 def test_read_honours_per_call_read_term_size_and_timeout() -> None:
     """``readTerm``, ``size`` and ``timeout`` override the open-time configuration per call: the
     terminator is stripped, ``size`` caps the take, and an empty buffer times out with err."""
-    peer = LoopbackPeer(payload=b"0123456789")
+    peer = LoopbackPeer()
     peer.start()
     try:
         dev = _open(peer)
+        peer.send(b"0123456789")
         _wait_for(dev, lambda d: len(d._buffer) >= 10)
         assert dev.read({"size": 4, "timeout": 1}) == (b"0123", 4, False, None)
         assert dev.read({"readTerm": "6", "timeout": 1}) == (b"45", 2, False, None), "the terminator is stripped"
@@ -234,10 +334,11 @@ def test_read_honours_per_call_read_term_size_and_timeout() -> None:
 
 
 def test_flush_discards_the_buffer_and_reports_the_count() -> None:
-    peer = LoopbackPeer(payload=b"noise")
+    peer = LoopbackPeer()
     peer.start()
     try:
         dev = _open(peer)
+        peer.send(b"noise")
         _wait_for(dev, lambda d: len(d._buffer) >= 5)
         assert dev.flush() == (True, 5, None)
         assert dev.flush() == (True, 0, None), "the buffer is empty after a flush"
@@ -247,11 +348,14 @@ def test_flush_discards_the_buffer_and_reports_the_count() -> None:
 
 
 def test_a_small_buffer_keeps_the_newest_bytes_and_flags_one_overflow() -> None:
-    peer = LoopbackPeer(payload=b"0123456789" * 10)  # 100 bytes into a 64-byte cap
+    peer = LoopbackPeer()  # 100 bytes into a 64-byte cap
     peer.start()
     try:
         dev = _open(peer, limit=64)
-        _wait_for(dev, lambda d: d._overflow_pending)
+        peer.send(b"0123456789" * 10)
+        # 36 bytes dropped means all 100 have arrived: waiting on the flag alone could trip on a
+        # partial chunk and leave the buffer holding the wrong newest 64 bytes.
+        _wait_for(dev, lambda d: d._overflow_dropped == 36)
         data, count, partial, err = dev.read({"size": 64, "timeout": 1})
         assert (count, partial, err) == (64, False, None)
         assert data == (b"0123456789" * 10)[-64:], "the oldest 36 bytes were dropped"
@@ -267,11 +371,14 @@ def test_peer_hang_up_fails_the_device_once_and_later_calls_report_it() -> None:
     """pyserial's socket handler raises SerialException('socket disconnected') when the peer closes:
     the reader records exactly one warning, the buffered bytes are still readable, and every later
     read and write returns that error."""
-    peer = LoopbackPeer(payload=b"buffered", hangup="close")
+    peer = LoopbackPeer(hangup="close")
     peer.start()
     try:
         dev = _open(peer)
-        _wait_for(dev, lambda d: d._failed is not None)
+        peer.send(b"buffered")  # the peer hangs up as soon as this is out
+        # Both halves of the state at once: the FIN cannot overtake the bytes that went before it,
+        # so a failure recorded without the payload means the reader never got it.
+        _wait_for(dev, lambda d: d._failed is not None and len(d._buffer) >= 8)
         assert dev.read({"timeout": 1}) == (b"buffered", 8, False, None), "buffered bytes survive the failure"
         failed = dev.read({"timeout": 1})
         assert failed[3] and "disconnect" in failed[3].lower(), f"the next read carries the failure: {failed!r}"
@@ -325,134 +432,135 @@ def test_a_write_that_cannot_get_out_times_out_that_call_only() -> None:
         peer.stop()
 
 
-# --- Seam 1: SERIAL Devices through a driven RunEngine -----------------------------------------
+# --- Seam 1: SERIAL Devices through a driven schedule --------------------------------------------
+#
+# The tests that need a payload are driven two steps at a time (`_run_two_steps`): step 1 opens the
+# Device, the test sends the reply and waits for the reader to have it, step 2 reads. The rest run
+# the whole schedule through a driven RunEngine, as before.
 
 
-def test_open_with_every_field_then_write_and_read(app: QCoreApplication) -> None:
+def test_open_with_every_field_then_write_and_read() -> None:
     """A schedule opens a SERIAL Device with every field, writes a terminated command, and reads the
     reply back: ``count`` is the bytes sent (terminator included), ``data`` is the reply with its
     terminator stripped."""
-    peer = LoopbackPeer(payload=b"OK\n")
+    peer = LoopbackPeer()
     peer.start()
     try:
-        store, ru = _run_with_peer(app, _step("""
-        local w = ATE.write(dev, {data = "PING"})
-        local r = ATE.read(dev, {timeout = 1})
+        host = _run_two_steps(peer, _two_step(
+            'w = ATE.write(dev, {data = "PING"})',  # global: step 2 reports on it
+            """local r = ATE.read(dev, {timeout = 1})
         ATE.report(Result.PASS, w.count.." "..tostring(w.ok).." "..r.data.." "..r.count.." "
           ..tostring(r.partial))""",
-                                            read_term="\n", write_term="\n"), peer.port)
+            read_term="\n", write_term="\n"), _reply(b"OK\n", 3))
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "5 true OK 2 false"
-    deadline = time.time() + 2
-    while time.time() < deadline and b"PING\n" not in b"".join(peer.received.values()):
-        time.sleep(0.02)
+    assert _host_message(host) == "5 true OK 2 false"
+    assert wait_for_disconnect(peer), "the schedule closed the port, so the peer saw the end"
     assert b"PING\n" in b"".join(peer.received.values()), "the peer never saw the write"
 
 
-def test_data_that_arrives_before_the_read_is_buffered(app: QCoreApplication) -> None:
+def test_data_that_arrives_before_the_read_is_buffered() -> None:
     # The peer sends and hangs up before the read: only the background buffer still has the bytes
     # (a read straight off pyserial's socket:// port would hit the EOF and drop them).
-    peer = LoopbackPeer(payload=b"early", hangup="close")
+    peer = LoopbackPeer(hangup="close")
     peer.start()
     try:
-        store, ru = _run_with_peer(app, _step("""
-        ATE.sleep(0.3)  -- let the peer hang up first
+        host = _run_two_steps(peer, _two_step("", """
         local r = ATE.read(dev, {size = 100, timeout = 1})
-        ATE.report(Result.PASS, r.data.." "..r.count)"""), peer.port)
+        ATE.report(Result.PASS, r.data.." "..r.count)"""), _reply_and_hang_up(b"early", 5))
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "early 5"
+    assert _host_message(host) == "early 5"
 
 
-def test_read_term_size_and_timeout_can_be_overridden_per_call(app: QCoreApplication) -> None:
-    peer = LoopbackPeer(payload=b"0123456789")
+def test_read_term_size_and_timeout_can_be_overridden_per_call() -> None:
+    peer = LoopbackPeer()
     peer.start()
     try:
-        store, ru = _run_with_peer(app, _step("""
+        host = _run_two_steps(peer, _two_step("", """
         local a = ATE.read(dev, {size = 4, timeout = 1})
         local b = ATE.read(dev, {readTerm = "6", timeout = 1})
         local c = ATE.read(dev, {timeout = 0.3})
         local d = ATE.read(dev, {timeout = 0.3}, function() return "nothing" end)
         ATE.report(Result.PASS, a.data.." "..a.count.." "..b.data.." "..c.count.." "
-          ..tostring(c.partial).." "..d)"""), peer.port)
+          ..tostring(c.partial).." "..d)"""), _reply(b"0123456789", 10))
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "0123 4 45 3 true nothing"
+    assert _host_message(host) == "0123 4 45 3 true nothing"
 
 
-def test_a_read_that_times_out_after_some_bytes_is_partial_and_warns(app: QCoreApplication) -> None:
-    peer = LoopbackPeer(payload=b"abc")  # no terminator: the read stalls on the timeout
+def test_a_read_that_times_out_after_some_bytes_is_partial_and_warns() -> None:
+    peer = LoopbackPeer()  # no terminator: the read stalls on the timeout
     peer.start()
     try:
-        store, ru = _run_with_peer(app, _step("""
+        host = _run_two_steps(peer, _two_step("", """
         local r = ATE.read(dev, {readTerm = "\\n", timeout = 0.3})
-        ATE.report(Result.PASS, r.count.." "..tostring(r.partial).." "..tostring(r.err))"""), peer.port)
+        ATE.report(Result.PASS, r.count.." "..tostring(r.partial).." "..tostring(r.err))"""),
+            _reply(b"abc", 3))
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "3 true nil"
-    assert any(ln["level"] == "WARNING" and "timed out" in ln["text"] for ln in store.log_lines(ru))
+    assert _host_message(host) == "3 true nil"
+    assert any(level == "WARNING" and "timed out" in text
+              for level, source, text in host.logs), "a partial read warns"
 
 
-def test_flush_empties_the_buffer(app: QCoreApplication) -> None:
-    peer = LoopbackPeer(payload=b"noise")
+def test_flush_empties_the_buffer() -> None:
+    peer = LoopbackPeer()
     peer.start()
     try:
-        store, ru = _run_with_peer(app, _step("""
-        ATE.sleep(0.2)  -- the background reader has the peer's payload buffered by now
+        host = _run_two_steps(peer, _two_step("", """
         local f = ATE.flush(dev)
         local r = ATE.read(dev, {timeout = 0.3}, function() return "nothing" end)
-        ATE.report(Result.PASS, f.count.." "..tostring(f.ok).." "..r)"""), peer.port)
+        ATE.report(Result.PASS, f.count.." "..tostring(f.ok).." "..r)"""), _reply(b"noise", 5))
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "5 true nothing"
+    assert _host_message(host) == "5 true nothing"
 
 
-def test_a_small_receive_buffer_overflows_once_with_a_warning(app: QCoreApplication) -> None:
-    peer = LoopbackPeer(payload=b"0123456789" * 10)  # 100 bytes into a 64-byte cap
+def test_a_small_receive_buffer_overflows_once_with_a_warning() -> None:
+    peer = LoopbackPeer()  # 100 bytes into a 64-byte cap
     peer.start()
     try:
-        source = _step("""
+        host = _run_two_steps(peer, _two_step("", """
         local r = ATE.read(dev, {size = 64, timeout = 1})
-        ATE.report(Result.PASS, #r.data.." "..tostring(r.overflow))""")
-        store, ru = _run_with_peer_limited(app, source, peer.port, limit=64)
+        ATE.report(Result.PASS, #r.data.." "..tostring(r.overflow))"""),
+            _reply_until_dropped(b"0123456789" * 10, 36), limit=64)
     finally:
         peer.stop()
 
-    assert _step_message(store, ru) == "64 true"
-    warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
+    assert _host_message(host) == "64 true"
+    warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
     assert len(warnings) == 1, f"exactly one device WARNING per overflow, got {len(warnings)}"
-    assert "SERIAL" in warnings[0]["text"] and "overflow" in warnings[0]["text"].lower()
+    assert "SERIAL" in warnings[0][2] and "overflow" in warnings[0][2].lower()
 
 
-def test_a_peer_that_hangs_up_fails_the_device_once_and_later_calls_error(app: QCoreApplication) -> None:
+def test_a_peer_that_hangs_up_fails_the_device_once_and_later_calls_error() -> None:
     """One WARNING (source device) at the hang-up, the buffered reply is still readable, and every
     read and write after it fails with that error through onError."""
-    peer = LoopbackPeer(payload=b"buffered\n", hangup="close")
+    peer = LoopbackPeer(hangup="close")
     peer.start()
     try:
-        source = _step("""
+        host = _run_two_steps(peer, _two_step("", """
         local keep = function(res) return res.err end
         local r1 = ATE.read(dev, {readTerm = "\\n", timeout = 1})
         local r2 = ATE.read(dev, {timeout = 1}, keep)
         local w = ATE.write(dev, {data = "x"}, keep)
-        ATE.report(Result.PASS, r1.count.."|"..r2.."|"..w)""")
-        store, ru = _run_with_peer(app, source, peer.port)
+        ATE.report(Result.PASS, r1.count.."|"..r2.."|"..w)"""), _reply_and_hang_up(b"buffered\n", 8))
     finally:
         peer.stop()
 
-    msg = _step_message(store, ru)
+    msg = _host_message(host)
     count, r2, w = msg.split("|", 2)
     assert count == "8", f"the buffered reply is readable after the failure: {msg!r}"
     assert "disconnect" in r2.lower() and w == r2, f"read and write carry the same failure: {msg!r}"
-    warnings = [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
+    warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
     assert len(warnings) == 1, f"one warning for one failure, got {len(warnings)}"
-    assert f"SERIAL socket://127.0.0.1:{peer.port}" in warnings[0]["text"]
+    assert f"SERIAL socket://127.0.0.1:{peer.port}" in warnings[0][2]
     assert wait_for_disconnect(peer)
 
 
@@ -475,6 +583,9 @@ def test_close_then_open_again_gives_a_new_device(app: QCoreApplication) -> None
 
     assert _step_message(store, ru) == "5 true"
     assert len(peer.connections) == 2, "the reopen opened a second connection"
+    # The peer only records what a connection sent it when that connection ends, so wait for both
+    # to close instead of reading `received` straight after the run.
+    assert wait_for_disconnect(peer, 5.0, 2), "the schedule closed both ports"
     assert b"again" in b"".join(peer.received.values())
 
 
