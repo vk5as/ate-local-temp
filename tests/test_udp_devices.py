@@ -15,13 +15,18 @@ polling and only the send that hit it fails.
 
 from __future__ import annotations
 
+import errno
+import socket
+import tempfile
 import time
 from collections import deque
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from ate.devices.udp import UdpDriver
+from ate.engine.lua_host import LuaHost
 
 from ._fixtures import UdpLoopbackPeer
 from .test_device_onerror import _dead_port
@@ -104,8 +109,8 @@ def test_seam_a_truncated_datagram_is_partial_and_its_tail_is_gone(app: QCoreApp
 
     assert _step_message(store, ru) == "0123 4 true empty"
     partials = [ln for ln in store.log_lines(ru)
-                if ln["level"] == "WARNING" and "after 4 byte" in ln["text"]]
-    assert len(partials) == 1, f"a partial read is logged once, got {partials}"
+                if ln["level"] == "WARNING" and "datagram truncated to 4 byte" in ln["text"]]
+    assert len(partials) == 1, f"a truncated datagram is logged once, got {partials}"
 
 
 _BAD_OPEN_FIELDS = [
@@ -183,6 +188,84 @@ def test_a_per_call_field_udp_does_not_know_raises_naming_it(
     count, msg = _step_message(store, ru).split(" ", 1)
     assert count == "0", f"onError must never run for a schedule bug: {count} calls"
     assert expected in msg, f"the error must name the field: {msg!r}"
+
+
+#: Lua's spellings of the numbers that are greater than 0 but not finite: NaN and infinity.
+_NON_FINITE = (("nan", "0/0"), ("inf", "1/0"))
+
+
+@pytest.mark.parametrize("name, lua", _NON_FINITE)
+def test_a_non_finite_open_timeout_raises_naming_the_field(
+    app: QCoreApplication, name: str, lua: str
+) -> None:
+    """A timeout must be a real number of seconds: NaN and infinity are both greater than 0 yet can
+    never be met, so open raises naming 'timeout', onError never runs, and no socket is opened."""
+    store, ru = _run_with_peer_limited(
+        app,
+        f"""return ScheduleParams("x") :setSchedule({{
+    StepParams("io"):setStepNo("1.")
+      :setAction(function()
+        local calls = {{}}
+        local mark = function() calls[#calls + 1] = "called"; return "handled" end
+        local msg = select(2, ATE.open(DeviceType.UDP,
+          {{host="127.0.0.1", port=12345, localPort=0, timeout={lua}}}, mark))
+        ATE.report(Result.PASS, #calls .. " " .. tostring(msg))
+      end),
+  }})""",
+        12345,
+    )
+    count, *msg = _step_message(store, ru).split(" ", 1)
+    assert count == "0", f"onError must never run for a schedule bug: {count} calls"
+    assert "field 'timeout' must be greater than 0" in msg[0], f"the error must name the field: {msg[0]!r}"
+    assert name in msg[0].lower(), f"the error must show the value it got: {msg[0]!r}"
+
+
+@pytest.mark.parametrize("name, lua", _NON_FINITE)
+def test_a_non_finite_per_call_timeout_raises_naming_the_field(
+    app: QCoreApplication, name: str, lua: str
+) -> None:
+    """The same rule for a per-call read timeout: the call raises naming 'timeout' and onError never
+    runs, so the schedule cannot make a read wait forever on a number that is not a number."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        store, ru = _run_with_peer_limited(app, _step(f"""
+        local calls = {{}}
+        local mark = function() calls[#calls + 1] = "called"; return "handled" end
+        local msg = select(2, ATE.read(dev, {{timeout = {lua}}}, mark))
+        ATE.report(Result.PASS, #calls .. " " .. tostring(msg))"""), peer.port)
+    finally:
+        peer.stop()
+
+    count, msg = _step_message(store, ru).split(" ", 1)
+    assert count == "0", f"onError must never run for a schedule bug: {count} calls"
+    assert "field 'timeout' must be greater than 0" in msg, f"the error must name the field: {msg!r}"
+    assert name in msg.lower(), f"the error must show the value it got: {msg!r}"
+
+
+def test_python_timeouts_must_be_finite_and_positive_at_open_and_per_call() -> None:
+    """The same check at the driver's own Python door: NaN, infinity, zero and a negative are all bad
+    open values and bad per-call overrides, each raising a ValueError naming 'timeout'."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        for bad in (float("nan"), float("inf"), 0, -1):
+            with pytest.raises(ValueError, match="field 'timeout'"):
+                UdpDriver().open(
+                    {"host": "127.0.0.1", "port": peer.port, "localPort": 0, "timeout": bad}
+                )
+        dev = _open(peer)
+        try:
+            for bad in (float("nan"), float("inf"), 0, -1):
+                with pytest.raises(ValueError, match="field 'timeout'"):
+                    dev.read({"timeout": bad})
+                with pytest.raises(ValueError, match="field 'timeout'"):
+                    dev.write({"data": "x", "timeout": bad})
+            assert dev._failed is None, "a bad timeout is a schedule bug, not a device failure"
+        finally:
+            dev.close()
+    finally:
+        peer.stop()
 
 
 # --- the queue: whole datagrams, in order, one per read -----------------------------------------
@@ -279,34 +362,52 @@ def test_flush_discards_every_queued_datagram_and_counts_the_bytes() -> None:
 # --- the cap, the refused peer, and close ---------------------------------------------------------
 
 
-def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning(app: QCoreApplication) -> None:
+def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning() -> None:
     """With a 10-byte cap and a burst of 4+4+4+6, the queue keeps the newest datagrams that fit
-    (dropping the oldest whole ones), the first read says overflow = true, and the run logs exactly
-    one device WARNING for the episode. The sleep is only to let the whole burst land before the
-    first read: reading straight away would race the reader thread against the queue."""
+    (dropping the oldest whole ones), the first read says overflow = true, and exactly one device
+    WARNING is logged for the episode.
+
+    No guessed sleep: the burst is opened in step 1 and read in step 2, and the test waits on the
+    device's own queue in between - `_queued == 10` means the reader has the whole burst in - so the
+    first read provably sees the finished burst rather than whatever had arrived by then."""
     peer = UdpLoopbackPeer(datagrams=[b"aaaa", b"bbbb", b"cccc", b"dddddd"])
     peer.start()
     try:
-        store, ru = _run_with_peer_limited(app, _step("""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "schedule.tslua"
+            path.write_text(
+                """return ScheduleParams("x") :setSchedule({
+    StepParams("burst"):setStepNo("1.")
+      :setAction(function()
+        dev = ATE.open(DeviceType.UDP, {host="127.0.0.1", port=__PORT__, localPort=0, timeout=5})
         ATE.write(dev, {data = "go"})
-        ATE.sleep(0.4)  -- four polls of the reader: the burst is queued before anything reads it
+      end),
+    StepParams("reads"):setStepNo("2.")
+      :setAction(function()
         local r1 = ATE.read(dev, {timeout = 1})
         local r2 = ATE.read(dev, {timeout = 1})
         local r3 = ATE.read(dev, {timeout = 0.3}, function() return "empty" end)
         ATE.report(Result.PASS, r1.count .. " " .. tostring(r1.overflow) .. " "
-            .. r2.count .. " " .. r3)"""), peer.port, limit=10)
+            .. r2.count .. " " .. r3)
+      end),
+  })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
+                encoding="utf-8",
+            )
+            host = LuaHost(str(path), receive_buffer_bytes=10)
+            steps = host.schedule.steps
+            host._current_step = 0
+            host._run_action(steps[0].action, "step")
+            dev = host._devices.snapshot()[0]
+            _wait_for(dev, lambda d: d._queued == 10)  # the reader has the whole burst queued
+            host._current_step = 1
+            host._run_action(steps[1].action, "step")
+
+        assert host.reports[-1][1] == "4 true 6 empty", f"the two oldest datagrams were dropped: {host.reports}"
+        warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
+        assert len(warnings) == 1, f"one WARNING per overflow episode, got {len(warnings)}"
+        assert "overflow" in warnings[0][2].lower() and "8" in warnings[0][2]
     finally:
         peer.stop()
-
-    assert _step_message(store, ru) == "4 true 6 empty", "the two oldest datagrams were dropped"
-    warnings = [ln for ln in store.log_lines(ru)
-                if ln["level"] == "WARNING" and ln["source"] == "device"]
-    assert len(warnings) == 1, f"one WARNING per overflow episode, got {len(warnings)}"
-    assert "overflow" in warnings[0]["text"].lower() and "8" in warnings[0]["text"]
-    warnings = [ln for ln in store.log_lines(ru)
-                if ln["level"] == "WARNING" and ln["source"] == "device"]
-    assert len(warnings) == 1, f"one WARNING per overflow episode, got {len(warnings)}"
-    assert "overflow" in warnings[0]["text"].lower() and "8" in warnings[0]["text"]
 
 
 def test_a_datagram_bigger_than_the_cap_is_dropped_whole() -> None:
@@ -327,6 +428,67 @@ def test_a_datagram_bigger_than_the_cap_is_dropped_whole() -> None:
         peer.stop()
 
 
+def test_an_oversize_datagram_fails_only_that_write_and_leaves_the_device_usable() -> None:
+    """A payload no UDP datagram can hold (65507 bytes is the most one carries) is a bad call, not a
+    dead device: the write fails with an err naming the size and the limit, nothing is warned, the
+    device is not failed, and the next small write still goes out."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+        ok, count, err = dev.write({"data": b"x" * 65508})
+        assert not ok and count == 0, f"a 65508-byte datagram cannot be sent: {ok}, {count}"
+        assert "65507" in err and "65508" in err, f"the err must name the limit and the size: {err!r}"
+        assert dev._failed is None, "an oversize write is that call's failure, not the device's"
+        assert dev.take_warnings() == [], "an oversize write logs no device warning"
+        assert dev.write({"data": "still here"}) == (True, 10, None), "the device still works"
+        assert peer.wait_for_datagram(1), "the small write reached the peer"
+        assert peer.received == [b"still here"]
+        assert dev.write({"data": b"y" * 65507}) == (True, 65507, None), "65507 bytes still fits"
+        dev.close()
+    finally:
+        peer.stop()
+
+
+def test_an_emsgsize_from_send_fails_only_that_call() -> None:
+    """If the socket raises EMSGSIZE anyway (a smaller limit than we checked, or a platform quirk),
+    that write fails alone: the device stays usable and logs nothing."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+
+        class _SendIsTooLong:
+            """A socket stand-in whose send always raises EMSGSIZE; recv, fileno and close are the
+            real socket's, so only the send is hurt (a socket object will not let send be replaced)."""
+
+            def __init__(self, real: socket.socket) -> None:
+                self._real = real
+
+            def fileno(self) -> int:
+                return self._real.fileno()  # select on the write side still sees the live fd
+
+            def send(self, _data: bytes) -> int:
+                raise OSError(errno.EMSGSIZE, "Message too long")
+
+            def recv(self, nbytes: int) -> bytes:
+                return self._real.recv(nbytes)
+
+            def close(self) -> None:
+                self._real.close()
+
+        dev.sock = _SendIsTooLong(dev.sock)  # the reader still works: only sends are hurt
+        ok, count, err = dev.write({"data": "x"})
+        assert (ok, count) == (False, 0), f"the send failed: {ok}, {count}"
+        assert "too long" in err.lower(), f"the err says why: {err!r}"
+        assert dev._failed is None, "EMSGSIZE is a send error, not a lost connection"
+        assert dev.take_warnings() == []
+        assert dev.read({"timeout": 0.2}) == (None, 0, False, "timeout"), "the device still reads"
+        dev.close()
+    finally:
+        peer.stop()
+
+
 def test_a_refused_write_fails_only_that_call_and_leaves_the_device_usable() -> None:
     """On Linux a connected UDP socket whose peer is not listening answers an ICMP port-unreachable,
     so the send is refused. The peer may start listening later, so that is not a device failure: the
@@ -335,7 +497,7 @@ def test_a_refused_write_fails_only_that_call_and_leaves_the_device_usable() -> 
     peer.start()
     try:
         dev = _open(peer)
-        assert dev.write({"data": "go"})[0], "the peer is listening, so the first send goes out"
+        _talk(dev, peer)  # the peer has to see this first datagram before it can reply
         peer.unbind()  # nothing at that port any more: Linux starts refusing our sends
         err = None
         deadline = time.monotonic() + 3
@@ -352,9 +514,47 @@ def test_a_refused_write_fails_only_that_call_and_leaves_the_device_usable() -> 
         peer.stop()
 
 
+def test_a_stopped_peer_leaves_no_drain_thread_and_frees_its_port() -> None:
+    """The fixture's own lifetime is part of the seam: stop() closes the socket, but a recvfrom
+    already blocked on it is not woken by that close, so without a poll timeout the drain thread
+    would outlive the peer and keep its port bound - and the next test would bind a different one."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    peer.stop()
+    assert not peer._thread.is_alive(), "the drain thread is still polling after stop()"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("127.0.0.1", peer.port))
+    except OSError as exc:
+        pytest.fail(f"a stopped peer still holds port {peer.port}: {exc}")
+    finally:
+        probe.close()
+
+
+def test_an_unbound_peer_stops_draining_and_is_not_deaf_after_rebind() -> None:
+    """unbind() takes the port out of service AND ends the drain: if the thread stayed blocked on the
+    closed socket, rebind() would see a live thread and never start a new one, leaving the peer deaf
+    while the device still writes to it."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        dev = _open(peer)
+        _talk(dev, peer)
+        peer.unbind()
+        assert not peer._thread.is_alive(), "the drain kept polling the closed socket"
+        peer.rebind()
+        peer.send(b"back")
+        _wait_for(dev, lambda d: len(d._datagrams) == 1)
+        assert dev.read({"timeout": 1}) == (b"back", 4, False, None), "a rebound peer still hears"
+        dev.close()
+    finally:
+        peer.stop()
+
+
 def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreApplication) -> None:
     """UDP has no connection to lose, so a peer nobody is listening on is not a broken device: the
-    open succeeds, every write either goes out or fails that call through onError, and the read after
+    open succeeds, every write either goes out or is refused that call through onError (at least one
+    is, since Linux answers a connected UDP socket with an ICMP port-unreachable), and the read after
     them is a plain timeout rather than a failure. Nothing logs a device warning."""
     source = """return ScheduleParams("x") :setSchedule({
     StepParams("io"):setStepNo("1.")
@@ -367,13 +567,15 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
           if type(w) == "table" then ok = ok + 1 end
         end
         local r = ATE.read(dev, {timeout = 0.2}, function(res) return res.err end)
-        ATE.report(Result.PASS, ok + refused .. " calls survived " .. tostring(r))
+        ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r))
       end),
   })"""
     store, ru = _run_with_peer_limited(app, source, _dead_port())
 
-    message = _step_message(store, ru)
-    assert message.endswith(" calls survived timeout"), f"no call failed the device: {message!r}"
+    ok, refused, read = _step_message(store, ru).split(" ")
+    assert int(ok) + int(refused) == 10, f"no call failed the device: {ok} ok + {refused} refused"
+    assert int(refused) >= 1, f"a peer nobody listens on must refuse at least one write: {refused}"
+    assert read == "timeout", f"the device is not failed, so the read just times out: {read!r}"
     warnings = [ln for ln in store.log_lines(ru)
                 if ln["level"] == "WARNING" and ln["source"] == "device"]
     assert not warnings, f"a peer that is not listening is not a device failure: {warnings}"
