@@ -143,6 +143,20 @@ def test_database_type_other_than_sqlite_is_rejected(tmp_path):
     assert "'database.type'" in str(exc.value)
 
 
+def test_store_mismatched_files_must_be_ask_always_or_never(tmp_path):
+    """`database.storeMismatchedFiles` accepts only the three documented words (ticket 06c)."""
+    bad = tmp_path / "config.json"
+    bad.write_text(json.dumps({"format": 1, "database": {"type": "sqlite", "path": "x.db", "storeMismatchedFiles": "sometimes"}}), encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        read_config(str(bad))
+    assert "'database.storeMismatchedFiles'" in str(exc.value)
+
+    for word in ("ask", "always", "never"):
+        good = tmp_path / f"config-{word}.json"
+        good.write_text(json.dumps({"format": 1, "database": {"type": "sqlite", "path": "x.db", "storeMismatchedFiles": word}}), encoding="utf-8")
+        assert read_config(str(good)).store_mismatched_files == word
+
+
 # --- station identity -------------------------------------------------------
 
 

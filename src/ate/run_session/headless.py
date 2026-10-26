@@ -152,19 +152,6 @@ class HeadlessRunSession(QObject):
                 "start() needs store_mismatched=True or False"
             )
         return bool(choice)
-        setting = self._config.store_mismatched_files if self._config is not None else "ask"
-        if not self.pending_mismatches():
-            return False
-        if setting == "always":
-            return True
-        if setting == "never":
-            return False
-        if choice is None:
-            raise ValueError(
-                "database.storeMismatchedFiles is 'ask' and this schedule has checksum mismatches: "
-                "start() needs store_mismatched=True or False"
-            )
-        return bool(choice)
 
     @property
     def run_uuid(self) -> Optional[str]:
