@@ -387,8 +387,9 @@ def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning() -> No
         local r1 = ATE.read(dev, {timeout = 1})
         local r2 = ATE.read(dev, {timeout = 1})
         local r3 = ATE.read(dev, {timeout = 0.3}, function() return "empty" end)
-        ATE.report(Result.PASS, r1.count .. " " .. tostring(r1.overflow) .. " "
-            .. r2.count .. " " .. r3)
+        ATE.close(dev)
+        ATE.report(Result.PASS, r1.data .. " " .. tostring(r1.overflow) .. " "
+            .. r2.data .. " " .. r3)
       end),
   })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
                 encoding="utf-8",
@@ -402,10 +403,10 @@ def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning() -> No
             host._current_step = 1
             host._run_action(steps[1].action, "step")
 
-        assert host.reports[-1][1] == "4 true 6 empty", f"the two oldest datagrams were dropped: {host.reports}"
+        assert host.reports[-1][1] == "cccc true dddddd empty", f"the two oldest datagrams were dropped: {host.reports}"
         warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
         assert len(warnings) == 1, f"one WARNING per overflow episode, got {len(warnings)}"
-        assert "overflow" in warnings[0][2].lower() and "8" in warnings[0][2]
+        assert "overflow" in warnings[0][2].lower() and "dropped 8 " in warnings[0][2], warnings[0][2]
     finally:
         peer.stop()
 
@@ -556,10 +557,9 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
     open succeeds, every write either goes out or is refused as that call's own err through onError,
     and the read after them is a plain timeout rather than a failure. Nothing logs a device warning.
 
-    The report keeps the two counts apart rather than adding them together, which is what used to make
-    the assertion vacuous: on Linux the reader drains each ICMP port-unreachable the kernel queues for
-    a port that was never bound, so all ten sends go out here and refused stays 0 - either way no call
-    fails the device, and the device still closes cleanly afterwards."""
+    Whether any send is refused here depends on when the reader drains the queued ICMP errors, so
+    this test only checks the outcome (no failure, a plain timeout, a clean close); the refusal path
+    itself is pinned by the refused-write seam test below."""
     source = """return ScheduleParams("x") :setSchedule({
     StepParams("io"):setStepNo("1.")
       :setAction(function()
@@ -577,8 +577,7 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
   })"""
     store, ru = _run_with_peer_limited(app, source, _dead_port())
 
-    ok, refused, read, closed = _step_message(store, ru).split(" ")
-    assert int(ok) + int(refused) == 10, f"no call failed the device: {ok} ok + {refused} refused"
+    _ok, _refused, read, closed = _step_message(store, ru).split(" ")
     assert read == "timeout", f"the device is not failed, so the read just times out: {read!r}"
     assert closed == "true", f"the sends that were refused left the device open: {closed!r}"
     warnings = [ln for ln in store.log_lines(ru)
@@ -586,10 +585,34 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
     assert not warnings, f"a peer that is not listening is not a device failure: {warnings}"
 
 
+class _RefusesSends:
+    """A socket stand-in that refuses its first ``n`` sends with ECONNREFUSED (what Linux gives a
+    connected UDP socket after an ICMP port-unreachable) and passes everything else to the real
+    socket. The real refusal depends on when the reader drains the ICMP error, so a test that needs
+    one uses this instead."""
+
+    def __init__(self, real: socket.socket, n: int) -> None:
+        self._real, self._left = real, n
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    def send(self, data: bytes) -> int:
+        if self._left > 0:
+            self._left -= 1
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+        return self._real.send(data)
+
+    def recv(self, nbytes: int) -> bytes:
+        return self._real.recv(nbytes)
+
+    def close(self) -> None:
+        self._real.close()
+
 
 def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() -> None:
-    """The refusal path through Lua, with the peer taken out of service between two steps: the sends
-    that hit the ICMP port-unreachable come back as that call's own err through onError, the others
+    """The refusal path through Lua: the first three sends of step 2 are refused (a stand-in socket,
+    so the count is exact), each comes back as that call's own err through onError, the other seven
     still go out, no call fails the device (the read after them is a plain timeout), and no device
     WARNING is logged."""
     peer = UdpLoopbackPeer()
@@ -614,6 +637,7 @@ def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() ->
           if type(w) == "table" then ok = ok + 1 end
         end
         local r = ATE.read(dev, {timeout = 0.2}, function(res) return res.err end)
+        ATE.close(dev)
         ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r))
       end),
   })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
@@ -623,14 +647,12 @@ def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() ->
             steps = host.schedule.steps
             host._current_step = 0
             host._run_action(steps[0].action, "step")
-            peer.unbind()  # nothing at that port now: Linux starts refusing our sends
+            dev = host._devices.snapshot()[0]
+            dev.sock = _RefusesSends(dev.sock, 3)  # the peer has gone: the next three sends are refused
             host._current_step = 1
             host._run_action(steps[1].action, "step")
 
-        ok, refused, read = host.reports[-1][1].split(" ")
-        assert int(refused) >= 1, f"a peer that has gone must refuse at least one send: {refused}"
-        assert int(ok) + int(refused) == 10, f"no call failed the device: {ok} ok + {refused} refused"
-        assert read == "timeout", f"a refused send does not fail the device: {read!r}"
+        assert host.reports[-1][1] == "7 3 timeout", f"each refusal cost only its own call: {host.reports}"
         warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
         assert not warnings, f"a refused send is not a device failure: {warnings}"
     finally:
