@@ -535,10 +535,21 @@ class _AteTable:
             overflow, dropped = device.take_overflow()  # the reader recorded it when the cap was exceeded
         else:
             data, count, partial, err, overflow, dropped = None, 0, False, "device closed", False, 0
-        if partial:  # spec: a timeout after some bytes is partial and logs a WARNING
-            self._host.record_log(
-                "WARNING", f"{self._host._location()} ATE.read: timed out after {count} byte(s)", source="ate"
-            )
+        if partial:  # spec: a partial read logs a WARNING — for a stream the deadline caught it
+            # mid-bytes; for a Device Type that reads whole messages (UDP) `size` cut a datagram
+            # short, and saying "timed out" there is a lie. The device says which it is.
+            if getattr(device, "partial_read_is_truncation", False):
+                self._host.record_log(
+                    "WARNING",
+                    f"{self._host._location()} ATE.read: datagram truncated to {count} byte(s)",
+                    source="ate",
+                )
+            else:
+                self._host.record_log(
+                    "WARNING",
+                    f"{self._host._location()} ATE.read: timed out after {count} byte(s)",
+                    source="ate",
+                )
         result = {
             "data": data,  # None -> nil on a timeout with no bytes or a failure
             "count": count,

@@ -75,6 +75,11 @@ class _StreamDevice:
     ``_fail`` and drained by the host via ``take_warnings`` (packet 17b). ``driver`` is the driver
     that opened it, which is what the ATE wrappers validate the per-call fields against."""
 
+    #: A Device Type whose reads are whole messages (UDP datagrams) can only be partial because
+    #: ``size`` cut one short; a stream is partial when the deadline catches it mid-bytes. The host
+    #: reads this to word the partial-read WARNING correctly (packets 17a/18b).
+    partial_read_is_truncation = False
+
     def __init__(self, params: dict[str, Any], driver: type[Driver],
                  receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
         self.params = params
