@@ -65,6 +65,7 @@ def _bundled_module_bytes(name: str) -> Optional[bytes]:
 from ..devices import DeviceRegistry, TcpDriver
 from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
 from ..devices.udp import UdpDriver  # packet 18b: UDP datagrams, registered like the other streams
+from ..devices.visa import VisaDriver  # packet 19: VISA instruments, read on demand (no reader)
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..errors import ATEError
 from .operator_input import OperatorInput
@@ -903,6 +904,7 @@ class _LuaHost:
         self._devices.register("TCP", TcpDriver)
         self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
         self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
+        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader
 
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
