@@ -350,7 +350,14 @@ class LoopbackPeer:
     the bytes the device sends back into ``received`` and flags the connection in ``closed`` when its
     other end hits EOF or an error (a clean disconnect). A per-peer ``payload`` is sent to each new
     connection on accept, so a schedule's read has data buffered the moment it connects;
-    :func:`wait_for_disconnect` polls for the disconnect."""
+    :func:`wait_for_disconnect` polls for the disconnect.
+
+    pyserial's ``socket://`` handler clears the port's input buffer inside ``open``, so bytes sent on
+    accept can be flushed away before the Device's reader ever starts (packet 31b). A SERIAL test
+    that wants bytes in the buffer hands them over with :meth:`send` after the open has returned,
+    which is provably after that flush; or, for a test driven through the run engine (where the test
+    can't act between ATE calls), passes ``after_first_byte=True`` so the payload goes out only once
+    the device has written, which also proves the open returned."""
 
     #: Placeholder substituted with the live peer port when writing a schedule to disk, so a static
     #: Lua string can target whatever ephemeral port this run's peer chose.
@@ -361,7 +368,11 @@ class LoopbackPeer:
     #: open itself fails instead of the connection dying later.
     RESET_GRACE = 1.0
 
-    def __init__(self, payload: bytes = b"", hangup: str | None = None) -> None:
+    #: How long a "close" peer with no payload of its own waits for a test-side :meth:`send` before
+    #: hanging up anyway: the wait is a safety net for a test that never sends, not a timing guess.
+    HANGUP_GRACE = 10.0
+
+    def __init__(self, payload: bytes = b"", hangup: str | None = None, after_first_byte: bool = False) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -383,6 +394,27 @@ class LoopbackPeer:
         # but only once the device's first byte has arrived or RESET_GRACE has elapsed, so the RST
         # can never beat the client's connect(). No byte-recording reader thread for these.
         self._hangup = hangup
+        # Set by send(): a "close" peer with no payload of its own hangs up only after this.
+        self._sent = threading.Event()
+        # Hold the payload until the device's first byte arrives (it is recorded in ``received``):
+        # pyserial's input reset inside open can't discard a reply sent after the device wrote.
+        self._after_first_byte = after_first_byte
+
+    def _first_byte(self, conn: socket.socket) -> bytes:
+        """Wait (up to HANGUP_GRACE) for the device's first bytes when ``after_first_byte`` is set;
+        return what arrived so the caller records it."""
+        if not (self._payload and self._after_first_byte):
+            return b""
+        try:
+            conn.settimeout(self.HANGUP_GRACE)
+            return conn.recv(4096)
+        except OSError:
+            return b""
+        finally:
+            try:
+                conn.settimeout(None)
+            except OSError:
+                pass
 
     def start(self) -> None:
         """Begin accepting connections (bind/listen already happened in ``__init__``)."""
@@ -402,6 +434,20 @@ class LoopbackPeer:
                 return True
             time.sleep(0.02)
         return len(self.connections) >= n
+
+    def send(self, data: bytes) -> None:
+        """Send ``data`` to every connection accepted so far.
+
+        The SERIAL tests use this instead of a construction-time ``payload``: pyserial flushes the
+        port's input buffer inside ``open``, so a payload handed to the peer at accept can be
+        discarded before the reader starts. Sent after the open returns, the bytes are provably
+        later than that flush, so the reader cannot miss them."""
+        for conn in list(self.connections):
+            try:
+                conn.sendall(data)
+            except OSError:
+                pass  # the connection went away; there is nothing to send
+        self._sent.set()
 
     def _accept_loop(self) -> None:
         while self._running:
@@ -423,10 +469,17 @@ class LoopbackPeer:
     def _hang_up(self, conn: socket.socket) -> None:
         """Send the payload, then hang up: "close" is an orderly close (the device reads EOF),
         "reset" sends an RST — but only after the device has sent its first byte, which proves the
-        client's connect() returned. A device that never writes gets the reset after RESET_GRACE."""
+        client's connect() returned. A device that never writes gets the reset after RESET_GRACE.
+        A "close" peer given no payload waits for a test-side send() first, so the hang-up cannot
+        beat the reader (see :meth:`send`)."""
         try:
             if self._payload:
+                first = self._first_byte(conn)
+                if first:
+                    self.received[conn] = first
                 conn.sendall(self._payload)
+            elif self._hangup == "close":
+                self._sent.wait(self.HANGUP_GRACE)  # the test sends the reply itself
             if self._hangup == "reset":
                 try:
                     conn.settimeout(self.RESET_GRACE)
@@ -444,12 +497,12 @@ class LoopbackPeer:
 
     def _handle_conn(self, conn: socket.socket) -> None:
         """Send the peer's payload (if any), then record every byte the device sends until it closes."""
+        buf = bytearray(self._first_byte(conn))  # empty unless after_first_byte holds the payload back
         if self._payload:
             try:
                 conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
             except OSError:
                 pass  # connection already gone; nothing to send
-        buf = bytearray()
         while self._running:
             try:
                 chunk = conn.recv(4096)
@@ -593,19 +646,17 @@ class UdpLoopbackPeer:
         self._join_drain()
 
 
-def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0) -> bool:
-    """Poll until a recorded peer connection has closed (the device closed it, or a hang-up peer
+def wait_for_disconnect(peer: LoopbackPeer, timeout: float = 2.0, n: int = 1) -> bool:
+    """Poll until ``n`` recorded peer connections have closed (the device closed it, or a hang-up peer
     closed/reset its side), or ``timeout`` elapses.
 
     Every accepted socket has a peer thread (reader, or hang-up) that adds it to ``closed`` when the
     connection ends, so this only reads that set — never recv, which would race the reader and steal
-    bytes. Returns True if any recorded connection was seen to close; False on timeout."""
+    bytes. Returns True if ``n`` recorded connections were seen to close; False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for conn in list(peer.connections):
-            # peer.closed is populated by the reader/hang-up thread when the connection ends.
-            if conn in peer.closed:
-                return True
+        if sum(conn in peer.closed for conn in peer.connections) >= n:
+            return True
         time.sleep(0.02)
     return False
 
