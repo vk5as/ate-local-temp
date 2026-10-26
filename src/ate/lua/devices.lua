@@ -23,12 +23,17 @@ local SERIAL_SETTERS = {
 local UDP_SETTERS = {
   setHost = set("host"), setPort = set("port"), setLocalPort = set("localPort"), setTimeout = set("timeout"),
 }
+local VISA_SETTERS = {
+  setResource = set("resource"), setTimeout = set("timeout"),
+  setReadTerm = set("readTerm"), setWriteTerm = set("writeTerm"),
+}
 -- read/write overrides: every field is optional, so no defaults are seeded here.
 local READ_SETTERS = {setSize = set("size"), setTimeout = set("timeout"), setReadTerm = set("readTerm")}
 local WRITE_SETTERS = {setWriteTerm = set("writeTerm"), setTimeout = set("timeout")}
 
 local function locked(setters) return {__index = setters, __metatable = false} end
 local TCP_MT, SERIAL_MT, UDP_MT = locked(TCP_SETTERS), locked(SERIAL_SETTERS), locked(UDP_SETTERS)
+local VISA_MT = locked(VISA_SETTERS)
 local READ_MT, WRITE_MT = locked(READ_SETTERS), locked(WRITE_SETTERS)
 
 return {
@@ -43,6 +48,9 @@ return {
   end,
   Udp = function(host, port)
     return setmetatable({host = host, port = port, localPort = 0, timeout = 1.0}, UDP_MT)
+  end,
+  Visa = function(resource)
+    return setmetatable({resource = resource, timeout = 1.0, readTerm = "\n", writeTerm = "\n"}, VISA_MT)
   end,
   Read = function()
     return setmetatable({}, READ_MT)
