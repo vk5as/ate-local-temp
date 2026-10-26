@@ -17,6 +17,8 @@ only the call that hit it.
 from __future__ import annotations
 
 import collections
+import errno
+import math
 import select
 import socket
 import time
@@ -39,6 +41,18 @@ class _Refused(Exception):
     peer may start listening later - so it fails one call, never the device (packet 18b)."""
 
 
+class _Oversize(Exception):
+    """The payload is too big for one datagram.
+
+    Also a one-call failure, like :class:`_Refused`: the socket is fine, it just cannot hold that
+    many bytes, so EMSGSIZE must not be read as a transport going away (packet 18b)."""
+
+
+#: The most bytes a single UDP datagram can carry: the 65,536-byte UDP length minus its 8-byte header.
+#: Checked before sending so an oversize write says what is wrong instead of tripping EMSGSIZE.
+MAX_DATAGRAM_BYTES = 65507
+
+
 #: Per-call ``read`` overrides for UDP. No ``readTerm``: a datagram is the message, so a terminator
 #: is not a field this Device Type knows, and passing one raises naming it.
 UDP_READ_FIELDS = {
@@ -59,6 +73,10 @@ class _UdpDevice(_StreamDevice):
     UDP replaces its byte buffer with a queue of whole datagrams (``_datagrams``, totalling
     ``_queued`` bytes) because a datagram is a message and cannot be split. The base's ``_buffer``
     stays empty: every path that reads it is overridden here."""
+
+    #: A UDP read is whole or nothing, so a partial one is ``size`` cutting a datagram short, never
+    #: the deadline catching it mid-bytes: the host words the WARNING as truncation, not a timeout.
+    partial_read_is_truncation = True
 
     def __init__(self, sock: socket.socket, params: dict[str, Any],
                  receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
@@ -169,12 +187,23 @@ class _UdpDevice(_StreamDevice):
             self._cond.notify_all()
         return True, count, None
 
+    def _timeout(self, params: dict[str, Any]) -> float:
+        """The per-call ``timeout``, or the open-time one, for UDP (packet 18b).
+
+        NaN and infinity are both greater than 0 but can never be met, so they are schedule bugs that
+        raise naming the field - the same rule the driver applies when the Device is opened."""
+        value = params.get("timeout", self.params["timeout"])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"field 'timeout' must be greater than 0 and finite, got {value}")
+        return float(value)
+
     def _send(self, datagram: bytes, seconds: float) -> int:
         """Send one whole datagram to the connected peer, waiting at most ``seconds``.
 
         A socket still not writable when the deadline is up is this call's timeout; an ICMP
         port-unreachable from a peer that is not listening yet is :class:`_Refused`, which fails only
-        this call; anything else means the socket is gone."""
+        this call; an EMSGSIZE from a payload too big for a datagram is :class:`_Oversize`, which
+        fails only this call too; anything else means the socket is gone."""
         if not select.select([], [self.sock], [], seconds)[1]:
             raise _SendTimeout("write timeout")
         try:
@@ -182,20 +211,28 @@ class _UdpDevice(_StreamDevice):
         except ConnectionRefusedError as exc:
             raise _Refused(str(exc)) from exc
         except OSError as exc:
+            if exc.errno == errno.EMSGSIZE:  # too big for a datagram: the call, not the device
+                raise _Oversize(str(exc)) from exc
             raise _TransportClosed(str(exc)) from exc
 
     def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
         """Send ``data`` as one datagram and return ``(ok, count, err_or_None)``.
 
         One datagram per call, no terminator appended: ``count`` is the bytes of that datagram. A
-        send that cannot go out within ``timeout`` fails only this call; a refused peer (the peer is
-        not listening yet) fails only this call too, because a UDP socket has no connection to lose.
-        Any other send error is a dead socket and fails the device, like a stream."""
+        payload no datagram can hold is refused before the socket is touched, naming the size and the
+        65507-byte limit; a send that cannot go out within ``timeout`` fails only this call; a refused
+        peer (the peer is not listening yet) fails only this call too, because a UDP socket has no
+        connection to lose. Any other send error is a dead socket and fails the device, like a stream.
+        """
         with self._lock:
             failed = self._failed
         if failed is not None:
             return False, 0, failed
         payload = self._to_bytes(params["data"])
+        if len(payload) > MAX_DATAGRAM_BYTES:
+            return False, 0, (
+                f"datagram of {len(payload)} bytes exceeds the {MAX_DATAGRAM_BYTES}-byte UDP limit"
+            )
         deadline = time.monotonic() + self._timeout(params)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -206,6 +243,8 @@ class _UdpDevice(_StreamDevice):
             return False, 0, "timeout"
         except _Refused as exc:
             return False, 0, str(exc)  # the peer is not listening: this call only, not the device
+        except _Oversize as exc:
+            return False, 0, str(exc)  # too big for a datagram: this call only, not the device
         except _TransportClosed as exc:
             self._fail(str(exc))
             return False, 0, str(exc)
@@ -249,8 +288,10 @@ class UdpDriver(Driver):
             raise ValueError(
                 f"field 'localPort' must be between 0 and 65535, got {validated['localPort']}"
             )
-        if validated["timeout"] <= 0:
-            raise ValueError(f"field 'timeout' must be greater than 0, got {validated['timeout']}")
+        if not math.isfinite(validated["timeout"]) or validated["timeout"] <= 0:
+            raise ValueError(
+                f"field 'timeout' must be greater than 0 and finite, got {validated['timeout']}"
+            )
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", local_port))
         sock.connect((validated["host"], port))  # connect for the peer filter, not for a connection
