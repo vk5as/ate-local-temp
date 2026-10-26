@@ -553,9 +553,13 @@ def test_an_unbound_peer_stops_draining_and_is_not_deaf_after_rebind() -> None:
 
 def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreApplication) -> None:
     """UDP has no connection to lose, so a peer nobody is listening on is not a broken device: the
-    open succeeds, every write either goes out or is refused that call through onError (at least one
-    is, since Linux answers a connected UDP socket with an ICMP port-unreachable), and the read after
-    them is a plain timeout rather than a failure. Nothing logs a device warning."""
+    open succeeds, every write either goes out or is refused as that call's own err through onError,
+    and the read after them is a plain timeout rather than a failure. Nothing logs a device warning.
+
+    The report keeps the two counts apart rather than adding them together, which is what used to make
+    the assertion vacuous: on Linux the reader drains each ICMP port-unreachable the kernel queues for
+    a port that was never bound, so all ten sends go out here and refused stays 0 - either way no call
+    fails the device, and the device still closes cleanly afterwards."""
     source = """return ScheduleParams("x") :setSchedule({
     StepParams("io"):setStepNo("1.")
       :setAction(function()
@@ -567,19 +571,70 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
           if type(w) == "table" then ok = ok + 1 end
         end
         local r = ATE.read(dev, {timeout = 0.2}, function(res) return res.err end)
-        ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r))
+        local c = ATE.close(dev)
+        ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r) .. " " .. tostring(c.ok))
       end),
   })"""
     store, ru = _run_with_peer_limited(app, source, _dead_port())
 
-    ok, refused, read = _step_message(store, ru).split(" ")
+    ok, refused, read, closed = _step_message(store, ru).split(" ")
     assert int(ok) + int(refused) == 10, f"no call failed the device: {ok} ok + {refused} refused"
-    assert int(refused) >= 1, f"a peer nobody listens on must refuse at least one write: {refused}"
     assert read == "timeout", f"the device is not failed, so the read just times out: {read!r}"
+    assert closed == "true", f"the sends that were refused left the device open: {closed!r}"
     warnings = [ln for ln in store.log_lines(ru)
                 if ln["level"] == "WARNING" and ln["source"] == "device"]
     assert not warnings, f"a peer that is not listening is not a device failure: {warnings}"
 
+
+
+def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() -> None:
+    """The refusal path through Lua, with the peer taken out of service between two steps: the sends
+    that hit the ICMP port-unreachable come back as that call's own err through onError, the others
+    still go out, no call fails the device (the read after them is a plain timeout), and no device
+    WARNING is logged."""
+    peer = UdpLoopbackPeer()
+    peer.start()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "schedule.tslua"
+            path.write_text(
+                """return ScheduleParams("x") :setSchedule({
+    StepParams("open"):setStepNo("1.")
+      :setAction(function()
+        dev = ATE.open(DeviceType.UDP, {host="127.0.0.1", port=__PORT__, localPort=0, timeout=1})
+        ATE.write(dev, {data = "go"})
+        ATE.report(Result.PASS, "listening")
+      end),
+    StepParams("refused"):setStepNo("2.")
+      :setAction(function()
+        local ok, refused = 0, 0
+        for i = 1, 10 do
+          local w = ATE.write(dev, {data = "ping", timeout = 1},
+            function(res) refused = refused + 1; return res.err end)
+          if type(w) == "table" then ok = ok + 1 end
+        end
+        local r = ATE.read(dev, {timeout = 0.2}, function(res) return res.err end)
+        ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r))
+      end),
+  })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
+                encoding="utf-8",
+            )
+            host = LuaHost(str(path))
+            steps = host.schedule.steps
+            host._current_step = 0
+            host._run_action(steps[0].action, "step")
+            peer.unbind()  # nothing at that port now: Linux starts refusing our sends
+            host._current_step = 1
+            host._run_action(steps[1].action, "step")
+
+        ok, refused, read = host.reports[-1][1].split(" ")
+        assert int(refused) >= 1, f"a peer that has gone must refuse at least one send: {refused}"
+        assert int(ok) + int(refused) == 10, f"no call failed the device: {ok} ok + {refused} refused"
+        assert read == "timeout", f"a refused send does not fail the device: {read!r}"
+        warnings = [ln for ln in host.logs if ln[0] == "WARNING" and ln[1] == "device"]
+        assert not warnings, f"a refused send is not a device failure: {warnings}"
+    finally:
+        peer.stop()
 
 
 def test_close_then_open_gives_a_new_device_and_a_clean_close_leaves_no_failure() -> None:
