@@ -110,19 +110,21 @@ def test_serial_builder_setters_reach_the_pyserial_port() -> None:
             ":setBaud(115200):setParity(Parity.EVEN):setDataBits(7):setStopBits(2):setFlowControl(FlowControl.RTSCTS)"
         )
         dev = SerialDriver().open(params)
-        assert peer.wait_for_connection()
-        assert dev.ser.baudrate == 115200
-        assert dev.ser.parity == serial.PARITY_EVEN
-        assert dev.ser.bytesize == 7
-        assert dev.ser.stopbits == 2
-        assert dev.ser.xonxoff is False and dev.ser.rtscts is True
-        dev.close()
+        try:
+            assert peer.wait_for_connection()
+            assert dev.ser.baudrate == 115200
+            assert dev.ser.parity == serial.PARITY_EVEN
+            assert dev.ser.bytesize == 7
+            assert dev.ser.stopbits == 2
+            assert dev.ser.xonxoff is False and dev.ser.rtscts is True
+        finally:
+            dev.close()
     finally:
         peer.stop()
 
 
 def test_udp_builders_open_write_and_read_through_a_step(app: QCoreApplication) -> None:
-    """UDP takes no terminators: ``Udp`'s fields are host/port/localPort/timeout, and the peer's reply
+    """UDP takes no terminators: ``Udp``'s fields are host/port/localPort/timeout, and the peer's reply
     comes back as one whole datagram."""
     peer = UdpLoopbackPeer(datagrams=[b"pong"])
     peer.start()
@@ -157,6 +159,23 @@ def test_open_builders_carry_every_open_field_with_the_spec_defaults() -> None:
     assert _builder_fields('local t = devices.Udp("127.0.0.1", 5025)') == {
         "host": "127.0.0.1", "port": 5025, "localPort": 0, "timeout": 1.0,
     }
+    assert _builder_fields('local t = devices.Udp("127.0.0.1", 5025):setLocalPort(1234)')["localPort"] == 1234
+    for ctor in ('devices.Tcp("127.0.0.1", 5025)', 'devices.Serial("COM3")', 'devices.Udp("127.0.0.1", 5025)'):
+        timeout = _builder_fields(f"local t = {ctor}")["timeout"]
+        assert isinstance(timeout, float), f"{ctor}: timeout = 1.0 is a float, got {timeout!r}"
+
+
+def test_builder_metatables_are_locked() -> None:
+    """``getmetatable`` on a builder gives ``false``, so a schedule can't reach the shared setter
+    table and change (or remove) a setter for every later builder of that kind."""
+    fields = _builder_fields(
+        "local t = {}\n"
+        "for _, b in ipairs({devices.Tcp('h', 1), devices.Serial('COM3'), devices.Udp('h', 1),\n"
+        "                    devices.Read(), devices.Write('x')}) do\n"
+        "  t[#t + 1] = tostring(getmetatable(b))\n"
+        "end"
+    )
+    assert fields == {1: "false", 2: "false", 3: "false", 4: "false", 5: "false"}
 
 
 def test_read_and_write_builders_carry_only_their_own_fields() -> None:
@@ -197,6 +216,7 @@ def test_a_setter_the_device_type_lacks_is_a_lua_error(app: QCoreApplication) ->
     try:
         store, ru = _run_with_peer(app, _schedule("""
         ATE.log(Log.INFO, "tcp timeout " .. devices.Tcp("127.0.0.1", 1):setTimeout(2.0).timeout)
+        ATE.log(Log.INFO, "tcp setBaud " .. tostring(devices.Tcp("127.0.0.1", 1).setBaud))
         local dead = devices.Udp("127.0.0.1", 1):setReadTerm("\\n")
         ATE.report(Result.PASS, "never reached")"""), peer.port)
     finally:
@@ -207,11 +227,12 @@ def test_a_setter_the_device_type_lacks_is_a_lua_error(app: QCoreApplication) ->
     (attempt,) = store.attempts(ru)
     assert "attempt to call a nil value" in attempt["msg"]
     assert any(ln["text"] == "tcp timeout 2.0" for ln in store.log_lines(ru))
+    assert any(ln["text"] == "tcp setBaud nil" for ln in store.log_lines(ru))
 
 
 def test_a_bad_setter_value_raises_naming_the_field_and_never_onError(app: QCoreApplication) -> None:
-    """Setters do not validate: ``setDataBits(4)`` is caught by the SERIAL open check, names the
-    field, and never reaches the ``onError`` handler."""
+    """Setters do not validate: ``setDataBits(4)`` is caught by the SERIAL open check, which (as a
+    schedule bug isolated at source ``ate``) returns false naming the field and never reaches ``onError``."""
     peer = LoopbackPeer()
     peer.start()
     try:

@@ -4,8 +4,9 @@
 -- ATE.open/read/write with no :build(), and the unknown-field check passes. Open builders carry every
 -- field their Device Type requires (open has no defaults); Read()/Write() start with only what the
 -- call needs, and a per-call field left out falls back to the Device's open configuration. Setters
--- don't validate: the open/read/write check raises and names the field. A setter the Type lacks is a
--- call on nil, like any other typo.
+-- don't validate: the open/read/write check rejects a bad value and names the field. A setter the
+-- Type lacks is a call on nil, like any other typo. The metatables are locked (__metatable = false)
+-- so a schedule can't reach the shared setter tables through getmetatable and change every builder.
 local function set(field)
   return function(t, value) t[field] = value return t end
 end
@@ -26,23 +27,27 @@ local UDP_SETTERS = {
 local READ_SETTERS = {setSize = set("size"), setTimeout = set("timeout"), setReadTerm = set("readTerm")}
 local WRITE_SETTERS = {setWriteTerm = set("writeTerm"), setTimeout = set("timeout")}
 
+local function locked(setters) return {__index = setters, __metatable = false} end
+local TCP_MT, SERIAL_MT, UDP_MT = locked(TCP_SETTERS), locked(SERIAL_SETTERS), locked(UDP_SETTERS)
+local READ_MT, WRITE_MT = locked(READ_SETTERS), locked(WRITE_SETTERS)
+
 return {
   Tcp = function(host, port)
     return setmetatable({host = host, port = port, timeout = 1.0, readTerm = "\n", writeTerm = "\n"},
-      {__index = TCP_SETTERS})
+      TCP_MT)
   end,
   Serial = function(port)
     return setmetatable({port = port, baud = 9600, dataBits = 8, stopBits = 1,
       parity = Parity.NONE, flowControl = FlowControl.NONE, timeout = 1.0, readTerm = "\n", writeTerm = "\n"},
-      {__index = SERIAL_SETTERS})
+      SERIAL_MT)
   end,
   Udp = function(host, port)
-    return setmetatable({host = host, port = port, localPort = 0, timeout = 1.0}, {__index = UDP_SETTERS})
+    return setmetatable({host = host, port = port, localPort = 0, timeout = 1.0}, UDP_MT)
   end,
   Read = function()
-    return setmetatable({}, {__index = READ_SETTERS})
+    return setmetatable({}, READ_MT)
   end,
   Write = function(data)
-    return setmetatable({data = data}, {__index = WRITE_SETTERS})
+    return setmetatable({data = data}, WRITE_MT)
   end,
 }
