@@ -25,6 +25,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
 from ..catalog import module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
+from .._version import __version__  # packet 06d: the version written to test_run.ate_version
 from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
@@ -361,7 +362,7 @@ class HeadlessRunSession(QObject):
             stop_on_fail=stop_on_fail,
             station_name=self._config.station_name or "",
             station_uuid=self._config.station_uuid or "",
-            ate_version="",  # ticket 02 leaves the ATE version empty; a later ticket fills it
+            ate_version=__version__,  # packet 06d: every run records the ATE build that ran it
             media_number="",
             modules=modules,  # packet 06a: forward the release's require'd module map to this run
             definition=definition,  # packet 06b: record the owning Media Release and files used with checksums

@@ -855,17 +855,30 @@ class RunEngine(QThread):
         self.state_changed.emit(RunStatus.FINISHED)
 
     def _record_files(self, run_uuid: str, host: "_LuaHost") -> None:
-        """Record one ``run_file`` row per file used this run and warn on mismatches (packet 06b).
+        """Record one ``run_file`` row per file used this run and warn on mismatches (packets 06b, 06d).
 
         Iterates the host's load-order list of ``(path, kind, sha256)`` entries; each is matched back
         to its Test Definition entry by absolute path so we can carry the definition-listed ``rel_path``,
         owning media number and expected checksum. A file that loaded but isn't listed has no expected
-        value to compare against, so it is skipped rather than recorded with a null expectation."""
+        value to compare against, so it is skipped rather than recorded with a null expectation — except
+        a bundled ``ate.`` module, which is never in the definition by design: it is recorded under its
+        module name, with no media number and no expectation, and can therefore never mismatch."""
         if self._definition is None:
             return
         by_path = {self._definition.path / entry.rel_path: entry for entry in self._definition.files}
         mismatches: list[tuple[str, Optional[str], str]] = []
         for path, kind, computed in getattr(host, "_files_used", []):
+            if kind == "ate-module":
+                self._store.insert_run_file(
+                    run_uuid,
+                    path=path,  # the `ate.` module name, not a path on disk
+                    media_number=None,
+                    kind=kind,
+                    expected_sha256=None,
+                    computed_sha256=computed,
+                    mismatch=False,
+                )
+                continue
             entry = by_path.get(Path(path))
             if entry is None:
                 continue
