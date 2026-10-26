@@ -34,7 +34,9 @@ Bridging facts (validated empirically against lupa 2.8):
 from __future__ import annotations
 
 import hashlib
+import importlib.resources
 import math
+import re
 import threading
 import time
 import weakref
@@ -45,6 +47,20 @@ from typing import Any, Callable, Mapping, Optional
 def _sha256_hex(data: bytes) -> str:
     """SHA-256 of ``data`` as lowercase hex (packet 06b)."""
     return hashlib.sha256(data).hexdigest()
+
+
+# Packet 06d: the reserved `ate.` namespace resolves to modules bundled with ATE, never to the Test
+# Definition. Only `ate.<word>` is a name; anything else is rejected outright so it cannot walk out of
+# the bundled directory. importlib.resources finds ate/lua/ in a wheel as well as a source checkout.
+_ATE_BUNDLED_RE = re.compile(r"ate\.[A-Za-z0-9_]+\Z")
+
+
+def _bundled_module_bytes(name: str) -> Optional[bytes]:
+    """The shipped bytes of bundled module ``name`` (``ate.devices`` -> ``ate/lua/devices.lua``)."""
+    try:
+        return (importlib.resources.files("ate") / "lua" / f"{name.split('.', 1)[1]}.lua").read_bytes()
+    except (OSError, ModuleNotFoundError):
+        return None
 
 from ..devices import DeviceRegistry, TcpDriver
 from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
@@ -762,7 +778,8 @@ class _LuaHost:
         # Packet 06b: every file this host loads at run time — the schedule plus each module it
         # requires — in load order, once each, as ``(path, kind, sha256-of-raw-bytes)``. ``kind``
         # is "tslua" for the schedule and "lua" for a required module; the run engine records these
-        # rows (and flags mismatches) when the run ends.
+        # rows (and flags mismatches) when the run ends. Packet 06d: a bundled ``ate.`` module is
+        # recorded with kind "ate-module" and the module NAME in place of a path.
         self._files_used: list[tuple[str, str, str]] = []
         # Cache of already-loaded module return values; keyed by module name. A nil return caches as
         # ``True`` (stock Lua), and every later require of the same name returns this without re-running.
@@ -916,15 +933,32 @@ class _LuaHost:
         ``require(name)`` resolves only against this host's module map; an unknown name raises a Lua
         error naming the module (via :meth:`_location`, so it reads as ``<file>:<line>: require: unknown
         module '<name>'``), and a known module is read from disk and run once here, cached per host. With
-        package paths emptied nothing else on disk is reachable."""
+        package paths emptied nothing else on disk is reachable. Packet 06d: the reserved ``ate.`` prefix
+        bypasses that map entirely and resolves to a module bundled in ``ate/lua/`."""
         modules = self._modules  # the whitelist this host was built for
 
         def _require(name: str) -> Any:
-            if name not in modules:
-                raise NotAllowedError(f"{self._location()} require: unknown module '{name}'")
             cached = self._require_cache.get(name)
             if cached is not None:  # a nil return was already cached as True below, so this never hits for nil
                 return cached
+            if isinstance(name, str) and name.startswith("ate."):
+                # Packet 06d: `ate.` is ATE's own namespace — never the Test Definition, and never a path.
+                if not _ATE_BUNDLED_RE.fullmatch(name):
+                    raise NotAllowedError(f"{self._location()} require: unknown module '{name}'")
+                data = _bundled_module_bytes(name)
+                if data is None:
+                    raise NotAllowedError(f"{self._location()} require: unknown module '{name}'")
+                # the module NAME is recorded, not the file it came from, and there is no expectation to match
+                self._files_used.append((name, "ate-module", _sha256_hex(data)))
+                source = data.decode("utf-8")
+                try:
+                    value = self._runtime.execute(source, name=f"@{name}", mode="t")
+                except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
+                    raise HostError(f"failed to load {name}: {exc}") from exc
+                self._require_cache[name] = True if value is None else value  # a nil return caches as true (stock Lua)
+                return self._require_cache[name]
+            if name not in modules:
+                raise NotAllowedError(f"{self._location()} require: unknown module '{name}'")
             module_path = Path(modules[name])
             data = module_path.read_bytes()  # checksum the raw bytes before decoding (packet 06b)
             self._files_used.append((str(module_path), "lua", _sha256_hex(data)))
