@@ -287,3 +287,16 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - The ticket-03 "latest step" large-font row lands on a trailing NOTRUN step and clashes with the bold headers (the mockup uses blue/red bands).
   - Tests use `setCheckState`, not clicks.
   - The PDF helper's callback can fire after the session is deleted (pre-existing).
+
+## 20 — Equipment (merged 2026-10-28) — first Strata run at variant medium
+- Strata (medium) implemented it in 24.9 min / 114 steps / 0 compactions (155k peak). `ATE.addEquipment` validates types (strings only, `name` required). A repeat of name+serial is ignored with a DEBUG line (source `ate`). A load-time call is a load error, like `ATE.report`/`ATE.input`. Rows are flushed through the engine's per-call drain, owned by the step Attempt or Action. Schema v5 adds the `equipment` table, with a v4→v5 migration test. 16 tests. Its report was accurate and complete.
+- Haiku: MUST-FIX 0. Its probes confirmed owners, order, NULLs, the repeat DEBUG line, per-step ERRORs, and that History and the log export are unaffected. Strata: MUST-FIX 1. Removing the per-call drain left all tests green, so "recorded as it happens" was untested. Strata also confirmed by probe that rows survive a raising step and an abort, that the retried-step owner is right, and that the shared `_log_seq` has gaps but no collisions.
+- Light review:
+  - A mid-step test with a busy Lua loop and no further ATE calls (`ATE.sleep` would flush the row itself), which fails under the drain mutation.
+  - `""` as name is "name is required".
+  - A sixth argument gives a readable error, not Python's signature message.
+  - No serial and `""` are the same Equipment.
+  - The DEBUG text no longer prints `(serial )`.
+
+  The new checks fail under their mutations. Suite 792 ×3.
+- Leftovers: the ownership dict's `action_seq` holds the instance seq, not the `action` row's `seq` (same as `log_line` since 17b), so a report join on `action.seq` would mis-join. Probes in the review came up with PDF-helper teardown noise (pre-existing).
