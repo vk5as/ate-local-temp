@@ -71,6 +71,7 @@ from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, regi
 from ..devices.udp import UdpDriver  # packet 18b: UDP datagrams, registered like the other streams
 from ..devices.visa import VisaDriver  # packet 19: VISA instruments, read on demand (no reader)
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
+from ..devices.tracing import DEFAULT_TRACE_MAX_BYTES  # packet 17c: the default deviceTrace.maxBytes
 from ..errors import ATEError
 from .operator_input import OperatorInput
 from .step_inputs import InvalidStepInput, StepInput, validate_inputs
@@ -896,6 +897,8 @@ class _LuaHost:
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
         includes: Any = None,  # packet 15b: the release's `catalog.IncludeMap`, resolving `setInclude` files
         receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
+        device_trace_enabled: bool = False,  # packet 17c: deviceTrace.enabled — one DEBUG line per operation
+        device_trace_max_bytes: int = DEFAULT_TRACE_MAX_BYTES,  # packet 17c: deviceTrace.maxBytes truncation
     ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
 
@@ -1050,7 +1053,12 @@ class _LuaHost:
         # reads it after the Post-test Actions (see RunEngine.run). The TCP driver is registered
         # here; later packets add their drivers to the same registry. The receive buffer cap (17a)
         # is held by the registry, which hands it to each driver's open.
-        self._devices = DeviceRegistry(receive_buffer_bytes=receive_buffer_bytes)
+        self._devices = DeviceRegistry(
+            receive_buffer_bytes=receive_buffer_bytes,
+            trace_enabled=device_trace_enabled,  # packet 17c: each operation logs one DEBUG line
+            trace_max_bytes=device_trace_max_bytes,
+            emit=self.record_log,  # through the run's own log, so the engine owns it like ATE.log
+        )
         # Packet 17b: the run engine's callable that records pending device warnings; None until a run.
         self.device_warning_sink: Optional[Callable[[], None]] = None
         self._devices.register("TCP", TcpDriver)

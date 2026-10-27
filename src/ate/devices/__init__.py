@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .registry import DeviceRegistry, Driver, validate_params
 from .tcp import TcpDriver
+from .tracing import DEFAULT_TRACE_MAX_BYTES, DeviceTracer, TracedDevice
 
 
-__all__ = ["DeviceRegistry", "Driver", "TcpDriver", "validate_params"]
+__all__ = ["DeviceRegistry", "Driver", "TcpDriver", "validate_params", "DeviceTracer", "TracedDevice", "DEFAULT_TRACE_MAX_BYTES"]

@@ -8,12 +8,19 @@ ends (see :meth:`RunEngine.run`).
 Drivers are intentionally small: each declares the fields its ``open`` params accept, validates
 them generically, connects, and returns an opaque handle. The registry never knows how a driver
 connects — only that it produced a handle to track until close.
+
+With Device tracing on (packet 17c, app config ``deviceTrace.enabled``) the registry also wraps every
+handle it opens in :class:`ate.devices.tracing.TracedDevice` and logs each open/read/write/close as
+one ``DEBUG`` line (source ``device``) through the host's log sink.
 """
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Mapping
+from typing import Any, Callable, ClassVar, Mapping, Optional
+
+from .tracing import DEFAULT_TRACE_MAX_BYTES, DeviceTracer, device_label, elapsed_ms, handle_label, TracedDevice
 
 
 def _is_number(value: Any) -> bool:
@@ -98,7 +105,13 @@ class DeviceRegistry:
     object) matches the one stored at open time; objects without custom equality hash by identity,
     which is exactly what we want for opaque handles."""
 
-    def __init__(self, receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
+    def __init__(
+        self,
+        receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,
+        trace_enabled: bool = False,
+        trace_max_bytes: int = DEFAULT_TRACE_MAX_BYTES,
+        emit: Optional[Callable[..., Any]] = None,  # packet 17c: the host's record_log for trace lines
+    ) -> None:
         self._drivers: dict[str, type[Driver]] = {}
         # id(handle) -> handle still open this run.
         self._open: dict[int, Any] = {}
@@ -108,6 +121,10 @@ class DeviceRegistry:
         self._closed: dict[int, Any] = {}
         # The per-device receive buffer cap (app config) passed to every driver's open (17a).
         self._receive_buffer_bytes = receive_buffer_bytes
+        # Packet 17c: with deviceTrace.enabled every open/read/write/close gets one DEBUG line,
+        # emitted through ``emit`` (the LuaHost's record_log) so the engine owns it like an ATE.log
+        # line. Off: tracer None, no wrapper on any handle, one `if` per call and nothing else.
+        self._tracer = DeviceTracer(trace_max_bytes, emit) if (trace_enabled and emit is not None) else None
 
     def register(self, name: str, driver_cls: type[Driver]) -> "DeviceRegistry":
         """Register a driver class under ``name`` (a Device Type name like ``"TCP"``)."""
@@ -115,14 +132,36 @@ class DeviceRegistry:
         return self
 
     def open_device(self, name: str, params: Mapping[str, Any]) -> Any:
-        """Open a device of type ``name`` and start tracking it; returns the opaque handle."""
+        """Open a device of type ``name`` and start tracking it; returns the opaque handle.
+
+        Packet 17c: with tracing on the open is timed and logged at DEBUG — a refused connect too,
+        before the OSError goes on to the caller's ``onError`` — and the handle comes back wrapped in
+        a :class:`TracedDevice` so its reads and writes are traced too. Off, this is the plain open:
+        one `if` and no wrapper."""
         if name not in self._drivers:
             raise ValueError(f"unknown DeviceType '{name}'")
         driver_cls = self._drivers[name]
-        if driver_cls.accepts_receive_buffer_bytes:  # 17a: the buffer-cap rides on the driver's open
-            handle = driver_cls().open(dict(params), self._receive_buffer_bytes)
-        else:
-            handle = driver_cls().open(dict(params))
+
+        def connect() -> Any:
+            if driver_cls.accepts_receive_buffer_bytes:  # 17a: the buffer-cap rides on the driver's open
+                return driver_cls().open(dict(params), self._receive_buffer_bytes)
+            return driver_cls().open(dict(params))
+
+        tracer = self._tracer
+        if tracer is None:
+            handle = connect()
+            self._open[id(handle)] = handle
+            return handle
+
+        label = device_label(name, params)
+        started = time.perf_counter()
+        try:
+            handle = connect()
+        except OSError as exc:
+            tracer.open(label, False, str(exc), elapsed_ms(started))
+            raise
+        tracer.open(label, True, None, elapsed_ms(started))
+        handle = TracedDevice(handle, tracer, handle_label(handle, label))
         self._open[id(handle)] = handle
         return handle
 
@@ -130,12 +169,24 @@ class DeviceRegistry:
         """Stop tracking ``handle`` and release it. Returns True if it was open (a real close), or
         False if it had already been closed — a double close is then a no-op that still succeeds.
         A closed handle is kept on the registry (``closed_handles``) so its failure warning can
-        still be drained after the handle left ``snapshot()`` (packet 17b)."""
+        still be drained after the handle left ``snapshot()`` (packet 17b).
+
+        Packet 17c: a real close is traced with the time its teardown took; a no-op second close
+        traces nothing, since nothing happened."""
         key = id(handle)
         device = self._open.pop(key, None)
         if device is None:
             return False
-        device.close()  # the handle's own teardown (TCP closes its socket); safe to call twice
+        label = getattr(device, "label", None) or handle_label(device, "device")
+        started = time.perf_counter()
+        try:
+            device.close()  # the handle's own teardown (TCP closes its socket); safe to call twice
+        except OSError as exc:  # 17c: a close that failed is still traced, then the error carries on
+            if self._tracer is not None:
+                self._tracer.close(label, elapsed_ms(started), err=str(exc))
+            raise
+        if self._tracer is not None:
+            self._tracer.close(label, elapsed_ms(started))
         self._closed[key] = device
         return True
 

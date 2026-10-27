@@ -419,6 +419,8 @@ class HeadlessRunSession(QObject):
             utc_offset="+00:00",
             overrides={int(seq): bool(en) for seq, en in (self._pending_node_enables or {}).items()},
             receive_buffer_bytes=self._config.receive_buffer_bytes,  # packet 17a: the per-device receive cap
+            device_trace_enabled=self._config.device_trace_enabled,  # packet 17c: deviceTrace.enabled
+            device_trace_max_bytes=self._config.device_trace_max_bytes,  # packet 17c: deviceTrace.maxBytes
         )
 
         # Announce STARTED on this thread before the worker runs. The worker's queued

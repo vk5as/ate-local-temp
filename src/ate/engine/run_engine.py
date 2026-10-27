@@ -37,6 +37,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..catalog import _search_chain, include_map
 from ..errors import ATEError
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES
+from ..devices.tracing import DEFAULT_TRACE_MAX_BYTES  # packet 17c: the default deviceTrace.maxBytes
 from ..storage._uuid import new_uuid7
 from ..storage.store import RunStore, _now_iso
 from .lua_host import _AbortFlag, _sha256_hex, LuaHost
@@ -102,6 +103,8 @@ class RunEngine(QThread):
         ate_fns: Mapping[str, Callable[..., Any]] | None = None,
         operator_input: Optional[OperatorInput] = None,
         receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
+        device_trace_enabled: bool = False,  # packet 17c: deviceTrace.enabled — one DEBUG line per operation
+        device_trace_max_bytes: int = DEFAULT_TRACE_MAX_BYTES,  # packet 17c: deviceTrace.maxBytes truncation
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -134,6 +137,10 @@ class RunEngine(QThread):
         # Packet 17a: the per-device receive buffer cap, forwarded to the host (and thus to each
         # device's open) so a chatty device can't exhaust memory; the config sets it at the session.
         self._receive_buffer_bytes = receive_buffer_bytes
+        # Packet 17c: device tracing (deviceTrace.enabled/maxBytes) forwarded to the host's registry,
+        # which wraps each handle it opens and logs every operation at DEBUG.
+        self._device_trace_enabled = bool(device_trace_enabled)
+        self._device_trace_max_bytes = int(device_trace_max_bytes)
         # Packet 06b: the resolved Media Release that owns this run, forwarded from the session so we
         # can record its media_release row (seq 0) and every file used with expected/computed checksums.
         # ``None`` means a bare schedule test — nothing extra is recorded then.
@@ -453,7 +460,10 @@ class RunEngine(QThread):
         def sink() -> None:
             owner = self._device_owner
             if owner is None:
-                self._flush_device_warnings(host, run_uuid)
+                # Nothing is running (the gap between actions, or the run-end teardown): lines emitted
+                # since the last drain belong to the run as a whole — 17c's trace of the closes this
+                # engine performs on devices the schedule left open, among them.
+                self._flush_device_warnings(host, run_uuid, log_from=self._log_cursor)
             else:
                 start, ownership = owner
                 self._flush_device_warnings(
@@ -553,7 +563,7 @@ class RunEngine(QThread):
         warnings: list[str] = []
         for device in registry.snapshot():
             try:
-                device.close()  # release the socket (TCP); safe to call twice at run end
+                registry.close_device(device)  # the registry's close, so 17c traces it; safe to repeat
             except Exception:  # noqa: BLE001 - teardown at run end must never abort the run
                 pass
             if hasattr(device, "describe"):
@@ -576,6 +586,8 @@ class RunEngine(QThread):
             modules=self._modules,  # packet 06a: forward the require'd module map to the host
             includes=self._includes,  # packet 15b: the release's Sub-schedule resolver
             receive_buffer_bytes=self._receive_buffer_bytes,  # packet 17a: the cap, per Device
+            device_trace_enabled=self._device_trace_enabled,  # packet 17c: deviceTrace.enabled
+            device_trace_max_bytes=self._device_trace_max_bytes,  # packet 17c: deviceTrace.maxBytes
         )
         self._host = host  # kept on the engine so per-step input values can be typed from declarations
         for name, fn in self._ate_fns.items():

@@ -6,9 +6,9 @@
 
 **Blocked by:** 17a (Background reader, receive buffer and `ATE.flush`)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] With `deviceTrace.enabled`, every operation is logged at `DEBUG` (source `device`) with the Device, escaped bytes truncated at `deviceTrace.maxBytes`, and timing
-- [ ] Seam-1 tests check traced lines
+- [x] With `deviceTrace.enabled`, every operation is logged at `DEBUG` (source `device`) with the Device, escaped bytes truncated at `deviceTrace.maxBytes`, and timing
+- [x] Seam-1 tests check traced lines
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
