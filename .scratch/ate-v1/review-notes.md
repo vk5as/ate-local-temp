@@ -300,3 +300,31 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 
   The new checks fail under their mutations. Suite 792 ×3.
 - Leftovers: the ownership dict's `action_seq` holds the instance seq, not the `action` row's `seq` (same as `log_line` since 17b), so a report join on `action.seq` would mis-join. Probes in the review came up with PDF-helper teardown noise (pre-existing).
+
+## 21b — report Steps section (merged 2026-10-28) — second Strata medium run, plus a medium rework
+- Strata (medium) implemented it in 23 min / 109 steps / 0 compactions: Steps rows from the record, a spec-worded roll-up (`N steps: 3 PASS, 1 FAIL`), Attempt sub-rows, override labels, input values and print CSS, plus `RunStore.input_values()`. 7 tests.
+- Haiku (MUST-FIX 2, PDF screenshots):
+  - Autoescape was OFF: `select_autoescape(["html"])` doesn't match `report.html.j2`, so operator input and report messages rendered as markup. This dates from 21a and also affected the Cover.
+  - The depth indent sat on the fixed-width Step Number cell, so names never moved.
+
+  Strata (MUST-FIX 3):
+  - The same autoescape bug.
+  - Header rows never carried an override label. My brief said "steps only", but spec line 66 says "whenever `enabled` differs".
+  - The print test was a substring grep that passed with the CSS removed; `<thead>` alone repeats the headings.
+- Rework (Strata medium, on its own `t3/report-escape-indent-rework` branch because the packet branch was checked out elsewhere):
+  - Autoescape on (`["html","j2"]`), with only the logo data URI and the margin CSS marked `Markup`.
+  - Indent on the name cell (sub-rows one level deeper).
+  - Header overrides follow the spec.
+  - The print test parses `<thead>`/`<tbody>`; the inert `thead` CSS rule was dropped.
+  - `input_values()` gets an `ORDER BY` (pinned by reversing it, since SQLite's PK order hides its removal).
+  - CHECKBOX values print as `Green, Blue`.
+
+  5 tests. Suite 804 ×3.
+- Leftovers (pre-existing):
+  - `.page-break` has no CSS rule, so no section starts a page.
+  - The footer `run_ftr` is never in the context, so it's blank.
+  - Cover Failures uses the first Attempt's message, Steps the last.
+  - The page header reads `· · rev` with no doc title and doesn't fall back to the schedule name (21a).
+  - `nodes()`/`attempts()` have no ORDER BY.
+  - The PDF file is written 0600 while the HTML is 0664.
+- Medium-trial note: the defects were real behaviour or spec gaps, not just test gaps, but 2 of the 3 distinct ones came from 21a or my brief. The rework was clean.
