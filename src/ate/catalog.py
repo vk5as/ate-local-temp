@@ -603,7 +603,7 @@ def _schedule_summaries(definition: Definition) -> list[tuple[str, str, str]]:
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full, modules=module_map(definition))
+            host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
             schedule_name = host.schedule.name
             description = host.schedule.description
         except HostError as exc:
@@ -646,7 +646,7 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
                 continue
             full = definition.path / file_entry.rel_path
             try:
-                host = LuaHost(full, modules=module_map(definition))
+                host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
                 rows.append(
                     ScheduleRow(
                         media_number=definition.media_number,
@@ -670,7 +670,7 @@ def resolve_schedule_path(definition: Definition, schedule_name: str) -> Path | 
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full, modules=module_map(definition))
+            host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
         except HostError:
             continue
         if host.schedule.name == schedule_name:
@@ -726,6 +726,55 @@ def module_map(definition: Definition) -> dict[str, Path]:
     return modules
 
 
+class IncludeMap:
+    """Resolves `setInclude` paths through one resolved Test Definition (packet 15b).
+
+    Resolution is anchored at the release that owns the INCLUDING file, not at the top-level
+    release: an include is first looked up in that release's own listed files, and a hit there
+    wins outright (the same own-first rule `require` uses). Only if it isn't listed there are the
+    release's dependencies searched depth first in declaration order, and a path listed by more
+    than one of those is ambiguous. Hidden schedules count: only the picker hides them."""
+
+    def __init__(self, definition: Definition) -> None:
+        self.definition = definition
+
+    @staticmethod
+    def _listed(member: Definition, rel: str) -> Optional[Path]:
+        for entry in member.files:
+            if entry.is_schedule and Path(entry.rel_path).as_posix() == rel:
+                return member.path / entry.rel_path
+        return None
+
+    def owner(self, path: Path) -> Optional[tuple[str, Definition]]:
+        """``(rel path as listed, owning release)`` for a loaded `.tslua` file, or ``None``."""
+        target = Path(path).resolve()
+        for member in _search_chain(self.definition):
+            for entry in member.files:
+                if entry.is_schedule and (member.path / entry.rel_path).resolve() == target:
+                    return Path(entry.rel_path).as_posix(), member
+        return None
+
+    def candidates(self, member: Definition, rel: str) -> list[tuple[Definition, Path]]:
+        """Every ``(release, absolute path)`` an include of ``rel`` from ``member`` may mean.
+
+        One entry when ``member`` lists it itself; otherwise each dependency that lists it, in
+        search order — more than one is an ambiguous include, none is "not listed"."""
+        own = self._listed(member, rel)
+        if own is not None:
+            return [(member, own)]
+        hits = []
+        for dep in _search_chain(member)[1:]:
+            path = self._listed(dep, rel)
+            if path is not None:
+                hits.append((dep, path))
+        return hits
+
+
+def include_map(definition: Definition) -> IncludeMap:
+    """The `setInclude` resolver for ``definition`` and every release in its chain (packet 15b)."""
+    return IncludeMap(definition)
+
+
 def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
     """Return the usable Media Release whose loaded schedules include ``schedule_name`` (or ``None``).
 
@@ -736,14 +785,16 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
     for definition in find_definitions(*directories):
         if definition.broken:
             continue
-        # Load each schedule with its own release's module map so a load-time require still resolves.
+        # Load each schedule with its own release's module map so a load-time require still resolves,
+        # and its include map so packet 15b can resolve `setInclude` files the same way.
         modules = module_map(definition)
+        includes = include_map(definition)
         for file_entry in definition.files:
             if not file_entry.is_schedule or file_entry.hidden:
                 continue
             full = definition.path / file_entry.rel_path
             try:
-                host = LuaHost(full, modules=modules)
+                host = LuaHost(full, modules=modules, includes=includes)
             except HostError:
                 continue
             if host.schedule.name == schedule_name:
@@ -754,27 +805,43 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
 # --- checksum mismatches ------------------------------------------------------
 
 
+def _loaded_schedule_paths(definition: Definition, path: Path) -> set[Path]:
+    """Every `.tslua` file a run of ``path`` loads, includes included (packet 15b).
+
+    Loading the schedule once with the release's include map is the only way to know which
+    Sub-schedules it actually expands into. A schedule that fails to load contributes nothing:
+    it cannot run, so there is nothing to flag."""
+    try:
+        host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
+    except HostError:
+        return set()
+    return {Path(loaded) for loaded, kind, _ in host._files_used if kind == "tslua"}
+
+
 def definition_mismatches(
     definition: Definition, schedule_name: Optional[str] = None
 ) -> list[tuple[str, Optional[str], str, str]]:
     """Return ``(rel_path, expected_sha256, computed_sha256, media_number)`` for every mismatch.
 
     With ``schedule_name``, only the files a run of that schedule can load are checked: its own
-    ``.tslua`` and the ``.lua`` modules of the release and of every release in its resolved chain
-    (any of which it may ``require``; which ones it actually loads is only known at run time). Other
-    schedules' files are left out, so a schedule is never flagged for a sibling's mismatch. Without
-    it, every listed file is checked. The media number is the one of the release that owns the file.
-    (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always set here.)"""
-    own = None
+    ``.tslua``, the ``.tslua`` files its Sub-schedule tree includes (packet 15b — the run loads
+    them too), and the ``.lua`` modules of the release and of every release in its resolved chain
+    (any of which it may ``require``; which ones it actually loads is only known at run time).
+    Other schedules' files are left out, so a schedule is never flagged for a sibling's mismatch.
+    Without it, every listed file is checked. The media number is the one of the release that owns
+    the file. (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always
+    set here.)"""
+    loaded = set()
     if schedule_name is not None:
         path = resolve_schedule_path(definition, schedule_name)
-        own = path.relative_to(definition.path).as_posix() if path is not None else None
+        if path is not None:
+            loaded = _loaded_schedule_paths(definition, path)
     return [
         (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, member.media_number)
         for member in _search_chain(definition)
         for entry in member.files
         if (entry.expected_sha256 or None) != entry.computed_sha256
-        and (schedule_name is None or not entry.is_schedule or (member is definition and Path(entry.rel_path).as_posix() == own))
+        and (schedule_name is None or not entry.is_schedule or member.path / entry.rel_path in loaded)
     ]
 
 

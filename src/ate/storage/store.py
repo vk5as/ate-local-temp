@@ -34,6 +34,7 @@ from .schema import (
     metadata,
     node,
     run_file,
+    schedule_instance,
     test_run,
 )
 
@@ -506,6 +507,40 @@ class RunStore:
             self._runfile_seq[run_uuid] = next_seq
         return dict(row)
 
+    # -- schedule_instance ---------------------------------------------------
+
+    def insert_schedule_instance(
+        self,
+        run_uuid: str,
+        *,
+        instance_seq: int,
+        parent_instance_seq: Optional[int] = None,
+        header_node_seq: Optional[int] = None,
+        schedule_name: Optional[str] = None,
+        file: Optional[str] = None,
+        media_number: Optional[str] = None,
+        prefix: str = "",
+        keyvals: str = "{}",
+    ) -> dict:
+        """Insert one schedule-instance row keyed by ``(run_uuid, instance_seq)``.
+
+        Packet 15b: the top-level schedule is instance 0 and every `setInclude` is its own
+        instance, numbered in tree order as the tree is walked; ``instance_seq`` is the host's own
+        index for it. ``keyvals`` is already JSON text (an empty table is ``"{}"``)."""
+        row = {
+            "run_uuid": run_uuid,
+            "instance_seq": instance_seq,
+            "parent_instance_seq": parent_instance_seq,
+            "header_node_seq": header_node_seq,
+            "schedule_name": schedule_name or None,
+            "file": file or None,
+            "media_number": media_number or None,
+            "prefix": prefix or "",
+            "keyvals": keyvals if keyvals is not None else "{}",
+        }
+        self._run(schedule_instance.insert().values(**row))
+        return dict(row)
+
     # -- reads --------------------------------------------------------------
 
     def media_releases(self, run_uuid: str) -> list[dict]:
@@ -530,6 +565,21 @@ class RunStore:
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
+        ]
+
+    def schedule_instances(self, run_uuid: str) -> list[dict]:
+        """Return this run's schedule-instance rows as dicts in instance_seq order (packet 15b).
+
+        One row per schedule in the expanded tree: instance 0 is the top-level schedule, then one
+        row per `setInclude`, in tree order. Empty when the run is unknown."""
+        stmt = (
+            schedule_instance.select()
+            .where(schedule_instance.c.run_uuid == run_uuid)
+            .order_by(schedule_instance.c.instance_seq)
+        )
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(schedule_instance.columns, row)} for row in rows
         ]
 
     # -- log_line ------------------------------------------------------------

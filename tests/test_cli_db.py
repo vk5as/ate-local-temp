@@ -10,7 +10,7 @@ so automation (and tests) can drive migrate non-interactively.
 import sqlite3
 
 from ate.cli import main
-from ate.storage import RunStore
+from ate.storage import DbLaunchStatus, RunStore, SCHEMA_VERSION, check_database_at_launch
 
 
 def _missing_db(tmp_path):
@@ -32,10 +32,10 @@ def test_status_refuses_missing_database_and_migrate_creates_it(tmp_path, capsys
     assert rc == 0
     assert captured.out.strip().startswith("created or upgraded database at")
 
-    # Now launchable: status prints the schema version (3) and exits cleanly.
+    # Now launchable: status prints the schema version and exits cleanly.
     rc, captured = main(["db", "status", path]), capsys.readouterr()
     assert rc == 0
-    assert captured.out.strip() == "3"
+    assert captured.out.strip() == str(SCHEMA_VERSION)
 
 
 def test_migrate_is_idempotent(tmp_path, capsys):
@@ -55,7 +55,7 @@ def test_status_reports_schema_version_of_migrated_db(tmp_path, capsys):
 
     rc, captured = main(["db", "status", path]), capsys.readouterr()
     assert rc == 0
-    assert captured.out.strip() == "3"
+    assert captured.out.strip() == str(SCHEMA_VERSION)
 
 
 def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsys):
@@ -64,11 +64,11 @@ def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsy
     The file is left exactly as it was — migrate never downgrades or creates tables here.
     """
     path = _missing_db(tmp_path)
-    # Bootstrap a real v3 database, then simulate a newer ATE by bumping its version one above schema.
-    RunStore(path)  # creates the tables and sets user_version to 3
+    # Bootstrap a real current database, then simulate a newer ATE by bumping its version one above schema.
+    RunStore(path)  # creates the tables and sets user_version to SCHEMA_VERSION
     conn = sqlite3.connect(f"file:{path}?mode=rwc", uri=True)
     try:
-        conn.execute("PRAGMA user_version=4")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     finally:
         conn.close()
 
@@ -81,13 +81,13 @@ def test_migrate_refuses_a_database_from_newer_ate_and_leaves_it(tmp_path, capsy
     assert rc == 1
     assert "too old" in captured.err.lower()
 
-    # The database is still user_version 4 (untouched).
+    # The database is still at the newer version it started with (untouched).
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     finally:
         conn.close()
-    assert version == 4
+    assert version == SCHEMA_VERSION + 1
 
 
 def test_migrate_without_yes_prompts_for_confirmation(tmp_path, capsys, monkeypatch):
@@ -99,3 +99,37 @@ def test_migrate_without_yes_prompts_for_confirmation(tmp_path, capsys, monkeypa
     assert rc == 1
     # The aborted migrate must not create the database.
     assert not (tmp_path / "ate.db").exists()
+
+
+def test_schema_version_is_4() -> None:
+    """Packet 15b's ``schedule_instance`` table bumped the schema to 4; this pins the bump."""
+    assert SCHEMA_VERSION == 4
+
+
+def test_a_v3_database_needs_migration_and_gains_schedule_instance(tmp_path, capsys):
+    """A v3 database (no ``schedule_instance``) refuses launch; migrating adds the table and sets v4."""
+    path = _missing_db(tmp_path)
+    RunStore(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DROP TABLE schedule_instance")
+        conn.execute("PRAGMA user_version=3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = check_database_at_launch(path)
+    assert (result.status, result.user_version) == (DbLaunchStatus.NEEDS_MIGRATE, 3)
+    rc, captured = main(["db", "status", path]), capsys.readouterr()
+    assert rc == 1 and "run `ate db migrate`" in captured.err
+
+    rc, captured = main(["db", "migrate", path, "--yes"]), capsys.readouterr()
+    assert rc == 0
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+    assert "schedule_instance" in tables and version == 4
+    assert check_database_at_launch(path).status == DbLaunchStatus.OK

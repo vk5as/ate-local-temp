@@ -25,6 +25,9 @@ Bridging facts (validated empirically against lupa 2.8):
   as ``None`` and clobbers the global with nil.
 * Builder classes (``ScheduleParams``/``StepParams``) and ATE functions are registered
   on the runtime's global environment by assigning them there; Lua calls them normally.
+* Each schedule instance (packet 15b) runs with its own ``_ENV`` table that reads through to
+  that shared global environment, loaded with ``load(code, name, "t", env)`` (Lua 5.5). Lua may
+  not set attributes on Python objects (lupa ``attribute_filter``), and the enums are read-only.
 * Steps read back from a loaded schedule: enumerate the step table's keys for the
   count, then index with **1-based** values to get the real builder objects (iterating
   the proxy yields indices, not steps). Each step's action is a closure that runs in
@@ -40,6 +43,7 @@ import re
 import threading
 import time
 import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -244,15 +248,53 @@ _ENUMS: dict[str, Mapping[str, str]] = {
 }
 
 
+# Packet 15b: every schedule instance shares the enum tables, so they are read-only proxies. The
+# values live in a private table behind ``__index``; the public table stays empty so every write
+# reaches ``__newindex``, ``__pairs`` still iterates the values, and ``__metatable`` hides the
+# metatable. ``rawset`` is wrapped so it can't plant a key in a protected table either.
+_READONLY_PRELUDE = r"""
+local setmetatable, error, next, tostring, raw_rawset = setmetatable, error, next, tostring, rawset
+local protected = setmetatable({}, {__mode = "k"})
+rawset = function(t, k, v)
+  if protected[t] then error("rawset: table is read-only", 2) end
+  return raw_rawset(t, k, v)
+end
+return function(name, vals)
+  local t = setmetatable({}, {
+    __index = vals,
+    __newindex = function(_, k) error(name .. "." .. tostring(k) .. " is read-only", 2) end,
+    __pairs = function() return next, vals, nil end,
+    __metatable = false,
+  })
+  protected[t] = true
+  return t
+end
+"""
+
+
 def _declare_enums(runtime) -> None:
-    """Define every enum table as a Lua global on ``runtime``."""
+    """Define every enum table as a read-only Lua global on ``runtime`` (packet 15b)."""
+    readonly = runtime.execute(_READONLY_PRELUDE, name="@enum-readonly", mode="t")
     for name, labels in _ENUMS.items():
         pairs = ", ".join(f"{key}={value!r}" for key, value in labels.items())
         runtime.execute(
-            f"{name} = {{ {pairs} }}",
+            f"local readonly = ...\n{name} = readonly({name!r}, {{ {pairs} }})",
+            readonly,
             name=f"@enum-{name}",
             mode="t",
         )
+
+
+def _lua_attribute_filter(obj: Any, name: str, is_setting: bool) -> str:
+    """lupa's attribute filter: Lua reads Python attributes but never sets one (packet 15b).
+
+    ``ATE``, the builders and the objects they hand out are shared by every schedule instance of
+    a run, so ``ATE.log = f`` in one include would rewrite it for all of them. Python code still
+    sets attributes freely; only assignments made from Lua come through here."""
+    if is_setting:
+        owner = "ATE" if isinstance(obj, _AteTable) else getattr(obj, "__name__", type(obj).__name__).lstrip("_")
+        raise AttributeError(f"{owner}.{name} is read-only")
+    return name
 
 
 class _AteTable:
@@ -710,10 +752,10 @@ class _StepParams:
         self.action = fn
         return self
 
-    def setInclude(self, file: str, keyvals: Mapping[str, Any] | None = None) -> "_StepParams":
+    def setInclude(self, file: str, keyvals: Any = None) -> "_StepParams":
         self.include_file = file
         self._included = True
-        self.keyvals = dict(keyvals or {})
+        self.keyvals = keyvals  # kept as given: the host checks it is a plain data table when it expands the include
         return self
 
     def setPrefix(self, value: str) -> "_StepParams":
@@ -774,6 +816,75 @@ class _ScheduleParams:
         return self
 
 
+# Packet 15b: the loader for one schedule instance. Its globals live in a fresh table that falls back
+# to the shared global table (the builders, ``ATE``, the enums, ``require``, the standard library)
+# for reads, so a global the chunk sets — at load time or later in an action, whose closures keep
+# this ``_ENV`` — stays in the instance. ``_G`` names the instance's own table. Modules loaded
+# through ``require`` still run in the shared table, once per run, so they stay shared.
+_INSTANCE_LOADER = r"""
+local load, setmetatable, error, G = load, setmetatable, error, _G
+return function(code, chunkname)
+  local env = setmetatable({}, {__index = G, __metatable = false})  -- hides the shared table
+  env._G = env
+  local chunk, err = load(code, chunkname, "t", env)
+  if not chunk then error(err, 0) end
+  return chunk, env
+end
+"""
+
+# Packet 15b: keyvals nested deeper than this are refused, so a table that contains itself is a
+# load error rather than a runaway recursion.
+MAX_KEYVALS_DEPTH = 32
+
+# Packet 15b: an include chain this deep is a cycle. 15c detects cycles properly; until then this
+# is the guard that stops a self-including schedule from hanging the loader.
+MAX_INCLUDE_DEPTH = 32
+
+
+@dataclass
+class _ScheduleInstance:
+    """One schedule in the expanded tree: the top level, or one `setInclude` (packet 15b).
+
+    `header` is the tree index of the include header row that introduced this instance, `parent`
+    is the instance that included it (None for the top level), and `keyvals` is the plain Python
+    table the include passed in (`{}` for a top-level schedule or an include with no keyvals)."""
+
+    parent_instance: Optional[int]
+    header: Optional[int]
+    name: str
+    file: str
+    media_number: Optional[str]
+    prefix: str
+    keyvals: dict[Any, Any]
+    # The release that owns `file` (None without a Test Definition): includes from this instance
+    # resolve against it. `env` is the instance's own Lua global table.
+    owner: Any = field(default=None, repr=False, compare=False)
+    env: Any = field(default=None, repr=False, compare=False)
+
+
+def _media_of(member: Any) -> Optional[str]:
+    """The media number of a release from the catalog, or None without one."""
+    return (member.media_number or None) if member is not None else None
+
+
+@dataclass
+class _TreeNode:
+    """One row of the expanded step tree, in the order the run engine records it.
+
+    `parent` is the tree index of the enclosing include header (None at the top level), `instance`
+    the schedule instance the row belongs to, `depth` how deeply it is nested. Everything else is
+    read straight off the step, so the runner's `step.step_no`/`step.is_header` reads work on a
+    tree entry as they do on a bare `_StepParams`."""
+
+    step: _StepParams
+    parent: Optional[int]
+    instance: int
+    depth: int
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.step, name)
+
+
 class _LuaHost:
     """A fresh lupa runtime plus the globals and one loaded schedule."""
 
@@ -783,6 +894,7 @@ class _LuaHost:
         operator_input: Optional[OperatorInput] = None,
         aborted_flag: Optional[_AbortFlag] = None,
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
+        includes: Any = None,  # packet 15b: the release's `catalog.IncludeMap`, resolving `setInclude` files
         receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
     ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
@@ -793,6 +905,12 @@ class _LuaHost:
         # Packet 06a: the whitelist of require'd modules for this host (one per Test Run). ``None``
         # means no replacement require is installed, so any require call reads back as a nil value.
         self._modules = dict(modules) if modules is not None else {}  # no map: nothing is requirable
+        # Packet 15b: the Sub-schedule resolver for this host (`catalog.IncludeMap`), which knows the
+        # release owning every listed `.tslua` file. Without one (a bare `LuaHost(path)` in a test, or
+        # a run with no Test Definition) an include is resolved against the directory of the file
+        # that includes it, and it gets no media number: that is a test seam only, not a second way
+        # to run a release.
+        self._includes = includes
         # Packet 06b: every file this host loads at run time — the schedule plus each module it
         # requires — in load order, once each, as ``(path, kind, sha256-of-raw-bytes)``. ``kind``
         # is "tslua" for the schedule and "lua" for a required module; the run engine records these
@@ -827,7 +945,7 @@ class _LuaHost:
         # The schedule path this host was built for; :meth:`_location` uses it to name the
         # error's file (lupa has no API to read a Python call site).
         self._schedule_path = Path(path)
-        self._runtime = LuaRuntime(**base)
+        self._runtime = LuaRuntime(**base, attribute_filter=_lua_attribute_filter)  # packet 15b: Lua can't set Python attributes
         if self._runtime.lua_version != TARGET_LUA_VERSION:
             raise VersionMismatch(
                 f"ATE requires Lua {TARGET_LUA_VERSION[0]}.{TARGET_LUA_VERSION[1]} "
@@ -866,6 +984,12 @@ class _LuaHost:
         # Enums as persistent Lua globals, then the builders and ATE table.
         _declare_enums(self._runtime)
         env = self._runtime.globals()
+        # Packet 15b: each schedule instance (the top level and every include) runs in its own
+        # global table, built by this loader. It captures the stock ``load`` before the lockdown
+        # removes it from the schedule's reach.
+        self._instance_loader = self._runtime.execute(_INSTANCE_LOADER, name="@instance-env", mode="t")
+        # Reads a table's metatable past any ``__metatable`` field, so keyvals can be checked for one.
+        self._raw_getmetatable = self._runtime.eval("debug.getmetatable")
         # Lock down the sandbox before anything else is registered so a schedule — even at load
         # time — cannot escape via file loading or reach Python (criterion 01).
         self._lockdown(env)
@@ -893,6 +1017,12 @@ class _LuaHost:
         # pcall/xpcall are wrapped to re-raise it so an abort can't be caught (packet 13c).
         env["aborted"] = self._make_aborted_callable()
         self._install_abort_hook(env)
+        # Packet 15b: with ``debug`` a schedule could reach the instance loader (and the stock
+        # ``load`` it holds) through ``debug.getregistry``, strip the read-only locks with
+        # ``debug.setmetatable``, read the shared globals past ``__metatable`` or remove the abort
+        # hook. ATE keeps what it needs (the hook above, ``_raw_getmetatable``) from Python; only
+        # ``debug.traceback`` stays, because error tracebacks are built through it.
+        self._runtime.execute("debug = { traceback = debug.traceback }", name="@debug-lockdown", mode="t")
 
         # Every ATE.report call, in order. The run engine diffs this around each step's
         # action closure to attribute reports (last-call-wins) to that step.
@@ -931,14 +1061,22 @@ class _LuaHost:
         # Load and validate the schedule file. Runs in this runtime's global env,
         # where the enums, builders and ATE table are already registered globals.
         self._schedule_source = Path(path).read_text(encoding="utf-8")
-        self._schedule = self._load_schedule(path)
+        self._schedule, top_env = self._load_schedule(path)
         # Check every step's setter combination against the Test Schedule format (packet 15a) before
         # anything else: a header that carries an Action, or an ordinary step with no number or no
         # Action, is a load error and must fail the schedule the same way a bad input table does.
-        self._validate_steps()
+        self._validate_steps(self._schedule, self._schedule_path)
         # Validate every step's input declarations against the Test Schedule format; a bad one is a
         # load error, so surface it here as HostError carrying the schedule's own filename.
-        self._validate_inputs()
+        self._validate_inputs(self._schedule, self._schedule_path)
+        # Packet 15b: expand every `setInclude` into the tree the runner walks. The top-level
+        # schedule is instance 0; each include is its own instance, numbered in tree order.
+        top_file, top_owner = self._own_listing(self._schedule_path)
+        self._instances = [_ScheduleInstance(parent_instance=None, header=None, name=self._schedule.name,
+                                           file=top_file, media_number=_media_of(top_owner), prefix="", keyvals={},
+                                           owner=top_owner, env=top_env)]
+        self._tree: list[_TreeNode] = []
+        self._expand(self._schedule, self._schedule_path, 0, None, 0)
 
     def _lockdown(self, env) -> None:
         """Remove the file-loading entry points and the python builtin from ``env``.
@@ -1155,19 +1293,131 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         """Install the abort count hook and re-raising pcall/xpcall on ``env`` (packet 13c)."""
         self._runtime.execute(self._AbortPrelude, name=f"@{self._schedule_path.name}-abort", mode="t")
 
-    def _load_schedule(self, path: str | Path) -> _ScheduleParams:
-        """Execute ``path`` as a text chunk and return its ScheduleParams.
+    def _own_listing(self, path: Path) -> tuple[str, Any]:
+        """The Test Definition entry for ``path``: ``(rel path as listed, owning release)``.
+
+        Falls back to the bare file name and no owner when no Test Definition stands behind this
+        host (a bare `LuaHost(path)` in a test) or the file isn't listed."""
+        found = self._includes.owner(path) if self._includes is not None else None
+        return found if found is not None else (Path(path).name, None)
+
+    def _resolve_include(self, name: str, from_path: Path, owner: Any) -> tuple[Path, Any]:
+        """Find the file an include refers to and the release that owns it (packet 15b).
+
+        Resolution is anchored at ``owner``, the release that owns the including file: its own
+        listed files first, and a hit there wins; otherwise its dependencies depth first in
+        declaration order, where a path more than one of them lists is ambiguous. One listed
+        nowhere, or listed but absent on disk, is a load error too. The caller names the include,
+        so these messages don't repeat it. With no Test Definition behind this host the name is
+        resolved against the directory of the file that includes it and has no owner — a test
+        seam, not a second resolution rule."""
+        rel = Path(name).as_posix()
+        if self._includes is None:
+            path, member = Path(from_path).parent / rel, None
+        else:
+            hits = self._includes.candidates(owner, rel) if owner is not None else []
+            if not hits:
+                raise HostError("is not listed in the Test Definition or its dependencies")
+            if len(hits) > 1:
+                owners = ", ".join(member.media_number or member.name for member, _ in hits)
+                raise HostError(f"is ambiguous: listed by more than one dependency ({owners})")
+            member, path = hits[0]
+        if not path.is_file():
+            raise HostError(f"is missing ({path})")
+        return path, member
+
+    def _plain_keyvals(self, value: Any) -> dict[Any, Any]:
+        """Return ``keyvals`` as plain Python data, or raise if it is not a plain data table.
+
+        Only strings, numbers, booleans and nested tables of those are allowed (packet 15b); a
+        function, userdata, builder object or a table with a metatable anywhere inside is a load
+        error (the caller names the header that passed it), and so is a value that isn't a table at all. Keys
+        keep their Lua type, so an array arrives in the included chunk as an array."""
+        if value is None:
+            return {}
+        if not isinstance(value, (dict, self._table_cls)):
+            raise HostError(f"keyvals must be a table, got {value!r}")
+        return self._plain_data(value, 0)
+
+    def _plain_data(self, value: Any, depth: int) -> Any:
+        if isinstance(value, (str, bool, int, float)):
+            return value
+        if isinstance(value, (dict, self._table_cls)):
+            if depth >= MAX_KEYVALS_DEPTH:
+                raise HostError(f"keyvals are nested more than {MAX_KEYVALS_DEPTH} deep")
+            if isinstance(value, self._table_cls) and self._raw_getmetatable(value) is not None:
+                raise HostError(f"keyvals must be plain data, got a table with a metatable")
+            plain = {}
+            for key, item in value.items():
+                if not isinstance(key, (str, bool, int, float)):
+                    raise HostError(f"keyvals must be plain data, got a key {key!r}")
+                plain[key] = self._plain_data(item, depth + 1)
+            return plain
+        raise HostError(f"keyvals must be plain data, got {type(value).__name__} ({value!r})")
+
+    def _expand(self, schedule: _ScheduleParams, schedule_path: Path, instance_seq: int, parent_node: Optional[int], depth: int) -> None:
+        """Walk one schedule's headers and expand every include into :attr:`_tree`/:attr:`_instances`.
+
+        Each header is followed immediately by the subtree of the schedule it includes, so the list
+        is exactly the node order the run engine records. The included chunk is compiled and run
+        again per include, each in its own global table (so instances never see each other's
+        globals, while `require`d modules stay shared), with that include's keyvals as its `...`
+        argument. The include is resolved from the release owning the including file. Anything
+        that goes wrong loading one — unlisted, missing, ambiguous, raising, bad keyvals, or a
+        setter error inside it — is a load error for the top-level schedule, and the message names
+        the chain that led to it. Depth is capped at :data:`MAX_INCLUDE_DEPTH` until packet 15c
+        detects cycles for real."""
+        owner = self._instances[instance_seq].owner
+        for seq, step in enumerate(schedule.steps):
+            node = len(self._tree)
+            self._tree.append(_TreeNode(step=step, parent=parent_node, instance=instance_seq, depth=depth))
+            if not step.is_header:
+                continue
+            label = str(step.step_no) if step.step_no else str(seq + 1)
+            where = f"{Path(schedule_path).name}:{label}:"
+            try:
+                if depth + 1 > MAX_INCLUDE_DEPTH:
+                    raise HostError(f"include depth exceeds {MAX_INCLUDE_DEPTH}")
+                path, member = self._resolve_include(step.include_file, schedule_path, owner)
+                keyvals = self._plain_keyvals(step.keyvals)
+                child, env = self._load_schedule(path, keyvals=keyvals)
+                self._validate_steps(child, path)
+                self._validate_inputs(child, path)
+                child_seq = len(self._instances)
+                self._instances.append(
+                    _ScheduleInstance(parent_instance=instance_seq, header=node, name=child.name,
+                                      file=Path(step.include_file).as_posix(), media_number=_media_of(member),
+                                      prefix=step.prefix or "", keyvals=keyvals, owner=member, env=env)
+                )
+                self._expand(child, path, child_seq, node, depth + 1)
+            except HostError as exc:
+                # Each level prefixes the header that led to it, so a defect deep in a nested
+                # chain reads as the include chain that reached it, naming each include once.
+                raise HostError(f"{where} include '{step.include_file}' {exc}") from exc
+
+    def _load_schedule(self, path: str | Path, keyvals: Optional[dict[Any, Any]] = None) -> tuple[_ScheduleParams, Any]:
+        """Execute ``path`` as a text chunk in a new instance global table; return its ScheduleParams and that table.
 
         The schedule's raw bytes are checksummed here (packet 06b) and recorded in :attr:`_files_used`
-        before decoding for execution — the first file used by this host, so it always lands first."""
-        data = Path(path).read_bytes()
-        self._files_used.append((str(path), "tslua", _sha256_hex(data)))
+        before decoding for execution — the first file used by this host, so it always lands first.
+        Packet 15b: an included Sub-schedule comes through here too, so its bytes are checksummed and
+        kept for `run_file` rows the same way. A file this host already loaded is checksummed and
+        recorded once (including the same file twice is two instances of one file) but its chunk is
+        compiled and run again for each instance, in its own global table (see
+        :data:`_INSTANCE_LOADER`), with that include's keyvals as the chunk's `...` argument — a
+        top-level schedule, or an include with no keyvals, gets `{}`."""
+        path = Path(path)
+        data = path.read_bytes()
+        if str(path) not in self._file_bytes:
+            self._files_used.append((str(path), "tslua", _sha256_hex(data)))
         self._file_bytes[str(path)] = data  # packet 06c: kept for a mismatched file's content
         code = data.decode("utf-8")
         try:
-            schedule = self._runtime.execute(
-                code, name=f"@{Path(path).name}", mode="t"
-            )
+            chunk, env = self._instance_loader(code, f"@{path.name}")
+            # `table_from` builds a real Lua table (nested tables included), so `local kv = ...`
+            # indexes it like any Lua table; passing the plain dict straight through would leave a
+            # Python object in the chunk, where a missing key raises instead of reading nil.
+            schedule = chunk(self._runtime.table_from(keyvals or {}, recursive=True))
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
             raise HostError(f"failed to load {path}: {exc}") from exc
         if not isinstance(schedule, _ScheduleParams):
@@ -1176,7 +1426,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             )
         if schedule.name is None or schedule.name == "":
             raise HostError(f"{path} has no ScheduleParams name")
-        return schedule
+        return schedule, env
 
     def _materialize(self, value: Any) -> Any:
         """Convert a Lua table/array proxy (or one nested inside another) into plain Python.
@@ -1192,8 +1442,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             return {str(k): self._materialize(value[k]) for k in str_keys}
         return value
 
-    def _validate_steps(self) -> None:
-        """Validate every loaded step against the Test Schedule format (packet 15a).
+    def _validate_steps(self, schedule: _ScheduleParams, path: Path) -> None:
+        """Validate one loaded schedule against the Test Schedule format (packets 15a, 15b).
 
         An include step (``setInclude``) is a header: no Action, no Step Inputs, and its own Step
         Number is optional. An ordinary step needs a Step Number and an Action, and ``setPrefix``
@@ -1203,9 +1453,9 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         ``setInputs`` table, so the schedule picker and the run start both report it as a load
         error. Step Numbers are checked for duplicates among siblings; 15c extends that to the
         expanded tree with prefixes."""
-        name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        name = Path(path).name if path else "schedule.tslua"
         seen: set[str] = set()
-        for seq, step in enumerate(self._schedule.steps):
+        for seq, step in enumerate(schedule.steps):
             label = str(step.step_no) if step.step_no else str(seq + 1)
             if step.name is not None and not isinstance(step.name, str):
                 raise HostError(f"{name}:{label}: Step Name must be a string, got {step.name!r}")
@@ -1230,20 +1480,20 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                     raise HostError(f"{name}:{label}: duplicate Step Number '{step.step_no}'")
                 seen.add(step.step_no)
 
-    def _validate_inputs(self) -> None:
-        """Validate every step's declared inputs against the Test Schedule format.
+    def _validate_inputs(self, schedule: _ScheduleParams, path: Path) -> None:
+        """Validate one schedule's declared step inputs against the Test Schedule format.
 
         Each declaration is converted out of its Lua tables into plain Python and checked by
-        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying the schedule's
+        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying that schedule's
         own filename so a bad ``setInputs`` table fails the load."""
-        for seq, step in enumerate(self._schedule.steps):
+        for seq, step in enumerate(schedule.steps):
             if step.inputs is None:
                 continue
             declarations = {int(k): self._materialize(v) for k, v in step.inputs.items()}
             try:
                 validated = validate_inputs(declarations)
             except InvalidStepInput as exc:
-                name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+                name = Path(path).name if path else "schedule.tslua"
                 raise HostError(f"{name}:{seq + 1}: {exc}") from exc
             # Stash the validated declarations on the step so the run engine can hand them to the
             # OperatorInput controller and the host maps typed values for ATE.input(n).
@@ -1318,6 +1568,25 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
     def schedule(self) -> _ScheduleParams:
         """The loaded top-level ScheduleParams object."""
         return self._schedule
+
+    @property
+    def tree(self) -> list[_TreeNode]:
+        """The expanded step tree in node order: each header immediately followed by its subtree.
+
+        Packet 15b — this is what the run engine walks and the Run screen previews. A tree entry
+        reads like its step (`entry.step_no`, `entry.is_header`) and adds `parent`, `instance` and
+        `depth`."""
+        return self._tree
+
+    @property
+    def instances(self) -> list[_ScheduleInstance]:
+        """The top-level schedule and every Sub-schedule include, in tree order (packet 15b).
+
+        Index 0 is the top-level schedule; each `setInclude` is its own instance with the index of
+        the header that introduced it, the schedule name/file, the owning media number (None for a
+        host with no Test Definition), the `setPrefix` value as given, and the keyvals as plain
+        Python."""
+        return self._instances
 
 
 # The public host type. ``_``-prefixed classes above are implementation details;

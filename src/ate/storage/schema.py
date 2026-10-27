@@ -20,8 +20,10 @@ from sqlalchemy import Column, Integer, MetaData, Table, Text
 # schema (ticket 01 had no tables), so it starts at 1; adding the ``input_value`` table
 # is a forward migration, so it becomes 2 and older databases must be migrated first.
 # Adding the ``media_release``/``run_file`` tables records each run's checksums, so this
-# build bumps it to 3 — older databases must migrate before launch (see store.py).
-SCHEMA_VERSION = 3
+# build bumps it to 3. Adding ``schedule_instance`` records the top-level schedule and every
+# Sub-schedule include of a run (packet 15b), so this build bumps it to 4 — older databases
+# must migrate before launch (see store.py).
+SCHEMA_VERSION = 4
 
 metadata = MetaData()
 
@@ -157,4 +159,23 @@ run_file = Table(
     Column("computed_sha256", Text, nullable=True),  # SHA-256 of the raw bytes at load
     Column("mismatch", Integer, nullable=True),  # 0/1: expected and computed differ
     Column("content", Text, nullable=True),  # raw bytes of a mismatched file; stored by ticket 06c
+)
+
+
+# The top-level schedule and every Sub-schedule include of a run, in tree order (packet 15b,
+# see `assets/test-run-record.md`). ``instance_seq`` 0 is the top-level schedule; each include
+# points at the instance that included it and at the header node that introduced it. ``keyvals``
+# is the JSON text of the table the include passed to that instance.
+schedule_instance = Table(
+    "schedule_instance",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("instance_seq", Integer, primary_key=True),  # composite (run_uuid, instance_seq) key; 0 is the top level
+    Column("parent_instance_seq", Integer, nullable=True),  # including instance; null for the top level
+    Column("header_node_seq", Integer, nullable=True),  # the include header node; null for the top level
+    Column("schedule_name", Text, nullable=True),  # this instance's ScheduleParams name
+    Column("file", Text, nullable=True),  # the .tslua path as listed in the Test Definition
+    Column("media_number", Text, nullable=True),  # Media Release the file came from
+    Column("prefix", Text, nullable=True),  # setPrefix value as applied, "" if none
+    Column("keyvals", Text, nullable=True),  # JSON text of the keyvals passed to this instance
 )
