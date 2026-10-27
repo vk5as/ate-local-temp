@@ -824,7 +824,7 @@ class _ScheduleParams:
 _INSTANCE_LOADER = r"""
 local load, setmetatable, error, G = load, setmetatable, error, _G
 return function(code, chunkname)
-  local env = setmetatable({}, {__index = G})
+  local env = setmetatable({}, {__index = G, __metatable = false})  -- hides the shared table
   env._G = env
   local chunk, err = load(code, chunkname, "t", env)
   if not chunk then error(err, 0) end
@@ -1017,6 +1017,12 @@ class _LuaHost:
         # pcall/xpcall are wrapped to re-raise it so an abort can't be caught (packet 13c).
         env["aborted"] = self._make_aborted_callable()
         self._install_abort_hook(env)
+        # Packet 15b: with ``debug`` a schedule could reach the instance loader (and the stock
+        # ``load`` it holds) through ``debug.getregistry``, strip the read-only locks with
+        # ``debug.setmetatable``, read the shared globals past ``__metatable`` or remove the abort
+        # hook. ATE keeps what it needs (the hook above, ``_raw_getmetatable``) from Python; only
+        # ``debug.traceback`` stays, because error tracebacks are built through it.
+        self._runtime.execute("debug = { traceback = debug.traceback }", name="@debug-lockdown", mode="t")
 
         # Every ATE.report call, in order. The run engine diffs this around each step's
         # action closure to attribute reports (last-call-wins) to that step.

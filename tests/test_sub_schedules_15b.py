@@ -389,6 +389,29 @@ return ScheduleParams("Main schedule", "includes a schedule that rewrites the AP
     assert "main.tslua:1.: include 'sub.tslua'" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "escape",
+    [
+        # debug.getregistry holds the instance loader and, as its upvalue, the stock load.
+        "for _, v in pairs(debug.getregistry()) do end",
+        # debug.setmetatable would strip a read-only enum's lock.
+        "debug.setmetatable(Result, nil)",
+        # The instance metatable's __index is the shared global table; writing through it leaks.
+        "getmetatable(_ENV).__index.LEAK = 1",
+    ],
+)
+def test_an_include_cannot_reach_the_loader_or_the_shared_globals(tmp_path, escape) -> None:
+    """Round-2 escapes: no `debug` library, and an instance's metatable is hidden."""
+    main = """\
+return ScheduleParams("Main schedule", "includes a schedule that tries to escape")
+  :setSchedule({ StepParams("child"):setStepNo("1."):setInclude("sub.tslua") })
+"""
+    sub = escape + '\nreturn ScheduleParams("Sub", "") :setSchedule({})\n'
+    with pytest.raises(HostError) as excinfo:
+        _bare(tmp_path, {"main.tslua": main, "sub.tslua": sub})
+    assert "main.tslua:1.: include 'sub.tslua'" in str(excinfo.value)
+
+
 def test_the_enum_tables_still_iterate(tmp_path) -> None:
     """Read-only enums keep working for reads and `pairs`."""
     main = """\
