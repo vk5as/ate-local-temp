@@ -413,7 +413,7 @@ class RunView(QWidget):
             if node.get("kind") != "step":
                 continue
             result = str(node.get("result", ""))
-            item = QListWidgetItem(f"{node.get('step_number', '')}  {node.get('step_name', '')}  →  {result}")
+            item = QListWidgetItem(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {result}")
             self.step_list.addItem(item)
         # The latest step is the current one; enlarge it so the eye lands on where we are.
         if self.step_list.count() > 1:
@@ -425,7 +425,7 @@ class RunView(QWidget):
 
         failed = any(node.get("result") in ("FAIL", "ERROR") for node in nodes)
         if failed:
-            names = [node.get("step_name", "") for node in nodes if node.get("result") in ("FAIL", "ERROR")]
+            names = [node.get("step_name") or "" for node in nodes if node.get("result") in ("FAIL", "ERROR")]
             self.failure_bar.setText(f"Run FAILED — {len(names)} step(s): {'; '.join(names)}")
             self._apply_failure_style()
         else:
@@ -441,7 +441,7 @@ class RunView(QWidget):
         for node in nodes:
             if node.get("kind") != "step":
                 continue
-            lines.append(f"{node.get('step_number', '')}  {node.get('step_name', '')}  →  {node.get('result', '')}")
+            lines.append(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {node.get('result', '')}")
         summary_tab.setText("\n".join(lines))
 
         # The Log pane shows INFO and above; the Debug window keeps every level.
@@ -893,6 +893,8 @@ class StagedRunScreen(QWidget):
         self.run_view.step_list.clear()
         self._failed_row = None
         for seq, step in enumerate(steps):
+            if getattr(step, "is_header", False):  # headers have no result row, as in the finished list
+                continue
             number = str(getattr(step, "step_no", "") or "")
             name = str(getattr(step, "name", "") or "")
             if seq == node_seq:
