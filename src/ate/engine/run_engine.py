@@ -489,7 +489,7 @@ class RunEngine(QThread):
         log line names the failure and explains why every step is NOTRUN."""
         for seq in range(len(steps)):
             step = steps[seq]
-            if step.is_header:  # a header records no Attempt and no Result
+            if step.is_header:
                 self._record_header(run_uuid, seq, step)
                 continue
             default_enabled, enabled = self._enabled(seq, step)

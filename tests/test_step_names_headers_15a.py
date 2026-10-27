@@ -17,7 +17,7 @@ from ate.engine.lua_host import HostError, LuaHost
 from ate.engine.run_engine import RunEngine
 from ate.report.html import write_report
 from ate.storage.store import RunStore
-from ate.ui.staged_run_screen import StepsOptionsStage
+from ate.ui.staged_run_screen import RunView, StepsOptionsStage
 
 from ._fixtures import _drive, _sha256
 
@@ -136,6 +136,44 @@ def test_header_without_a_step_number_loads_and_runs(qapp, tmp_path) -> None:
     assert header["kind"] == "header"
     assert header["step_number"] is None
     assert store.get_test_run(run_uuid)["result"] == "PASS"
+
+
+def test_headers_are_recorded_when_a_pretest_action_fails(qapp, tmp_path) -> None:
+    """A run aborted before any step runs still records the header row, with no Result."""
+    source = """\
+return ScheduleParams("Pretest fail schedule", "header alongside NOTRUN steps")
+  :setPreTestAction(function() error("calibration failed") end)
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "1", "1") end),
+    StepParams("group header"):setInclude("sub.tslua"),
+    StepParams(nil):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "ok", "1", "1") end),
+  })
+"""
+    store, run_uuid = _run(source, tmp_path, qapp)
+    nodes = _nodes(store, run_uuid)
+    assert len(nodes) == 3
+    assert nodes[1]["kind"] == "header" and nodes[1]["result"] is None
+    assert nodes[0]["result"] == "NOTRUN" and nodes[2]["result"] == "NOTRUN"
+    assert store.get_test_run(run_uuid)["result"] == "FAIL"
+
+
+def test_headers_are_recorded_when_a_run_is_aborted(qapp, tmp_path) -> None:
+    """An abort at the first step boundary marks later steps NOTRUN and headers as headers."""
+    store = RunStore(tmp_path / "ate.db")
+    schedule = tmp_path / "schedule.tslua"
+    schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
+    engine = RunEngine(store, str(schedule))
+    captured: dict[str, str] = {}
+    engine.run_uuid_reported.connect(lambda ru: captured.__setitem__("ru", ru))
+    engine.request_abort()
+    _drive(engine, qapp)
+    nodes = _nodes(store, captured["ru"])
+    assert len(nodes) == 3
+    assert nodes[1]["kind"] == "header" and nodes[1]["attempt_count"] == 0
+    assert nodes[2]["result"] == "NOTRUN"
+    assert nodes[0]["result"] == "ERROR"
 
 
 def test_header_is_excluded_from_the_report_summary_counts(qapp, tmp_path) -> None:
@@ -284,6 +322,16 @@ def test_run_screen_step_list_shows_no_none_for_an_unnamed_step(qapp) -> None:
         texts = [stage.step_list.item(i).text() for i in range(stage.step_list.count())]
         assert texts == ["1.  first", ""]
         assert "None" not in " ".join(texts)
+
+
+def test_run_view_rows_of_an_unnamed_step_have_no_none(qapp, tmp_path) -> None:
+    """The finished-run step rows and the Summary tab leave an unnamed step blank."""
+    store, run_uuid = _run(NAMED_AND_UNNAMED, tmp_path, qapp)
+    view = RunView()
+    view.refresh(store.nodes(run_uuid), store.attempts(run_uuid), [])
+    rows = [view.step_list.item(i).text() for i in range(view.step_list.count())]
+    assert "None" not in " ".join(rows)
+    assert "None" not in view.tabs.widget(1).text()
 
 
 def test_report_of_an_unnamed_step_shows_no_none(qapp, tmp_path) -> None:
