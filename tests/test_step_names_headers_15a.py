@@ -190,7 +190,9 @@ def test_header_is_excluded_from_the_report_summary_counts(qapp, tmp_path) -> No
     html = write_report(store, run_uuid, config).read_text(encoding="utf-8")
     assert 'class="res pass">2' in html
     assert 'class="res notrun">0' in html
-    assert "group header" not in html
+    # Packet 21b put the Steps section in: the header row does appear there (spec rule 68), with its
+    # roll-up in the Result column instead of a Result, and it is still not counted above.
+    assert 'class="rollup">0 steps' in html
 
 
 # --- load errors -------------------------------------------------------------
