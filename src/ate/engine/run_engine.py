@@ -179,6 +179,9 @@ class RunEngine(QThread):
         # The first index into the host's ``logs`` not yet written to the store; set to the log
         # start whenever an action begins (its owner is set), advanced by every drain.
         self._log_cursor = 0
+        # Packet 20: the first index into the host's ``equipment`` not yet written to the store;
+        # advanced by every drain, so each `ATE.addEquipment` call is recorded in call order.
+        self._equipment_cursor = 0
         # Set when a Stop-on-Fail pause is aborted (packet 12b); ends the run STOPPED_ON_FAIL.
         self._stopped_on_fail = False
 
@@ -450,9 +453,38 @@ class RunEngine(QThread):
             batch.append({**line, "at": at})
         self._store.insert_log_lines(run_uuid, 0, batch, **(ownership if batch_owned else {}))
 
+    def _flush_equipment(self, host: "_LuaHost", run_uuid: str, *, node_seq: int | None = None,
+                         attempt_no: int | None = None, action_seq: int | None = None) -> None:
+        """Record every `ATE.addEquipment` call made since the last drain, in the order it happened (packet 20).
+
+        The host keeps the Equipment its schedule declared; this writes the rows the engine has not
+        seen yet, each stamped with the time the call was made (the host's monotonic clock mapped to
+        wall-clock, exactly like a log line's ``at``) and owned by the running step Attempt or
+        Pre-/Post-test Action, the same way that action's own log lines are. A no-op when nothing is
+        pending, so the drain that runs on every ATE call stays cheap."""
+        if self._equipment_cursor >= len(host.equipment):
+            return
+        wall_offset = time.time() - time.monotonic()  # monotonic -> wall-clock, measured once per drain
+        for item in host.equipment[self._equipment_cursor:]:
+            at = datetime.fromtimestamp(item["at"] + wall_offset, timezone.utc).isoformat(timespec="milliseconds")
+            self._store.insert_equipment(
+                run_uuid,
+                name=item["name"],
+                serial=item["serial"],
+                connection=item["connection"],
+                cal_due=item["cal_due"],
+                notes=item["notes"],
+                at=at,
+                action_seq=action_seq,
+                node_seq=node_seq,
+                attempt_no=attempt_no,
+            )
+        self._equipment_cursor = len(host.equipment)
+
     def _drain_device_warnings(self) -> None:
         """Record pending device warnings now, owned by whatever is running (see ``_device_owner``),
-        together with the running action's log lines emitted so far, in the order they happened.
+        together with the running action's log lines and Equipment declarations emitted so far, in the
+        order they happened.
 
         A no-op before the run row exists. Called at every ATE call (through the host's sink), through
         a Stop-on-Fail pause, at action end and at run end, so a failure is logged at once."""
@@ -470,11 +502,13 @@ class RunEngine(QThread):
                 # since the last drain belong to the run as a whole — 17c's trace of the closes this
                 # engine performs on devices the schedule left open, among them.
                 self._flush_device_warnings(host, run_uuid, log_from=self._log_cursor)
+                self._flush_equipment(host, run_uuid)
             else:
                 start, ownership = owner
                 self._flush_device_warnings(
                     host, run_uuid, in_window=(start, time.monotonic()), log_from=self._log_cursor, **ownership
                 )
+                self._flush_equipment(host, run_uuid, **ownership)
         return sink
 
     def _record_phase_action(
