@@ -28,6 +28,7 @@ from .schema import (
     SCHEMA_VERSION,
     action,
     attempt,
+    equipment,
     input_value,
     log_line,
     media_release,
@@ -436,6 +437,38 @@ class RunStore:
         if next_seq > 0:
             self._log_seq[run_uuid] = next_seq
 
+    # -- equipment -----------------------------------------------------------
+
+    def insert_equipment(self, run_uuid: str, *, name: Optional[str] = None, serial: Optional[str] = None,
+                         connection: Optional[str] = None, cal_due: Optional[str] = None,
+                         notes: Optional[str] = None, at: Optional[str] = None,
+                         action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> dict:
+        """Insert one Equipment row keyed by ``(run_uuid, seq)`` (packet 20).
+
+        One row per `ATE.addEquipment` call, in the order the calls happened: ``seq`` comes from the
+        run's shared log-line counter (:attr:`_log_seq`), like an Action or an input value, so it is
+        unique within the run and its ordering matches the run's timeline. Ownership works exactly as
+        a log line's — an owning Pre-test/Post-test Action call puts its ``action_seq`` on the row, a
+        step Attempt its ``node_seq`` + ``attempt_no``. Only ``name`` is required by the Lua call; the
+        other fields stay null when the schedule passed nil."""
+        now = _now_iso()
+        row = {
+            "run_uuid": run_uuid,
+            "seq": self._log_seq.get(run_uuid, 0),
+            "name": name,
+            "serial": serial,
+            "connection": connection,
+            "cal_due": cal_due,
+            "notes": notes,
+            "at": at or now,
+            "action_seq": action_seq,
+            "node_seq": node_seq,
+            "attempt_no": attempt_no,
+        }
+        self._run(equipment.insert().values(**row))
+        self._log_seq[run_uuid] = row["seq"] + 1
+        return dict(row)
+
     # -- media_release -------------------------------------------------------
 
     def insert_media_release(
@@ -580,6 +613,17 @@ class RunStore:
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(schedule_instance.columns, row)} for row in rows
+        ]
+
+    def equipment(self, run_uuid: str) -> list[dict]:
+        """Return this run's Equipment rows as dicts in declaration order (packet 20).
+
+        `seq` is the order the `ATE.addEquipment` calls happened, so reading by it gives the
+        Equipment exactly as the schedule declared it. Empty when the run is unknown."""
+        stmt = equipment.select().where(equipment.c.run_uuid == run_uuid).order_by(equipment.c.seq)
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(equipment.columns, row)} for row in rows
         ]
 
     # -- log_line ------------------------------------------------------------
