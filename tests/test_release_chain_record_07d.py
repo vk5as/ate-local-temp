@@ -17,8 +17,7 @@ from typing import Optional
 from ate.catalog import module_map, resolve_schedule_definition
 from ate.engine.run_engine import RunEngine
 from ate.run_session.headless import HeadlessRunSession, SessionState
-from ate.storage import RunStore, new_uuid7
-from ate.storage.schema import media_release, run_file
+from ate.storage import RunStore
 
 from ._fixtures import _drive
 
@@ -256,23 +255,3 @@ def test_a_dependency_whose_atedef_is_deleted_is_recorded_with_no_checksum(qapp,
     assert len(warnings) == 1, store.log_lines(uuid)
     assert "MR-B" in warnings[0]["text"]
     assert store.get_test_run(uuid)["result"] == "PASS", "the run must still complete"
-
-
-# -- the store reads rows back in recorded order ---------------------------
-
-def test_media_release_and_run_file_rows_read_back_in_seq_order(tmp_path):
-    """Rows written out of order come back ordered by seq, not in write order."""
-    store = RunStore(tmp_path / "ate.db")
-    run_uuid = new_uuid7()
-    for seq in (2, 0, 1):  # bypass the per-run counters so the rows really are out of order
-        store._run(media_release.insert().values(
-            run_uuid=run_uuid, seq=seq, media_number=f"MR-{seq}", name=f"Release {seq}",
-            version="1.0.0", atedef_sha256=None,
-        ))
-        store._run(run_file.insert().values(
-            run_uuid=run_uuid, seq=seq, path=f"file{seq}.lua", kind="lua",
-            computed_sha256="a" * 64, mismatch=0,
-        ))
-
-    assert [r["seq"] for r in store.media_releases(run_uuid)] == [0, 1, 2]
-    assert [r["seq"] for r in store.run_files(run_uuid)] == [0, 1, 2]

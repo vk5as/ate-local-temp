@@ -587,7 +587,7 @@ class RunEngine(QThread):
                 if atedef_path is not None:
                     try:
                         atedef_sha = _sha256_hex(atedef_path.read_bytes())
-                    except OSError as exc:
+                    except Exception as exc:  # any read failure: the row is still recorded, the run carries on
                         self._store.insert_log_lines(
                             run_uuid, 0,
                             [{"level": "WARNING", "source": "ate", "text": f"could not read .atedef for {member.media_number or member.name} ({atedef_path}): {exc}"}],
@@ -889,7 +889,7 @@ class RunEngine(QThread):
         if self._definition is None:
             return
         by_path = {}
-        for member in (self._definition, *self._definition.chain):
+        for member in _search_chain(self._definition):
             for entry in member.files:
                 by_path.setdefault(member.path / entry.rel_path, (entry, member))
         mismatches: list[tuple[str, Optional[str], str]] = []
