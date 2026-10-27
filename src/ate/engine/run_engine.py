@@ -860,17 +860,23 @@ class RunEngine(QThread):
         self.state_changed.emit(RunStatus.FINISHED)
 
     def _record_files(self, run_uuid: str, host: "_LuaHost") -> None:
-        """Record one ``run_file`` row per file used this run and warn on mismatches (packets 06b, 06d).
+        """Record one ``run_file`` row per file used this run and warn on mismatches (packets 06b, 06d, 07b).
 
         Iterates the host's load-order list of ``(path, kind, sha256)`` entries; each is matched back
         to its Test Definition entry by absolute path so we can carry the definition-listed ``rel_path``,
-        owning media number and expected checksum. A file that loaded but isn't listed has no expected
-        value to compare against, so it is skipped rather than recorded with a null expectation — except
-        a bundled ``ate.`` module, which is never in the definition by design: it is recorded under its
-        module name, with no media number and no expectation, and can therefore never mismatch."""
+        owning media number and expected checksum. The match walks the run's whole resolved chain, so a
+        module loaded from a dependency release is recorded against that release: its own media number,
+        its rel path in that release, and that release's expected checksum. A file that loaded but isn't
+        listed has no expected value to compare against, so it is skipped rather than recorded with a
+        null expectation — except a bundled ``ate.`` module, which is never in the definition by design:
+        it is recorded under its module name, with no media number and no expectation, and can therefore
+        never mismatch."""
         if self._definition is None:
             return
-        by_path = {self._definition.path / entry.rel_path: entry for entry in self._definition.files}
+        by_path = {}
+        for member in (self._definition, *self._definition.chain):
+            for entry in member.files:
+                by_path.setdefault(member.path / entry.rel_path, (entry, member))
         mismatches: list[tuple[str, Optional[str], str]] = []
         for path, kind, computed in getattr(host, "_files_used", []):
             if kind == "ate-module":
@@ -884,9 +890,10 @@ class RunEngine(QThread):
                     mismatch=False,
                 )
                 continue
-            entry = by_path.get(Path(path))
-            if entry is None:
+            found = by_path.get(Path(path))
+            if found is None:
                 continue
+            entry, owner = found
             mismatch = (entry.expected_sha256 or None) != computed
             # Packet 06c: only a file that mismatched, and only when this run was told to store them,
             # carries the bytes it was checksummed from — never a re-read of the file.
@@ -896,7 +903,7 @@ class RunEngine(QThread):
             self._store.insert_run_file(
                 run_uuid,
                 path=entry.rel_path,
-                media_number=self._definition.media_number or None,
+                media_number=owner.media_number or None,
                 kind=kind,
                 expected_sha256=entry.expected_sha256 or None,
                 computed_sha256=computed,
