@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
-from ..catalog import definition_mismatches, module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import definition_mismatches, include_map, module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
 from .._version import __version__  # packet 06d: the version written to test_run.ate_version
 from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
@@ -261,7 +261,7 @@ class HeadlessRunSession(QObject):
                     modules = module_map(definition)
                     path = resolve_schedule_path(definition, name)
                     if path is not None:
-                        host = LuaHost(path, modules=modules)
+                        host = LuaHost(path, modules=modules, includes=include_map(definition))
                         stop_on_fail = bool(host.schedule.stop_on_fail)
             except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
                 print(f"WARNING: could not read Stop on Fail default from '{name}', using True")

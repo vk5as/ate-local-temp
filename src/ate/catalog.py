@@ -603,7 +603,7 @@ def _schedule_summaries(definition: Definition) -> list[tuple[str, str, str]]:
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full, modules=module_map(definition))
+            host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
             schedule_name = host.schedule.name
             description = host.schedule.description
         except HostError as exc:
@@ -646,7 +646,7 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
                 continue
             full = definition.path / file_entry.rel_path
             try:
-                host = LuaHost(full, modules=module_map(definition))
+                host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
                 rows.append(
                     ScheduleRow(
                         media_number=definition.media_number,
@@ -670,7 +670,7 @@ def resolve_schedule_path(definition: Definition, schedule_name: str) -> Path | 
             continue
         full = definition.path / file_entry.rel_path
         try:
-            host = LuaHost(full, modules=module_map(definition))
+            host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
         except HostError:
             continue
         if host.schedule.name == schedule_name:
@@ -726,6 +726,26 @@ def module_map(definition: Definition) -> dict[str, Path]:
     return modules
 
 
+def include_map(definition: Definition) -> dict[str, list[tuple[Definition, Path]]]:
+    """Map every listed Sub-schedule rel path to the releases that list it (packet 15b).
+
+    Keyed by the `.tslua` path exactly as written in the `.atedef`, in `_search_chain` order
+    (the release's own files first, then its dependencies depth-first in declaration order — the
+    same walk `require` uses for modules). Each value is the list of ``(member, absolute path)``
+    pairs that list that path, so a key with more than one entry is an ambiguous include: the Lua
+    host turns it into a load error rather than silently picking one. A `.tslua` file a schedule
+    never lists is simply absent from the map, which the host reports as "not listed". Unlike
+    `module_map`, hidden schedules are included: `setInclude` resolves against every listed file,
+    and only the picker hides them."""
+    includes: dict[str, list[tuple[Definition, Path]]] = {}
+    for member in _search_chain(definition):
+        for entry in member.files:
+            if not entry.is_schedule:
+                continue
+            includes.setdefault(Path(entry.rel_path).as_posix(), []).append((member, member.path / entry.rel_path))
+    return includes
+
+
 def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
     """Return the usable Media Release whose loaded schedules include ``schedule_name`` (or ``None``).
 
@@ -736,14 +756,16 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
     for definition in find_definitions(*directories):
         if definition.broken:
             continue
-        # Load each schedule with its own release's module map so a load-time require still resolves.
+        # Load each schedule with its own release's module map so a load-time require still resolves,
+        # and its include map so packet 15b can resolve `setInclude` files the same way.
         modules = module_map(definition)
+        includes = include_map(definition)
         for file_entry in definition.files:
             if not file_entry.is_schedule or file_entry.hidden:
                 continue
             full = definition.path / file_entry.rel_path
             try:
-                host = LuaHost(full, modules=modules)
+                host = LuaHost(full, modules=modules, includes=includes)
             except HostError:
                 continue
             if host.schedule.name == schedule_name:

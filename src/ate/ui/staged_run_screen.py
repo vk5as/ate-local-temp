@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import find_definitions, list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
 
@@ -698,7 +698,7 @@ class StagedRunScreen(QWidget):
         path = resolve_schedule_path(definition, schedule_name)
         if path is None:
             return []
-        host = LuaHost(path, modules=modules)
+        host = LuaHost(path, modules=modules, includes=include_map(definition))  # packet 15b: the Sub-schedule map
         return list(host.schedule.steps)
 
     # -- running ------------------------------------------------------------

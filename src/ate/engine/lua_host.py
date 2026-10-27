@@ -783,6 +783,7 @@ class _LuaHost:
         operator_input: Optional[OperatorInput] = None,
         aborted_flag: Optional[_AbortFlag] = None,
         modules: Mapping[str, Path] | None = None,  # packet 06a: the require'd module map for this run
+        includes: Mapping[str, list[tuple[Any, Path]]] | None = None,  # packet 15b: rel .tslua path -> the releases that list it
         receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
     ) -> None:
         from lupa import LuaRuntime  # imported here so importing this module needs no lupa
@@ -793,6 +794,12 @@ class _LuaHost:
         # Packet 06a: the whitelist of require'd modules for this host (one per Test Run). ``None``
         # means no replacement require is installed, so any require call reads back as a nil value.
         self._modules = dict(modules) if modules is not None else {}  # no map: nothing is requirable
+        # Packet 15b: the Sub-schedule map for this host — each listed `.tslua` rel path and every
+        # release that lists it, in `_search_chain` order. Without one (a bare `LuaHost(path)` in a
+        # test, or a run with no Test Definition) an include is resolved against the directory of
+        # the file that includes it, and it gets no media number: that is a test seam only, not a
+        # second way to run a release.
+        self._includes = None if includes is None else dict(includes)  # None: no Test Definition, so the seam below applies
         # Packet 06b: every file this host loads at run time — the schedule plus each module it
         # requires — in load order, once each, as ``(path, kind, sha256-of-raw-bytes)``. ``kind``
         # is "tslua" for the schedule and "lua" for a required module; the run engine records these

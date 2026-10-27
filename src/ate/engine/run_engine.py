@@ -34,7 +34,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..catalog import _search_chain
+from ..catalog import _search_chain, include_map
 from ..errors import ATEError
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES
 from ..storage._uuid import new_uuid7
@@ -138,6 +138,10 @@ class RunEngine(QThread):
         # can record its media_release row (seq 0) and every file used with expected/computed checksums.
         # ``None`` means a bare schedule test — nothing extra is recorded then.
         self._definition = definition
+        # Packet 15b: the Sub-schedule include map for the owning release (rel path -> the releases
+        # that list it), forwarded to the host so `setInclude` resolves through the Test Definition
+        # and its dependencies exactly as `require` does. None for a bare schedule test.
+        self._includes = include_map(definition) if definition is not None else None
         # Packet 06c: whether this run stores the raw bytes of a file whose checksum differs from the
         # Test Definition's. The Run screen's confirmation (or `database.storeMismatchedFiles`) decides
         # it at the session; a run started without one stores nothing.
@@ -552,6 +556,7 @@ class RunEngine(QThread):
             operator_input=self._op,
             aborted_flag=self._abort_flag,  # the count hook reads this; see request_abort/aborted
             modules=self._modules,  # packet 06a: forward the require'd module map to the host
+            includes=self._includes,  # packet 15b: the release's Sub-schedule include map
             receive_buffer_bytes=self._receive_buffer_bytes,  # packet 17a: the cap, per Device
         )
         self._host = host  # kept on the engine so per-step input values can be typed from declarations
