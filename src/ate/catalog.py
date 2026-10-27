@@ -726,24 +726,53 @@ def module_map(definition: Definition) -> dict[str, Path]:
     return modules
 
 
-def include_map(definition: Definition) -> dict[str, list[tuple[Definition, Path]]]:
-    """Map every listed Sub-schedule rel path to the releases that list it (packet 15b).
+class IncludeMap:
+    """Resolves `setInclude` paths through one resolved Test Definition (packet 15b).
 
-    Keyed by the `.tslua` path exactly as written in the `.atedef`, in `_search_chain` order
-    (the release's own files first, then its dependencies depth-first in declaration order — the
-    same walk `require` uses for modules). Each value is the list of ``(member, absolute path)``
-    pairs that list that path, so a key with more than one entry is an ambiguous include: the Lua
-    host turns it into a load error rather than silently picking one. A `.tslua` file a schedule
-    never lists is simply absent from the map, which the host reports as "not listed". Unlike
-    `module_map`, hidden schedules are included: `setInclude` resolves against every listed file,
-    and only the picker hides them."""
-    includes: dict[str, list[tuple[Definition, Path]]] = {}
-    for member in _search_chain(definition):
+    Resolution is anchored at the release that owns the INCLUDING file, not at the top-level
+    release: an include is first looked up in that release's own listed files, and a hit there
+    wins outright (the same own-first rule `require` uses). Only if it isn't listed there are the
+    release's dependencies searched depth first in declaration order, and a path listed by more
+    than one of those is ambiguous. Hidden schedules count: only the picker hides them."""
+
+    def __init__(self, definition: Definition) -> None:
+        self.definition = definition
+
+    @staticmethod
+    def _listed(member: Definition, rel: str) -> Optional[Path]:
         for entry in member.files:
-            if not entry.is_schedule:
-                continue
-            includes.setdefault(Path(entry.rel_path).as_posix(), []).append((member, member.path / entry.rel_path))
-    return includes
+            if entry.is_schedule and Path(entry.rel_path).as_posix() == rel:
+                return member.path / entry.rel_path
+        return None
+
+    def owner(self, path: Path) -> Optional[tuple[str, Definition]]:
+        """``(rel path as listed, owning release)`` for a loaded `.tslua` file, or ``None``."""
+        target = Path(path).resolve()
+        for member in _search_chain(self.definition):
+            for entry in member.files:
+                if entry.is_schedule and (member.path / entry.rel_path).resolve() == target:
+                    return Path(entry.rel_path).as_posix(), member
+        return None
+
+    def candidates(self, member: Definition, rel: str) -> list[tuple[Definition, Path]]:
+        """Every ``(release, absolute path)`` an include of ``rel`` from ``member`` may mean.
+
+        One entry when ``member`` lists it itself; otherwise each dependency that lists it, in
+        search order — more than one is an ambiguous include, none is "not listed"."""
+        own = self._listed(member, rel)
+        if own is not None:
+            return [(member, own)]
+        hits = []
+        for dep in _search_chain(member)[1:]:
+            path = self._listed(dep, rel)
+            if path is not None:
+                hits.append((dep, path))
+        return hits
+
+
+def include_map(definition: Definition) -> IncludeMap:
+    """The `setInclude` resolver for ``definition`` and every release in its chain (packet 15b)."""
+    return IncludeMap(definition)
 
 
 def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:

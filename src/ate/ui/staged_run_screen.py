@@ -157,6 +157,26 @@ class TestScheduleStage(QWidget):
         layout.addWidget(self.run_button)
 
 
+def _row_label(number: object, name: object, depth: int) -> str:
+    """A step list row's text: Step Number and name, indented two spaces per nesting level.
+
+    Packet 15b: an expanded Sub-schedule's rows sit under their header, so the same Step Number
+    in two instances still reads as two places in the tree. The mockup's styling is packet 15d's."""
+    indent = "  " * depth
+    number = str(number or "")
+    name = str(name or "")
+    return f"{indent}{number}  {name}" if number else f"{indent}{name}"
+
+
+def _node_depths(nodes: list[dict]) -> dict[object, int]:
+    """Each recorded node's nesting depth, from its ``parent_node_seq`` (parents come first)."""
+    depths: dict[object, int] = {}
+    for node in nodes:
+        parent = node.get("parent_node_seq")
+        depths[node.get("node_seq")] = 0 if parent is None else depths.get(parent, 0) + 1
+    return depths
+
+
 class StepsOptionsStage(QWidget):
     """Stage three: the run's steps and the stop-on-fail option.
 
@@ -211,11 +231,7 @@ class StepsOptionsStage(QWidget):
         for step in steps:
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
-            # Packet 15b: an expanded Sub-schedule's rows sit under their header, indented two
-            # spaces per nesting level. The mockup's styling is packet 15d's.
-            indent = "  " * int(getattr(step, "depth", 0))
-            text = f"{indent}{number}  {label}" if number else f"{indent}{label}"
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(_row_label(number, label, int(getattr(step, "depth", 0))))
             # Always keep the row enabled and selectable and the box drawn; only
             # ItemIsUserCheckable toggles with the run lock (a locked box still shows its
             # check state). NoItemFlags would disable the row even in setup.
@@ -411,16 +427,20 @@ class RunView(QWidget):
         summary_tab = self.tabs.widget(1)
 
         self.step_list.clear()
-        failed_steps: list[str] = []
+        # Packet 15b: header rows show their Step Number and name with no result, and every row is
+        # indented by its depth in the expanded tree, as on the Steps & options stage.
+        depths = _node_depths(nodes)
+        last = None
         for node in nodes:
-            if node.get("kind") != "step":
-                continue
-            result = str(node.get("result", ""))
-            item = QListWidgetItem(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {result}")
+            text = _row_label(node.get("step_number"), node.get("step_name"), depths[node.get("node_seq")])
+            if node.get("kind") == "step":
+                text += f"  →  {node.get('result', '')}"
+            item = QListWidgetItem(text)
             self.step_list.addItem(item)
+            if node.get("kind") == "step":
+                last = item
         # The latest step is the current one; enlarge it so the eye lands on where we are.
-        if self.step_list.count() > 1:
-            last = self.step_list.item(self.step_list.count() - 1)
+        if last is not None and self.step_list.count() > 1:
             font = last.font()
             font.setPointSize(font.pointSize() + 2)
             font.setBold(True)
@@ -896,17 +916,17 @@ class StagedRunScreen(QWidget):
         self.run_view.step_list.clear()
         self._failed_row = None
         for seq, step in enumerate(steps):
-            if getattr(step, "is_header", False):  # headers have no result row, as in the finished list
+            text = _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
+            if getattr(step, "is_header", False):  # a header row has no result, as in the finished list
+                self.run_view.step_list.addItem(QListWidgetItem(text))
                 continue
-            number = str(getattr(step, "step_no", "") or "")
-            name = str(getattr(step, "name", "") or "")
             if seq == node_seq:
                 state = result
             elif seq in done:
                 state = str(done[seq].get("result", ""))
             else:
                 state = "…"
-            item = QListWidgetItem(f"{number}  {name}  →  {state}")
+            item = QListWidgetItem(f"{text}  →  {state}")
             if seq == node_seq:
                 # The pause highlight: a pale red row, cleared once the Operator chooses.
                 item.setBackground(QColor("#fff0f0"))

@@ -85,8 +85,9 @@ def test_listed_module_resolves(tmp_path: Path) -> None:
     defs_dir, host = _host(tmp_path)
     assert host.schedule.name == "Load require"
     # The load-time require ran and its value is visible to the schedule's step.
-    # The load-time require resolved and its value flowed into the schedule's global.
-    name = host.runtime.execute("return _G.H_NAME")
+    # The load-time require resolved and its value flowed into the schedule's global, which lives
+    # in the top-level instance's own global table (packet 15b), not the shared one.
+    name = host.instances[0].env["H_NAME"]
     assert name == "counter"  # helper.name from the loaded module
 
 
