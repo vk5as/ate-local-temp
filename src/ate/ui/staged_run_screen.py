@@ -372,6 +372,8 @@ class StepsOptionsStage(QWidget):
             for child in beneath:
                 if getattr(self._rows[child], "is_header", False):
                     self._set_box(child, self._header_state(child))
+            for header in self._header_rows_above(row):  # a nested header's click changes its ancestors too
+                self._set_box(header, self._header_state(header))
             return
         checked = item.checkState() == Qt.CheckState.Checked
         if self._states.get(row) == checked:

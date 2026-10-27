@@ -573,14 +573,19 @@ class RunEngine(QThread):
         if getattr(step, "is_header", False):
             children = self._tree_children()
             stack = list(children.get(seq, ()))
+            saw_step = False
             while stack:
                 child = stack.pop()
                 node = self._host.tree[child]
                 if node.is_header:
                     stack.extend(children.get(child, ()))
-                elif self._enabled(child, node)[1]:
+                    continue
+                saw_step = True
+                if self._enabled(child, node)[1]:
                     return default_enabled, 1
-            return default_enabled, 0
+            # No Test Step beneath: nothing the Operator could switch, so it stays at its default
+            # (the Run screen draws such a header checked).
+            return default_enabled, (0 if saw_step else int(default_enabled))
         effective_enabled = self._overrides.get(seq, default_enabled)
         return int(default_enabled), int(effective_enabled)
 

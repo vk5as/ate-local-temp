@@ -237,6 +237,25 @@ def test_forced_off_children_record_default_enabled_zero_and_run_notrun(qapp, tm
     assert session.store.get_test_run(session.run_uuid)["result"] == "PASS"
 
 
+def test_a_header_over_an_empty_sub_schedule_records_its_default(qapp, tmp_path) -> None:
+    """No Test Step beneath it: the record keeps the header's default, as the screen draws it checked."""
+    root = tmp_path / "defs"
+    main = """\
+return ScheduleParams("Empty include main", "a header over nothing")
+  :setSchedule({
+    StepParams("empty"):setStepNo("1."):setPrefix("1."):setInclude("empty.tslua"),
+    StepParams("real"):setStepNo("2."):setAction(function() ATE.report(Result.PASS, "ok") end),
+  })
+"""
+    _write_release(root, "empty", {"main.tslua": main, "empty.tslua": 'return ScheduleParams("Empty", "") :setSchedule({})\n'})
+    session = HeadlessRunSession(_config(tmp_path, root))
+    session.select_schedule("Empty include main")
+    session.start()
+    _finish(qapp, session)
+    header = _nodes(session)[0]
+    assert header["kind"] == "header" and header["default_enabled"] == 1 and header["enabled"] == 1
+
+
 # --- the Run screen: derived header boxes, cascades, and styling -------------
 
 
@@ -276,6 +295,13 @@ def test_a_header_box_derives_from_its_children_and_clicking_it_sets_them_all(qa
     steps.item(header).setCheckState(Qt.CheckState.Checked)
     assert session.node_enables == {1: True, 2: True, 4: True}  # the header rows themselves: never stored
     assert steps.item(off).checkState() == Qt.CheckState.Checked
+    assert steps.item(header).checkState() == Qt.CheckState.Checked
+
+    # Unchecking the nested header re-derives the header above it too.
+    steps.item(nested).setCheckState(Qt.CheckState.Unchecked)
+    assert steps.item(deep).checkState() == Qt.CheckState.Unchecked
+    assert steps.item(header).checkState() == Qt.CheckState.PartiallyChecked
+    steps.item(nested).setCheckState(Qt.CheckState.Checked)
     assert steps.item(header).checkState() == Qt.CheckState.Checked
 
     # Children can still be toggled one by one afterwards, and the header reads back live.
