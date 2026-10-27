@@ -853,9 +853,11 @@ class _ScheduleInstance:
     prefix: str
     keyvals: dict[Any, Any]
     # The release that owns `file` (None without a Test Definition): includes from this instance
-    # resolve against it. `env` is the instance's own Lua global table.
+    # resolve against it. `env` is the instance's own Lua global table. `schedule` is this instance's
+    # loaded ScheduleParams — packet 15e needs it to reach each instance's Pre-/Post-test Action.
     owner: Any = field(default=None, repr=False, compare=False)
     env: Any = field(default=None, repr=False, compare=False)
+    schedule: Any = field(default=None, repr=False, compare=False)
 
 
 def _media_of(member: Any) -> Optional[str]:
@@ -1084,7 +1086,7 @@ class _LuaHost:
         top_file, top_owner = self._own_listing(self._schedule_path)
         self._instances = [_ScheduleInstance(parent_instance=None, header=None, name=self._schedule.name,
                                            file=top_file, media_number=_media_of(top_owner), prefix="", keyvals={},
-                                           owner=top_owner, env=top_env)]
+                                           owner=top_owner, env=top_env, schedule=self._schedule)]
         self._tree: list[_TreeNode] = []
         self._chain_names: dict[Path, str] = {}
         try:
@@ -1413,7 +1415,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                 self._instances.append(
                     _ScheduleInstance(parent_instance=instance_seq, header=node, name=child.name,
                                       file=Path(step.include_file).as_posix(), media_number=_media_of(member),
-                                      prefix=step.prefix or "", keyvals=keyvals, owner=member, env=env)
+                                      prefix=step.prefix or "", keyvals=keyvals, owner=member, env=env,
+                                      schedule=child)
                 )
                 self._chain_names.setdefault(resolved, Path(step.include_file).as_posix())
                 self._expand(child, path, child_seq, node, depth + 1, prefix + (step.prefix or ""),
@@ -1637,8 +1640,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
 
         Index 0 is the top-level schedule; each `setInclude` is its own instance with the index of
         the header that introduced it, the schedule name/file, the owning media number (None for a
-        host with no Test Definition), the `setPrefix` value as given, and the keyvals as plain
-        Python."""
+        host with no Test Definition), the `setPrefix` value as given, the keyvals as plain
+        Python, and that instance's loaded ScheduleParams (packet 15e: its Pre-/Post-test Actions)."""
         return self._instances
 
 
