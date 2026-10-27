@@ -714,6 +714,17 @@ class RunStore:
             {str(c.name): value for c, value in zip(attempt.columns, row)} for row in rows
         ]
 
+    def input_values(self, run_uuid: str) -> list[dict]:
+        """Return this run's Operator input value rows as dicts, in the order they were recorded.
+
+        The report needs them to print each Step Input under the step that asked for it, so the
+        read mirrors :meth:`nodes`/:meth:`attempts` rather than reaching into SQLite directly."""
+        stmt = input_value.select().where(input_value.c.run_uuid == run_uuid).order_by(input_value.c.seq)  # recorded order
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(input_value.columns, row)} for row in rows
+        ]
+
     # -- interrupted-run recovery -------------------------------------------
 
     def close_interrupted_runs(self, on_log: Optional[callable] = None) -> list[str]:

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import json
 import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from jinja2 import Environment, PackageLoader, select_autoescape
+from markupsafe import Markup
 
 from ..config import Config
 from ..storage.store import RunStore
@@ -108,11 +110,191 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]", "_", name)
 
 
-def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> str:
-    """Render the self-contained HTML Test Report for a finished run.
+def _tree_depths(nodes: list[dict]) -> dict[int, int]:
+    """Nesting depth of every expanded-tree node, keyed by ``node_seq`` (0 = top level).
 
-    Raises :class:`ValueError` if no run is recorded for ``run_uuid`` — callers that regenerate
-    from History only ever render finished runs."""
+    ``nodes`` comes back in tree order, so a node's parent is always already keyed when it is read."""
+    depth: dict[int, int] = {}
+    for row in nodes:
+        seq = int(row.get("node_seq") or 0)
+        parent = row.get("parent_node_seq")
+        depth[seq] = 0 if parent is None else depth.get(int(parent), 0) + 1
+    return depth
+
+
+def _subtree_steps(nodes: list[dict]) -> dict[int, list[dict]]:
+    """Every Test Step beneath each header, keyed by that header's ``node_seq``.
+
+    Nested headers contribute their own steps, so a header's roll-up counts the whole subtree under
+    it (spec rule 68); the header row itself is never in the list."""
+    children: dict[int, list[int]] = {}
+    for row in nodes:
+        parent = row.get("parent_node_seq")
+        if parent is not None:
+            children.setdefault(int(parent), []).append(int(row.get("node_seq") or 0))
+    by_seq = {int(row.get("node_seq") or 0): row for row in nodes}
+    beneath: dict[int, list[dict]] = {}
+    for row in nodes:
+        if row.get("kind") != "header":
+            continue
+        seq = int(row.get("node_seq") or 0)
+        steps: list[dict] = []
+        stack = list(children.get(seq, []))
+        while stack:
+            child = by_seq[stack.pop()]
+            if child.get("kind") == "header":
+                stack.extend(children.get(int(child.get("node_seq") or 0), []))
+            else:
+                steps.append(child)
+        beneath[seq] = steps
+    return beneath
+
+
+def _rollup_text(steps: list[dict]) -> str:
+    """A header's Result column: "4 steps: 3 PASS, 1 FAIL", zero counts left out (spec rule 68)."""
+    if not steps:
+        return "0 steps"
+    counts: dict[str, int] = {}
+    for step in steps:
+        result = step.get("result") or "NOTRUN"
+        counts[result] = counts.get(result, 0) + 1
+    parts = [f"{counts[r]} {r}" for r in RESULT_LABELS if counts.get(r)]
+    return f"{len(steps)} step{'s' if len(steps) != 1 else ''}: " + ", ".join(parts)
+
+
+def _input_lines(declared: Optional[str], values: list[dict]) -> list[dict]:
+    """One "Input n (desc): value" line per Operator input value, labelled from the step's declaration.
+
+    A CHECKBOX selection is stored as a JSON array of labels (packet 10), so it prints as those
+    labels joined by ", " rather than as raw JSON; every other value prints exactly as recorded."""
+    if not values:
+        return []
+    labels: dict[int, str] = {}
+    checkbox: set[int] = set()
+    if declared:
+        try:
+            decls = json.loads(declared)
+        except ValueError:
+            decls = []
+        # `inputs` stores the schedule-format declarations in order, so position i is input index i.
+        for i, decl in enumerate(decls, start=1):
+            labels[i] = (decl.get("desc") or "").strip()
+            if decl.get("type") == "ENUM" and decl.get("input") == "CHECKBOX":
+                checkbox.add(i)
+    lines: list[dict] = []
+    for v in values:
+        index = int(v.get("input_index") or 0)
+        value = v.get("value") if v.get("value") is not None else ""
+        if index in checkbox and isinstance(value, str):
+            try:
+                chosen = json.loads(value)
+            except ValueError:
+                chosen = None
+            if isinstance(chosen, list):
+                value = ", ".join(str(label) for label in chosen)
+        lines.append({"index": index, "desc": labels.get(index, ""), "value": value})
+    return lines
+
+
+def _row(number: str, name: str, message: str, expected: str, actual: str, result: str, depth: int,
+         *, override: str = "", retry: str = "", choice: str = "", inputs: Optional[list[dict]] = None,
+         rollup: str = "", is_header: bool = False, sub: bool = False) -> dict:
+    """One Steps-table row: a Test Step (main or Attempt sub-row) or an include header."""
+    return {
+        "sub": sub,
+        "number": number,
+        "name": name,
+        "message": message,
+        "choice": choice,
+        "expected": expected,
+        "actual": actual,
+        "result": result,
+        "override": override,
+        "retry": retry,
+        "inputs": inputs or [],
+        "rollup": rollup,
+        "depth": depth,
+        "is_header": is_header,
+    }
+
+
+def _step_rows(nodes: list[dict], attempts: list[dict], input_values: list[dict]) -> list[dict]:
+    """One row per expanded-tree node, in tree order, with earlier Attempts as sub-rows (spec 21b).
+
+    Header rows carry the roll-up of the steps beneath them and, like Test Steps, an Operator
+    override label whenever their recorded ``enabled`` differs from ``default_enabled`` (spec rule
+    66): a header's ``enabled`` is derived from its children (packet 15d), so disabling every step
+    under a Sub-schedule labels the header "disabled by Operator". A retried step shows "↻ n" on the
+    main row, which always holds its last Attempt; Attempts 1..n-1 follow it as deeper sub-rows with
+    the prompt choice after the message. A step that never ran shows NOTRUN with no Attempt to print."""
+    atts: dict[int, list[dict]] = {}
+    for a in attempts:
+        atts.setdefault(int(a.get("node_seq") or 0), []).append(a)
+    for rows in atts.values():
+        rows.sort(key=lambda a: int(a.get("attempt_no") or 0))
+
+    asked: dict[tuple[int, int], list[dict]] = {}
+    for v in input_values:
+        asked.setdefault((int(v.get("node_seq") or 0), int(v.get("attempt_no") or 0)), []).append(v)
+
+    depths = _tree_depths(nodes)
+    beneath = _subtree_steps(nodes)
+
+    rows: list[dict] = []
+    for node in nodes:
+        seq = int(node.get("node_seq") or 0)
+        depth = depths.get(seq, 0)
+        name = node.get("step_name") or ""
+        number = node.get("step_number") or ""
+        default_enabled, enabled = node.get("default_enabled"), node.get("enabled")
+        override = ""
+        if default_enabled is not None and enabled is not None and bool(default_enabled) != bool(enabled):
+            override = "enabled by Operator" if enabled else "disabled by Operator"
+        if node.get("kind") == "header":
+            rows.append(_row(number, name, "", "", "", "", depth, override=override,
+                             rollup=_rollup_text(beneath.get(seq, [])), is_header=True))
+            continue
+
+        node_atts = atts.get(seq, [])
+        last = node_atts[-1] if node_atts else {}
+        attempt_count = int(node.get("attempt_count") or 0)
+        rows.append(
+            _row(
+                number,
+                name,
+                last.get("msg") or "",
+                last.get("expected") or "",
+                last.get("actual") or "",
+                node.get("result") or "NOTRUN",
+                depth,
+                override=override,
+                retry=f"↻ {attempt_count}" if attempt_count > 1 else "",
+                inputs=_input_lines(node.get("inputs"), asked.get((seq, int(last.get("attempt_no") or 0)), [])),
+            )
+        )
+        for attempt in node_atts[:-1]:  # earlier Attempts, indented one level deeper
+            rows.append(
+                _row(
+                    "",
+                    name,
+                    attempt.get("msg") or "",
+                    attempt.get("expected") or "",
+                    attempt.get("actual") or "",
+                    attempt.get("pass_fail") or "NOTRUN",
+                    depth + 1,
+                    sub=True,
+                    choice=f"→ {attempt['prompt_choice']}" if attempt.get("prompt_choice") else "",
+                    inputs=_input_lines(node.get("inputs"), asked.get((seq, int(attempt.get("attempt_no") or 0)), [])),
+                )
+            )
+    return rows
+
+
+def _report_context(store: RunStore, run_uuid: str, config: Config) -> dict:
+    """Everything the report template needs for one run, as its render context.
+
+    Split out from :func:`render_report` so a caller (or a test) can render the same context with a
+    different Jinja environment — for example with autoescape off — and compare the byte output."""
     row = store.get_test_run(run_uuid)
     if row is None:
         raise ValueError(f"no test run recorded for {run_uuid!r}")
@@ -166,12 +348,14 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
     pretest_error, posttest_error = _phase_errors(store, run_uuid)
 
     ctx = {
-        # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift.
-        "page_margin_css": _page_margin_css(REPORT_PAGE_MARGINS_MM),
+        # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift. Both of
+        # these are CSS/URI markup the template interpolates raw, so they are marked safe.
+        "page_margin_css": Markup(_page_margin_css(REPORT_PAGE_MARGINS_MM)),
         "org": config.reports_organisation,
-        # The logo is a base64 data URI (ASCII A-Za-z0-9+/= plus ",;=/"), so autoescape leaves it
-        # byte-for-byte unchanged in the CSS url() / <img src>; no external reference is emitted.
-        "logo": _logo_data_uri(config.reports_logo),
+        # The logo is a base64 data URI (ASCII A-Za-z0-9+/= plus ",;=/") emitted into a CSS url()
+        # and an <img src>; it is markup the template must not escape. No external reference is
+        # ever emitted.
+        "logo": Markup(_logo_data_uri(config.reports_logo)),
         "paper": config.reports_paper_size,
         # Cover — document fields (recorded on test_run by packet 21a).
         "doc_title": row.get("doc_title") or None,
@@ -208,17 +392,36 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
         "operator_overrides": operator_overrides,
         # Failures list (Cover).
         "failures": failures,
+        # Steps section (packet 21b): one row per expanded-tree node, headers indented by depth with
+        # their roll-up, retried steps followed by their earlier Attempts.
+        "steps": _step_rows(nodes, store.attempts(run_uuid), store.input_values(run_uuid)),
         # Operator + signature box.
         "operator": row.get("operator") or "",
     }
 
+    return ctx
+
+
+def _render(context: dict) -> str:
+    """Render report.html.j2 with `context`, escaping every value that is not marked safe."""
     env = Environment(
         loader=PackageLoader("ate.report", "templates"),
-        autoescape=select_autoescape(["html"]),
+        # report.html.j2 does not end in ".html", so "j2" has to be an enabled extension or
+        # autoescape stays off and every value lands in the page verbatim.
+        autoescape=select_autoescape(["html", "j2"]),
     )
-    template = env.get_template("report.html.j2")
     # Spread the context as top-level variables (the template reads them bare, e.g. {{ uut_type }}).
-    return template.render(**ctx)
+    return env.get_template("report.html.j2").render(**context)
+
+
+def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> str:
+    """Render the self-contained HTML Test Report for a finished run.
+
+    Raises :class:`ValueError` if no run is recorded for ``run_uuid`` — callers that regenerate
+    from History only ever render finished runs. Every context value is autoescaped unless it is a
+    :class:`markupsafe.Markup`, so the template's deliberate markup (logo data URI, print margins)
+    stays raw while Operator-entered text cannot become markup."""
+    return _render(_report_context(store, run_uuid, config))
 
 
 def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optional[dict]]:
