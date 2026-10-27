@@ -346,7 +346,7 @@ class RunEngine(QThread):
             run_uuid,
             seq,
             kind="header",
-            step_number=step.step_no,
+            step_number=step.step_no or None,
             step_name=step.name,
             default_enabled=default_enabled,
             enabled=enabled,

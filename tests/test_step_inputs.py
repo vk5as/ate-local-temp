@@ -190,10 +190,11 @@ def test_host_rejects_a_bad_input_declaration():
     source = (
         'return ScheduleParams("Bad", "bad input")\n'
         '  :setSchedule({\n'
-        '    StepParams("Colour"):setStepNo("1.")\n'
+        '    StepParams("Colour"):setStepNo("1."):setAction(function() end)\n'
         '      :setInputs({ [1] = { desc = "LED colour", type = "ENUM", input = "BUTTON" } })\n'
         '  })\n'
     )
     with pytest.raises(HostError) as excinfo:
         _host_with_source(source)
     assert "schedule.tslua:" in str(excinfo.value)
+    assert "ENUM input must be one of" in str(excinfo.value)

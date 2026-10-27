@@ -893,6 +893,8 @@ class StagedRunScreen(QWidget):
         self.run_view.step_list.clear()
         self._failed_row = None
         for seq, step in enumerate(steps):
+            if getattr(step, "is_header", False):  # headers have no result row, as in the finished list
+                continue
             number = str(getattr(step, "step_no", "") or "")
             name = str(getattr(step, "name", "") or "")
             if seq == node_seq:

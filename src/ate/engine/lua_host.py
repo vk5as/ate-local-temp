@@ -682,11 +682,12 @@ class _StepParams:
         self.include_file = None
         self.keyvals = None
         self.prefix = None
+        self._included = False  # setInclude was called, whatever it was given
 
     @property
     def is_header(self) -> bool:
         """True for an include step: a header row, not a Test Step."""
-        return self.include_file is not None
+        return self._included
 
     @property
     def kind(self) -> str:
@@ -711,6 +712,7 @@ class _StepParams:
 
     def setInclude(self, file: str, keyvals: Mapping[str, Any] | None = None) -> "_StepParams":
         self.include_file = file
+        self._included = True
         self.keyvals = dict(keyvals or {})
         return self
 
@@ -1207,7 +1209,11 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             label = str(step.step_no) if step.step_no else str(seq + 1)
             if step.name is not None and not isinstance(step.name, str):
                 raise HostError(f"{name}:{label}: Step Name must be a string, got {step.name!r}")
+            if step.step_no is not None and not isinstance(step.step_no, str):
+                raise HostError(f"{name}:{seq + 1}: Step Number must be a string, got {step.step_no!r}")
             if step.is_header:
+                if not isinstance(step.include_file, str) or not step.include_file:
+                    raise HostError(f"{name}:{label}: setInclude needs a file name, got {step.include_file!r}")
                 if step.action is not None:
                     raise HostError(f"{name}:{label}: setInclude step cannot also have an Action")
                 if step.inputs is not None:
@@ -1215,7 +1221,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             else:
                 if step.prefix is not None:
                     raise HostError(f"{name}:{label}: setPrefix needs setInclude")
-                if step.step_no is None:
+                if not step.step_no:  # an empty string is no Step Number either
                     raise HostError(f"{name}:{label}: ordinary step needs a Step Number")
                 if step.action is None:
                     raise HostError(f"{name}:{label}: ordinary step needs an Action")

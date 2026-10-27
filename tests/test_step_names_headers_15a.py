@@ -253,6 +253,50 @@ def test_ordinary_step_without_an_action_is_a_load_error(tmp_path) -> None:
     assert "ordinary step needs an Action" in message
 
 
+def test_an_empty_step_number_is_no_step_number(tmp_path) -> None:
+    """`setStepNo("")` doesn't satisfy "required for an ordinary step"."""
+    step = 'StepParams("x"):setStepNo(""):setAction(function() end)'
+    message = _load_error(_one_step(step), tmp_path)
+    assert "schedule.tslua:1:" in message
+    assert "ordinary step needs a Step Number" in message
+
+
+def test_a_non_string_step_number_is_a_load_error(tmp_path) -> None:
+    """The setter table types the Step Number as a string; `setStepNo(7)` is not silently `"7"`."""
+    step = 'StepParams("x"):setStepNo(7):setAction(function() end)'
+    message = _load_error(_one_step(step), tmp_path)
+    assert "Step Number must be a string" in message
+
+
+@pytest.mark.parametrize("file", ["nil", "{}", '""'])
+def test_set_include_without_a_file_name_is_a_load_error(tmp_path, file) -> None:
+    """`setInclude(nil)` still makes an include step, and one with no usable file is a load error."""
+    step = f'StepParams("x"):setStepNo("1."):setInclude({file}):setPrefix("1.")'
+    message = _load_error(_one_step(step), tmp_path)
+    assert "setInclude needs a file name" in message
+
+
+def test_two_ordinary_steps_with_the_same_number_are_a_load_error(tmp_path) -> None:
+    source = (
+        'return ScheduleParams("Dup", "two steps share a number")\n'
+        '  :setSchedule({\n'
+        '    StepParams("a"):setStepNo("1."):setAction(function() end),\n'
+        '    StepParams("b"):setStepNo("1."):setAction(function() end),\n'
+        '  })\n'
+    )
+    message = _load_error(source, tmp_path)
+    assert "schedule.tslua:1.:" in message and "duplicate Step Number '1.'" in message
+
+
+def test_set_enable_and_set_prefix_on_a_header_are_allowed(tmp_path) -> None:
+    schedule = tmp_path / "schedule.tslua"
+    schedule.write_text(_one_step(
+        'StepParams("group"):setInclude("sub.tslua"):setPrefix("3."):setEnable(false)'
+    ), encoding="utf-8")
+    header = LuaHost(schedule).schedule.steps[0]
+    assert header.is_header and header.enabled is False and header.prefix == "3."
+
+
 def test_a_load_error_names_the_step_number_when_there_is_one(tmp_path) -> None:
     """The step is identified by its Step Number, not its position in the list."""
     step = 'StepParams("x"):setStepNo("4.2.1"):setPrefix("1.")'
