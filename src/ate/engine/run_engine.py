@@ -954,6 +954,10 @@ class RunEngine(QThread):
         # raised fails the run without changing this reason (packet 14c); a second abort during one
         # ends only that action and leaves the rest to run.
         posttest_aborted = self.aborted
+        # The Post-test Actions get the run's overall result (spec: `fn(passFail)`): a Pre-test
+        # failure, a stop or an abort has already made it FAIL, whatever the steps did.
+        if pretest_failed or self._stopped_on_fail or posttest_aborted or aborted:
+            pass_fail = "FAIL"
         # Packet 15e: one Post-test Action per schedule instance, in exactly the reverse of the
         # Pre-test order above — an instance reached in the Pre-test pass gets its teardown even
         # when its own Pre-test Action failed, and one the pass never got to gets none.

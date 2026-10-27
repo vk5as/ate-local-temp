@@ -336,6 +336,9 @@ def test_a_pretest_failure_in_an_include_runs_no_steps_and_only_started_posts(qa
     run = session.store.get_test_run(session.run_uuid)
     assert (run["result"], run["end_reason"]) == ("FAIL", "PRETEST_FAILED")
     assert any("group calibration failed" in line["text"] for line in session.store.log_lines(session.run_uuid))
+    # The run already failed, so every Post-test Action is told FAIL.
+    posts = [l["text"] for l in session.store.log_lines(session.run_uuid) if l["text"].startswith("POST")]
+    assert posts and all(text.endswith("FAIL") for text in posts), posts
 
 
 def test_a_top_level_pretest_failure_is_unchanged_by_15e(qapp, tmp_path) -> None:
@@ -392,7 +395,7 @@ def test_every_post_action_still_runs_after_an_abort(qapp, tmp_path) -> None:
     assert (run["result"], run["end_reason"]) == ("FAIL", "ABORTED")
     assert _phases(session) == [("pre", s) for s in INSTANCES] + [("post", s) for s in reversed(INSTANCES)]
     assert all(r["outcome"] == "ok" for r in _action_rows(session))
-    assert _phase_lines(session) == PRE_ORDER + POST_ORDER
+    assert _phase_lines(session) == PRE_ORDER + [line.replace(" PASS", " FAIL") for line in POST_ORDER]  # an aborted run is FAIL
     assert _step_results(session) == [("1.", "ERROR"), ("2.1.", "NOTRUN"), ("2.1.1.", "NOTRUN"), ("3.1.", "NOTRUN")]
     # Only the interrupted busy step records an Attempt.
     assert len(session.store.attempts(session.run_uuid)) == 1
