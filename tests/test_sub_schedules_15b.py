@@ -3,8 +3,9 @@
 Real `.atedef` trees and real `.tslua` files on disk, expanded by a `LuaHost` that carries the
 release's include map, and run end to end through :class:`HeadlessRunSession`. The channel example
 from `assets/test-schedule-format.md` is the centre of gravity: one `channel.tslua` included twice
-with different `keyvals`, each include its own instance. Cycle detection, Step Number prefixes and
-`setEnable` forcing belong to packets 15c/15d; here a runaway include chain is stopped at depth 32.
+with different `keyvals`, each include its own instance; each include header carries a `setPrefix`
+so the expanded tree has no duplicate Step Numbers (packet 15c checks that). Cycle detection and
+prefix stacking are tested in `test_tree_checks_15c.py`; `setEnable` forcing belongs to packet 15d.
 """
 
 import hashlib
@@ -41,8 +42,8 @@ return ScheduleParams("Main schedule", "the channel example: two includes of one
   :setSchedule({
     StepParams("setup"):setStepNo("1.")
       :setAction(function() ATE.report(Result.PASS, "setup", "1", "1") end),
-    StepParams("channel 1"):setStepNo("2."):setInclude("channel.tslua", { channel = 1 }),
-    StepParams("channel 2"):setStepNo("3."):setInclude("channel.tslua", { channel = 2 }),
+    StepParams("channel 1"):setStepNo("2."):setPrefix("2."):setInclude("channel.tslua", { channel = 1 }),
+    StepParams("channel 2"):setStepNo("3."):setPrefix("3."):setInclude("channel.tslua", { channel = 2 }),
   })
 """
 
@@ -67,14 +68,14 @@ GROUP_SRC = """\
 local kv = ...
 return ScheduleParams("Group schedule", "one channel instance per group member")
   :setSchedule({
-    StepParams("inner"):setStepNo("1."):setInclude("channel.tslua", { channel = kv.channel }),
+    StepParams("inner"):setStepNo("1."):setPrefix("1."):setInclude("channel.tslua", { channel = kv.channel }),
   })
 """
 
 NESTED_MAIN_SRC = """\
 return ScheduleParams("Nested schedule", "a Sub-schedule that includes another Sub-schedule")
   :setSchedule({
-    StepParams("group 1"):setStepNo("1."):setInclude("group.tslua", { channel = 7 }),
+    StepParams("group 1"):setStepNo("1."):setPrefix("1."):setInclude("group.tslua", { channel = 7 }),
     StepParams("plain"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "plain step", "1", "1") end),
   })
@@ -234,7 +235,7 @@ def test_each_include_is_its_own_instance(tmp_path) -> None:
     for seq, header_node in enumerate((1, 4), start=1):
         inst = instances[seq]
         assert (inst.parent_instance, inst.header, inst.name, inst.file, inst.media_number, inst.prefix, inst.keyvals) == (
-            0, header_node, "Channel check", "channel.tslua", "MR-MAIN", "", {"channel": seq}
+            0, header_node, "Channel check", "channel.tslua", "MR-MAIN", f"{seq + 1}.", {"channel": seq}
         )
 
 
@@ -258,7 +259,7 @@ return ScheduleParams("Keyvals main", "passes nested keyvals")
   :setSchedule({
     StepParams("top"):setStepNo("1.")
       :setAction(function() ATE.report(Result.PASS, type(kv) .. " " .. tostring(next(kv)), "1", "1") end),
-    StepParams("child"):setStepNo("2."):setInclude("child.tslua", { n = 3, settings = { tag = "abc" }, list = { 10, 20 } }),
+    StepParams("child"):setStepNo("2."):setPrefix("2."):setInclude("child.tslua", { n = 3, settings = { tag = "abc" }, list = { 10, 20 } }),
   })
 """
     directory = _write_release(root, "kv", [_entry("main.tslua", main), _entry("child.tslua", src)])
@@ -275,15 +276,15 @@ def test_a_require_d_module_is_shared_between_instances(tmp_path) -> None:
     main = """\
 return ScheduleParams("Shared module schedule", "two includes of the counting channel")
   :setSchedule({
-    StepParams("first"):setStepNo("1."):setInclude("channel.tslua", { channel = 1 }),
-    StepParams("second"):setStepNo("2."):setInclude("channel.tslua", { channel = 2 }),
+    StepParams("first"):setStepNo("1."):setPrefix("1."):setInclude("channel.tslua", { channel = 1 }),
+    StepParams("second"):setStepNo("2."):setPrefix("2."):setInclude("channel.tslua", { channel = 2 }),
   })
 """
     files = {"main.tslua": main, "channel.tslua": COUNTING_CHANNEL_SRC, "counter.lua": COUNTER_SRC}
     directory = _write_release(root, "shared", [_entry(p, s) for p, s in files.items()])
     _write_files(directory, files)
     host = _host(root, "shared")
-    assert [t.step_no for t in host.tree] == ["1.", "1.", "2.", "2.", "1.", "2."]  # each instance numbers its own steps
+    assert [t.step_no for t in host.tree] == ["1.", "1.1.", "1.2.", "2.", "2.1.", "2.2."]  # each instance under its own prefix
     # Seen from the steps: each instance bumped the one shared counter at load (1, then 2), and
     # both read 2 when they run, because `require` loaded the module once for the whole run.
     assert _step_messages(host) == ["run 1", "ch 1 sees 2", "run 2", "ch 2 sees 2"]
@@ -309,8 +310,8 @@ def test_sibling_includes_do_not_share_globals(tmp_path) -> None:
     main = """\
 return ScheduleParams("Main schedule", "includes the marker twice")
   :setSchedule({
-    StepParams("a"):setStepNo("1."):setInclude("sub.tslua", { channel = 1 }),
-    StepParams("b"):setStepNo("2."):setInclude("sub.tslua", { channel = 2 }),
+    StepParams("a"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua", { channel = 1 }),
+    StepParams("b"):setStepNo("2."):setPrefix("2."):setInclude("sub.tslua", { channel = 2 }),
   })
 """
     host = _bare(tmp_path, {"main.tslua": main, "sub.tslua": MARKER_SRC})
@@ -326,7 +327,7 @@ PARENT = "p"
 _G.VIA_G = "g"
 return ScheduleParams("Main schedule", "sets globals around an include")
   :setSchedule({
-    StepParams("child"):setStepNo("1."):setInclude("sub.tslua"),
+    StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua"),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, tostring(CHILD) .. " " .. PARENT .. " " .. VIA_G, "1", "1") end),
   })
@@ -350,7 +351,7 @@ def test_shadowing_a_shared_name_stays_in_its_instance(tmp_path) -> None:
     main = """\
 return ScheduleParams("Main schedule", "an include shadows ATE")
   :setSchedule({
-    StepParams("child"):setStepNo("1."):setInclude("sub.tslua"),
+    StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua"),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "top still has " .. Result.PASS, "1", "1") end),
   })
@@ -380,7 +381,7 @@ def test_an_include_cannot_redefine_the_shared_api(tmp_path, statement, expected
     """Writing into `ATE`, an enum table or a builder from an include is a load error."""
     main = """\
 return ScheduleParams("Main schedule", "includes a schedule that rewrites the API")
-  :setSchedule({ StepParams("child"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     sub = statement + '\nreturn ScheduleParams("Sub", "") :setSchedule({})\n'
     with pytest.raises(HostError) as excinfo:
@@ -404,7 +405,7 @@ def test_an_include_cannot_reach_the_loader_or_the_shared_globals(tmp_path, esca
     """Round-2 escapes: no `debug` library, and an instance's metatable is hidden."""
     main = """\
 return ScheduleParams("Main schedule", "includes a schedule that tries to escape")
-  :setSchedule({ StepParams("child"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     sub = escape + '\nreturn ScheduleParams("Sub", "") :setSchedule({})\n'
     with pytest.raises(HostError) as excinfo:
@@ -433,7 +434,7 @@ def test_an_include_is_resolved_from_a_dependency_release(tmp_path) -> None:
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Dependency main", "includes a Sub-schedule owned by a dependency")
-  :setSchedule({ StepParams("dep"):setStepNo("1."):setInclude("sub.tslua", { channel = 5 }) })
+  :setSchedule({ StepParams("dep"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua", { channel = 5 }) })
 """
     own = [_entry("main.tslua", main)]
     dep = [_entry("sub.tslua", CHANNEL_SRC)]
@@ -452,7 +453,7 @@ def test_an_include_is_found_transitively_through_a_dependency_chain(tmp_path) -
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes a Sub-schedule owned by a grandchild release")
-  :setSchedule({ StepParams("deep"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("deep"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     _write_release(root, "own", [_entry("main.tslua", main)], [{"name": "Release mid", "version": "^1.0"}])
     _write_files(root / "own", {"main.tslua": main})
@@ -496,7 +497,7 @@ def test_the_channel_example_runs_and_records_its_tree(qapp, tmp_path) -> None:
     for seq, channel in enumerate((1, 2), start=1):
         row = instances[seq]
         assert (row["parent_instance_seq"], row["header_node_seq"], row["schedule_name"], row["file"], row["media_number"], row["prefix"]) == (
-            0, (1, 4)[seq - 1], "Channel check", "channel.tslua", "MR-MAIN", ""
+            0, (1, 4)[seq - 1], "Channel check", "channel.tslua", "MR-MAIN", f"{seq + 1}."
         )
         assert json.loads(row["keyvals"]) == {"channel": channel}
 
@@ -518,8 +519,8 @@ def test_a_shared_require_d_module_carries_state_across_instances(qapp, tmp_path
     main = """\
 return ScheduleParams("Shared module schedule", "two includes of the counting channel")
   :setSchedule({
-    StepParams("first"):setStepNo("1."):setInclude("channel.tslua", { channel = 1 }),
-    StepParams("second"):setStepNo("2."):setInclude("channel.tslua", { channel = 2 }),
+    StepParams("first"):setStepNo("1."):setPrefix("1."):setInclude("channel.tslua", { channel = 1 }),
+    StepParams("second"):setStepNo("2."):setPrefix("2."):setInclude("channel.tslua", { channel = 2 }),
   })
 """
     files = {"main.tslua": main, "channel.tslua": COUNTING_CHANNEL_SRC, "counter.lua": COUNTER_SRC}
@@ -572,7 +573,7 @@ return ScheduleParams("Sub with doc fields", "ignored description")
 return ScheduleParams("Stop on fail main", "the top level's stop-on-fail still applies")
   :setDocTitle("Main Report")
   :setStopOnFail(true)
-  :setSchedule({ StepParams("sub"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("sub"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     directory = _write_release(root, "clf", [_entry("main.tslua", main), _entry("sub.tslua", sub)])
     _write_files(directory, {"main.tslua": main, "sub.tslua": sub})
@@ -611,7 +612,7 @@ def test_a_sibling_schedule_still_loads_when_an_include_is_broken(tmp_path) -> N
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes a file that is not listed")
-  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("nowhere.tslua") })
+  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("nowhere.tslua") })
 """
     sibling = """\
 return ScheduleParams("Sibling schedule", "no includes at all")
@@ -642,7 +643,7 @@ def test_include_load_errors_break_the_including_schedule(tmp_path, include_file
     keyvals_src = "" if keyvals is None else ", " + keyvals
     main = (
         'return ScheduleParams("Main schedule", "an include that fails")\n'
-        f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setInclude("{include_file}"{keyvals_src}) }})\n'
+        f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("{include_file}"{keyvals_src}) }})\n'
     )
     files = {"main.tslua": main}
     if sub_src is not None:
@@ -667,7 +668,7 @@ def test_an_include_listed_but_absent_on_disk_is_a_load_error(tmp_path) -> None:
     directory.mkdir()
     (directory / "main.tslua").write_text(
         'return ScheduleParams("Main schedule", "includes a file that is not on disk")\n'
-        '  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("sub.tslua") })\n',
+        '  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })\n',
         encoding="utf-8",
     )
     definition = Definition(
@@ -691,7 +692,7 @@ def test_the_including_release_own_file_wins_over_a_dependency(tmp_path) -> None
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes a file the release and a dependency both list")
-  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     _write_release(root, "amb", [_entry("main.tslua", main), _entry("sub.tslua", _named("own sub"))],
                   [{"name": "Release dep", "version": "^1.0"}])
@@ -711,11 +712,11 @@ def test_an_include_is_resolved_from_the_including_file_release(tmp_path) -> Non
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes b.tslua from its dependency")
-  :setSchedule({ StepParams("b"):setStepNo("1."):setInclude("b.tslua") })
+  :setSchedule({ StepParams("b"):setStepNo("1."):setPrefix("1."):setInclude("b.tslua") })
 """
     b_src = """\
 return ScheduleParams("B schedule", "includes own.tslua")
-  :setSchedule({ StepParams("own"):setStepNo("1."):setInclude("own.tslua") })
+  :setSchedule({ StepParams("own"):setStepNo("1."):setPrefix("1."):setInclude("own.tslua") })
 """
     a_files = {"main.tslua": main, "own.tslua": _named("A own")}
     _write_release(root, "a", [_entry(p, src) for p, src in a_files.items()], [{"name": "Release b", "version": "^1.0"}])
@@ -736,11 +737,11 @@ def test_an_include_does_not_see_files_only_the_top_release_lists(tmp_path) -> N
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes b.tslua from its dependency")
-  :setSchedule({ StepParams("b"):setStepNo("1."):setInclude("b.tslua") })
+  :setSchedule({ StepParams("b"):setStepNo("1."):setPrefix("1."):setInclude("b.tslua") })
 """
     b_src = """\
 return ScheduleParams("B schedule", "includes a file only A lists")
-  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("aonly.tslua") })
+  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("aonly.tslua") })
 """
     a_files = {"main.tslua": main, "aonly.tslua": _named("A only")}
     _write_release(root, "a", [_entry(p, src) for p, src in a_files.items()], [{"name": "Release b", "version": "^1.0"}])
@@ -756,7 +757,7 @@ def test_an_include_two_dependencies_list_is_ambiguous(tmp_path) -> None:
     root = tmp_path / "defs"
     main = """\
 return ScheduleParams("Main schedule", "includes a file two dependencies list")
-  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("sub.tslua") })
+  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })
 """
     _write_release(root, "amb", [_entry("main.tslua", main)],
                   [{"name": "Release one", "version": "^1.0"}, {"name": "Release two", "version": "^1.0"}])
@@ -776,7 +777,7 @@ def test_a_function_in_keyvals_is_a_load_error(tmp_path) -> None:
     for keyvals in ("{ f = function() end }", "{ nested = { f = function() end } }", "{ x = StepParams(\"y\") }"):
         main = (
             'return ScheduleParams("Main schedule", "keyvals hold a function")\n'
-            f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setInclude("channel.tslua", {keyvals}) }})\n'
+            f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("channel.tslua", {keyvals}) }})\n'
         )
         directory = _write_release(root, "kv", [_entry("main.tslua", main), _entry("channel.tslua", CHANNEL_SRC)])
         _write_files(directory, {"main.tslua": main, "channel.tslua": CHANNEL_SRC})
@@ -801,7 +802,7 @@ def test_keyvals_that_are_not_a_plain_data_table_are_a_load_error(tmp_path, keyv
     """A non-table, a table with a metatable (nested too) or a self-containing table: a clean load error."""
     main = (
         'return ScheduleParams("Main schedule", "bad keyvals")\n'
-        f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setInclude("sub.tslua", {keyvals}) }})\n'
+        f'  :setSchedule({{ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua", {keyvals}) }})\n'
     )
     with pytest.raises(HostError) as excinfo:
         _bare(tmp_path, {"main.tslua": main, "sub.tslua": CHANNEL_SRC})
@@ -813,19 +814,19 @@ def test_bare_host_reports_a_missing_include_as_a_load_error(tmp_path) -> None:
     """Without a Test Definition a missing include is the same HostError, not a raw FileNotFoundError."""
     main = """\
 return ScheduleParams("Bare main", "includes a file that is not there")
-  :setSchedule({ StepParams("x"):setStepNo("1."):setInclude("gone.tslua") })
+  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("gone.tslua") })
 """
     with pytest.raises(HostError) as excinfo:
         _bare(tmp_path, {"main.tslua": main})
     assert "main.tslua:1.: include 'gone.tslua' is missing (" in str(excinfo.value)
 
 
-def test_a_self_include_hits_the_depth_limit(tmp_path) -> None:
-    """Until 15c detects cycles properly, a chain that recurses stops at depth 32 with a load error."""
+def test_a_self_include_is_a_cycle(tmp_path) -> None:
+    """A schedule that includes itself fails at the first repeat with the cycle error (packet 15c)."""
     root = tmp_path / "defs"
     src = """\
 return ScheduleParams("Looping schedule", "includes itself")
-  :setSchedule({ StepParams("again"):setStepNo("1."):setInclude("loop.tslua") })
+  :setSchedule({ StepParams("again"):setStepNo("1."):setPrefix("1."):setInclude("loop.tslua") })
 """
     directory = _write_release(root, "loop", [_entry("loop.tslua", src)])
     _write_files(directory, {"loop.tslua": src})
@@ -833,10 +834,7 @@ return ScheduleParams("Looping schedule", "includes itself")
     with pytest.raises(HostError) as excinfo:
         host = LuaHost(directory / "loop.tslua", modules={}, includes=includes)
     message = str(excinfo.value)
-    assert "include depth exceeds 32" in message
-    # The chain prefix names each level the walk reached before the limit stopped it: 32 legal
-    # include levels, then the 33rd that raises.
-    assert message.count("include 'loop.tslua'") == 33
+    assert message == "loop.tslua:1.: include 'loop.tslua' is an include cycle: loop.tslua → loop.tslua"
 
 
 # --- the pre-run mismatch scope (06c) ---------------------------------------
@@ -893,11 +891,11 @@ def test_run_screen_lists_children_indented_under_their_header(qapp, tmp_path) -
     assert texts == [
         "1.  setup",
         "2.  channel 1",
-        "  1.  output on",
-        "  2.  output off",
+        "  2.1.  output on",
+        "  2.2.  output off",
         "3.  channel 2",
-        "  1.  output on",
-        "  2.  output off",
+        "  3.1.  output on",
+        "  3.2.  output off",
     ]
     assert all(box.checkState() == Qt.CheckState.Checked for box in [
         screen.steps_options_stage.step_list.item(i) for i in range(7)
@@ -929,11 +927,11 @@ def test_disabling_an_included_child_records_it_notrun(qapp, tmp_path) -> None:
     assert rows == [
         "1.  setup  →  PASS",
         "2.  channel 1",
-        "  1.  output on  →  PASS",
-        "  2.  output off  →  NOTRUN",
+        "  2.1.  output on  →  PASS",
+        "  2.2.  output off  →  NOTRUN",
         "3.  channel 2",
-        "  1.  output on  →  PASS",
-        "  2.  output off  →  PASS",
+        "  3.1.  output on  →  PASS",
+        "  3.2.  output off  →  PASS",
     ]
 
 
@@ -969,11 +967,11 @@ def test_the_paused_run_list_shows_headers_and_indents_children(qapp, tmp_path) 
     assert rows == [
         "1.  setup  →  PASS",
         "2.  channel 1",
-        "  1.  output on  →  PASS",
-        "  2.  output off  →  PASS",
+        "  2.1.  output on  →  PASS",
+        "  2.2.  output off  →  PASS",
         "3.  channel 2",
-        "  1.  output on  →  PASS",
-        "  2.  output off  →  FAIL",
+        "  3.1.  output on  →  PASS",
+        "  3.2.  output off  →  FAIL",
     ]
     assert screen._failed_row is screen.run_view.step_list.item(6)
     screen.run_view.failure_prompt_bar.continue_button.click()
@@ -986,7 +984,7 @@ def test_bare_host_resolves_includes_against_its_own_directory(tmp_path) -> None
     directory.mkdir()
     (directory / "main.tslua").write_text(
         'return ScheduleParams("Bare main", "no definition behind it")\n'
-        '  :setSchedule({ StepParams("child"):setStepNo("1."):setInclude("sub.tslua", { channel = 9 }) })\n',
+        '  :setSchedule({ StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua", { channel = 9 }) })\n',
         encoding="utf-8",
     )
     (directory / "sub.tslua").write_text(CHANNEL_SRC, encoding="utf-8")
