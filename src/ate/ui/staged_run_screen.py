@@ -24,7 +24,7 @@ import html
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -1222,9 +1222,11 @@ class StagedRunScreen(QWidget):
         # UserRole is deliberately left empty so no path can pass a broken row to the session.
         item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled))
         item.setData(Qt.ItemDataRole.UserRole + 1, row.error)
-        item.setSizeHint(QSize(0, 48))
+        widget = _broken_row_widget(name, release, row.error)
+        # The row is three lines tall, so let the widget's own height set the item's.
+        item.setSizeHint(widget.sizeHint())
         list_widget.addItem(item)
-        list_widget.setItemWidget(item, _broken_row_widget(name, release, row.error))
+        list_widget.setItemWidget(item, widget)
         return item
 
     def _selected_schedule_name(self) -> Optional[str]:
