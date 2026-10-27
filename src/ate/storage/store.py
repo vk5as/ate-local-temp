@@ -509,16 +509,24 @@ class RunStore:
     # -- reads --------------------------------------------------------------
 
     def media_releases(self, run_uuid: str) -> list[dict]:
-        """Return this run's Media Release rows as dicts (empty when the run is unknown)."""
-        stmt = media_release.select().where(media_release.c.run_uuid == run_uuid)
+        """Return this run's Media Release rows as dicts in seq order (empty when the run is unknown)."""
+        stmt = (
+            media_release.select()
+            .where(media_release.c.run_uuid == run_uuid)
+            .order_by(media_release.c.seq)
+        )
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(media_release.columns, row)} for row in rows
         ]
 
     def run_files(self, run_uuid: str) -> list[dict]:
-        """Return this run's file-used rows as dicts (empty when the run is unknown)."""
-        stmt = run_file.select().where(run_file.c.run_uuid == run_uuid)
+        """Return this run's file-used rows as dicts in seq order (empty when the run is unknown)."""
+        stmt = (
+            run_file.select()
+            .where(run_file.c.run_uuid == run_uuid)
+            .order_by(run_file.c.seq)
+        )
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
