@@ -837,11 +837,6 @@ end
 # load error rather than a runaway recursion.
 MAX_KEYVALS_DEPTH = 32
 
-# Packet 15b: an include chain this deep is a cycle. 15c detects cycles properly; until then this
-# is the guard that stops a self-including schedule from hanging the loader.
-MAX_INCLUDE_DEPTH = 32
-
-
 @dataclass
 class _ScheduleInstance:
     """One schedule in the expanded tree: the top level, or one `setInclude` (packet 15b).
@@ -875,12 +870,19 @@ class _TreeNode:
     `parent` is the tree index of the enclosing include header (None at the top level), `instance`
     the schedule instance the row belongs to, `depth` how deeply it is nested. Everything else is
     read straight off the step, so the runner's `step.step_no`/`step.is_header` reads work on a
-    tree entry as they do on a bare `_StepParams`."""
+    tree entry as they do on a bare `_StepParams`.
+
+    Packet 15c: `step_no` is the fully prefixed Step Number (every enclosing include's `setPrefix`,
+    outside in, then the step's own number; a header takes its ancestors' prefixes, not its own) and
+    is what the run records and every view shows. `chain` names the row by its include chain,
+    `file:number` per level, for load errors."""
 
     step: _StepParams
     parent: Optional[int]
     instance: int
     depth: int
+    step_no: Optional[str] = None
+    chain: str = ""
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.step, name)
@@ -1084,7 +1086,12 @@ class _LuaHost:
                                            file=top_file, media_number=_media_of(top_owner), prefix="", keyvals={},
                                            owner=top_owner, env=top_env)]
         self._tree: list[_TreeNode] = []
-        self._expand(self._schedule, self._schedule_path, 0, None, 0)
+        self._chain_names: dict[Path, str] = {}
+        try:
+            self._expand(self._schedule, self._schedule_path, 0, None, 0, "", (Path(self._schedule_path).resolve(),), "")
+        except RecursionError as exc:  # a legal but absurdly deep chain is a load error for this schedule only
+            raise HostError(f"{Path(self._schedule_path).name}: include tree too deep to load") from exc
+        self._check_tree_step_numbers()
 
     def _lockdown(self, env) -> None:
         """Remove the file-loading entry points and the python builtin from ``env``.
@@ -1363,7 +1370,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             return plain
         raise HostError(f"keyvals must be plain data, got {type(value).__name__} ({value!r})")
 
-    def _expand(self, schedule: _ScheduleParams, schedule_path: Path, instance_seq: int, parent_node: Optional[int], depth: int) -> None:
+    def _expand(self, schedule: _ScheduleParams, schedule_path: Path, instance_seq: int, parent_node: Optional[int],
+                depth: int, prefix: str, chain: tuple[Path, ...], where_chain: str) -> None:
         """Walk one schedule's headers and expand every include into :attr:`_tree`/:attr:`_instances`.
 
         Each header is followed immediately by the subtree of the schedule it includes, so the list
@@ -1371,22 +1379,32 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         again per include, each in its own global table (so instances never see each other's
         globals, while `require`d modules stay shared), with that include's keyvals as its `...`
         argument. The include is resolved from the release owning the including file. Anything
-        that goes wrong loading one — unlisted, missing, ambiguous, raising, bad keyvals, or a
-        setter error inside it — is a load error for the top-level schedule, and the message names
-        the chain that led to it. Depth is capped at :data:`MAX_INCLUDE_DEPTH` until packet 15c
-        detects cycles for real."""
+        that goes wrong loading one — unlisted, missing, ambiguous, cyclic, raising, bad keyvals, or
+        a setter error inside it — is a load error for the top-level schedule, and the message names
+        the chain that led to it.
+
+        Packet 15c: `prefix` is every enclosing include's `setPrefix`, outside in, prepended as is to
+        each Step Number at this level; a header's own prefix applies only beneath it. `chain` is
+        the resolved files on this include chain, top level first: a file already on it is a cycle,
+        while the same file in a sibling branch is not. Nesting is otherwise unlimited.
+        `where_chain` is the `file:number → ` trail naming each row for duplicate errors."""
         owner = self._instances[instance_seq].owner
+        file_name = self._instances[instance_seq].file
         for seq, step in enumerate(schedule.steps):
             node = len(self._tree)
-            self._tree.append(_TreeNode(step=step, parent=parent_node, instance=instance_seq, depth=depth))
+            label = str(step.step_no) if step.step_no else str(seq + 1)
+            number = prefix + step.step_no if step.step_no else None
+            self._tree.append(_TreeNode(step=step, parent=parent_node, instance=instance_seq, depth=depth,
+                                        step_no=number, chain=f"{where_chain}{file_name}:{label}"))
             if not step.is_header:
                 continue
-            label = str(step.step_no) if step.step_no else str(seq + 1)
             where = f"{Path(schedule_path).name}:{label}:"
             try:
-                if depth + 1 > MAX_INCLUDE_DEPTH:
-                    raise HostError(f"include depth exceeds {MAX_INCLUDE_DEPTH}")
                 path, member = self._resolve_include(step.include_file, schedule_path, owner)
+                resolved = Path(path).resolve()
+                if resolved in chain:
+                    names = [self._chain_name(p) for p in chain] + [self._chain_name(resolved)]
+                    raise HostError(f"is an include cycle: {' → '.join(names)}")
                 keyvals = self._plain_keyvals(step.keyvals)
                 child, env = self._load_schedule(path, keyvals=keyvals)
                 self._validate_steps(child, path)
@@ -1397,11 +1415,36 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                                       file=Path(step.include_file).as_posix(), media_number=_media_of(member),
                                       prefix=step.prefix or "", keyvals=keyvals, owner=member, env=env)
                 )
-                self._expand(child, path, child_seq, node, depth + 1)
+                self._chain_names.setdefault(resolved, Path(step.include_file).as_posix())
+                self._expand(child, path, child_seq, node, depth + 1, prefix + (step.prefix or ""),
+                             chain + (resolved,), f"{where_chain}{file_name}:{label} → ")
             except HostError as exc:
                 # Each level prefixes the header that led to it, so a defect deep in a nested
                 # chain reads as the include chain that reached it, naming each include once.
                 raise HostError(f"{where} include '{step.include_file}' {exc}") from exc
+
+    def _chain_name(self, resolved: Path) -> str:
+        """How a file on an include chain is named in a cycle error: as listed, or as first included."""
+        if resolved == Path(self._schedule_path).resolve():
+            return self._instances[0].file
+        return self._chain_names.get(resolved, resolved.name)
+
+    def _check_tree_step_numbers(self) -> None:
+        """Refuse a fully prefixed Step Number used twice anywhere in the expanded tree (packet 15c).
+
+        Siblings are already checked per file by :meth:`_validate_steps`; this catches what the
+        includes create (a missing or colliding prefix) and names both rows by their include
+        chains. It is a load error for the top-level schedule."""
+        seen: dict[str, _TreeNode] = {}
+        for entry in self._tree:
+            if entry.step_no is None:
+                continue
+            first = seen.setdefault(entry.step_no, entry)
+            if first is not entry:
+                raise HostError(
+                    f"{Path(self._schedule_path).name}: duplicate Step Number '{entry.step_no}' "
+                    f"in the expanded tree: {first.chain} and {entry.chain}"
+                )
 
     def _load_schedule(self, path: str | Path, keyvals: Optional[dict[Any, Any]] = None) -> tuple[_ScheduleParams, Any]:
         """Execute ``path`` as a text chunk in a new instance global table; return its ScheduleParams and that table.
@@ -1459,8 +1502,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         they are called in is irrelevant. Each violation raises HostError naming the step by its
         Step Number, or its 1-based position when it has no number — the same shape as a bad
         ``setInputs`` table, so the schedule picker and the run start both report it as a load
-        error. Step Numbers are checked for duplicates among siblings; 15c extends that to the
-        expanded tree with prefixes."""
+        error. Step Numbers are checked for duplicates among siblings here; packet 15c checks the
+        fully prefixed numbers across the expanded tree once the includes are expanded."""
         name = Path(path).name if path else "schedule.tslua"
         seen: set[str] = set()
         for seq, step in enumerate(schedule.steps):
@@ -1476,6 +1519,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                     raise HostError(f"{name}:{label}: setInclude step cannot also have an Action")
                 if step.inputs is not None:
                     raise HostError(f"{name}:{label}: setInclude step cannot also have Step Inputs")
+                if step.prefix is not None and not isinstance(step.prefix, str):
+                    raise HostError(f"{name}:{label}: setPrefix needs a string, got {step.prefix!r}")
             else:
                 if step.prefix is not None:
                     raise HostError(f"{name}:{label}: setPrefix needs setInclude")
