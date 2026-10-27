@@ -923,13 +923,14 @@ def test_disabling_an_included_child_records_it_notrun(qapp, tmp_path) -> None:
     assert nodes[2]["result"] == "PASS" and nodes[5]["result"] == "PASS"
     rows = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
     # The finished list shows the whole tree: header rows (no result) with their children indented,
-    # so the two "output on"/"output off" pairs read as two different places.
+    # so the two "output on"/"output off" pairs read as two different places. Packet 15d adds the
+    # header rollup: every step beneath a header has a Result here, so both read "2/2 done".
     assert rows == [
         "1.  setup  →  PASS",
-        "2.  channel 1",
+        "2.  channel 1  2/2 done",
         "  2.1.  output on  →  PASS",
         "  2.2.  output off  →  NOTRUN",
-        "3.  channel 2",
+        "3.  channel 2  2/2 done",
         "  3.1.  output on  →  PASS",
         "  3.2.  output off  →  PASS",
     ]
@@ -964,12 +965,14 @@ def test_the_paused_run_list_shows_headers_and_indents_children(qapp, tmp_path) 
         time.sleep(0.005)
     assert prompts == [(6, 1)]
     rows = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
+    # Packet 15d's rollup reads live: channel 1's two steps are both recorded, channel 2's failing
+    # step has no node row yet (it is written after its last Attempt), so it counts 1 of 2.
     assert rows == [
         "1.  setup  →  PASS",
-        "2.  channel 1",
+        "2.  channel 1  2/2 done",
         "  2.1.  output on  →  PASS",
         "  2.2.  output off  →  PASS",
-        "3.  channel 2",
+        "3.  channel 2  1/2 done",
         "  3.1.  output on  →  PASS",
         "  3.2.  output off  →  FAIL",
     ]
