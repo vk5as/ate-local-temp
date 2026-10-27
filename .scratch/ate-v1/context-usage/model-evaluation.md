@@ -1,6 +1,6 @@
 # Model evaluation — ATE v1 build
 
-Generated 2026-10-27 07:03 by `model_eval.py`, after 42 merged packets/tickets. Regenerated every 5 merged packets.
+Generated 2026-10-27 19:45 by `model_eval.py`, after 46 merged packets/tickets. Regenerated every 5 merged packets.
 
 ## Summary
 
@@ -33,6 +33,8 @@ Only Claude costs money; the local models are free but slow and less reliable. R
 - **As implementer** (18a, 18b): both complete with mutation-proven tests (18a: shared stream base + SERIAL; 18b: UDP datagram queue), ~35–45 min each. But it **misreports its own step counts**: 18a claimed "first compaction, well under 150 steps" (actual 161 steps, 2 compactions); 18b claimed "~60 steps" (actual 158, 1 compaction), so it never triggers the Opus-handoff rule. 18a also left a box unticked while marking the packet resolved. Trust collect.py, not its self-report.
 - **On the tuned 262k config** (16d, 2026-10-26: n_ctx 262,144, compaction buffer 32,768): 21 min, 87 steps, 0 compactions at a 106k peak; ~43 output tok/s, the same as before the tune. Clean, small Lua module; tests shown failing first; its self-report (~90 steps, 0 compactions) was accurate this time.
 - **31b** (2026-10-27, 262k config): found a real root cause by instrumenting (pyserial's `socket://` open resets the input buffer) and fixed the tests correctly, but **ended its turn with a background verification run still going and the packet unticked**; 60 min, 130 steps, 0 compactions at a 170k peak, which is beyond the old 131k window, so the bigger context paid off. As reviewer it was excellent: probes, before/after controls, 30/30 and 10/10 runs, and a precise product note.
+- **19, 06c, 07b, 07c, 07d** (2026-10-27, 262k config): 19 (VISA) needed an Opus rework for pyvisa-py I/O semantics (overrunning reads, write with no timeout), the second time network I/O design went beyond it. The catalog/record packets were fast and clean: 07b 16 min/64 steps, 07c ~19 min/41 steps, 07d ~13 min/~50 steps, all 0 compactions, each finished with only small light-review fixes. Self-reports were accurate from 16d on, and it now volunteers weak spots unprompted (07c: 3 tests pin pre-existing behaviour; 07d: its ORDER BY test can't fail on SQLite).
+- **As reviewer** (06c-07d): consistently the deeper of the two reviewers. It found must-fixes Haiku missed in 07b (an assertion that couldn't fail) and 07c (broken installed dependency reported as "unresolved"; the Run screen never shows broken definitions at all, a ticket-05 gap now packet 05b), and answered brief questions from the code (07d: only SQLite is accepted, so the ORDER BY question is moot). Reviews take 12-55 min against Haiku's ~2-4 min.
 - **Concurrency** (2026-10-26): two agents on its single slot ran ~12.2 s/turn each vs 6.0 s solo (≈49%): the slot time-shares with no aggregate gain, so it runs one session at a time.
 - **As reviewer** (24b round 2): good — verified each fix with probes and mutation tests, and found a real coverage gap (filter-vs-typed-extension precedence untested; flipping it still passed all tests).
 
@@ -64,7 +66,7 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | Model | Role | Runs | Packets | Total time | Median run | Sec / step | Output tok / s | Compactions / 100 steps | Max peak context |
 |---|---|---|---|---|---|---|---|---|---|
 | Claude Haiku 💲 | haiku-reviewer | 21 | 12 | 50 min | 2 min | 10 | 150 | 0.0 | 102,221 |
-| Claude Haiku 💲 | side-job | 11 | 0 | 29 min | 2 min | 11 | 153 | 0.0 | 97,498 |
+| Claude Haiku 💲 | side-job | 14 | 0 | 37 min | 2 min | 12 | 146 | 0.0 | 97,498 |
 | Claude Opus 💲 | opus-helper | 1 | 1 | 4 min | 4 min | 11 | 63 | 0.0 | 64,758 |
 | Claude Opus 💲 | opus-implementer | 6 | 4 | 1.2 h | 7 min | 23 | 44 | 0.0 | 154,170 |
 | Ornith 1.5 9B (LM Studio) | explorer | 1 | 1 | 2 min | 2 min | 15 | 31 | 0.0 | 50,451 |
@@ -75,8 +77,8 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | Qwen-long 3.8 27B Q4 (llama.cpp) | reviewer | 4 | 2 | 51 min | 12 min | 33 | 23 | 4.3 | 48,206 |
 | Qwen3.5 9B FP8 (vLLM) | implementer | 5 | 2 | 1.0 h | 14 min | 6 | 49 | 0.0 | 135,075 |
 | Qwen3.5 9B FP8 (vLLM) | reviewer | 7 | 2 | 27 min | 2 min | 5 | 44 | 0.0 | 109,577 |
-| Qwen3.8 Flash Next Q2 (Strata) | implementer | 10 | 9 | 5.6 h | 31 min | 17 | 37 | 0.4 | 185,612 |
-| Qwen3.8 Flash Next Q2 (Strata) | reviewer | 11 | 9 | 5.2 h | 26 min | 24 | 41 | 0.4 | 211,278 |
+| Qwen3.8 Flash Next Q2 (Strata) | implementer | 13 | 12 | 6.4 h | 23 min | 17 | 37 | 0.4 | 185,612 |
+| Qwen3.8 Flash Next Q2 (Strata) | reviewer | 14 | 12 | 6.0 h | 18 min | 22 | 42 | 0.3 | 211,278 |
 | saluki 27B IQ2_XS (llama.cpp) | implementer | 9 | 7 | 14.9 h | 87 min | 58 | 13 | 0.8 | 152,355 |
 | saluki 27B IQ2_XS (llama.cpp) | reviewer | 11 | 7 | 5.9 h | 30 min | 38 | 17 | 0.0 | 101,215 |
 
@@ -128,12 +130,15 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | 16d | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 1.8 h | yes |
 | 31b | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 2.3 h | yes |
 | 19 | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 2.5 h | yes |
+| 06c | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 1.4 h | yes |
+| 07b | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 0.5 h | yes |
+| 07c | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 0.7 h | yes |
+| 07d | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 0.6 h | yes |
 | 01 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 02 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 04 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 05 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 06 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
-| 06c | Qwen3.8 Flash Next Q2 | 1 | — | 0 | — | in progress |
 | 11 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 26 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 
@@ -141,8 +146,8 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 
 | Model | Role | Input tokens | of which cache reads | Output tokens |
 |---|---|---|---|---|
-| Claude Opus | orchestrator | 377.5M | 368.3M | 838k |
+| Claude Opus | orchestrator | 403.4M | 393.5M | 921k |
 | Claude Haiku | haiku-reviewer | 15.8M | 14.3M | 450k |
 | Claude Opus | opus-implementer | 15.6M | 15.1M | 188k |
-| Claude Haiku | side-job | 8.2M | 7.4M | 268k |
+| Claude Haiku | side-job | 9.9M | 8.9M | 326k |
 | Claude Opus | opus-helper | 1.2M | 1.2M | 16k |
