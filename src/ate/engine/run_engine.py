@@ -384,11 +384,12 @@ class RunEngine(QThread):
 
     @staticmethod
     def _phase_actions(schedule: Any, phase: str) -> list[Callable[..., Any]]:
-        """Return the action closures for one Pre-test/Post-test phase, in run order.
+        """Return the action closures for one schedule instance's Pre-test/Post-test phase, in run order.
 
         ``schedule.pre_test_action`` / ``post_test_action`` are each a single closure under the
         current builder model; wrap it so both phases and any future multi-action schedules share
-        one path (Post-test callers reverse this list to honour "run in reverse")."""
+        one path. Packet 15e calls this once per schedule instance, walking the instances in tree
+        order for Pre-test and in exactly that order reversed for Post-test."""
         actions = getattr(schedule, f"{phase}_test_action", None)
         if actions is None:
             return []
@@ -472,14 +473,17 @@ class RunEngine(QThread):
         return sink
 
     def _record_phase_action(
-        self, host: "_LuaHost", run_uuid: str, *, instance_seq: int, phase: str, fn: Callable[..., Any], pass_fail: str
+        self, host: "_LuaHost", run_uuid: str, *, instance_seq: int, phase: str, fn: Callable[..., Any], pass_fail: str,
+        run_order: int = 0
     ) -> None:
         """Run one Pre-test/Post-test action closure and record its row (and owned log lines).
 
-        ``phase`` is "pre" or "post"; the internal context string ("pretest"/"posttest") keeps the
-        host's lockdown/location logic intact. On success the outcome is "ok"; a raised Lua error
-        becomes an "error" row carrying its first line, with the traceback logged at ERROR and both
-        attributed to this action via ``action_seq`` so later packets can surface it. Returns
+        ``phase`` is "pre" or "post"; ``instance_seq`` is the schedule instance the Action belongs to
+        (packet 15e — the same value the `action` row and the Action's log lines carry), and
+        ``run_order`` its position within that phase. The internal context string ("pretest"/"posttest")
+        keeps the host's lockdown/location logic intact. On success the outcome is "ok"; a raised Lua
+        error becomes an "error" row carrying its first line, with the traceback logged at ERROR and
+        both attributed to this action via ``action_seq`` so later packets can surface it. Returns
         ``(outcome, error)`` so the caller can abort on a Pre-test failure (packet 14b)."""
         started_at = _now_iso()
         # Packet 17b: a device failure from now until the action ends is owned by this action.
@@ -507,7 +511,7 @@ class RunEngine(QThread):
             self._drain_device_warnings()
             self._device_owner = None
         self._store.insert_action(
-            run_uuid, instance_seq=instance_seq, phase=phase, run_order=0,
+            run_uuid, instance_seq=instance_seq, phase=phase, run_order=run_order,
             outcome=outcome, error=(error or None), started_at=started_at, ended_at=ended_at,
         )
         return outcome, error
@@ -549,6 +553,38 @@ class RunEngine(QThread):
         default_enabled = bool(step.enabled)
         effective_enabled = self._overrides.get(seq, default_enabled)
         return int(default_enabled), int(effective_enabled)
+
+    def _action_instances(self, host: "LuaHost") -> list[int]:
+        """The schedule instance seqs whose Pre-/Post-test Actions run, in Pre-test order (packet 15e).
+
+        :attr:`_LuaHost.instances` is already depth first — the top level, then each include in step
+        order, each before its own includes — so this is that list minus every instance whose subtree
+        holds Test Steps and every one of them is disabled: a Sub-schedule that runs no step has
+        nothing to set up or tear down, so both of its Actions are skipped. Nested instances count, so
+        an instance is skipped only when every step beneath it, down to the deepest include, is
+        disabled. A schedule with no Test Steps at all keeps its Actions — an empty schedule is not a
+        disabled one — and Operator enable overrides (packet 11a) count as much as the author's
+        :setEnable()."""
+        children: dict[int, list[int]] = {}
+        for seq, instance in enumerate(host.instances):
+            if instance.parent_instance is not None:
+                children.setdefault(instance.parent_instance, []).append(seq)
+        steps: dict[int, int] = {}
+        live: dict[int, int] = {}
+        for seq, node in enumerate(host.tree):
+            if node.is_header:
+                continue
+            steps[node.instance] = steps.get(node.instance, 0) + 1
+            if self._enabled(seq, node)[1]:
+                live[node.instance] = live.get(node.instance, 0) + 1
+
+        def subtree_steps(seq: int) -> int:
+            return steps.get(seq, 0) + sum(subtree_steps(child) for child in children.get(seq, ()))
+
+        def subtree_enabled(seq: int) -> int:
+            return live.get(seq, 0) + sum(subtree_enabled(child) for child in children.get(seq, ()))
+
+        return [seq for seq in range(len(host.instances)) if subtree_enabled(seq) or not subtree_steps(seq)]
 
     def _close_open_devices(self, host: "LuaHost", run_uuid: str) -> None:
         """Close every Device still open at run end and log one WARNING per device (packet 16a).
@@ -689,15 +725,26 @@ class RunEngine(QThread):
         # Pre-test Actions run up front, in order, each called with the current pass_fail. Nothing
         # has failed yet so this is "PASS"; 13b owns what happens if one fails (aborting). Each runs
         # before any step and records an action row plus its own log lines first.
-        # 15e: the Pre-test Actions of included Sub-schedules are not run here — only the
-        # top-level schedule's, which is what `self._phase_actions(schedule, ...)` returns.
+        # Packet 15e: every schedule instance's Pre-test Action runs before the first Test Step, depth
+        # first through the Sub-schedule tree (parent first, each include in step order) — that is
+        # exactly :attr:`_LuaHost.instances` order, minus the instances whose whole subtree of Test
+        # Steps is disabled (see :meth:`_action_instances`). `pre_started` keeps the instances whose
+        # Pre-test phase was reached, so a Pre-test failure can skip the Post-test Actions of the
+        # ones that never got there.
         pretest_failed = False  # a Pre-test Action that raised aborts the whole run (packet 14b)
-        for seq, action_fn in enumerate(self._phase_actions(schedule, "pre")):
-            outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="pre", fn=action_fn, pass_fail=pass_fail)
-            if outcome == "error":
-                # A failing Pre-test Action aborts automatically before any step runs.
-                pretest_failed = True
-                self._record_pretest_failure(run_uuid, steps, failed_seq=seq, error_text=error or "")
+        pre_started: list[int] = []
+        run_order = 0
+        for instance_seq in self._action_instances(host):
+            pre_started.append(instance_seq)
+            for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "pre"):
+                outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="pre", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
+                run_order += 1
+                if outcome == "error":
+                    # A failing Pre-test Action aborts automatically before any step runs.
+                    pretest_failed = True
+                    self._record_pretest_failure(run_uuid, steps, failed_seq=instance_seq, error_text=error or "")
+                    break
+            if pretest_failed:
                 break
 
         for seq, step in enumerate(steps):
@@ -907,19 +954,23 @@ class RunEngine(QThread):
         # raised fails the run without changing this reason (packet 14c); a second abort during one
         # ends only that action and leaves the rest to run.
         posttest_aborted = self.aborted
-        # 15e: only the top-level schedule's Post-test Actions run here; an included Sub-schedule's
-        # are not collected yet.
-        for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
-            # Clear before every action, not just the first: a second abort ends only the action it
-            # lands in, so the flag must not carry over and kill the next one on its first hook tick.
-            self._abort_flag.clear()
-            outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="post", fn=action_fn, pass_fail=pass_fail)
-            if outcome == "aborted":
-                posttest_aborted = True
-            elif outcome == "error":
-                # A Post-test Action that raised fails the run (result FAIL) but keeps its End Reason.
-                failed = True
-                pass_fail = "FAIL"
+        # Packet 15e: one Post-test Action per schedule instance, in exactly the reverse of the
+        # Pre-test order above — an instance reached in the Pre-test pass gets its teardown even
+        # when its own Pre-test Action failed, and one the pass never got to gets none.
+        run_order = 0
+        for instance_seq in reversed(pre_started):
+            for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "post"):
+                # Clear before every action, not just the first: a second abort ends only the action it
+                # lands in, so the flag must not carry over and kill the next one on its first hook tick.
+                self._abort_flag.clear()
+                outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="post", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
+                run_order += 1
+                if outcome == "aborted":
+                    posttest_aborted = True
+                elif outcome == "error":
+                    # A Post-test Action that raised fails the run (result FAIL) but keeps its End Reason.
+                    failed = True
+                    pass_fail = "FAIL"
 
         # Packet 17b: drain any device failure warning no action's window claimed (a failure in the
         # gap between the last action and run end) — it attaches to the run as a whole.
