@@ -3,13 +3,17 @@
 Real `.tslua` trees on disk, run end to end through :class:`HeadlessRunSession`, rendered with
 :func:`render_report` and read back with the standard-library `html.parser` (no new dependencies):
 the columns, a FAIL row's Expected/Actual, an ERROR step, retried steps with their earlier Attempts
-as indented sub-rows, Sub-schedule headers with their roll-up and indentation, Operator override
-labels, steps disabled by default (NOTRUN, not labelled as an override), the Operator's input values,
-and the print CSS that repeats the step table's headings."""
+as indented sub-rows at one depth deeper, Sub-schedule headers indented by depth and labelled when
+the Operator disabled everything beneath them, steps disabled by default (NOTRUN, not labelled as an
+override), the Operator's input values (a CHECKBOX as a plain list), markup in every printed value
+escaped rather than rendered, and the Steps table's `<thead>`/`<tbody>` structure that makes the
+headings repeat on every printed page."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import html as html_escape
 import json
 import re
 import time
@@ -17,10 +21,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
 
+from jinja2 import Environment, PackageLoader
 from PyQt6.QtCore import QCoreApplication
 
 from ate.config import Config
-from ate.report.html import render_report
+from ate.report.html import _report_context, render_report
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 
@@ -109,6 +114,33 @@ return ScheduleParams("Channel check", "one channel, one pass one fail")
       :setAction(function() ATE.report(Result.PASS, "channel " .. ch, tostring(ch), tostring(ch)) end),
     StepParams("output bad"):setStepNo("2.")
       :setAction(function() ATE.report(Result.FAIL, "bad " .. ch, "0.1V", "2.4V") end),
+  })
+"""
+
+#: Step Name, message, Expected, Actual and an Operator STRING input all contain markup, as does the
+#: UUT serial. None of it may reach the page as live HTML.
+MARKUP_SOURCE = """\
+return ScheduleParams("Steps markup schedule", "printed values that contain markup")
+  :setSchedule({
+    StepParams("flag <b>checked</b>"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "note", type = "STRING" } })
+      :setAction(function()
+        local n = ATE.input(1)
+        ATE.report(Result.PASS, "seen <b>x</b>", n, "<script>expected</script>")
+      end),
+  })
+"""
+
+#: An ENUM input with the CHECKBOX widget: two labels selected, recorded as a JSON array of labels.
+CHECKBOX_SOURCE = """\
+return ScheduleParams("Steps checkbox schedule", "a checkbox input with two labels ticked")
+  :setSchedule({
+    StepParams("channels"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "channels", type = "ENUM", input = "CHECKBOX", enum = {"Green", "Blue"} } })
+      :setAction(function()
+        local c = ATE.input(1)
+        ATE.report(Result.PASS, "channels asked")
+      end),
   })
 """
 
@@ -210,7 +242,8 @@ def _write_env(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def _run(tmp_path: Path, files: dict[str, str], schedule: str, *, enables: Optional[dict[int, bool]] = None,
-         stop_on_fail: Optional[bool] = None, input_values: Optional[list[str]] = None) -> tuple[RunStore, str]:
+         stop_on_fail: Optional[bool] = None, input_values: Optional[list] = None,
+         serial: str = "B-1") -> tuple[RunStore, str]:
     """Run one schedule through :class:`HeadlessRunSession` and return (store, run_uuid)."""
     root = _write_env(tmp_path, files)
     config_path = tmp_path / "config.json"
@@ -230,7 +263,7 @@ def _run(tmp_path: Path, files: dict[str, str], schedule: str, *, enables: Optio
     session = HeadlessRunSession(config_path)
     session.set_operator("Alice")
     session.set_uut_type("Board")
-    session.set_uut_serial("B-1")
+    session.set_uut_serial(serial)
     session.select_schedule(schedule)
     if stop_on_fail is not None:
         session.set_stop_on_fail(stop_on_fail)
@@ -281,6 +314,49 @@ def _report(tmp_path: Path, files: dict[str, str], schedule: str, **kwargs) -> s
 
 
 # -- the table itself ---------------------------------------------------------
+
+
+def test_markup_in_printed_values_is_escaped(tmp_path: Path) -> None:
+    """Every value the report prints is escaped, never injected as live HTML."""
+    html = _report(
+        tmp_path,
+        {"markup.tslua": MARKUP_SOURCE},
+        "Steps markup schedule",
+        input_values=["<b>x</b>"],
+        serial="<b>serial</b>",
+    )
+    assert "<script>" not in html, "no printed value reaches the page as a live tag"
+    assert "&lt;script&gt;expected&lt;/script&gt;" in html
+
+    # Read back through the parser: the escapes are data, so the cells still say the markup.
+    row = _step_rows(html, "1.")[0]
+    assert "<b>checked</b>" in row[1][1][0], "the Step Name's <b> is escaped text, not a tag"
+    assert "seen <b>x</b>" in row[1][1][0], "the ATE.report message's <b> is escaped text"
+    assert row[1][2][0] == "<script>expected</script>", "Expected is escaped text"
+    assert row[1][3][0] == "<b>x</b>", "the Operator's STRING input value is escaped text"
+    assert "&lt;b&gt;serial&lt;/b&gt;" in html, "the UUT serial on the Cover is escaped"
+
+
+def test_autoescape_does_not_change_the_cover_bytes(tmp_path: Path) -> None:
+    """Cover markup is marked safe, so escaping changes nothing but the escaped characters."""
+    store, run_uuid = _run(tmp_path, {"steps.tslua": PASS_FAIL}, "Steps pass fail schedule")
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(bytes(range(1, 256)))
+    config = Config(
+        path=tmp_path / "config.json",
+        reports_organisation="ACME & Co",
+        reports_logo=logo,
+        reports_paper_size="A4",
+    )
+    escaped = render_report(store, run_uuid, config)
+    # The same context rendered with autoescape off is what the Cover used to emit.
+    plain = Environment(loader=PackageLoader("ate.report", "templates")).get_template("report.html.j2").render(
+        **_report_context(store, run_uuid, config)
+    )
+    assert html_escape.unescape(escaped) == plain, "only escaping differs from the pre-autoescape page"
+    assert f"data:image/png;base64,{base64.b64encode(logo.read_bytes()).decode()}" in escaped, "the logo data URI is untouched"
+    assert "margin: 24mm 14mm 18mm 14mm;" in escaped, "the print margin CSS is untouched"
+    assert escaped.count("<br>") == plain.count("<br>"), "the <br> joins are still joins"
 
 
 def test_step_table_columns_and_pass_fail_rows(tmp_path: Path) -> None:

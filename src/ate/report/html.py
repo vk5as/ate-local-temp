@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from jinja2 import Environment, PackageLoader, select_autoescape
+from markupsafe import Markup
 
 from ..config import Config
 from ..storage.store import RunStore
@@ -276,11 +277,11 @@ def _step_rows(nodes: list[dict], attempts: list[dict], input_values: list[dict]
     return rows
 
 
-def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> str:
-    """Render the self-contained HTML Test Report for a finished run.
+def _report_context(store: RunStore, run_uuid: str, config: Config) -> dict:
+    """Everything the report template needs for one run, as its render context.
 
-    Raises :class:`ValueError` if no run is recorded for ``run_uuid`` — callers that regenerate
-    from History only ever render finished runs."""
+    Split out from :func:`render_report` so a caller (or a test) can render the same context with a
+    different Jinja environment — for example with autoescape off — and compare the byte output."""
     row = store.get_test_run(run_uuid)
     if row is None:
         raise ValueError(f"no test run recorded for {run_uuid!r}")
@@ -334,12 +335,14 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
     pretest_error, posttest_error = _phase_errors(store, run_uuid)
 
     ctx = {
-        # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift.
-        "page_margin_css": _page_margin_css(REPORT_PAGE_MARGINS_MM),
+        # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift. Both of
+        # these are CSS/URI markup the template interpolates raw, so they are marked safe.
+        "page_margin_css": Markup(_page_margin_css(REPORT_PAGE_MARGINS_MM)),
         "org": config.reports_organisation,
-        # The logo is a base64 data URI (ASCII A-Za-z0-9+/= plus ",;=/"), so autoescape leaves it
-        # byte-for-byte unchanged in the CSS url() / <img src>; no external reference is emitted.
-        "logo": _logo_data_uri(config.reports_logo),
+        # The logo is a base64 data URI (ASCII A-Za-z0-9+/= plus ",;=/") emitted into a CSS url()
+        # and an <img src>; it is markup the template must not escape. No external reference is
+        # ever emitted.
+        "logo": Markup(_logo_data_uri(config.reports_logo)),
         "paper": config.reports_paper_size,
         # Cover — document fields (recorded on test_run by packet 21a).
         "doc_title": row.get("doc_title") or None,
@@ -383,13 +386,29 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
         "operator": row.get("operator") or "",
     }
 
+    return ctx
+
+
+def _render(context: dict) -> str:
+    """Render report.html.j2 with `context`, escaping every value that is not marked safe."""
     env = Environment(
         loader=PackageLoader("ate.report", "templates"),
-        autoescape=select_autoescape(["html"]),
+        # report.html.j2 does not end in ".html", so "j2" has to be an enabled extension or
+        # autoescape stays off and every value lands in the page verbatim.
+        autoescape=select_autoescape(["html", "j2"]),
     )
-    template = env.get_template("report.html.j2")
     # Spread the context as top-level variables (the template reads them bare, e.g. {{ uut_type }}).
-    return template.render(**ctx)
+    return env.get_template("report.html.j2").render(**context)
+
+
+def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> str:
+    """Render the self-contained HTML Test Report for a finished run.
+
+    Raises :class:`ValueError` if no run is recorded for ``run_uuid`` — callers that regenerate
+    from History only ever render finished runs. Every context value is autoescaped unless it is a
+    :class:`markupsafe.Markup`, so the template's deliberate markup (logo data URI, print margins)
+    stays raw while Operator-entered text cannot become markup."""
+    return _render(_report_context(store, run_uuid, config))
 
 
 def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optional[dict]]:
