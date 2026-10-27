@@ -289,6 +289,20 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return str(typed)
 
+    def _insert_node(self, run_uuid: str, seq: int, node: Any, **fields: Any) -> None:
+        """Write one node row, stamped with its place in the expanded tree (packet 15b).
+
+        `node` is the tree entry, so `parent_node_seq` and `instance_seq` come from the tree walk
+        the host did at load; the caller supplies the kind, number, name, enable flags, result and
+        Attempt count. `seq` is the node's index in the tree, which is its `node_seq`."""
+        self._store.insert_node(
+            run_uuid,
+            seq,
+            parent_node_seq=node.parent,
+            instance_seq=node.instance,
+            **fields,
+        )
+
     def _record_abort(
         self, run_uuid: str, steps: list[Any], aborted_seq: int, *, record_attempt: bool = True, attempt_no: int = 1
     ) -> None:
@@ -309,9 +323,10 @@ class RunEngine(QThread):
                 run_uuid, aborted_seq, attempt_no, pass_fail="ERROR", msg="Aborted by Operator"
             )
             default_enabled, enabled = self._enabled(aborted_seq, step)
-            self._store.insert_node(
+            self._insert_node(
                 run_uuid,
                 aborted_seq,
+                step,
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
@@ -326,9 +341,10 @@ class RunEngine(QThread):
                 self._record_header(run_uuid, seq, later)
                 continue
             default_enabled, enabled = self._enabled(seq, later)
-            self._store.insert_node(
+            self._insert_node(
                 run_uuid,
                 seq,
+                later,
                 kind="step",
                 step_number=later.step_no or "",
                 step_name=later.name,
@@ -338,20 +354,21 @@ class RunEngine(QThread):
                 attempt_count=0,
             )
 
-    def _record_header(self, run_uuid: str, seq: int, step: Any) -> None:
-        """Record one header row of the expanded tree: a row that never runs.
+    def _record_header(self, run_uuid: str, seq: int, node: Any) -> None:
+        """Record one header row of the expanded tree: a row that never runs (packets 15a, 15b).
 
         A header (an include step, packet 15a) has no Attempt and no Result — `result` stays null
         and `attempt_count` is 0 — so it is left out of the summary counts and can never make the
         run PASS or FAIL. Its own Step Number is optional, so it is stored null when absent.
         Enabling a header is packet 15d."""
-        default_enabled, enabled = self._enabled(seq, step)
-        self._store.insert_node(
+        default_enabled, enabled = self._enabled(seq, node)
+        self._insert_node(
             run_uuid,
             seq,
+            node,
             kind="header",
-            step_number=step.step_no or None,
-            step_name=step.name,
+            step_number=node.step_no or None,
+            step_name=node.name,
             default_enabled=default_enabled,
             enabled=enabled,
             result=None,
@@ -497,9 +514,10 @@ class RunEngine(QThread):
                 self._record_header(run_uuid, seq, step)
                 continue
             default_enabled, enabled = self._enabled(seq, step)
-            self._store.insert_node(
+            self._insert_node(
                 run_uuid,
                 seq,
+                step,
                 kind="step",
                 step_number=step.step_no or "",
                 step_name=step.name,
@@ -578,7 +596,10 @@ class RunEngine(QThread):
                 "version": self.ate_version or None,
             }
         )
-        steps = schedule.steps
+        # Packet 15b: the expanded tree, in node order — every ordinary step, and every include
+        # header immediately followed by the subtree of the Sub-schedule it includes. Each entry
+        # reads like its step, so the runner below is unchanged apart from where it gets the list.
+        steps = host.tree
 
         run_uuid = new_uuid7()
         created = self._store.insert_test_run(
@@ -626,6 +647,21 @@ class RunEngine(QThread):
                     version=member.version or None,
                     atedef_sha256=atedef_sha,
                 )
+        # Packet 15b: one row for the top-level schedule and one per Sub-schedule instance, in tree
+        # order (instance 0 is the top level), each naming the instance that included it and the
+        # header node that introduced it. `keyvals` is stored as JSON text.
+        for seq, instance in enumerate(host.instances):
+            self._store.insert_schedule_instance(
+                run_uuid,
+                instance_seq=seq,
+                parent_instance_seq=instance.parent_instance,
+                header_node_seq=instance.header,
+                schedule_name=instance.name,
+                file=instance.file,
+                media_number=instance.media_number,
+                prefix=instance.prefix,
+                keyvals=json.dumps(instance.keyvals),
+            )
         # Report the run key and mark RUNNING on the main thread, both queued signals
         # delivered after ``start()`` returns; emitted from the worker before any other
         # row is written beyond this one.
@@ -641,6 +677,8 @@ class RunEngine(QThread):
         # Pre-test Actions run up front, in order, each called with the current pass_fail. Nothing
         # has failed yet so this is "PASS"; 13b owns what happens if one fails (aborting). Each runs
         # before any step and records an action row plus its own log lines first.
+        # 15e: the Pre-test Actions of included Sub-schedules are not run here — only the
+        # top-level schedule's, which is what `self._phase_actions(schedule, ...)` returns.
         pretest_failed = False  # a Pre-test Action that raised aborts the whole run (packet 14b)
         for seq, action_fn in enumerate(self._phase_actions(schedule, "pre")):
             outcome, error = self._record_phase_action(host, run_uuid, instance_seq=seq, phase="pre", fn=action_fn, pass_fail=pass_fail)
@@ -655,8 +693,9 @@ class RunEngine(QThread):
                 # Already recorded every step NOTRUN above; stop before running any.
                 break
 
-            # An include step is a header row: it records its place in the tree, never runs, and
-            # its Sub-schedule is expanded in packet 15b.
+            # An include step is a header row: it records its place in the tree and never runs. Its
+            # Sub-schedule was expanded at load (packet 15b), so its steps are separate nodes that
+            # follow it in this same list.
             if step.is_header:
                 self._record_header(run_uuid, seq, step)
                 continue
@@ -664,9 +703,10 @@ class RunEngine(QThread):
             # executed; record it NOTRUN with no Attempt and move on. See :meth:`_enabled`.
             default_enabled, enabled = self._enabled(seq, step)
             if not enabled:
-                self._store.insert_node(
+                self._insert_node(
                     run_uuid,
                     seq,
+                    step,
                     kind="step",
                     step_number=step.step_no or "",
                     step_name=step.name,
@@ -826,9 +866,10 @@ class RunEngine(QThread):
             # already recorded its own ERROR node and attempt, so it is skipped here.
             if not aborted:
                 default_enabled, enabled = self._enabled(seq, step)
-                self._store.insert_node(
+                self._insert_node(
                     run_uuid,
                     seq,
+                    step,
                     kind="step",
                     step_number=step.step_no or "",
                     step_name=step.name,
@@ -854,6 +895,8 @@ class RunEngine(QThread):
         # raised fails the run without changing this reason (packet 14c); a second abort during one
         # ends only that action and leaves the rest to run.
         posttest_aborted = self.aborted
+        # 15e: only the top-level schedule's Post-test Actions run here; an included Sub-schedule's
+        # are not collected yet.
         for seq, action_fn in enumerate(reversed(self._phase_actions(schedule, "post"))):
             # Clear before every action, not just the first: a second abort ends only the action it
             # lands in, so the flag must not carry over and kill the next one on its first hook tick.

@@ -211,7 +211,10 @@ class StepsOptionsStage(QWidget):
         for step in steps:
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
-            text = f"{number}  {label}" if number else str(label)
+            # Packet 15b: an expanded Sub-schedule's rows sit under their header, indented two
+            # spaces per nesting level. The mockup's styling is packet 15d's.
+            indent = "  " * int(getattr(step, "depth", 0))
+            text = f"{indent}{number}  {label}" if number else f"{indent}{label}"
             item = QListWidgetItem(text)
             # Always keep the row enabled and selectable and the box drawn; only
             # ItemIsUserCheckable toggles with the run lock (a locked box still shows its
@@ -699,7 +702,7 @@ class StagedRunScreen(QWidget):
         if path is None:
             return []
         host = LuaHost(path, modules=modules, includes=include_map(definition))  # packet 15b: the Sub-schedule map
-        return list(host.schedule.steps)
+        return list(host.tree)  # the expanded tree in node order: headers followed by their children
 
     # -- running ------------------------------------------------------------
 

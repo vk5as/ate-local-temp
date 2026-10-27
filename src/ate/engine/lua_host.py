@@ -40,6 +40,7 @@ import re
 import threading
 import time
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -774,6 +775,46 @@ class _ScheduleParams:
         return self
 
 
+# Packet 15b: an include chain this deep is a cycle. 15c detects cycles properly; until then this
+# is the guard that stops a self-including schedule from hanging the loader.
+MAX_INCLUDE_DEPTH = 32
+
+
+@dataclass
+class _ScheduleInstance:
+    """One schedule in the expanded tree: the top level, or one `setInclude` (packet 15b).
+
+    `header` is the tree index of the include header row that introduced this instance, `parent`
+    is the instance that included it (None for the top level), and `keyvals` is the plain Python
+    table the include passed in (`{}` for a top-level schedule or an include with no keyvals)."""
+
+    parent_instance: Optional[int]
+    header: Optional[int]
+    name: str
+    file: str
+    media_number: Optional[str]
+    prefix: str
+    keyvals: dict[str, Any]
+
+
+@dataclass
+class _TreeNode:
+    """One row of the expanded step tree, in the order the run engine records it.
+
+    `parent` is the tree index of the enclosing include header (None at the top level), `instance`
+    the schedule instance the row belongs to, `depth` how deeply it is nested. Everything else is
+    read straight off the step, so the runner's `step.step_no`/`step.is_header` reads work on a
+    tree entry as they do on a bare `_StepParams`."""
+
+    step: _StepParams
+    parent: Optional[int]
+    instance: int
+    depth: int
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.step, name)
+
+
 class _LuaHost:
     """A fresh lupa runtime plus the globals and one loaded schedule."""
 
@@ -942,10 +983,17 @@ class _LuaHost:
         # Check every step's setter combination against the Test Schedule format (packet 15a) before
         # anything else: a header that carries an Action, or an ordinary step with no number or no
         # Action, is a load error and must fail the schedule the same way a bad input table does.
-        self._validate_steps()
+        self._validate_steps(self._schedule, self._schedule_path)
         # Validate every step's input declarations against the Test Schedule format; a bad one is a
         # load error, so surface it here as HostError carrying the schedule's own filename.
-        self._validate_inputs()
+        self._validate_inputs(self._schedule, self._schedule_path)
+        # Packet 15b: expand every `setInclude` into the tree the runner walks. The top-level
+        # schedule is instance 0; each include is its own instance, numbered in tree order.
+        top_file, top_media = self._own_listing(self._schedule_path)
+        self._instances = [_ScheduleInstance(parent_instance=None, header=None, name=self._schedule.name,
+                                           file=top_file, media_number=top_media, prefix="", keyvals={})]
+        self._tree: list[_TreeNode] = []
+        self._expand(self._schedule, self._schedule_path, 0, None, 0)
 
     def _lockdown(self, env) -> None:
         """Remove the file-loading entry points and the python builtin from ``env``.
@@ -1162,19 +1210,113 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         """Install the abort count hook and re-raising pcall/xpcall on ``env`` (packet 13c)."""
         self._runtime.execute(self._AbortPrelude, name=f"@{self._schedule_path.name}-abort", mode="t")
 
-    def _load_schedule(self, path: str | Path) -> _ScheduleParams:
+    def _own_listing(self, path: Path) -> tuple[str, Optional[str]]:
+        """The Test Definition entry for ``path``: ``(rel path as listed, owning media number)``.
+
+        Falls back to the bare file name and no media number when no Test Definition stands behind
+        this host (a bare `LuaHost(path)` in a test)."""
+        if self._includes is None:
+            return Path(path).name, None
+        for rel, hits in self._includes.items():
+            for member, full in hits:
+                if full == path:
+                    return rel, member.media_number or None
+        return Path(path).name, None
+
+    def _resolve_include(self, name: str, from_path: Path) -> tuple[Path, Optional[str]]:
+        """Find the file an include refers to and the Media Release that owns it (packet 15b).
+
+        The search is the same walk `require` uses: the including release's own listing first, then
+        its dependencies depth first in declaration order. A path matched by more than one release
+        is ambiguous and a load error (spec: "a path matched in more than one release is an error");
+        one listed nowhere, or listed but absent on disk, is a load error too. With no Test
+        Definition behind this host the name is resolved against the directory of the file that
+        includes it and carries no media number — a test seam, not a second resolution rule."""
+        rel = Path(name).as_posix()
+        if self._includes is None:
+            return Path(from_path).parent / rel, None
+        hits = self._includes.get(rel, [])
+        if not hits:
+            raise HostError(f"include '{name}' is not listed in the Test Definition or its dependencies")
+        if len(hits) > 1:
+            owners = ", ".join(member.media_number or member.name for member, _ in hits)
+            raise HostError(f"ambiguous include '{name}' ({owners})")
+        member, path = hits[0]
+        if not path.is_file():
+            raise HostError(f"include '{name}' is missing ({path})")
+        return path, member.media_number or None
+
+    def _plain_keyvals(self, value: Any, where: str) -> dict[str, Any]:
+        """Return ``keyvals`` as plain Python data, or raise if anything inside is not.
+
+        Only strings, numbers, booleans and nested tables of those are allowed (packet 15b); a
+        function, userdata or builder object anywhere in the table is a load error naming the header
+        that passed it. Keys are read as strings so an instance's keyvals can be stored as JSON."""
+        if isinstance(value, (dict, self._table_cls)):
+            return {str(key): self._plain_keyvals(item, where) for key, item in value.items()}
+        if isinstance(value, (str, bool, int, float)):
+            return value
+        raise HostError(f"{where} keyvals must be plain data, got {type(value).__name__} ({value!r})")
+
+    def _expand(self, schedule: _ScheduleParams, schedule_path: Path, instance_seq: int, parent_node: Optional[int], depth: int) -> None:
+        """Walk one schedule's headers and expand every include into :attr:`_tree`/:attr:`_instances`.
+
+        Each header is followed immediately by the subtree of the schedule it includes, so the list
+        is exactly the node order the run engine records. The included chunk is compiled and run
+        again per include in the same Lua state (so `require`d modules stay shared) with that
+        include's keyvals as its `...` argument. Anything that goes wrong loading one — unlisted,
+        missing, ambiguous, raising, bad keyvals, or a setter error inside it — is a load error for
+        the top-level schedule, and the message names the chain that led to it. Depth is capped at
+        :data:`MAX_INCLUDE_DEPTH` until packet 15c detects cycles for real."""
+        for seq, step in enumerate(schedule.steps):
+            node = len(self._tree)
+            self._tree.append(_TreeNode(step=step, parent=parent_node, instance=instance_seq, depth=depth))
+            if not step.is_header:
+                continue
+            label = str(step.step_no) if step.step_no else str(seq + 1)
+            where = f"{Path(schedule_path).name}:{label}:"
+            try:
+                if depth + 1 > MAX_INCLUDE_DEPTH:
+                    raise HostError(f"include depth exceeds {MAX_INCLUDE_DEPTH}")
+                path, media_number = self._resolve_include(step.include_file, schedule_path)
+                keyvals = self._plain_keyvals(step.keyvals, where)
+                child = self._load_schedule(path, keyvals=keyvals)
+                self._validate_steps(child, path)
+                self._validate_inputs(child, path)
+                child_seq = len(self._instances)
+                self._instances.append(
+                    _ScheduleInstance(parent_instance=instance_seq, header=node, name=child.name,
+                                      file=Path(step.include_file).as_posix(), media_number=media_number,
+                                      prefix=step.prefix or "", keyvals=keyvals)
+                )
+                self._expand(child, path, child_seq, node, depth + 1)
+            except HostError as exc:
+                # Each level prefixes the header that led to it, so a defect deep in a nested
+                # chain reads as the include chain that reached it.
+                raise HostError(f"{where} include '{step.include_file}': {exc}") from exc
+
+    def _load_schedule(self, path: str | Path, keyvals: Optional[dict[str, Any]] = None) -> _ScheduleParams:
         """Execute ``path`` as a text chunk and return its ScheduleParams.
 
         The schedule's raw bytes are checksummed here (packet 06b) and recorded in :attr:`_files_used`
-        before decoding for execution — the first file used by this host, so it always lands first."""
-        data = Path(path).read_bytes()
-        self._files_used.append((str(path), "tslua", _sha256_hex(data)))
+        before decoding for execution — the first file used by this host, so it always lands first.
+        Packet 15b: an included Sub-schedule comes through here too, so its bytes are checksummed and
+        kept for `run_file` rows the same way. A file this host already loaded is checksummed and
+        recorded once (including the same file twice is two instances of one file) but its chunk is
+        compiled and run again for each instance, with that include's keyvals as the chunk's `...`
+        argument — a top-level schedule, or an include with no keyvals, gets `{}`."""
+        path = Path(path)
+        data = path.read_bytes()
+        if str(path) not in self._file_bytes:
+            self._files_used.append((str(path), "tslua", _sha256_hex(data)))
         self._file_bytes[str(path)] = data  # packet 06c: kept for a mismatched file's content
         code = data.decode("utf-8")
         try:
-            schedule = self._runtime.execute(
-                code, name=f"@{Path(path).name}", mode="t"
-            )
+            chunk = self._runtime.compile(code, name=f"@{path.name}")
+            # `table_from` builds a real Lua table (nested tables included), so `local kv = ...`
+            # indexes it like any Lua table; passing the plain dict straight through would leave a
+            # Python object in the chunk, where a missing key raises instead of reading nil.
+            schedule = chunk(self._runtime.table_from(keyvals or {}))
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as HostError
             raise HostError(f"failed to load {path}: {exc}") from exc
         if not isinstance(schedule, _ScheduleParams):
@@ -1199,8 +1341,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             return {str(k): self._materialize(value[k]) for k in str_keys}
         return value
 
-    def _validate_steps(self) -> None:
-        """Validate every loaded step against the Test Schedule format (packet 15a).
+    def _validate_steps(self, schedule: _ScheduleParams, path: Path) -> None:
+        """Validate one loaded schedule against the Test Schedule format (packets 15a, 15b).
 
         An include step (``setInclude``) is a header: no Action, no Step Inputs, and its own Step
         Number is optional. An ordinary step needs a Step Number and an Action, and ``setPrefix``
@@ -1210,9 +1352,9 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         ``setInputs`` table, so the schedule picker and the run start both report it as a load
         error. Step Numbers are checked for duplicates among siblings; 15c extends that to the
         expanded tree with prefixes."""
-        name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        name = Path(path).name if path else "schedule.tslua"
         seen: set[str] = set()
-        for seq, step in enumerate(self._schedule.steps):
+        for seq, step in enumerate(schedule.steps):
             label = str(step.step_no) if step.step_no else str(seq + 1)
             if step.name is not None and not isinstance(step.name, str):
                 raise HostError(f"{name}:{label}: Step Name must be a string, got {step.name!r}")
@@ -1237,20 +1379,20 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                     raise HostError(f"{name}:{label}: duplicate Step Number '{step.step_no}'")
                 seen.add(step.step_no)
 
-    def _validate_inputs(self) -> None:
-        """Validate every step's declared inputs against the Test Schedule format.
+    def _validate_inputs(self, schedule: _ScheduleParams, path: Path) -> None:
+        """Validate one schedule's declared step inputs against the Test Schedule format.
 
         Each declaration is converted out of its Lua tables into plain Python and checked by
-        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying the schedule's
+        :func:`step_inputs.validate_inputs`; a violation raises HostError carrying that schedule's
         own filename so a bad ``setInputs`` table fails the load."""
-        for seq, step in enumerate(self._schedule.steps):
+        for seq, step in enumerate(schedule.steps):
             if step.inputs is None:
                 continue
             declarations = {int(k): self._materialize(v) for k, v in step.inputs.items()}
             try:
                 validated = validate_inputs(declarations)
             except InvalidStepInput as exc:
-                name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+                name = Path(path).name if path else "schedule.tslua"
                 raise HostError(f"{name}:{seq + 1}: {exc}") from exc
             # Stash the validated declarations on the step so the run engine can hand them to the
             # OperatorInput controller and the host maps typed values for ATE.input(n).
@@ -1325,6 +1467,25 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
     def schedule(self) -> _ScheduleParams:
         """The loaded top-level ScheduleParams object."""
         return self._schedule
+
+    @property
+    def tree(self) -> list[_TreeNode]:
+        """The expanded step tree in node order: each header immediately followed by its subtree.
+
+        Packet 15b — this is what the run engine walks and the Run screen previews. A tree entry
+        reads like its step (`entry.step_no`, `entry.is_header`) and adds `parent`, `instance` and
+        `depth`."""
+        return self._tree
+
+    @property
+    def instances(self) -> list[_ScheduleInstance]:
+        """The top-level schedule and every Sub-schedule include, in tree order (packet 15b).
+
+        Index 0 is the top-level schedule; each `setInclude` is its own instance with the index of
+        the header that introduced it, the schedule name/file, the owning media number (None for a
+        host with no Test Definition), the `setPrefix` value as given, and the keyvals as plain
+        Python."""
+        return self._instances
 
 
 # The public host type. ``_``-prefixed classes above are implementation details;

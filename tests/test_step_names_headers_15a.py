@@ -59,11 +59,16 @@ return ScheduleParams("Numberless header schedule", "a header with no number and
   })
 """
 
+# Packet 15b expands `setInclude`, so a schedule with a header needs the Sub-schedule file to
+# exist. An empty one keeps every 15a expectation here intact: the header has no children.
+EMPTY_SUB = 'return ScheduleParams("Empty sub", "an include with no steps") :setSchedule({})\n'
+
 
 def _run(source: str, tmp_path: Path, app) -> tuple[RunStore, str]:
     """Write ``source`` as a schedule, run it to completion, return the store and run uuid."""
     schedule = tmp_path / "schedule.tslua"
     schedule.write_text(source, encoding="utf-8")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b: the include needs its file
     store = RunStore(tmp_path / "ate.db")
     engine = RunEngine(store, str(schedule))
     captured: dict[str, str] = {}
@@ -109,6 +114,7 @@ def test_include_step_is_a_header_on_the_loaded_tree(tmp_path) -> None:
     """The loaded step says what it is, so later packets need not guess from `action is None`."""
     schedule = tmp_path / "schedule.tslua"
     schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
     steps = LuaHost(schedule).schedule.steps
     assert steps[1].is_header and steps[1].kind == "header"
     assert not steps[0].is_header and steps[0].kind == "step"
@@ -164,6 +170,7 @@ def test_headers_are_recorded_when_a_run_is_aborted(qapp, tmp_path) -> None:
     store = RunStore(tmp_path / "ate.db")
     schedule = tmp_path / "schedule.tslua"
     schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
     engine = RunEngine(store, str(schedule))
     captured: dict[str, str] = {}
     engine.run_uuid_reported.connect(lambda ru: captured.__setitem__("ru", ru))
@@ -293,6 +300,7 @@ def test_set_enable_and_set_prefix_on_a_header_are_allowed(tmp_path) -> None:
     schedule.write_text(_one_step(
         'StepParams("group"):setInclude("sub.tslua"):setPrefix("3."):setEnable(false)'
     ), encoding="utf-8")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
     header = LuaHost(schedule).schedule.steps[0]
     assert header.is_header and header.enabled is False and header.prefix == "3."
 
@@ -339,11 +347,14 @@ def test_catalog_reports_a_header_misuse_as_a_load_error(tmp_path) -> None:
     )
     good = defs / "good.tslua"
     good.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
+    sub = defs / "sub.tslua"  # packet 15b: the header's Sub-schedule must exist
+    sub.write_text(EMPTY_SUB, encoding="utf-8")
     (defs / "bad.atedef").write_text(
         json.dumps({
             "format": 1, "mediaNumber": "REL-15A", "name": "15a release", "version": "1.0.0",
             "files": [{"path": "bad.tslua", "sha256": _sha256(bad)},
-                      {"path": "good.tslua", "sha256": _sha256(good)}],
+                      {"path": "good.tslua", "sha256": _sha256(good)},
+                      {"path": "sub.tslua", "sha256": _sha256(sub)}],
         }),
         encoding="utf-8",
     )
@@ -361,6 +372,7 @@ def test_run_screen_step_list_shows_no_none_for_an_unnamed_step(qapp) -> None:
     with tempfile.TemporaryDirectory() as td:
         schedule = Path(td) / "schedule.tslua"
         schedule.write_text(HEADER_WITHOUT_NUMBER, encoding="utf-8")
+        (Path(td) / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
         stage = StepsOptionsStage()
         stage.load_steps(LuaHost(schedule).schedule.steps)
         texts = [stage.step_list.item(i).text() for i in range(stage.step_list.count())]

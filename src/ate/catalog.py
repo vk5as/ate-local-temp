@@ -776,27 +776,43 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
 # --- checksum mismatches ------------------------------------------------------
 
 
+def _loaded_schedule_paths(definition: Definition, path: Path) -> set[Path]:
+    """Every `.tslua` file a run of ``path`` loads, includes included (packet 15b).
+
+    Loading the schedule once with the release's include map is the only way to know which
+    Sub-schedules it actually expands into. A schedule that fails to load contributes nothing:
+    it cannot run, so there is nothing to flag."""
+    try:
+        host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
+    except HostError:
+        return set()
+    return {Path(loaded) for loaded, kind, _ in host._files_used if kind == "tslua"}
+
+
 def definition_mismatches(
     definition: Definition, schedule_name: Optional[str] = None
 ) -> list[tuple[str, Optional[str], str, str]]:
     """Return ``(rel_path, expected_sha256, computed_sha256, media_number)`` for every mismatch.
 
     With ``schedule_name``, only the files a run of that schedule can load are checked: its own
-    ``.tslua`` and the ``.lua`` modules of the release and of every release in its resolved chain
-    (any of which it may ``require``; which ones it actually loads is only known at run time). Other
-    schedules' files are left out, so a schedule is never flagged for a sibling's mismatch. Without
-    it, every listed file is checked. The media number is the one of the release that owns the file.
-    (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always set here.)"""
-    own = None
+    ``.tslua``, the ``.tslua`` files its Sub-schedule tree includes (packet 15b — the run loads
+    them too), and the ``.lua`` modules of the release and of every release in its resolved chain
+    (any of which it may ``require``; which ones it actually loads is only known at run time).
+    Other schedules' files are left out, so a schedule is never flagged for a sibling's mismatch.
+    Without it, every listed file is checked. The media number is the one of the release that owns
+    the file. (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always
+    set here.)"""
+    loaded = set()
     if schedule_name is not None:
         path = resolve_schedule_path(definition, schedule_name)
-        own = path.relative_to(definition.path).as_posix() if path is not None else None
+        if path is not None:
+            loaded = _loaded_schedule_paths(definition, path)
     return [
         (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, member.media_number)
         for member in _search_chain(definition)
         for entry in member.files
         if (entry.expected_sha256 or None) != entry.computed_sha256
-        and (schedule_name is None or not entry.is_schedule or (member is definition and Path(entry.rel_path).as_posix() == own))
+        and (schedule_name is None or not entry.is_schedule or member.path / entry.rel_path in loaded)
     ]
 
 
