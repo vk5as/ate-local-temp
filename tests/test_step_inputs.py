@@ -174,6 +174,7 @@ def test_host_loads_a_schedule_with_valid_inputs():
         '    StepParams("Colour"):setStepNo("1.")\n'
         '      :setInputs({ [1] = { desc = "LED colour", type = "ENUM", input = "RADIOBUT",\n'
         '                         enum = {"Green", "Red"}, orient = "HORIZ" } })\n'
+        '      :setAction(function() end)\n'
         '  })\n'
     )
     host = _host_with_source(source)

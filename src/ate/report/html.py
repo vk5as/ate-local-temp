@@ -150,7 +150,7 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
     failures = [
         {
             "number": node.get("step_number"),
-            "name": node.get("step_name"),
+            "name": node.get("step_name") or "",
             "message": node_message.get(node["node_seq"], ""),
             "result": node.get("result") or "NOTRUN",
         }

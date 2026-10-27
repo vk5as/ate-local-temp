@@ -666,9 +666,14 @@ class _AteTable:
 
 
 class _StepParams:
-    """The ``StepParams`` builder. Setters chain and stash fields for the runner."""
+    """The ``StepParams`` builder. Setters chain and stash fields for the runner.
 
-    def __init__(self, name: str) -> None:
+    The Step Name is optional (packet 15a): ``StepParams()`` and ``StepParams(nil)`` both load and
+    leave ``name`` None, so the Run screen and the report show nothing for that step. Setters are
+    only checked when the schedule finishes loading (see :meth:`_LuaHost._validate_steps`), so the
+    order they are called in never matters."""
+
+    def __init__(self, name: Any = None) -> None:
         self.name = name
         self.step_no = None
         self.enabled = True
@@ -677,6 +682,16 @@ class _StepParams:
         self.include_file = None
         self.keyvals = None
         self.prefix = None
+
+    @property
+    def is_header(self) -> bool:
+        """True for an include step: a header row, not a Test Step."""
+        return self.include_file is not None
+
+    @property
+    def kind(self) -> str:
+        """``"header"`` for an include step, ``"step"`` for an ordinary one — the node row's kind."""
+        return "header" if self.is_header else "step"
 
     def setStepNo(self, value: str) -> "_StepParams":
         self.step_no = value
@@ -915,6 +930,10 @@ class _LuaHost:
         # where the enums, builders and ATE table are already registered globals.
         self._schedule_source = Path(path).read_text(encoding="utf-8")
         self._schedule = self._load_schedule(path)
+        # Check every step's setter combination against the Test Schedule format (packet 15a) before
+        # anything else: a header that carries an Action, or an ordinary step with no number or no
+        # Action, is a load error and must fail the schedule the same way a bad input table does.
+        self._validate_steps()
         # Validate every step's input declarations against the Test Schedule format; a bad one is a
         # load error, so surface it here as HostError carrying the schedule's own filename.
         self._validate_inputs()
@@ -1170,6 +1189,40 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                 return [self._materialize(value[k]) for k in sorted(int_keys)]
             return {str(k): self._materialize(value[k]) for k in str_keys}
         return value
+
+    def _validate_steps(self) -> None:
+        """Validate every loaded step against the Test Schedule format (packet 15a).
+
+        An include step (``setInclude``) is a header: no Action, no Step Inputs, and its own Step
+        Number is optional. An ordinary step needs a Step Number and an Action, and ``setPrefix``
+        only means something on a header. Setters are stashed first and checked here, so the order
+        they are called in is irrelevant. Each violation raises HostError naming the step by its
+        Step Number, or its 1-based position when it has no number — the same shape as a bad
+        ``setInputs`` table, so the schedule picker and the run start both report it as a load
+        error. Step Numbers are checked for duplicates among siblings; 15c extends that to the
+        expanded tree with prefixes."""
+        name = Path(self._schedule_path).name if self._schedule_path else "schedule.tslua"
+        seen: set[str] = set()
+        for seq, step in enumerate(self._schedule.steps):
+            label = str(step.step_no) if step.step_no else str(seq + 1)
+            if step.name is not None and not isinstance(step.name, str):
+                raise HostError(f"{name}:{label}: Step Name must be a string, got {step.name!r}")
+            if step.is_header:
+                if step.action is not None:
+                    raise HostError(f"{name}:{label}: setInclude step cannot also have an Action")
+                if step.inputs is not None:
+                    raise HostError(f"{name}:{label}: setInclude step cannot also have Step Inputs")
+            else:
+                if step.prefix is not None:
+                    raise HostError(f"{name}:{label}: setPrefix needs setInclude")
+                if step.step_no is None:
+                    raise HostError(f"{name}:{label}: ordinary step needs a Step Number")
+                if step.action is None:
+                    raise HostError(f"{name}:{label}: ordinary step needs an Action")
+            if step.step_no:
+                if step.step_no in seen:
+                    raise HostError(f"{name}:{label}: duplicate Step Number '{step.step_no}'")
+                seen.add(step.step_no)
 
     def _validate_inputs(self) -> None:
         """Validate every step's declared inputs against the Test Schedule format.

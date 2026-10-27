@@ -318,7 +318,8 @@ class RunEngine(QThread):
             )
         for seq in range(aborted_seq + 1, len(steps)):
             later = steps[seq]
-            if later.action is None:
+            if later.is_header:  # a header never ran, so it records no Attempt and no Result
+                self._record_header(run_uuid, seq, later)
                 continue
             default_enabled, enabled = self._enabled(seq, later)
             self._store.insert_node(
@@ -332,6 +333,26 @@ class RunEngine(QThread):
                 result="NOTRUN",
                 attempt_count=0,
             )
+
+    def _record_header(self, run_uuid: str, seq: int, step: Any) -> None:
+        """Record one header row of the expanded tree: a row that never runs.
+
+        A header (an include step, packet 15a) has no Attempt and no Result — `result` stays null
+        and `attempt_count` is 0 — so it is left out of the summary counts and can never make the
+        run PASS or FAIL. Its own Step Number is optional, so it is stored null when absent.
+        Enabling a header is packet 15d."""
+        default_enabled, enabled = self._enabled(seq, step)
+        self._store.insert_node(
+            run_uuid,
+            seq,
+            kind="header",
+            step_number=step.step_no,
+            step_name=step.name,
+            default_enabled=default_enabled,
+            enabled=enabled,
+            result=None,
+            attempt_count=0,
+        )
 
     @staticmethod
     def _phase_actions(schedule: Any, phase: str) -> list[Callable[..., Any]]:
@@ -468,7 +489,8 @@ class RunEngine(QThread):
         log line names the failure and explains why every step is NOTRUN."""
         for seq in range(len(steps)):
             step = steps[seq]
-            if step.action is None:  # header/include rows have no node recorded (see run)
+            if step.is_header:  # a header records no Attempt and no Result
+                self._record_header(run_uuid, seq, step)
                 continue
             default_enabled, enabled = self._enabled(seq, step)
             self._store.insert_node(
@@ -628,8 +650,10 @@ class RunEngine(QThread):
                 # Already recorded every step NOTRUN above; stop before running any.
                 break
 
-            # Header/include rows have no action; only ordinary steps run.
-            if step.action is None:
+            # An include step is a header row: it records its place in the tree, never runs, and
+            # its Sub-schedule is expanded in packet 15b.
+            if step.is_header:
+                self._record_header(run_uuid, seq, step)
                 continue
             # A step disabled at run start (its :setEnable() default or an Operator override) isn't
             # executed; record it NOTRUN with no Attempt and move on. See :meth:`_enabled`.
