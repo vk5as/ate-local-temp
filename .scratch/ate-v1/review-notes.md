@@ -229,3 +229,17 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - The depth-32 guard rejects legal acyclic trees deeper than 32 (15c replaces it with cycle detection).
   - `schedule_instance` text columns are nullable where the spec has them as text.
   - Header styling is 15d.
+
+## 17c — device tracing (merged 2026-10-27)
+- Strata implemented in parallel with the 15b Opus rework: 30 min, 149 steps, 0 compactions. `src/ate/devices/tracing.py` (`DeviceTracer`, `TracedDevice` proxy). The registry wraps handles when `deviceTrace.enabled` is set, and lines go out through `record_log(..., source="device")`, so owner and order match `ATE.log`. Run-end teardown now closes through the registry, so leftover closes are traced. `lua_host.py` changed by 10 lines and merged cleanly after 15b.
+- Haiku (MUST-FIX 0) ran a real config through `HeadlessRunSession`: lines are in order, at DEBUG, owned by the attempt, and truncated on raw bytes. They appear in the Debug pane, not in the Log pane or the HTML report, and do appear in the CSV/JSONL exports. Strata (MUST-FIX 2): nothing pinned raw-byte truncation (an escaped-text cut passed every test), and nothing pinned the `\t` escape. Strata's probes also showed SERIAL and VISA traced correctly, with no regression with tracing off.
+- Light review: one direct test of `quoted_bytes`, covering every simple escape plus ten control bytes capped at 8 (fails under both mutations). Removed the duplicate `__getattr__`. Suite 686 ×3, integrated 737.
+- Leftovers:
+  - Opens rejected with `ValueError` (bad params, unknown DeviceType) and non-OSError close failures aren't traced.
+  - Two handles to the same address share one label.
+  - `isinstance(handle, _StreamDevice)` is False through the proxy; nothing checks it today.
+  - At run end the "left open" WARNING is stored before the close trace.
+  - A failed write quotes the whole payload next to the sent count.
+  - `maxBytes` isn't range-checked.
+  - Tests use a fixed `ATE.sleep(0.3)` and two vacuous assertions.
+  - Only TCP/UDP are covered by tests.
