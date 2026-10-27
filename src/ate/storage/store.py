@@ -719,7 +719,7 @@ class RunStore:
 
         The report needs them to print each Step Input under the step that asked for it, so the
         read mirrors :meth:`nodes`/:meth:`attempts` rather than reaching into SQLite directly."""
-        stmt = input_value.select().where(input_value.c.run_uuid == run_uuid)
+        stmt = input_value.select().where(input_value.c.run_uuid == run_uuid).order_by(input_value.c.seq)  # recorded order
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(input_value.columns, row)} for row in rows

@@ -27,6 +27,7 @@ from PyQt6.QtCore import QCoreApplication
 from ate.config import Config
 from ate.report.html import _report_context, render_report
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.storage.schema import input_value
 from ate.storage.store import RunStore
 
 #: One step passes and one fails, so the columns and a failure's Expected/Actual are visible.
@@ -481,6 +482,17 @@ def test_input_values_print_under_the_step(tmp_path: Path) -> None:
     assert "saw Green" in row[1][1][0]  # the last Attempt's message is there too
 
 
+def test_checkbox_input_prints_as_labels_not_json(tmp_path: Path) -> None:
+    """A CHECKBOX is recorded as a JSON array of labels but printed as "Green, Blue"."""
+    html = _report(
+        tmp_path, {"checkbox.tslua": CHECKBOX_SOURCE}, "Steps checkbox schedule",
+        input_values=[["Green", "Blue"]],
+    )
+    row = _step_rows(html, "1.")[0]
+    assert "Input 1 (channels): Green, Blue" in row[1][1][0]
+    assert '["Green"' not in html, "the stored JSON array never reaches the page"
+
+
 def test_error_step_shows_error_result_and_message(tmp_path: Path) -> None:
     """A step whose action raised is an ERROR row with the error text as its message."""
     html = _report(tmp_path, {"error.tslua": ERROR_SOURCE}, "Steps error schedule")
@@ -543,3 +555,20 @@ def test_step_table_headings_repeat_on_every_page(tmp_path: Path) -> None:
     rules = _css_rules(html)
     assert "page-break-inside: avoid" in rules.get("tr", ""), "a step row is never split across pages"
     assert "thead" not in rules, "Chromium repeats a <thead> by default; the display rule was inert"
+
+
+def test_input_values_read_back_in_recorded_order(tmp_path: Path) -> None:
+    """`input_values` sorts by `seq`, like every other child read in the store.
+
+    The rows are written out of seq order on purpose: the ORDER BY is what makes the read
+    order-stable on any backend, rather than leaving it to the database's scan order."""
+    store = RunStore(tmp_path / "order.db")
+    for seq, index in ((7, 1), (2, 2), (9, 3)):  # written out of order on purpose
+        store._run(
+            input_value.insert().values(
+                run_uuid="run-order", seq=seq, node_seq=0, attempt_no=1, input_index=index,
+                type="STRING", value=f"v{seq}", at="2026-01-01T00:00:00+00:00",
+            )
+        )
+    got = [r["seq"] for r in store.input_values("run-order")]
+    assert got == [2, 7, 9], "the read is ordered by seq, not by insertion order"

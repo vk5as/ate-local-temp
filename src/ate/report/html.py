@@ -163,10 +163,14 @@ def _rollup_text(steps: list[dict]) -> str:
 
 
 def _input_lines(declared: Optional[str], values: list[dict]) -> list[dict]:
-    """One "Input n (desc): value" line per Operator input value, labelled from the step's declaration."""
+    """One "Input n (desc): value" line per Operator input value, labelled from the step's declaration.
+
+    A CHECKBOX selection is stored as a JSON array of labels (packet 10), so it prints as those
+    labels joined by ", " rather than as raw JSON; every other value prints exactly as recorded."""
     if not values:
         return []
     labels: dict[int, str] = {}
+    checkbox: set[int] = set()
     if declared:
         try:
             decls = json.loads(declared)
@@ -175,14 +179,21 @@ def _input_lines(declared: Optional[str], values: list[dict]) -> list[dict]:
         # `inputs` stores the schedule-format declarations in order, so position i is input index i.
         for i, decl in enumerate(decls, start=1):
             labels[i] = (decl.get("desc") or "").strip()
-    return [
-        {
-            "index": int(v.get("input_index") or 0),
-            "desc": labels.get(int(v.get("input_index") or 0), ""),
-            "value": v.get("value") if v.get("value") is not None else "",
-        }
-        for v in values
-    ]
+            if decl.get("type") == "ENUM" and decl.get("input") == "CHECKBOX":
+                checkbox.add(i)
+    lines: list[dict] = []
+    for v in values:
+        index = int(v.get("input_index") or 0)
+        value = v.get("value") if v.get("value") is not None else ""
+        if index in checkbox and isinstance(value, str):
+            try:
+                chosen = json.loads(value)
+            except ValueError:
+                chosen = None
+            if isinstance(chosen, list):
+                value = ", ".join(str(label) for label in chosen)
+        lines.append({"index": index, "desc": labels.get(index, ""), "value": value})
+    return lines
 
 
 def _row(number: str, name: str, message: str, expected: str, actual: str, result: str, depth: int,
