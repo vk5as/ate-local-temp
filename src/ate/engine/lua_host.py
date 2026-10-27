@@ -430,6 +430,46 @@ class _AteTable:
         self._host.record_log(level, *args)
         return True
 
+    def addEquipment(self, name: Any = None, serial: Any = None, connection: Any = None,
+                     cal_due: Any = None, notes: Any = None, *extra: Any) -> bool:
+        """Declare a piece of Equipment this Test Run used (packet 20). Returns ``true``.
+
+        Every argument is a string: `name` is required, the others may be nil and show blank. Any
+        other type is an error that fails the step (or Action) like any other Lua error, and so is a
+        call at load time — the top level of the file runs before a Test Run exists, so Equipment,
+        like ATE.report and ATE.input, belongs to a Pre-test Action, a step or a Post-test Action.
+        `cal_due` is free text, printed as given; ATE never parses it. A repeat of the same `name`
+        and `serial` adds no row and logs one DEBUG line instead; the first call's order is kept."""
+        self._host.drain_device_warnings()
+        if self._host._context not in ("step", "pretest", "posttest"):
+            raise NotAllowedError(
+                f"{self._host._location()} ATE.addEquipment: only allowed in a step or a Pre-test/Post-test Action"
+            )
+        if extra:
+            raise ValueError(f"ATE.addEquipment: takes at most 5 arguments, got {5 + len(extra)}")
+        for label, value in (("name", name), ("serial", serial), ("connection", connection),
+                             ("cal_due", cal_due), ("notes", notes)):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"ATE.addEquipment: {label} must be a string or nil, got {value!r}")
+        if not name:  # nil or ""
+            raise ValueError("ATE.addEquipment: name is required")
+        key = (name, serial or None)  # no serial and an empty serial are the same Equipment
+        if key in self._host._equipment_seen:
+            # The same Equipment declared twice is the same Equipment: keep the first row, log the
+            # duplicate at DEBUG so the Operator can see the schedule repeated it.
+            self._host.record_log("DEBUG", f"ATE.addEquipment: {name}" + (f" (serial {serial})" if serial else "") + " already declared - ignored", source="ate")
+            self._host.drain_device_warnings()
+            return True
+        self._host._equipment_seen.add(key)
+        self._host.equipment.append(
+            {"name": name, "serial": serial, "connection": connection, "cal_due": cal_due, "notes": notes,
+             "at": time.monotonic()}
+        )
+        # Write the row now, owned by the running step Attempt or Action, so the record shows the
+        # declaration at the moment the schedule made it.
+        self._host.drain_device_warnings()
+        return True
+
     def _device_type_name(self, value: Any) -> str:
         """Map a DeviceType enum member to its type name.
 
@@ -1053,6 +1093,13 @@ class _LuaHost:
         # The monotonic time each line in ``logs`` was emitted, index for index, so the run engine
         # can stamp it with its own time and order it against device warnings (packet 17b).
         self.log_times: list[float] = []
+        # Packet 20: every ATE.addEquipment call this run made, in call order, as
+        # ``{"name", "serial", "connection", "cal_due", "notes", "at"}`` with ``at`` the monotonic
+        # time of the call; the run engine writes each row as it is drained, owned by the running
+        # step Attempt or Pre-/Post-test Action. ``_equipment_seen`` is the (name, serial) pairs
+        # already declared, so a repeat adds no row.
+        self.equipment: list[dict[str, Any]] = []
+        self._equipment_seen: set[tuple[str, Optional[str]]] = set()
         # The step index currently running (set by the run engine before each action), used to
         # attribute an isolated ATE error to the schedule line where it was called. None outside
         # a run, when only the filename is known.

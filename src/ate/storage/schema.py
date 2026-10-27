@@ -21,9 +21,10 @@ from sqlalchemy import Column, Integer, MetaData, Table, Text
 # is a forward migration, so it becomes 2 and older databases must be migrated first.
 # Adding the ``media_release``/``run_file`` tables records each run's checksums, so this
 # build bumps it to 3. Adding ``schedule_instance`` records the top-level schedule and every
-# Sub-schedule include of a run (packet 15b), so this build bumps it to 4 — older databases
-# must migrate before launch (see store.py).
-SCHEMA_VERSION = 4
+# Sub-schedule include of a run (packet 15b), so this build bumps it to 4. Adding ``equipment``
+# records the Equipment a run declared with `ATE.addEquipment` (packet 20), so this build bumps it
+# to 5 — older databases must migrate before launch (see store.py).
+SCHEMA_VERSION = 5
 
 metadata = MetaData()
 
@@ -129,6 +130,27 @@ input_value = Table(
     Column("type", Text, nullable=True),  # Step Input type (ENUM/INTEGER/FLOAT/STRING/PROMPT/POLL)
     Column("value", Text, nullable=True),  # value as text; CHECKBOX as a JSON array of labels
     Column("at", Text, nullable=True),  # ISO-8601 UTC with ms when it was entered
+)
+
+
+# Equipment the Test Run declared with `ATE.addEquipment`, in the order it was declared (packet 20,
+# see `assets/test-run-record.md`). Only `name` is mandatory; the rest are as given, `cal_due` being
+# free text ATE never parses. Ownership is structural like a log line's: a Pre-test/Post-test Action
+# call owns its rows through `action_seq`, a step Attempt through `node_seq` + `attempt_no`.
+equipment = Table(
+    "equipment",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # composite (run_uuid, seq) key; declaration order
+    Column("name", Text, nullable=True),
+    Column("serial", Text, nullable=True),
+    Column("connection", Text, nullable=True),
+    Column("cal_due", Text, nullable=True),
+    Column("notes", Text, nullable=True),
+    Column("at", Text, nullable=True),  # ISO-8601 UTC with ms when it was declared
+    Column("action_seq", Integer, nullable=True),  # owning Pre-test/Post-test Action call; null otherwise
+    Column("node_seq", Integer, nullable=True),  # owning step node; null when not tied to a step
+    Column("attempt_no", Integer, nullable=True),  # the Attempt's number within that node; null otherwise
 )
 
 
