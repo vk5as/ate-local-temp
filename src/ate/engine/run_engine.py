@@ -34,6 +34,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from ..catalog import _search_chain
 from ..errors import ATEError
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES
 from ..storage._uuid import new_uuid7
@@ -573,17 +574,31 @@ class RunEngine(QThread):
                 "utc_offset": self.utc_offset,
             }
         )
-        # Packet 06b: record the Media Release that owns this run (seq 0) straight after the test_run
-        # row. Without a resolved definition there is nothing to record — bare schedule tests behave as before.
+        # Packet 06b, 07d: record every Media Release in this run's resolved chain, straight after the
+        # test_run row — the owning release at seq 0, then its dependencies depth-first in declaration
+        # order, a release reached twice listed once. Without a resolved definition there is nothing to
+        # record, so bare schedule tests behave as before. Each row checksums ITS OWN .atedef; one that
+        # has vanished or cannot be read since the scan still gets a row with a null checksum, one
+        # WARNING, and the run carries on.
         if self._definition is not None:
-            atedef_path = getattr(self._definition, "atedef_path", None)
-            self._store.insert_media_release(
-                run_uuid,
-                media_number=self._definition.media_number or None,
-                name=self._definition.name or None,
-                version=self._definition.version or None,
-                atedef_sha256=_sha256_hex(atedef_path.read_bytes()) if atedef_path is not None else None,
-            )
+            for member in _search_chain(self._definition):
+                atedef_path = getattr(member, "atedef_path", None)
+                atedef_sha = None
+                if atedef_path is not None:
+                    try:
+                        atedef_sha = _sha256_hex(atedef_path.read_bytes())
+                    except Exception as exc:  # any read failure: the row is still recorded, the run carries on
+                        self._store.insert_log_lines(
+                            run_uuid, 0,
+                            [{"level": "WARNING", "source": "ate", "text": f"could not read .atedef for {member.media_number or member.name} ({atedef_path}): {exc}"}],
+                        )
+                self._store.insert_media_release(
+                    run_uuid,
+                    media_number=member.media_number or None,
+                    name=member.name or None,
+                    version=member.version or None,
+                    atedef_sha256=atedef_sha,
+                )
         # Report the run key and mark RUNNING on the main thread, both queued signals
         # delivered after ``start()`` returns; emitted from the worker before any other
         # row is written beyond this one.
@@ -874,7 +889,7 @@ class RunEngine(QThread):
         if self._definition is None:
             return
         by_path = {}
-        for member in (self._definition, *self._definition.chain):
+        for member in _search_chain(self._definition):
             for entry in member.files:
                 by_path.setdefault(member.path / entry.rel_path, (entry, member))
         mismatches: list[tuple[str, Optional[str], str]] = []
