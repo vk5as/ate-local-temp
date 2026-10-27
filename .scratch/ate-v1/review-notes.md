@@ -243,3 +243,20 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - `maxBytes` isn't range-checked.
   - Tests use a fixed `ATE.sleep(0.3)` and two vacuous assertions.
   - Only TCP/UDP are covered by tests.
+
+## 15c — prefixes, numbering and tree checks (merged 2026-10-27)
+- Opus implemented, as the user's one-off (effort medium; it paused at the rate limit and resumed after the reset).
+  - `setPrefix` stacks outside in on `host.tree`, so every view and `node.step_number` get the prefixed number.
+  - A header takes the outer prefixes but not its own.
+  - Duplicates are checked on the expanded tree, and each error names both include chains.
+  - A cycle (the same resolved file twice on one chain) is caught before the chunk reloads, and the error names the chain.
+  - The depth-32 limit is removed; a non-string prefix is a load error.
+  - 12 tests. The 15b fixtures gained a `setPrefix` on every include, since 15c correctly rejects them otherwise; reviewers confirmed no 15b behaviour was hidden.
+- Haiku (MUST-FIX 0, screenshots): the channel example reads `2.1.` / `3.2.`, errors are readable, the sibling schedule still loads, and the report shows `3.2.`. Strata (MUST-FIX 1): `_expand` recurses per level, so a chain of about 1000 levels raised `RecursionError` out of the scan and killed every schedule. It also confirmed the remaining behaviour by probe and that 8 mutations each fail tests.
+- Light review: `RecursionError` from the expansion becomes the schedule's load error. Tested with a 150-level chain under a recursion limit just above the current stack depth; the test fails under mutation. Suite 733 ×3, integrated 750.
+- Leftovers:
+  - Nothing pins that a cycle is caught before the repeated chunk runs (correct by probe).
+  - `schedule_instance.prefix` stores the raw per-include value; the spec's "as applied" could mean the stacked one.
+  - Chain labels in errors use raw `file:number`, which is inconsistent about the trailing dot and doesn't match the prefixed numbers shown everywhere else, and nested messages run together without a separator.
+  - The report assertion is weak.
+  - There is no run-start cycle test.
