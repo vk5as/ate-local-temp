@@ -253,6 +253,8 @@ BAD_ARGS = [
     ("a boolean for the serial", '"Scope", true', "serial"),
     ("a table for the name", '{ "Scope" }', "name"),
     ("a number for the notes", '"Scope", nil, nil, nil, 7', "notes"),
+    ("an empty name", '""', "name is required"),
+    ("a sixth argument", '"Scope", "S1", "GPIB", "2027", "note", "extra"', "at most 5 arguments"),
 ]
 
 
@@ -387,3 +389,54 @@ def test_a_repeat_across_a_sub_schedule_is_still_ignored(qapp, tmp_path) -> None
     assert [r["name"] for r in rows] == ["Sub supply", "Sub jig", "Sub load"]
     debug = [l for l in session.store.log_lines(session.run_uuid) if l["level"] == "DEBUG"]
     assert len(debug) == 1 and "SUB-PSU" in debug[0]["text"]
+
+
+def test_no_serial_and_an_empty_serial_are_the_same_equipment(qapp, tmp_path) -> None:
+    files = {"main.tslua": """\
+return ScheduleParams("Equipment bench", "nil vs empty serial")
+  :setSchedule({
+    StepParams("declare"):setStepNo("1.")
+      :setAction(function()
+        ATE.addEquipment("Jig")
+        ATE.addEquipment("Jig", "")
+        ATE.report(Result.PASS, "ok", "1", "1")
+      end),
+  })
+"""}
+    session = _run(qapp, tmp_path, "nilserial", files)
+    assert _names(session) == ["Jig"]
+    debug = [l["text"] for l in session.store.log_lines(session.run_uuid) if l["level"] == "DEBUG"]
+    assert any(t == "ATE.addEquipment: Jig already declared - ignored" for t in debug), debug
+
+
+def test_equipment_is_in_the_store_while_the_step_is_still_running(qapp, tmp_path) -> None:
+    """"Recorded as it happens": the row exists before the declaring step ends."""
+    files = {"main.tslua": """\
+return ScheduleParams("Equipment bench", "declare, then keep running")
+  :setSchedule({
+    StepParams("declare"):setStepNo("1.")
+      :setAction(function()
+        ATE.addEquipment("Scope", "S1")
+        local t0 = os.clock()  -- busy, with no further ATE call that could flush the row instead
+        while os.clock() - t0 < 3 do end
+        ATE.report(Result.PASS, "ok", "1", "1")
+      end),
+  })
+"""}
+    root = _release(tmp_path / "defs", "midrun", files)
+    session = HeadlessRunSession(_config(tmp_path, root))
+    session.select_schedule("Equipment bench")
+    session.start()
+    try:
+        deadline = time.monotonic() + 2.5
+        seen, running = [], False
+        while time.monotonic() < deadline and not seen:
+            qapp.processEvents()
+            if session.run_uuid:
+                seen = session.store.equipment(session.run_uuid)
+                running = session._state != SessionState.FINISHED
+            time.sleep(0.01)
+        assert [r["name"] for r in seen] == ["Scope"]
+        assert running, "the row must be there while the step is still running"
+    finally:
+        _pump(qapp, session)

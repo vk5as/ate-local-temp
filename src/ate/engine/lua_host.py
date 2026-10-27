@@ -431,7 +431,7 @@ class _AteTable:
         return True
 
     def addEquipment(self, name: Any = None, serial: Any = None, connection: Any = None,
-                     cal_due: Any = None, notes: Any = None) -> bool:
+                     cal_due: Any = None, notes: Any = None, *extra: Any) -> bool:
         """Declare a piece of Equipment this Test Run used (packet 20). Returns ``true``.
 
         Every argument is a string: `name` is required, the others may be nil and show blank. Any
@@ -445,17 +445,19 @@ class _AteTable:
             raise NotAllowedError(
                 f"{self._host._location()} ATE.addEquipment: only allowed in a step or a Pre-test/Post-test Action"
             )
+        if extra:
+            raise ValueError(f"ATE.addEquipment: takes at most 5 arguments, got {5 + len(extra)}")
         for label, value in (("name", name), ("serial", serial), ("connection", connection),
                              ("cal_due", cal_due), ("notes", notes)):
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"ATE.addEquipment: {label} must be a string or nil, got {value!r}")
-        if name is None:
+        if not name:  # nil or ""
             raise ValueError("ATE.addEquipment: name is required")
-        key = (name, serial)
+        key = (name, serial or None)  # no serial and an empty serial are the same Equipment
         if key in self._host._equipment_seen:
             # The same Equipment declared twice is the same Equipment: keep the first row, log the
             # duplicate at DEBUG so the Operator can see the schedule repeated it.
-            self._host.record_log("DEBUG", f"ATE.addEquipment: {name} (serial {serial or ''}) already declared - ignored", source="ate")
+            self._host.record_log("DEBUG", f"ATE.addEquipment: {name}" + (f" (serial {serial})" if serial else "") + " already declared - ignored", source="ate")
             self._host.drain_device_warnings()
             return True
         self._host._equipment_seen.add(key)
