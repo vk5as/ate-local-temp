@@ -124,6 +124,9 @@ class RunEngine(QThread):
         # the same seq the runner assigns to each step. Absent here every step keeps its own
         # :setEnable() default; an override wins over that default when present (see _enabled).
         self._overrides: dict[int, bool] = {int(seq): bool(en) for seq, en in (overrides or {}).items()}
+        # Packet 15d: the expanded tree's parent links, built once per run by _tree_children, so a
+        # header row can ask whether any Test Step beneath it is enabled.
+        self._children: Optional[dict[int, list[int]]] = None
         # Optional pre-registered ATE functions (a testability seam; see criterion 03). When
         # provided they are registered on the host before it runs, so a failing one can be
         # exercised through real Lua execution without touching device drivers.
@@ -367,7 +370,9 @@ class RunEngine(QThread):
         A header (an include step, packet 15a) has no Attempt and no Result — `result` stays null
         and `attempt_count` is 0 — so it is left out of the summary counts and can never make the
         run PASS or FAIL. Its own Step Number is optional, so it is stored null when absent.
-        Enabling a header is packet 15d."""
+        Packet 15d: `default_enabled` is the header's own default after any enclosing header's
+        :setEnable() forced it, and `enabled` is whether any Test Step beneath it is enabled —
+        the header row itself is never toggled as a whole."""
         default_enabled, enabled = self._enabled(seq, node)
         self._insert_node(
             run_uuid,
@@ -546,11 +551,41 @@ class RunEngine(QThread):
             action_seq=failed_seq,
         )
 
-    def _enabled(self, seq: int, step: Any) -> tuple[int, int]:
-        """Return ``(default_enabled, enabled)`` for a runner step at ``seq``.
+    def _tree_children(self) -> dict[int, list[int]]:
+        """Each expanded-tree row's direct children, keyed by its node seq (packet 15d)."""
+        if self._children is None:
+            children: dict[int, list[int]] = {}
+            for seq, node in enumerate(self._host.tree):
+                if node.parent is not None:
+                    children.setdefault(node.parent, []).append(seq)
+            self._children = children
+        return self._children
 
-        The default comes from the author's :setEnable(); an Operator override wins when one is set."""
-        default_enabled = bool(step.enabled)
+    def _enabled(self, seq: int, step: Any) -> tuple[int, int]:
+        """Return ``(default_enabled, enabled)`` for a tree row at ``seq``.
+
+        The default is the row's own :setEnable() after any enclosing header's :setEnable() has
+        forced it (packet 15d, :attr:`_TreeNode.default_enabled`); an Operator override wins over
+        that default for a Test Step. A header row is never toggled as a whole (the Run screen sets
+        every step beneath it one by one), so its own `enabled` is whether any Test Step in its
+        subtree is enabled."""
+        default_enabled = bool(getattr(step, "default_enabled", getattr(step, "enabled", True)))
+        if getattr(step, "is_header", False):
+            children = self._tree_children()
+            stack = list(children.get(seq, ()))
+            saw_step = False
+            while stack:
+                child = stack.pop()
+                node = self._host.tree[child]
+                if node.is_header:
+                    stack.extend(children.get(child, ()))
+                    continue
+                saw_step = True
+                if self._enabled(child, node)[1]:
+                    return default_enabled, 1
+            # No Test Step beneath: nothing the Operator could switch, so it stays at its default
+            # (the Run screen draws such a header checked).
+            return default_enabled, (0 if saw_step else int(default_enabled))
         effective_enabled = self._overrides.get(seq, default_enabled)
         return int(default_enabled), int(effective_enabled)
 

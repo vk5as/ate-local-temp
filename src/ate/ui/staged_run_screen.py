@@ -168,6 +168,44 @@ def _row_label(number: object, name: object, depth: int) -> str:
     return f"{indent}{number}  {name}" if number else f"{indent}{name}"
 
 
+#: The mockup's header row background (`.row.hdr` / `.b-row.hdr`), packet 15d.
+_HEADER_BG = "#eef1f5"
+
+
+def _children_of_rows(rows: list[object], parent_of) -> dict[int, list[int]]:
+    """Each row index's direct children, for both the step objects and the recorded node dicts."""
+    children: dict[int, list[int]] = {}
+    for index, row in enumerate(rows):
+        parent = parent_of(row)
+        if parent is not None:
+            children.setdefault(int(parent), []).append(index)
+    return children
+
+
+def _rollup_text(row: int, children: dict[int, list[int]], is_header, result) -> str:
+    """The mockup's header rollup: `N/M done`, plus `, K failed` when K > 0 (packet 15d).
+
+    `M` is every Test Step beneath this header (nested headers included), `N` those with a Result,
+    and `K` of those that FAILED or ERRORED. A header whose steps have not produced any Result yet
+    shows nothing."""
+    stack = list(children.get(row, ()))
+    done = total = failed = 0
+    while stack:
+        seq = stack.pop()
+        if is_header(seq):
+            stack.extend(children.get(seq, ()))
+            continue
+        total += 1
+        outcome = result(seq)
+        if outcome:
+            done += 1
+            if outcome in ("FAIL", "ERROR"):
+                failed += 1
+    if not done:
+        return ""
+    return f"{done}/{total} done" + (f", {failed} failed" if failed else "")
+
+
 def _node_depths(nodes: list[dict]) -> dict[object, int]:
     """Each recorded node's nesting depth, from its ``parent_node_seq`` (parents come first)."""
     depths: dict[object, int] = {}
@@ -194,11 +232,15 @@ class StepsOptionsStage(QWidget):
 
         self.step_list = QListWidget()
         # Checkboxes are per step (packet 11b): each row is checkable and a toggle is one call
-        # into session.toggle_node — the widget holds no logic of its own.
+        # into session.toggle_node — the widget holds no logic of its own. Packet 15d: a header row
+        # has no toggle of its own; clicking it sets every step beneath it, one call per step.
         self._checkable = True  # setup state: the boxes stay checkable until a run starts
         self._loading = False  # True while load_steps re-syncs check states, so itemChanged
         # is not mistaken for an Operator toggle.
         self._states: dict[int, bool] = {}  # each row's last-seen checked state
+        self._rows: list[object] = []  # the expanded tree rows, in runner seq order
+        self._children: dict[int, list[int]] = {}  # each row's direct children in the tree
+        self._overrides: dict[int, bool] = {}  # the Operator's per-step toggles seen so far
         self.step_list.itemChanged.connect(self._on_check_toggled)
         self.stop_on_fail_radio = QRadioButton("Stop on first failure")
         self.continue_all_radio = QRadioButton("Run every step regardless of failures")
@@ -213,22 +255,26 @@ class StepsOptionsStage(QWidget):
         layout.addWidget(self.run_button)
 
     def load_steps(self, steps: Iterable[object]) -> None:
-        """Show ``steps`` (each with ``step_no``, ``name``, ``enabled``) as checkable rows.
+        """Show ``steps`` (each with ``step_no``, ``name``, ``default_enabled``) as checkable rows.
 
-        Every row carries its step's default ``enabled`` state, or — when the session carries
-        step-enable overrides for the selected schedule — the override that a next run would
-        record, so the boxes show what the run will record (spec 37: options carry over). A
-        toggle is one call into ``session.toggle_node(row, checked)`` (packet 11b), with the row's
-        position in the expanded step list as the runner seq. Also re-applies the selected
-        schedule's Stop on Fail default to the radio pair so it is not stuck at construction-
-        time; the Operator can still toggle either choice."""
+        Every row carries its step's enabled default — after any enclosing header's ``setEnable``
+        forced it (packet 15d) — or, when the session carries step-enable overrides for the
+        selected schedule, the override that a next run would record, so the boxes show what the
+        run will record (spec 37: options carry over). A toggle is one call into
+        ``session.toggle_node(row, checked)`` (packet 11b), with the row's position in the expanded
+        step list as the runner seq. A header row's box is DERIVED (packet 15d): Checked when every
+        step beneath it is on, Unchecked when none is, partial when mixed, and clicking it sets
+        them all. Header rows also get the mockup's look: ``#eef1f5`` background and a bold name.
+        Also re-applies the selected schedule's Stop on Fail default to the radio pair so it is not
+        stuck at construction-time; the Operator can still toggle either choice."""
         self._loading = True
         self.step_list.clear()
         self._states = {}
+        self._rows = list(steps)
+        self._children = _children_of_rows(self._rows, lambda row: getattr(row, "parent", None))
         overrides = self.session.node_enables if self.session is not None else None
-        if overrides is not None:
-            overrides = dict(overrides)
-        for step in steps:
+        self._overrides = dict(overrides) if overrides else {}
+        for step in self._rows:
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
             item = QListWidgetItem(_row_label(number, label, int(getattr(step, "depth", 0))))
@@ -239,13 +285,64 @@ class StepsOptionsStage(QWidget):
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | checkable)
             self.step_list.addItem(item)
             row = self.step_list.row(item)
-            default = bool(getattr(step, "enabled", True))
-            checked = overrides.get(row, default) if overrides else default
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-            self._states[row] = checked
+            if getattr(step, "is_header", False):
+                item.setBackground(QColor(_HEADER_BG))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                state = self._header_state(row)
+            else:
+                state = Qt.CheckState.Checked if self._effective(row) else Qt.CheckState.Unchecked
+            self._states[row] = state == Qt.CheckState.Checked
+            item.setCheckState(state)
         self._loading = False
         if self.session is not None:
             self._apply_stop_on_fail(self.session.selected_stop_on_fail)
+
+    def _effective(self, row: int) -> bool:
+        """Whether row ``row``'s box is on: the Operator's override if there is one, else the default."""
+        step = self._rows[row]
+        default = bool(getattr(step, "default_enabled", getattr(step, "enabled", True)))
+        return self._overrides.get(row, default)
+
+    def _subtree(self, row: int) -> list[int]:
+        """Every row beneath the header at ``row``, depth first — headers and Test Steps alike."""
+        rows: list[int] = []
+        stack = list(self._children.get(row, ()))
+        while stack:
+            child = stack.pop(0)
+            rows.append(child)
+            stack.extend(self._children.get(child, ()))
+        return rows
+
+    def _header_state(self, row: int) -> Qt.CheckState:
+        """A header's box, derived from the steps beneath it (packet 15d, the mockup's enableBox).
+
+        Checked when every one is on, Unchecked when none is, PartiallyChecked when the states are
+        mixed. A header with no Test Steps at all has nothing to disable, so it reads Checked, as
+        in the mockup."""
+        beneath = [r for r in self._subtree(row) if not getattr(self._rows[r], "is_header", False)]
+        on = sum(self._effective(r) for r in beneath)
+        if on == len(beneath):
+            return Qt.CheckState.Checked
+        if on == 0:
+            return Qt.CheckState.Unchecked
+        return Qt.CheckState.PartiallyChecked
+
+    def _header_rows_above(self, row: int) -> list[int]:
+        """The header rows enclosing ``row``, innermost first, whose box must follow its children."""
+        headers: list[int] = []
+        parent = getattr(self._rows[row], "parent", None)
+        while parent is not None:
+            if getattr(self._rows[parent], "is_header", False):
+                headers.append(parent)
+            parent = getattr(self._rows[parent], "parent", None)
+        return headers
+
+    def _set_box(self, row: int, state: Qt.CheckState) -> None:
+        """Set one row's box without it reading as a new Operator toggle (the state is recorded first)."""
+        self._states[row] = state == Qt.CheckState.Checked
+        self.step_list.item(row).setCheckState(state)
 
     def _on_check_toggled(self, item: QListWidgetItem, *_args: int) -> None:
         """A checkbox toggle reaches the session as ``toggle_node(row, checked)`` — no logic here.
@@ -254,15 +351,38 @@ class StepsOptionsStage(QWidget):
         check state and compares it against the state it last saw; flag re-syncs (set_checkable),
         same-state events and the load_steps re-sync are all ignored, so only a real toggle
         reaches the session. A locked box (a run in progress) has no toggle: the handler
-        returns before touching the session."""
+        returns before touching the session. Packet 15d: clicking a header is not an override of
+        its own row — it calls toggle_node for every Test Step beneath it, and the header's box
+        (and every header above it) then reads back from those steps."""
         if self._loading or self.session is None or not self._checkable:
             return
         row = self.step_list.row(item)
+        if getattr(self._rows[row], "is_header", False):
+            on = item.checkState() == Qt.CheckState.Checked
+            if self._states.get(row) == on:
+                return
+            self._states[row] = on
+            beneath = self._subtree(row)
+            for child in beneath:
+                if getattr(self._rows[child], "is_header", False):
+                    continue
+                self._overrides[child] = on
+                self._set_box(child, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                self.session.toggle_node(child, on)
+            for child in beneath:
+                if getattr(self._rows[child], "is_header", False):
+                    self._set_box(child, self._header_state(child))
+            for header in self._header_rows_above(row):  # a nested header's click changes its ancestors too
+                self._set_box(header, self._header_state(header))
+            return
         checked = item.checkState() == Qt.CheckState.Checked
         if self._states.get(row) == checked:
             return
         self._states[row] = checked
+        self._overrides[row] = checked
         self.session.toggle_node(row, checked)
+        for header in self._header_rows_above(row):
+            self._set_box(header, self._header_state(header))
 
     def set_checkable(self, checkable: bool) -> None:
         """Lock or unlock the step checkboxes: toggle only ItemIsUserCheckable so the
@@ -428,16 +548,32 @@ class RunView(QWidget):
 
         self.step_list.clear()
         # Packet 15b: header rows show their Step Number and name with no result, and every row is
-        # indented by its depth in the expanded tree, as on the Steps & options stage.
+        # indented by its depth in the expanded tree, as on the Steps & options stage. Packet 15d:
+        # header rows get the mockup's `#eef1f5` background and bold name, and a rollup of the
+        # steps beneath them — `N/M done`, plus `, K failed` when some failed.
         depths = _node_depths(nodes)
+        children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
+        by_seq = {node["node_seq"]: node for node in nodes}
         last = None
         for node in nodes:
             text = _row_label(node.get("step_number"), node.get("step_name"), depths[node.get("node_seq")])
-            if node.get("kind") == "step":
+            is_header = node.get("kind") != "step"
+            if not is_header:
                 text += f"  →  {node.get('result', '')}"
+            else:
+                rollup = _rollup_text(node["node_seq"], children,
+                                     lambda seq: by_seq[seq].get("kind") != "step",
+                                     lambda seq: by_seq[seq].get("result"))
+                if rollup:
+                    text += f"  {rollup}"
             item = QListWidgetItem(text)
+            if is_header:
+                item.setBackground(QColor(_HEADER_BG))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
             self.step_list.addItem(item)
-            if node.get("kind") == "step":
+            if not is_header:
                 last = item
         # The latest step is the current one; enlarge it so the eye lands on where we are.
         if last is not None and self.step_list.count() > 1:
@@ -915,10 +1051,21 @@ class StagedRunScreen(QWidget):
         steps = self._load_schedule_steps(self.session.selected_schedule or "")
         self.run_view.step_list.clear()
         self._failed_row = None
+        # Packet 15d: header rows are styled like the finished list and roll up the steps beneath
+        # them, so a paused run still shows how far each Sub-schedule got.
+        children = _children_of_rows(steps, lambda step: getattr(step, "parent", None))
         for seq, step in enumerate(steps):
             text = _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
             if getattr(step, "is_header", False):  # a header row has no result, as in the finished list
-                self.run_view.step_list.addItem(QListWidgetItem(text))
+                rollup = _rollup_text(seq, children,
+                                      lambda index: getattr(steps[index], "is_header", False),
+                                      lambda index: done[index].get("result") if index in done else None)
+                item = QListWidgetItem(text + (f"  {rollup}" if rollup else ""))
+                item.setBackground(QColor(_HEADER_BG))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                self.run_view.step_list.addItem(item)
                 continue
             if seq == node_seq:
                 state = result
