@@ -528,6 +528,11 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
         if collisions:
             _set_broken(definition, f"module name collision across Media Releases: {', '.join(sorted(collisions))}")
 
+    # A broken release has no usable chain, however far its own resolve got before the break.
+    for definition in definitions:
+        if definition.broken or id(definition) in broken_ids:
+            definition.chain = ()
+
 
 def _set_broken(definition: Definition, error: str) -> None:
     definition.broken = error
@@ -760,7 +765,7 @@ def definition_mismatches(
         for member in _search_chain(definition)
         for entry in member.files
         if (entry.expected_sha256 or None) != entry.computed_sha256
-        and (schedule_name is None or not entry.is_schedule or Path(entry.rel_path).as_posix() == own)
+        and (schedule_name is None or not entry.is_schedule or (member is definition and Path(entry.rel_path).as_posix() == own))
     ]
 
 

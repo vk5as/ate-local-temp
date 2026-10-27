@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ate.catalog import Definition, FileEntry, find_definitions, module_map
+from ate.catalog import Definition, FileEntry, definition_mismatches, find_definitions, module_map
 from ate.run_session.headless import HeadlessRunSession, SessionState
 
 WRONG_SHA = "0" * 64
@@ -184,6 +184,30 @@ def test_a_broken_definition_keeps_an_empty_chain(tmp_path):
     assert definition.chain == ()
 
 
+def test_a_cycle_and_a_release_above_it_keep_empty_chains(tmp_path):
+    """A -> B -> C -> B and X -> A: every release broken by the cycle, or by depending on it, has no chain."""
+    def release(label, name, deps):
+        return {
+            "format": 1, "mediaNumber": f"MR-{label}", "name": name, "version": "1.0.0",
+            "depends": [{"name": dep, "version": "^1.0"} for dep in deps], "files": [],
+        }
+
+    root = _write_releases(
+        tmp_path,
+        {
+            "x": release("X", "Release X", ["Release A"]),
+            "a": release("A", "Release A", ["Release B"]),
+            "b": release("B", "Release B", ["Release C"]),
+            "c": release("C", "Release C", ["Release B"]),
+        },
+        {},
+    )
+    by_media = _by_media(root)
+    for media_number in ("MR-X", "MR-A", "MR-B", "MR-C"):
+        assert by_media[media_number].broken is not None, media_number
+        assert by_media[media_number].chain == (), media_number
+
+
 def test_a_definition_with_no_chain_still_maps_its_own_modules():
     """Hand-built definitions (no dependency resolution ran) keep working."""
     definition = Definition(
@@ -302,8 +326,18 @@ def test_the_chain_is_walked_depth_first_in_declaration_order(tmp_path):
     assert all(d.broken is None for d in by_media.values()), {d.media_number: d.broken for d in by_media.values()}
     assert _media_chain(by_media["MR-A"]) == ("MR-A", "MR-B", "MR-E", "MR-D")
     assert module_map(by_media["MR-A"])["shared"] == root / "e" / "shared.lua", "B's subtree before D"
-    # Schedules in a dependency are never modules.
-    assert not any(name.endswith(".tslua") for name in module_map(by_media["MR-A"]))
+
+
+def test_a_dependency_schedule_is_never_requireable():
+    """Even a schedule entry carrying a module name is skipped when building the map."""
+    dependency = Definition(
+        path=Path("/tmp/ate-chain-dep"), media_number="MR-DEP", name="Dep", version="1.0.0",
+        files=(FileEntry(rel_path="run.tslua", is_schedule=True, module_name="run"),
+               FileEntry(rel_path="lib.lua", module_name="lib")),
+    )
+    definition = Definition(path=Path("/tmp/ate-chain-own"), media_number="MR-OWN", name="Own", version="1.0.0")
+    definition.chain = (definition, dependency)
+    assert module_map(definition) == {"lib": Path("/tmp/ate-chain-dep/lib.lua")}
 
 
 # -- mismatches across the chain --------------------------------------------
@@ -342,3 +376,34 @@ def test_a_mismatched_module_in_a_grandchild_is_flagged_before_the_run(qapp, tmp
     assert row["content"] == C_MOD_MISMATCH_SRC.encode("utf-8")
     warnings = [line["text"] for line in session.store.log_lines(session.run_uuid) if "checksum mismatch" in line["text"]]
     assert any("c_mod.lua" in text for text in warnings), warnings
+
+
+SIMPLE_SRC = (
+    'return ScheduleParams("Simple schedule", "no requires") :setSchedule({\n'
+    '  StepParams("check"):setStepNo("1."):setAction(function() ATE.report(Result.PASS, "ok") end),\n'
+    "})\n"
+)
+
+
+def test_a_dependency_schedule_with_the_same_path_is_not_flagged(tmp_path):
+    """A and its dependency B both list ``main.tslua``; only B's is mismatched, and A's run never loads it."""
+    root = _write_releases(
+        tmp_path,
+        {
+            "a": {
+                "format": 1, "mediaNumber": "MR-A", "name": "Release A", "version": "1.0.0",
+                "depends": [{"name": "Release B", "version": "^1.0"}],
+                "files": [_entry("main.tslua", SIMPLE_SRC)],
+            },
+            "b": {
+                "format": 1, "mediaNumber": "MR-B", "name": "Release B", "version": "1.0.0",
+                "files": [{"path": "main.tslua", "sha256": WRONG_SHA}],
+            },
+        },
+        {"main.tslua": SIMPLE_SRC},
+    )
+    by_media = _by_media(root)
+    assert all(d.broken is None for d in by_media.values()), {d.media_number: d.broken for d in by_media.values()}
+    assert definition_mismatches(by_media["MR-A"], "Simple schedule") == []
+    flagged = definition_mismatches(by_media["MR-B"], "Simple schedule")
+    assert [(path, media) for path, _, _, media in flagged] == [("main.tslua", "MR-B")]
