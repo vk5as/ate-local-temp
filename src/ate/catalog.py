@@ -425,13 +425,14 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
     propagate "broken dependency" up the chain, repeatedly, so a broken release breaks everything
     above it. Every defect sets ``Definition.broken``; runnable definitions are left untouched.
     """
-    # Registry of structurally-valid Media Releases for matching depends entries.
+    # Registry of installed Media Releases for matching depends entries. A broken release still
+    # matches (with a readable name and version), so its dependents are told it is a broken
+    # dependency rather than that nothing is installed.
     by_name: dict[str, list[tuple[str, Definition]]] = {}
     for definition in definitions:
-        if not definition.broken:
+        if definition.name and isinstance(definition.version, str) and parse_version(definition.version):
             by_name.setdefault(definition.name, []).append((definition.version, definition))
 
-    broken_ids = {id(d) for d in definitions if d.broken}
     # Registry of structurally-valid Media Releases (with a real media number) for matching depends entries and collision checks.
     by_media = {d.media_number: d for d in definitions if d.media_number}
     # Two definitions with the same mediaNumber are both broken (media number is a unique identity); only Media Releases with a real media number can be matched or flagged as duplicates.
@@ -452,7 +453,7 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
         with that dependency's own resolved chain, and a release reached twice keeps its first
         position (packet 07b)."""
         definition = by_media.get(media_number)
-        if not definition or id(definition) in broken_ids:
+        if not definition or definition.broken:
             return
 
         chain: list[Definition] = [definition]  # own release first, then dependencies depth-first
@@ -494,14 +495,16 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
         definition._chain = tuple(d.media_number for d in chain)  # media numbers, for the module-collision check
 
     for definition in definitions:
-        if not definition.broken and id(definition) not in broken_ids:
+        if not definition.broken:
             resolve(definition.media_number, [definition.media_number])
 
     # A module name provided by more than one Media Release of a resolved chain breaks the
     # definition. Intrinsic defects are all found first, so a collision never hides a broken
-    # dependency further up the chain (packet 07c).
+    # dependency further up the chain (packet 07c). A chain already holding a broken release is
+    # left to propagation, so the message names that release, not a collision with it.
+    broken_before = {id(d) for d in definitions if d.broken}
     for definition in definitions:
-        if definition.broken or id(definition) in broken_ids:
+        if definition.broken or any(id(member) in broken_before for member in getattr(definition, "chain", ())):
             continue
         providers: dict[str, set[str]] = {}
         for member in getattr(definition, "chain", ()):
@@ -534,12 +537,14 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
 
     # A broken release has no usable chain, however far its own resolve got before the break.
     for definition in definitions:
-        if definition.broken or id(definition) in broken_ids:
+        if definition.broken:
             definition.chain = ()
 
 
 def _set_broken(definition: Definition, error: str) -> None:
-    definition.broken = error
+    """Mark ``definition`` broken; a definition keeps the first error found for it."""
+    if definition.broken is None:
+        definition.broken = error
 
 
 # --- scanning ----------------------------------------------------------------

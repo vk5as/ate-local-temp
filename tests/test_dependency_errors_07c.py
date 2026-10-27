@@ -270,6 +270,67 @@ def test_a_collision_broken_release_breaks_the_release_above_it(tmp_path):
     )
     assert by_media["MR-B"].broken == "module name collision across Media Releases: one (MR-B, MR-C)"
     assert by_media["MR-C"].broken is None
-    assert by_media["MR-A"].broken is not None, by_media["MR-A"].broken
+    # A's own chain holds the same pair, so A is broken by that collision directly.
+    assert by_media["MR-A"].broken == "module name collision across Media Releases: one (MR-B, MR-C)"
     assert by_media["MR-A"].chain == ()
     assert resolve_schedule_definition(tmp_path / "defs", schedule_name="A run") is None
+
+
+# --- the first error found is the one shown -----------------------------------
+
+
+def test_a_release_with_a_duplicate_media_number_keeps_that_error(tmp_path):
+    """Both MR-A releases sit on a cycle with B; each still shows its duplicate mediaNumber."""
+    _scan(
+        tmp_path,
+        {
+            "a1": _release("MR-A", "A release", "1.0.0", depends=(("B release", "^1"),)),
+            "a2": _release("MR-A", "A release", "2.0.0", depends=(("B release", "^1"),)),
+            "b": _release("MR-B", "B release", "1.0.0", depends=(("A release", ">=1"),)),
+        },
+    )
+    by_label = {d.path.name: d for d in find_definitions(tmp_path / "defs")}
+    assert by_label["a1"].broken == "duplicate mediaNumber 'MR-A'"
+    assert by_label["a2"].broken == "duplicate mediaNumber 'MR-A'"
+    assert by_label["b"].broken == "broken dependency 'A release'"
+
+
+def test_a_structurally_broken_dependency_is_a_broken_dependency_not_a_missing_one(tmp_path):
+    """Lib is installed and matches the range but lists a missing file: A names it as broken."""
+    lib, _ = _release("MR-L", "Lib", "1.0.0", modules=("lib",))
+    by_media = _scan(
+        tmp_path,
+        {
+            "lib": (lib, {}),  # lib.lua is listed but never written
+            "a": _release("MR-A", "A release", "1.0.0", depends=(("Lib", "^1"),), schedule="A run"),
+        },
+    )
+    assert by_media["MR-L"].broken is not None and "missing" in by_media["MR-L"].broken
+    assert by_media["MR-A"].broken == "broken dependency 'Lib'"
+
+
+def test_a_shared_module_in_a_broken_dependency_is_named_as_the_broken_dependency(tmp_path):
+    """Y(m) -> Z(m), Z broken by a missing dependency: Y is told Z is broken, not that they collide."""
+    by_media = _scan(
+        tmp_path,
+        {
+            "y": _release("MR-Y", "Y release", "1.0.0", modules=("m",), depends=(("Z release", "^1"),)),
+            "z": _release("MR-Z", "Z release", "1.0.0", modules=("m",), depends=(("Ghost", "^9"),)),
+        },
+    )
+    assert by_media["MR-Z"].broken == "unresolved dependency 'Ghost' (^9)"
+    assert by_media["MR-Y"].broken == "broken dependency 'Z release'"
+
+
+def test_a_cycle_found_mid_resolve_is_not_replaced_by_a_later_depends_entry(tmp_path):
+    """R depends [A, Ghost] and A depends R: R is on a cycle, which stays its error."""
+    by_media = _scan(
+        tmp_path,
+        {
+            # R's directory sorts first, so R is the release mid-resolve when the cycle is found.
+            "first": _release("MR-R", "R release", "1.0.0", depends=(("A release", "^1"), ("Ghost", "^9"))),
+            "second": _release("MR-A", "A release", "1.0.0", depends=(("R release", "^1"),)),
+        },
+    )
+    assert by_media["MR-R"].broken.startswith("dependency cycle involving"), by_media["MR-R"].broken
+    assert by_media["MR-A"].broken.startswith("dependency cycle involving"), by_media["MR-A"].broken
