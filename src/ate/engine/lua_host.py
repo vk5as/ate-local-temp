@@ -720,6 +720,7 @@ class _StepParams:
         self.name = name
         self.step_no = None
         self.enabled = True
+        self._enable_set = False  # setEnable was called, whatever it was given (packet 15d)
         self.inputs = None
         self.action = None  # a closure that runs in Lua when called
         self.include_file = None
@@ -742,7 +743,10 @@ class _StepParams:
         return self
 
     def setEnable(self, value: bool) -> "_StepParams":
+        # Packet 15d: on an include step this FORCES the default of every step beneath it, so the
+        # runner needs to know whether the setter was called at all, not just what it set.
         self.enabled = value
+        self._enable_set = True
         return self
 
     def setInputs(self, table: Any) -> "_StepParams":
@@ -877,7 +881,11 @@ class _TreeNode:
     Packet 15c: `step_no` is the fully prefixed Step Number (every enclosing include's `setPrefix`,
     outside in, then the step's own number; a header takes its ancestors' prefixes, not its own) and
     is what the run records and every view shows. `chain` names the row by its include chain,
-    `file:number` per level, for load errors."""
+    `file:number` per level, for load errors.
+
+    Packet 15d: `default_enabled` is the row's enabled default after header forcing (see
+    :meth:`_LuaHost._expand`): the nearest enclosing header's `setEnable` when one was called,
+    otherwise the row's own."""
 
     step: _StepParams
     parent: Optional[int]
@@ -885,6 +893,10 @@ class _TreeNode:
     depth: int
     step_no: Optional[str] = None
     chain: str = ""
+    # Packet 15d: this row's enabled default AFTER header forcing — a Test Step takes the nearest
+    # enclosing header's setEnable when one was called, else its own; a header row is not a step,
+    # so its own default is its own setEnable (enabled when it never called one).
+    default_enabled: bool = True
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.step, name)
@@ -1373,7 +1385,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         raise HostError(f"keyvals must be plain data, got {type(value).__name__} ({value!r})")
 
     def _expand(self, schedule: _ScheduleParams, schedule_path: Path, instance_seq: int, parent_node: Optional[int],
-                depth: int, prefix: str, chain: tuple[Path, ...], where_chain: str) -> None:
+                depth: int, prefix: str, chain: tuple[Path, ...], where_chain: str,
+                forced: Optional[bool] = None) -> None:
         """Walk one schedule's headers and expand every include into :attr:`_tree`/:attr:`_instances`.
 
         Each header is followed immediately by the subtree of the schedule it includes, so the list
@@ -1389,15 +1402,26 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         each Step Number at this level; a header's own prefix applies only beneath it. `chain` is
         the resolved files on this include chain, top level first: a file already on it is a cycle,
         while the same file in a sibling branch is not. Nesting is otherwise unlimited.
-        `where_chain` is the `file:number → ` trail naming each row for duplicate errors."""
+        `where_chain` is the `file:number → ` trail naming each row for duplicate errors.
+
+        Packet 15d: `forced` is the `setEnable` value of the nearest enclosing header that called it
+        (None when none did), so each Test Step's `default_enabled` is that value, else its own
+        `setEnable`, else enabled. A header's own `setEnable` replaces it for its subtree, so the
+        innermost header wins; a header row is not a Test Step, so its own default is just its own
+        `setEnable` — and a header with no `setEnable` leaves its children's own defaults alone."""
         owner = self._instances[instance_seq].owner
         file_name = self._instances[instance_seq].file
         for seq, step in enumerate(schedule.steps):
             node = len(self._tree)
             label = str(step.step_no) if step.step_no else str(seq + 1)
             number = prefix + step.step_no if step.step_no else None
+            # Packet 15d: the effective default. A Test Step takes the nearest enclosing header's
+            # setEnable when one was called, otherwise its own; a header row is not a Test Step, so
+            # its own default is just its own setEnable (enabled when it never called one).
+            default = bool(step.enabled) if step.is_header else (forced if forced is not None else bool(step.enabled))
             self._tree.append(_TreeNode(step=step, parent=parent_node, instance=instance_seq, depth=depth,
-                                        step_no=number, chain=f"{where_chain}{file_name}:{label}"))
+                                        step_no=number, chain=f"{where_chain}{file_name}:{label}",
+                                        default_enabled=default))
             if not step.is_header:
                 continue
             where = f"{Path(schedule_path).name}:{label}:"
@@ -1420,7 +1444,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
                 )
                 self._chain_names.setdefault(resolved, Path(step.include_file).as_posix())
                 self._expand(child, path, child_seq, node, depth + 1, prefix + (step.prefix or ""),
-                             chain + (resolved,), f"{where_chain}{file_name}:{label} → ")
+                             chain + (resolved,), f"{where_chain}{file_name}:{label} → ",
+                             forced=step.enabled if step._enable_set else forced)
             except HostError as exc:
                 # Each level prefixes the header that led to it, so a defect deep in a nested
                 # chain reads as the include chain that reached it, naming each include once.
@@ -1631,7 +1656,8 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
 
         Packet 15b — this is what the run engine walks and the Run screen previews. A tree entry
         reads like its step (`entry.step_no`, `entry.is_header`) and adds `parent`, `instance` and
-        `depth`."""
+        `depth`. Packet 15d adds `default_enabled`: the row's enabled default after every enclosing
+        header's `setEnable` has forced it."""
         return self._tree
 
     @property
