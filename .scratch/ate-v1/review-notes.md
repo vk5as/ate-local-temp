@@ -260,3 +260,16 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Chain labels in errors use raw `file:number`, which is inconsistent about the trailing dot and doesn't match the prefixed numbers shown everywhere else, and nested messages run together without a separator.
   - The report assertion is weak.
   - There is no run-start cycle test.
+
+## 15e — Pre/Post-test Action ordering across the tree (merged 2026-10-28)
+- Strata implemented it with 11 tests and no existing tests changed. Pre-test runs in `host.instances` order (parent first, depth first); Post-test runs in exact reverse. An instance whose whole subtree is disabled is skipped (a schedule with zero steps is not). After a Pre-test failure, only instances the Pre-test pass reached get a Post-test. `action.instance_seq` is recorded, and `run_order` is the position in its phase.
+- Haiku (MUST-FIX 0, screenshots) confirmed by probe the spec order, the disabled skip, the Pre-test failure path and a Post-test error. Strata (MUST-FIX 1): Post-test Actions got `passFail="PASS"` on runs that had already failed through a Pre-test failure or an abort, against spec line 21 ("the Test Run's overall result"). This predates 15e, but 15e's own tests pinned PASS. Strata also checked by mutation that no 15e test is vacuous, that `run_order` has no readers, and the abort, second-abort and stop-on-fail paths across the tree.
+- Light review: a Pre-test failure, stop or abort sets `pass_fail` to FAIL before the Post-test loop. The Pre-test failure test now asserts every Post logs FAIL, and the abort test expects FAIL; both fail under mutation. Suite 761 ×3.
+- Leftovers:
+  - When every step in the run is disabled, the top-level schedule's own actions are skipped too (the spec names only Sub-schedules).
+  - "Its steps are all disabled" is read as the whole subtree.
+  - No 15e test covers an instance with no Pre-test Action reached before a failure; 14c tests pin it.
+  - `outcome="skipped"` is never written: a skipped action has no row.
+  - Text/CSV export labels every instance's action plainly "Pre-test" while the dialog numbers them.
+  - The report names only the first errored action, and without its name.
+  - A Pre-test-failed run's header reads "FINISHED".
