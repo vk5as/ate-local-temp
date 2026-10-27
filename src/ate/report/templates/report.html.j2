@@ -2,9 +2,9 @@
    self-contained with no external assets. The logo is a base64 data URI. Only reports.organisation,
    reports.logo and reports.paperSize customise it in v1.
 
-   Packet 21a builds the Cover section here; the Steps section is packet 21b and Equipment /
-   Configuration / Run log are packet 21c — they are left as clearly-marked placeholders so this
-   packet's scope stays whole. #}
+   Packet 21a builds the Cover section and 21b the Steps section here; Equipment / Configuration /
+   Run log are packet 21c — they are left as clearly-marked placeholders so that packet's scope
+   stays whole. #}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -41,6 +41,17 @@ th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
 .res-pass { color: #146c2e; } .res-fail, .res-error, .res-noreport { color: #a4161a; }
 .res-skipped, .res-notrun, .res-forced_notrun { color: #777; }
 .mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 7pt; word-break: break-all; }
+/* Steps table (packet 21b): the column headings repeat after every page break (spec rule 32), and a
+   row is never split across pages. Header roll-ups are styled so they do not read as a Result. */
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+.steps th { background: #f4f7fb; border-bottom: 0.4mm solid #1f4e8c; }
+.steps .num { width: 20mm; }
+.steps .hdr { background: #eef1f5; font-weight: bold; }
+.rollup { font-size: 7.5pt; font-style: italic; color: #555; }
+.retry { font-size: 7.5pt; color: #1f4e8c; }
+.override { color: #6b3e00; }
+.sub-row td { font-size: 8pt; color: #444; border-top: 0.1mm solid #d8d8d8; }
 </style>
 </head>
 <body>
@@ -104,10 +115,34 @@ th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
   <td><span class="small">Signature</span><div class="sig"></div></td>
 </tr></table>
 
-<!-- ============ Steps (packet 21b) — TODO: one row per expanded-tree node, indented headers and
-     retried-step sub-rows. Placeholder until 21b is implemented. ============ -->
+<!-- ============ Steps (packet 21b) — one row per expanded-tree node in tree order, disabled steps
+     included; headers indented by depth with their roll-up, retried steps followed by their earlier
+     Attempts as indented sub-rows. ============ -->
 <h2 class="page-break">Steps</h2>
-<p class="small"><i>[placeholder — packet 21b]</i></p>
+<table class="steps">
+<thead><tr><th>Step Number</th><th>Step Name / message</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
+<tbody>
+{% for s in steps %}
+<tr class="{{ 'hdr' if s.is_header else ('sub-row' if s.sub else 'step-row') }}">
+  <td class="num" style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.number }}</td>
+  {% if s.is_header %}
+  <td colspan="3">{{ s.name }}</td>
+  <td class="rollup">{{ s.rollup }}</td>
+  {% else %}
+  <td>{{ s.name }}{% if s.retry %} <span class="retry">{{ s.retry }}</span>{% endif %}
+    {% if s.message %}<br><span class="small">{{ s.message }}{% if s.choice %} {{ s.choice }}{% endif %}</span>{% elif s.choice %}<br><span class="small">{{ s.choice }}</span>{% endif %}
+    {% if s.override %}<br><span class="small override">{{ s.override }}</span>{% endif %}
+    {% for i in s.inputs %}<br><span class="small">Input {{ i.index }}{% if i.desc %} ({{ i.desc }}){% endif %}: {{ i.value }}</span>{% endfor %}
+  </td>
+  <td>{{ s.expected }}</td>
+  <td>{{ s.actual }}</td>
+  <td class="res {{ s.result|lower }}">{{ s.result }}</td>
+  {% endif %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% if not steps %}<p class="small"><i>No steps in this run.</i></p>{% endif %}
 
 <!-- ============ Equipment (packet 21c) — TODO: declared equipment in declaration order, or
      "No equipment declared." Placeholder until 21c is implemented. ============ -->
