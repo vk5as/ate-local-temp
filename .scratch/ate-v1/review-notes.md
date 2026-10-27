@@ -273,3 +273,17 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Text/CSV export labels every instance's action plainly "Pre-test" while the dialog numbers them.
   - The report names only the first errored action, and without its name.
   - A Pre-test-failed run's header reads "FINISHED".
+
+## 15d — enabling under headers (merged 2026-10-28)
+- Strata run 1 ended after 28 steps (7.7 min) when it tried to view a screenshot with a non-existent `browser.preview` tool: the malformed tool call ended the turn with nothing committed. Run 2 was told to check screenshots in code and finished: forced defaults carried down `host.tree` (innermost wins), a derived tri-state header box whose click sets every descendant step through `toggle_node`, `#eef1f5`/bold header rows, and an `N/M done, K failed` rollup. 10 tests; two 15b row-text assertions updated for the rollup.
+- Haiku (MUST-FIX 1, screenshots from real clicks): a header over an empty Sub-schedule is drawn checked but recorded `enabled=0`, which a report would print as "disabled by Operator". Strata (MUST-FIX 1): clicking a nested header re-derived the headers below it but not the ones above, so the outer box went stale and the operator's next click on it did nothing. Strata also timed a 500-step header click at ~4 ms with no list rebuild, confirmed the list is locked during a run, and traced the large last RunView row to ticket 03 (`f23847b`).
+- Light review: the header branch re-derives ancestor headers; a header with no Test Step beneath it records its default. Both have tests that fail under mutation. Suite 772 ×3.
+- Leftovers:
+  - NOTRUN counts as "done" in the rollup (as in the mockup).
+  - A nested header's `default_enabled` ignores an enclosing force (its steps don't).
+  - A partly-enabled header under a forced-off parent records `enabled=1`, which a report could call "enabled by Operator".
+  - The paused rollup assumes `node_seq == row index`.
+  - Mockup gaps: the rollup is not right-aligned, there is no "Sub-schedule" tag, "K failed" is not red, and disabled rows are not greyed or struck through.
+  - The ticket-03 "latest step" large-font row lands on a trailing NOTRUN step and clashes with the bold headers (the mockup uses blue/red bands).
+  - Tests use `setCheckState`, not clicks.
+  - The PDF helper's callback can fire after the session is deleted (pre-existing).
