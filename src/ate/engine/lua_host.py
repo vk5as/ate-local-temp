@@ -1079,7 +1079,10 @@ class _LuaHost:
                                            owner=top_owner, env=top_env)]
         self._tree: list[_TreeNode] = []
         self._chain_names: dict[Path, str] = {}
-        self._expand(self._schedule, self._schedule_path, 0, None, 0, "", (Path(self._schedule_path).resolve(),), "")
+        try:
+            self._expand(self._schedule, self._schedule_path, 0, None, 0, "", (Path(self._schedule_path).resolve(),), "")
+        except RecursionError as exc:  # a legal but absurdly deep chain is a load error for this schedule only
+            raise HostError(f"{Path(self._schedule_path).name}: include tree too deep to load") from exc
         self._check_tree_step_numbers()
 
     def _lockdown(self, env) -> None:

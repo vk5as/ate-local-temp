@@ -298,6 +298,29 @@ def test_a_forty_level_acyclic_chain_loads(tmp_path) -> None:
     assert len(host.instances) == levels + 1
 
 
+def test_a_chain_too_deep_for_python_is_a_load_error_not_a_crash(tmp_path) -> None:
+    """Past the interpreter's recursion limit loading raises the schedule's load error, not RecursionError."""
+    import sys
+
+    root = tmp_path / "defs"
+    levels = 150
+    files = {"main.tslua": _schedule("Deep main", _header("1.", "level 1", "l1.tslua", prefix="1."))}
+    for n in range(1, levels):
+        files[f"l{n}.tslua"] = _schedule(f"L{n}", _header("1.", f"level {n + 1}", f"l{n + 1}.tslua", prefix="1."))
+    files[f"l{levels}.tslua"] = _schedule("Bottom", _step("1.", "bottom"))
+    _release(root, "deep", files)
+    frame, depth = sys._getframe(), 0
+    while frame is not None:
+        frame, depth = frame.f_back, depth + 1
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(depth + 60)  # room for the loader, not for 150 include levels
+    try:
+        with pytest.raises(HostError, match="include tree too deep to load"):
+            _host(root, "deep")
+    finally:
+        sys.setrecursionlimit(old)
+
+
 # --- where the errors surface ------------------------------------------------
 
 
