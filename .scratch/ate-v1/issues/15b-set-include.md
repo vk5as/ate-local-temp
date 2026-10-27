@@ -6,11 +6,11 @@
 
 **Blocked by:** 15a (Step Names and header rows), 06b (SHA-256 checks and `media_release`/`run_file` rows)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `setInclude(file, keyvals)` per `test-schedule-format`: resolution through the Test Definition, checksum checked and recorded, chunk re-run per include with `keyvals` (plain data only) as its argument
-- [ ] An included schedule's doc fields and `setStopOnFail` are ignored
-- [ ] `schedule_instance` rows and header `node` rows are recorded
-- [ ] Seam-1 tests cover expansion and the recorded rows
+- [x] `setInclude(file, keyvals)` per `test-schedule-format`: resolution through the Test Definition, checksum checked and recorded, chunk re-run per include with `keyvals` (plain data only) as its argument
+- [x] An included schedule's doc fields and `setStopOnFail` are ignored
+- [x] `schedule_instance` rows and header `node` rows are recorded
+- [x] Seam-1 tests cover expansion and the recorded rows
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
