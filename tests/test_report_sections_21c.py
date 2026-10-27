@@ -568,6 +568,7 @@ def test_run_log_section_is_left_out_when_include_run_log_is_false(tmp_path: Pat
     assert ">Run log<" in with_log
     assert not re.search(r"<h2[^>]*>Run log</h2>", without), "the section itself is gone, not just its rows"
     assert 'class="log"' not in without
+    assert "Run log left out of this report." in without, "one line says why it is not there"
     assert ">Equipment<" in without and "Power supply" in without, "the other sections are unaffected"
     assert "pretest info" not in without
 

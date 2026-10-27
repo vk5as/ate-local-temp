@@ -204,7 +204,7 @@ h3 { font-size: 10pt; margin: 3mm 0 1mm 0; color: #1f4e8c; }
 
 <!-- ============ Run log (packet 21c) — INFO/WARNING/ERROR lines grouped by owner: the run, then
      each Pre-test and Post-test Action, then each step Attempt, each group in time order. Left out
-     when regenerating from History with the toggle off. ==== -->
+     when regenerating from History with the toggle off, where a one-line note stands in for it. ==== -->
 {% if include_run_log %}
 <h2 class="page-break">Run log</h2>
 {% if run_log %}
@@ -220,6 +220,8 @@ h3 { font-size: 10pt; margin: 3mm 0 1mm 0; color: #1f4e8c; }
 {% else %}
 <p class="small"><i>No INFO, WARNING or ERROR lines recorded for this run.</i></p>
 {% endif %}
+{% else %}
+<p class="small"><i>Run log left out of this report.</i></p>
 {% endif %}
 
 </body>
