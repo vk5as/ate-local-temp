@@ -41,9 +41,9 @@ th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
 .res-pass { color: #146c2e; } .res-fail, .res-error, .res-noreport { color: #a4161a; }
 .res-skipped, .res-notrun, .res-forced_notrun { color: #777; }
 .mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 7pt; word-break: break-all; }
-/* Steps table (packet 21b): the column headings repeat after every page break (spec rule 32), and a
-   row is never split across pages. Header roll-ups are styled so they do not read as a Result. */
-thead { display: table-header-group; }
+/* Steps table (packet 21b): a row is never split across pages. The <thead> is what makes Chromium
+   repeat the column headings after a page break, so no display rule is needed here. Header
+   roll-ups are styled so they do not read as a Result. */
 tr { page-break-inside: avoid; }
 .steps th { background: #f4f7fb; border-bottom: 0.4mm solid #1f4e8c; }
 .steps .num { width: 20mm; }
@@ -116,20 +116,20 @@ tr { page-break-inside: avoid; }
 </tr></table>
 
 <!-- ============ Steps (packet 21b) — one row per expanded-tree node in tree order, disabled steps
-     included; headers indented by depth with their roll-up, retried steps followed by their earlier
-     Attempts as indented sub-rows. ============ -->
+     included; the depth indent is on the name cell (the Step Number cell is fixed width), headers
+     carry their roll-up, retried steps are followed by their earlier Attempts as deeper sub-rows. -->
 <h2 class="page-break">Steps</h2>
 <table class="steps">
 <thead><tr><th>Step Number</th><th>Step Name / message</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
 <tbody>
 {% for s in steps %}
 <tr class="{{ 'hdr' if s.is_header else ('sub-row' if s.sub else 'step-row') }}">
-  <td class="num" style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.number }}</td>
+  <td class="num">{{ s.number }}</td>
   {% if s.is_header %}
-  <td colspan="3">{{ s.name }}</td>
+  <td colspan="3" style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.name }}{% if s.override %}<br><span class="small override">{{ s.override }}</span>{% endif %}</td>
   <td class="rollup">{{ s.rollup }}</td>
   {% else %}
-  <td>{{ s.name }}{% if s.retry %} <span class="retry">{{ s.retry }}</span>{% endif %}
+  <td style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.name }}{% if s.retry %} <span class="retry">{{ s.retry }}</span>{% endif %}
     {% if s.message %}<br><span class="small">{{ s.message }}{% if s.choice %} {{ s.choice }}{% endif %}</span>{% elif s.choice %}<br><span class="small">{{ s.choice }}</span>{% endif %}
     {% if s.override %}<br><span class="small override">{{ s.override }}</span>{% endif %}
     {% for i in s.inputs %}<br><span class="small">Input {{ i.index }}{% if i.desc %} ({{ i.desc }}){% endif %}: {{ i.value }}</span>{% endfor %}

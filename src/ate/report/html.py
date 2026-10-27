@@ -210,11 +210,12 @@ def _row(number: str, name: str, message: str, expected: str, actual: str, resul
 def _step_rows(nodes: list[dict], attempts: list[dict], input_values: list[dict]) -> list[dict]:
     """One row per expanded-tree node, in tree order, with earlier Attempts as sub-rows (spec 21b).
 
-    Header rows carry the roll-up of the steps beneath them and never an Operator override label: a
-    header's ``enabled`` is derived from its children (packet 15d), so only a Test Step can be
-    "disabled/enabled by Operator". A retried step shows "↻ n" on the main row, which always holds its
-    last Attempt; Attempts 1..n-1 follow it as indented sub-rows with the prompt choice after the
-    message. A step that never ran shows NOTRUN with no Attempt to print."""
+    Header rows carry the roll-up of the steps beneath them and, like Test Steps, an Operator
+    override label whenever their recorded ``enabled`` differs from ``default_enabled`` (spec rule
+    66): a header's ``enabled`` is derived from its children (packet 15d), so disabling every step
+    under a Sub-schedule labels the header "disabled by Operator". A retried step shows "↻ n" on the
+    main row, which always holds its last Attempt; Attempts 1..n-1 follow it as deeper sub-rows with
+    the prompt choice after the message. A step that never ran shows NOTRUN with no Attempt to print."""
     atts: dict[int, list[dict]] = {}
     for a in attempts:
         atts.setdefault(int(a.get("node_seq") or 0), []).append(a)
@@ -234,16 +235,17 @@ def _step_rows(nodes: list[dict], attempts: list[dict], input_values: list[dict]
         depth = depths.get(seq, 0)
         name = node.get("step_name") or ""
         number = node.get("step_number") or ""
-        if node.get("kind") == "header":
-            rows.append(_row(number, name, "", "", "", "", depth, rollup=_rollup_text(beneath.get(seq, [])), is_header=True))
-            continue
-
-        node_atts = atts.get(seq, [])
-        last = node_atts[-1] if node_atts else {}
         default_enabled, enabled = node.get("default_enabled"), node.get("enabled")
         override = ""
         if default_enabled is not None and enabled is not None and bool(default_enabled) != bool(enabled):
             override = "enabled by Operator" if enabled else "disabled by Operator"
+        if node.get("kind") == "header":
+            rows.append(_row(number, name, "", "", "", "", depth, override=override,
+                             rollup=_rollup_text(beneath.get(seq, [])), is_header=True))
+            continue
+
+        node_atts = atts.get(seq, [])
+        last = node_atts[-1] if node_atts else {}
         attempt_count = int(node.get("attempt_count") or 0)
         rows.append(
             _row(

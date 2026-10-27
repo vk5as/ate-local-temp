@@ -151,6 +151,7 @@ class _StepsTable(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.rows: list[tuple[str, list[tuple[str, str]]]] = []
+        self.has_tbody = False
         self._in_steps = False
         self._tables = 0
         self._in_thead = False
@@ -169,6 +170,8 @@ class _StepsTable(HTMLParser):
             self._cells = []
         elif tag == "thead":
             self._in_thead = True
+        elif tag == "tbody":
+            self.has_tbody = True
         elif tag in ("td", "th") and self._in_steps:
             self._cell_depth += 1
             self._cell_style = dict(attrs).get("style") or ""
@@ -202,6 +205,41 @@ def _steps_rows(html: str) -> list[tuple[str, list[tuple[str, str]]]]:
     return parser.rows
 
 
+def _steps_sections(html: str) -> tuple[list[tuple[str, list[tuple[str, str]]]], list[tuple[str, list[tuple[str, str]]]], bool]:
+    """The Steps table's `<thead>` rows, its `<tbody>` rows, and whether a `<tbody>` was seen."""
+    parser = _StepsTable()
+    parser.feed(html)
+    head = [row for row in parser.rows if row[0] == "thead"]
+    body = [row for row in parser.rows if row[0] != "thead"]
+    return head, body, parser.has_tbody
+
+
+class _CssRules(HTMLParser):
+    """The report's inline CSS as {selector: declarations}, read from the <style> element."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_style = False
+        self.text = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        self._in_style = tag == "style"
+
+    def handle_endtag(self, tag: str) -> None:
+        self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            self.text += data
+
+
+def _css_rules(html: str) -> dict[str, str]:
+    """Every CSS rule in the report, keyed by its selector."""
+    css = _CssRules()
+    css.feed(html)
+    return {sel.strip(): decl.strip() for sel, decl in re.findall(r"([^\n{}]+)\{([^}]*)\}", css.text)}
+
+
 def _step_rows(html: str, step_number: str) -> list[tuple[str, list[tuple[str, str]]]]:
     """The Steps rows carrying this Step Number — a main row, and its header's number for headers."""
     return [
@@ -216,9 +254,15 @@ def _sub_rows(html: str) -> list[tuple[str, list[tuple[str, str]]]]:
 
 
 def _indent(cell_style: str) -> float:
-    """The padding-left in mm a row's first cell carries — its indentation in the tree."""
+    """The padding-left in mm a cell carries — its indentation in the tree (0 when it has none)."""
     match = re.search(r"padding-left:\s*([\d.]+)mm", cell_style)
     return float(match.group(1)) if match else 0.0
+
+
+def _name_indent(row: tuple[str, list[tuple[str, str]]]) -> float:
+    """Indentation of a row's Step Name / message cell: the depth indent lives there, not on the
+    fixed-width Step Number cell, so deeper rows visibly move right."""
+    return _indent(row[1][1][1])
 
 
 def _write_env(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -397,7 +441,8 @@ def test_retried_step_shows_attempt_subrows(tmp_path: Path) -> None:
     assert sub[0] == "sub-row" and "cold joint" in sub[1][1][0]
     assert "→ RETRY" in sub[1][1][0], "the sub-row prints the prompt choice after the message"
     assert sub[1][4][0] == "FAIL" and sub[1][3][0] == "0.2V" and sub[1][2][0] == "2.4V"
-    assert _indent(sub[1][0][1]) > _indent(main[1][0][1]), "Attempt sub-rows are indented"
+    assert _name_indent(sub) > _name_indent(main), "Attempt sub-rows are indented one level deeper"
+    assert _indent(main[1][0][1]) == 0.0 and _indent(sub[1][0][1]) == 0.0, "the Step Number cell never moves"
 
 
 def test_operator_override_labelled_and_default_disable_not(tmp_path: Path) -> None:
@@ -461,14 +506,40 @@ def test_sub_schedule_header_indent_and_rollup(tmp_path: Path) -> None:
 
     children = _step_rows(html, "2.1.") + _step_rows(html, "2.2.")
     assert len(children) == 2
-    top_indent = _indent(_step_rows(html, "1.")[0][1][0][1])  # a top-level row sits at depth 0
-    assert _indent(header[1][0][1]) == top_indent, "a top-level header sits at the top level"
+    top_indent = _name_indent(_step_rows(html, "1.")[0])  # a top-level row sits at depth 0
+    assert _name_indent(header) == top_indent, "a top-level header sits at the top level"
     for child in children:
-        assert _indent(child[1][0][1]) == _indent(header[1][0][1]) + 4, "a header's steps are indented one level deeper"
+        assert _name_indent(child) == _name_indent(header) + 4, "a header's steps are indented one level deeper"
+
+
+def test_header_labelled_when_operator_disables_all_its_steps(tmp_path: Path) -> None:
+    """Spec rule 66: a header whose `enabled` differs from its default is labelled, steps only or not."""
+    html = _report(
+        tmp_path,
+        {"main.tslua": SUB_MAIN, "channel.tslua": SUB_CHANNEL},
+        "Steps sub schedule",
+        enables={2: False, 3: False},
+    )
+    header = _step_rows(html, "2.")[0]
+    assert "disabled by Operator" in header[1][1][0], "the Sub-schedule header is labelled an override"
+    assert header[1][2][0] == "2 steps: 2 NOTRUN", "its roll-up still counts the steps beneath it"
+    for child in _step_rows(html, "2.1.") + _step_rows(html, "2.2."):
+        assert child[1][4][0] == "NOTRUN" and "disabled by Operator" in child[1][1][0]
+    untouched = _step_rows(html, "1.")[0]
+    assert "Operator" not in untouched[1][1][0], "a header's label does not leak to its neighbours"
 
 
 def test_step_table_headings_repeat_on_every_page(tmp_path: Path) -> None:
-    """The print CSS makes the step table's column headings repeat after every page break (rule 32)."""
+    """The Steps table's structure is what repeats its headings: <thead> headings, rows in <tbody>."""
     html = _report(tmp_path, {"steps.tslua": PASS_FAIL}, "Steps pass fail schedule")
-    assert "thead { display: table-header-group; }" in html
-    assert "page-break-inside: avoid" in html, "a step row is never split across pages"
+    head, body, has_tbody = _steps_sections(html)
+    assert has_tbody, "the step rows sit in a <tbody>"
+    assert len(head) == 1, "the Steps table has exactly one heading row, inside its <thead>"
+    assert [cell[0] for cell in head[0][1]] == [
+        "Step Number", "Step Name / message", "Expected", "Actual", "Result"
+    ], "the <thead> carries the five column headings"
+    assert len(body) == 2, "both steps are data rows in the <tbody>, not part of the heading"
+
+    rules = _css_rules(html)
+    assert "page-break-inside: avoid" in rules.get("tr", ""), "a step row is never split across pages"
+    assert "thead" not in rules, "Chromium repeats a <thead> by default; the display rule was inert"
