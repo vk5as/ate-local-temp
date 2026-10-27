@@ -18,11 +18,11 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPointF, Qt
-from PyQt6.QtGui import QColor, QMouseEvent
-from PyQt6.QtWidgets import QLabel
+from PyQt6.QtGui import QColor, QFontMetrics, QMouseEvent
+from PyQt6.QtWidgets import QLabel, QWidget
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
-from ate.ui.staged_run_screen import StagedRunScreen
+from ate.ui.staged_run_screen import StagedRunScreen, _broken_row_size_hint, _ROW_MARGIN_X, _wrapped_height
 
 #: The mockup's broken-row colours, spelled out here so the assertions name the design directly.
 BROKEN_BG = (255, 245, 245)  # #fff5f5
@@ -38,6 +38,9 @@ return ScheduleParams("Good schedule", "a schedule that loads and runs")
 
 # An unclosed table: the file raises while the schedule loads, so only this row is broken.
 RAISING_SRC = "return {\n"
+
+# A schedule that raises with a message far wider than the picker, so the `.err` line must wrap.
+LONG_RAISING_SRC = 'error("unexpected symbol near <eof> ' + "while loading this schedule " * 20 + '")'
 
 CYCLE_A = {
     "format": 1, "mediaNumber": "MR-10600", "name": "Cycle A", "version": "1.0.0",
@@ -256,6 +259,11 @@ def test_the_filter_matches_broken_rows_by_name_release_and_error(qapp, tmp_path
     texts = _texts(screen)
     assert len(texts) == 2 and all("(Test Definition broken)" in t for t in texts), texts
 
+    # A schedule broken on load is named by its file, so the filter finds it by that file too.
+    screen.test_schedule_stage.filter_edit.setText("broken.tslua")
+    texts = _texts(screen)
+    assert len(texts) == 1 and "MR-10422 · PSU-200 Tests 2.3.0" in texts[0], texts
+
     screen.test_schedule_stage.filter_edit.setText("nothing matches this")
     assert _texts(screen) == []
 
@@ -320,7 +328,247 @@ def test_the_good_schedule_still_starts_a_run(qapp, tmp_path):
     assert session.store.get_test_run(session.run_uuid)["result"] == "PASS"
 
 
+# -- the review fixes ---------------------------------------------------------
+
+
+def _write_long_error_env(tmp_path: Path) -> Path:
+    """One Media Release whose only Test Schedule raises with an error wider than the picker."""
+    defs = tmp_path / "defs"
+    release = defs / "longerr"
+    release.mkdir(parents=True, exist_ok=True)
+    atedef = {
+        "format": 1, "mediaNumber": "MR-10750", "name": "Long errors", "version": "1.0.0",
+        "files": [{"path": "long.tslua", "sha256": hashlib.sha256(LONG_RAISING_SRC.encode()).hexdigest()}],
+    }
+    (release / "longerr.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (release / "long.tslua").write_text(LONG_RAISING_SRC, encoding="utf-8")
+    config = {
+        "format": 1,
+        "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
+        "reports": {"directory": str(tmp_path / "reports")},
+        "testDefinitions": {"directories": [str(defs)]},
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    return config_path
+
+
+def _write_flagged_env(tmp_path: Path) -> Path:
+    """One Media Release with a schedule that loads but whose bytes no longer match its checksum."""
+    defs = tmp_path / "defs"
+    release = defs / "flagged"
+    release.mkdir(parents=True, exist_ok=True)
+    atedef = {
+        "format": 1, "mediaNumber": "MR-10760", "name": "Flagged Fixtures", "version": "1.0.0",
+        # The recorded sha256 is of different bytes than the file on disk: a ⚠ flag, not a broken row.
+        "files": [{"path": "good.tslua", "sha256": hashlib.sha256(b"edited after the release\n").hexdigest()}],
+    }
+    (release / "flagged.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (release / "good.tslua").write_text(GOOD_SRC, encoding="utf-8")
+    config = {
+        "format": 1,
+        "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
+        "reports": {"directory": str(tmp_path / "reports")},
+        "testDefinitions": {"directories": [str(defs)]},
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    return config_path
+
+
+def test_rescans_do_not_leave_orphan_row_widgets(qapp, tmp_path):
+    """The viewport's widget count stays constant across rescans: every row widget is freed first.
+
+    `QListWidget.clear()` does not delete the widgets given to `setItemWidget`, so each rescan used to
+    leave one orphan per broken row alive in the viewport (packet 05b review): 4 broken rows, 20
+    rescans, 80 rows no Operator can see."""
+    screen = _screen(tmp_path)
+    screen.show()
+    qapp.processEvents()
+    list_widget = _list(screen)
+    broken = len(_broken_items(screen))
+    assert broken == 4, "the fixture has four broken rows to leak"
+
+    def viewport_widgets() -> int:
+        return len(list_widget.viewport().findChildren(QWidget))
+
+    # A broken row is its QWidget plus its three labels; a usable row is plain item text.
+    live = viewport_widgets()
+    assert live == 4 * broken, live
+    for _ in range(5):
+        screen.test_schedule_stage.rescan_button.click()
+        qapp.processEvents()
+    assert viewport_widgets() == live, f"the viewport grew from {live} to {viewport_widgets()} widgets"
+    for item in _broken_items(screen):
+        assert list_widget.itemWidget(item) is not None, item.text()
+
+
+def test_a_broken_current_row_never_begins_a_run(qapp, tmp_path):
+    """The run path refuses when the picker's current row is not a runnable schedule.
+
+    Nothing is picked and a broken row is made current, so there is no name to run; and the session
+    can still carry an older pick while the picker stands on a broken row — the guard, not the empty
+    name, is what stops the preview in that case."""
+    env = _write_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    list_widget = _list(screen)
+    broken = _broken_items(screen)
+
+    list_widget.setCurrentItem(broken[0])
+    screen._begin_run_from_selection()
+    assert screen.steps_stack.currentIndex() == 0, "a broken row must not open the steps stage"
+    assert screen.steps_options_stage.step_list.count() == 0
+    assert session.selected_schedule in (None, "")
+    assert screen.engine is None
+
+    # A selection the picker no longer stands for: the guard is the only thing between it and a run.
+    session.select_schedule("Good schedule")
+    assert screen._selected_schedule_name() is None, "the current row is a broken one"
+    screen._begin_run_from_selection()
+    assert screen.steps_stack.currentIndex() == 0, "the stale pick must not preview its steps"
+    assert screen.engine is None
+
+
+def test_a_long_error_wraps_and_the_row_grows_to_fit_it(qapp, tmp_path):
+    """At a 640 px list the `.err` line wraps and the row is tall enough for every wrapped line."""
+    screen = StagedRunScreen(HeadlessRunSession(_write_long_error_env(tmp_path)))
+    list_widget = _list(screen)
+    list_widget.setFixedWidth(640)
+    screen.test_schedule_stage.rescan_button.click()  # rebuild the rows at the new list width
+    screen.show()
+    qapp.processEvents()
+
+    item = _broken_items(screen)[0]
+    widget = list_widget.itemWidget(item)
+    label = widget.findChild(QLabel, "schedule_error")
+    viewport = list_widget.viewport().width()
+    assert viewport <= 640, viewport
+    assert label.wordWrap(), "the error label must wrap instead of running off the row"
+
+    metrics = QFontMetrics(label.font())
+    unwrapped = metrics.horizontalAdvance(label.text())
+    assert unwrapped > viewport, f"the fixture error is only {unwrapped} px wide; nothing to wrap"
+
+    wrapped = _wrapped_height(label.text(), label.font(), viewport - 2 * _ROW_MARGIN_X)
+    lines = wrapped // metrics.lineSpacing()
+    assert lines > 1, f"the wrapped error is {lines} line(s) tall"
+    rect = list_widget.visualItemRect(item)
+    # The row is exactly as tall as its three wrapped lines need: Qt's own guess for a word-wrapped
+    # label sizes the row from an ideal width the list never has, so it is not what the row follows.
+    assert rect.height() == _broken_row_size_hint(widget, viewport).height(), rect
+    assert rect.height() >= wrapped, f"row is {rect.height()} px, the wrapped error needs {wrapped} px"
+    assert label.width() <= viewport, f"the label is {label.width()} px wide in a {viewport} px list"
+    assert list_widget.horizontalScrollBar().maximum() == 0, "a wrapped row must not scroll sideways"
+
+
+def test_broken_rows_show_a_not_allowed_cursor(qapp, tmp_path):
+    """The mockup's `.it.broken { cursor: not-allowed }`: the pointer says the row cannot be picked."""
+    screen = _screen(tmp_path)
+    list_widget = _list(screen)
+    for item in _broken_items(screen):
+        widget = list_widget.itemWidget(item)
+        assert widget.cursor() == Qt.CursorShape.ForbiddenCursor, item.text()
+        for label in widget.findChildren(QLabel):
+            assert label.cursor() == Qt.CursorShape.ForbiddenCursor, item.text()
+    for item in _usable_items(screen):
+        assert list_widget.itemWidget(item) is None, item.text()
+
+
+def test_a_load_error_shows_one_line_with_the_full_text_in_the_tooltip(qapp, tmp_path):
+    """The row shows `broken.tslua:2: unexpected symbol near <eof>`, not the traceback or the scan path."""
+    screen = _screen(tmp_path)
+    list_widget = _list(screen)
+    item = next(i for i in _broken_items(screen) if "broken.tslua" in i.text())
+    shown = item.text().splitlines()[2]
+    assert shown == "broken.tslua:2: unexpected symbol near <eof>", shown
+    assert "/" not in shown and "failed to load" not in shown, shown
+    assert "stack traceback" not in shown and "instance-env" not in shown, shown
+
+    tooltip = item.toolTip()
+    assert "failed to load" in tooltip and "stack traceback" in tooltip, tooltip
+    assert list_widget.itemWidget(item).findChild(QLabel, "schedule_error").text() == shown
+
+    # A definition-level error has no traceback to strip, so it is shown as it is.
+    legacy = next(i for i in _broken_items(screen) if "Legacy Fixtures" in i.text())
+    assert "listed file is missing: fixture_io.lua" in legacy.text().splitlines()[2], legacy.text()
+
+
+def test_a_hidden_or_broken_current_row_clears_the_stale_notes(qapp, tmp_path):
+    """Nothing may keep naming a schedule the picker no longer shows."""
+    env = _write_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    list_widget = _list(screen)
+    good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
+    list_widget.setCurrentItem(good)
+    assert session.selected_schedule == "Good schedule"
+    assert "Good schedule" in screen.test_schedule_stage.notes_label.text()
+
+    screen.test_schedule_stage.filter_edit.setText("Cycle")
+    assert screen.test_schedule_stage.notes_label.text() == "", screen.test_schedule_stage.notes_label.text()
+    assert screen.test_schedule_stage.mismatch_label.text() == ""
+    assert session.selected_schedule in (None, ""), "the dropped pick must not still be selected"
+    assert not screen.test_schedule_stage.run_button.isEnabled()
+    assert not screen.steps_options_stage.run_button.isEnabled()
+
+    screen.test_schedule_stage.filter_edit.setText("")
+    list_widget.setCurrentItem(next(i for i in _usable_items(screen) if "Good schedule" in i.text()))
+    assert session.selected_schedule == "Good schedule"
+    list_widget.setCurrentItem(_broken_items(screen)[0])
+    assert screen.test_schedule_stage.notes_label.text() == ""
+    assert screen.test_schedule_stage.mismatch_label.text() == ""
+    assert session.selected_schedule in (None, "")
+
+
+def test_the_mismatch_flag_clears_when_the_picked_row_is_hidden(qapp, tmp_path):
+    """The ⚠ line belongs to the schedule that is picked; hide it and the line goes with it."""
+    session = HeadlessRunSession(_write_flagged_env(tmp_path))
+    screen = StagedRunScreen(session)
+    list_widget = _list(screen)
+    list_widget.setCurrentItem(_usable_items(screen)[0])
+    flagged = screen.test_schedule_stage.mismatch_label.text()
+    assert "⚠" in flagged, flagged
+
+    screen.test_schedule_stage.filter_edit.setText("nothing matches this")
+    assert screen.test_schedule_stage.mismatch_label.text() == "", flagged
+    assert screen.test_schedule_stage.notes_label.text() == ""
+    assert session.selected_schedule in (None, "")
+
+
+def test_stage_two_start_reports_a_schedule_that_broke_after_picking(qapp, tmp_path):
+    """Start on the Steps stage is taken away when the picked schedule breaks, and never raises.
+
+    The Operator previews the steps, then a Rescan finds the schedule's file no longer loads: the
+    Steps stage's Start button is disabled like the picker's, and clicking it anyway shows the
+    session's refusal instead of an uncaught SessionError."""
+    env = _write_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = StagedRunScreen(session)
+    list_widget = _list(screen)
+    good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
+    list_widget.setCurrentItem(good)
+    screen._begin_run_from_selection()
+    assert screen.steps_stack.currentIndex() == 2
+    assert screen.steps_options_stage.run_button.isEnabled()
+
+    (env["defs"] / "demo" / "good.tslua").write_text(RAISING_SRC, encoding="utf-8")
+    screen.test_schedule_stage.rescan_button.click()
+    assert not screen.steps_options_stage.run_button.isEnabled(), "Start goes with the broken row"
+    assert not screen.test_schedule_stage.run_button.isEnabled()
+
+    screen.steps_options_stage.run_button.setEnabled(True)  # a click that would have raised
+    screen.steps_options_stage.run_button.click()
+    assert screen.engine is None, "no run started"
+    error = screen.steps_options_stage.error_label.text()
+    assert error.startswith("⛔"), error
+    assert "schedule" in error.lower(), error
+
+
 # -- the screenshot -----------------------------------------------------------
+
 
 
 def test_picker_screenshot_is_saved_for_the_mockup_comparison(qapp, tmp_path):
@@ -337,4 +585,24 @@ def test_picker_screenshot_is_saved_for_the_mockup_comparison(qapp, tmp_path):
 
     # The picture itself proves the mockup's two colours are present in the list.
     colours = _pixels(screen.test_schedule_stage.schedule_list)
+    assert BROKEN_BG in colours and BROKEN_ERR in colours, sorted(colours)[:10]
+
+
+def test_picker_r2_screenshot_shows_a_wrapped_error_at_640_px(qapp, tmp_path):
+    """The picker at a 640 px list width with a load error long enough to wrap, saved for review."""
+    screen = StagedRunScreen(HeadlessRunSession(_write_long_error_env(tmp_path)))
+    screen.resize(700, 460)
+    list_widget = _list(screen)
+    list_widget.setFixedWidth(640)
+    screen.test_schedule_stage.rescan_button.click()
+    screen.show()
+    qapp.processEvents()
+
+    shots = Path("/tmp/05b-shots")
+    shots.mkdir(parents=True, exist_ok=True)
+    image = list_widget.grab()
+    assert image.width() == 640, image.width()
+    assert image.save(str(shots / "picker-r2.png")), "the picker-r2 grab did not save"
+
+    colours = _pixels(list_widget)
     assert BROKEN_BG in colours and BROKEN_ERR in colours, sorted(colours)[:10]
