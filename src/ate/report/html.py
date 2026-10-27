@@ -24,6 +24,7 @@ from markupsafe import Markup
 
 from ..config import Config
 from ..storage.store import RunStore
+from .log_export import owner_keys
 
 
 # The CSS ``@page`` margin boxes (mm) must match exactly the ``QPageLayout`` margins passed to
@@ -290,7 +291,153 @@ def _step_rows(nodes: list[dict], attempts: list[dict], input_values: list[dict]
     return rows
 
 
-def _report_context(store: RunStore, run_uuid: str, config: Config) -> dict:
+def _equipment_rows(store: RunStore, run_uuid: str) -> list[dict]:
+    """Equipment in declaration order, every nil printed as a blank (spec Equipment).
+
+    Nothing is reformatted: `cal_due` is free text and stays exactly what the schedule gave."""
+    return [
+        {
+            "name": row.get("name") or "",
+            "serial": row.get("serial") or "",
+            "connection": row.get("connection") or "",
+            "cal_due": row.get("cal_due") or "",
+            "notes": row.get("notes") or "",
+        }
+        for row in store.equipment(run_uuid)
+    ]
+
+
+def _media_release_rows(store: RunStore, run_uuid: str) -> list[dict]:
+    """Only the Media Releases this run used: the top-level one plus every release that supplied
+    a file the run loaded (spec Configuration). Chain order (`seq`) is kept; an unused dependency
+    is left out, and bundled `ate.` modules belong to no release, so they add none."""
+    used = {row.get("media_number") for row in store.run_files(run_uuid) if row.get("media_number")}
+    return [
+        {
+            "media_number": rel.get("media_number") or "",
+            "name": rel.get("name") or "",
+            "version": rel.get("version") or "",
+            "atedef_sha256": rel.get("atedef_sha256") or "",
+        }
+        for rel in store.media_releases(run_uuid)
+        if rel.get("seq") == 0 or rel.get("media_number") in used
+    ]
+
+
+def _file_rows(store: RunStore, run_uuid: str) -> list[dict]:
+    """Every `run_file` row: path, owning Media Number, expected and computed SHA-256, whether the
+    bytes were stored, and the mismatch flag the template highlights. `ate.` modules have no
+    expected checksum, so their expected cell is blank."""
+    return [
+        {
+            "path": row.get("path") or "",
+            "media_number": row.get("media_number") or "",
+            "expected": row.get("expected_sha256") or "",
+            "computed": row.get("computed_sha256") or "",
+            "mismatch": bool(row.get("mismatch")),
+            "stored": bool(row.get("content")),
+        }
+        for row in store.run_files(run_uuid)
+    ]
+
+
+def _instance_rows(store: RunStore, run_uuid: str) -> list[dict]:
+    """Schedule instances in tree order with name, file and prefix; `keyvals` are not shown.
+
+    `instance_seq` is already tree order (0 is the top-level schedule), so the depth is just the
+    parent chain, and the template indents by it like the Steps table."""
+    instances = store.schedule_instances(run_uuid)
+    depth: dict[int, int] = {}
+    for row in instances:
+        seq = int(row.get("instance_seq") or 0)
+        parent = row.get("parent_instance_seq")
+        depth[seq] = 0 if parent is None else depth.get(int(parent), 0) + 1
+    return [
+        {
+            "name": row.get("schedule_name") or "",
+            "file": row.get("file") or "",
+            "prefix": row.get("prefix") or "",
+            "depth": depth.get(int(row.get("instance_seq") or 0), 0),
+        }
+        for row in instances
+    ]
+
+
+def _run_log_groups(store: RunStore, run_uuid: str, offset: str) -> list[dict]:
+    """Every INFO/WARNING/ERROR log line grouped by owner: the run, then each Pre-test and
+    Post-test Action, then each step Attempt; lines within a group stay in recorded order, which
+    is time order (spec Run log).
+
+    `DEBUG` lines are dropped here, and Device trace is `DEBUG`, so it never reaches the report.
+    Ownership comes from :func:`ate.report.log_export.owner_keys`, so the report and the export
+    dialog can never disagree about who a line belongs to."""
+    lines = []
+    for key, line in zip(owner_keys(store, run_uuid), store.log_lines(run_uuid)):
+        if line.get("level") not in ("INFO", "WARNING", "ERROR"):
+            continue
+        # A step's owner key is its node; split it further by Attempt so each Attempt is its own group.
+        if key.startswith("step:") and line.get("attempt_no") is not None:
+            key = f"{key}:{line['attempt_no']}"
+        lines.append((key, line))
+    if not lines:
+        return []
+
+    actions = store.actions(run_uuid)
+    instances = {int(row["instance_seq"]): row.get("schedule_name") or "" for row in store.schedule_instances(run_uuid)}
+    steps = {
+        int(row["node_seq"]): (row.get("step_number") or "", row.get("step_name") or "")
+        for row in store.nodes(run_uuid)
+        if row.get("kind") == "step" and row.get("node_seq") is not None
+    }
+    pre_count = sum(1 for a in actions if a.get("phase") == "pre")
+    post_count = sum(1 for a in actions if a.get("phase") == "post")
+
+    groups: dict[str, list[dict]] = {}
+    for key, line in lines:
+        groups.setdefault(key, []).append(
+            {
+                "time": _local_time(line.get("at"), offset) or "",
+                "level": line.get("level") or "",
+                "source": line.get("source") or "",
+                "text": line.get("text") or "",
+            }
+        )
+
+    def phase_label(phase: str, instance_seq: int) -> str:
+        """Pre-test, or Pre-test (Channel check, instance 1) when the phase has more than one Action."""
+        name = instances.get(int(instance_seq), "")
+        count = pre_count if phase == "pre" else post_count
+        if count < 2:
+            return "Pre-test" if phase == "pre" else "Post-test"
+        return f"{'Pre-test' if phase == 'pre' else 'Post-test'} ({name}, instance {instance_seq})"
+
+    def ordered(phase: str) -> list[str]:
+        """This phase's owner keys in the order its Actions ran (run_order, then instance)."""
+        return [
+            f"{phase}test:{a['instance_seq']}"
+            for a in sorted((a for a in actions if a.get("phase") == phase),
+                            key=lambda a: (int(a.get("run_order") or 0), int(a.get("instance_seq") or 0)))
+        ]
+
+    out: list[dict] = []
+    if "run" in groups:
+        out.append({"label": "Run", "lines": groups["run"]})
+    for phase in ("pre", "post"):
+        for key in ordered(phase):
+            if key in groups:
+                out.append({"label": phase_label(phase, key.split(":", 1)[1]), "lines": groups[key]})
+    for node_seq, (number, name) in sorted(steps.items()):  # nodes are in tree order
+        attempt_keys = sorted(
+            (k for k in groups if k.startswith(f"step:{node_seq}:")),
+            key=lambda k: int(k.rsplit(":", 1)[1] or 0),
+        )
+        for key in attempt_keys:
+            label = " ".join(p for p in ("Step", number, name) if p) + f" (attempt {key.rsplit(':', 1)[1]})"
+            out.append({"label": label, "lines": groups[key]})
+    return out
+
+
+def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> dict:
     """Everything the report template needs for one run, as its render context.
 
     Split out from :func:`render_report` so a caller (or a test) can render the same context with a
@@ -395,6 +542,13 @@ def _report_context(store: RunStore, run_uuid: str, config: Config) -> dict:
         # Steps section (packet 21b): one row per expanded-tree node, headers indented by depth with
         # their roll-up, retried steps followed by their earlier Attempts.
         "steps": _step_rows(nodes, store.attempts(run_uuid), store.input_values(run_uuid)),
+        # Equipment, Configuration and Run log (packet 21c).
+        "equipment": _equipment_rows(store, run_uuid),
+        "media_releases": _media_release_rows(store, run_uuid),
+        "files": _file_rows(store, run_uuid),
+        "instances": _instance_rows(store, run_uuid),
+        "include_run_log": include_run_log,
+        "run_log": _run_log_groups(store, run_uuid, offset) if include_run_log else [],
         # Operator + signature box.
         "operator": row.get("operator") or "",
     }
@@ -421,7 +575,7 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
     from History only ever render finished runs. Every context value is autoescaped unless it is a
     :class:`markupsafe.Markup`, so the template's deliberate markup (logo data URI, print margins)
     stays raw while Operator-entered text cannot become markup."""
-    return _render(_report_context(store, run_uuid, config))
+    return _render(_report_context(store, run_uuid, config, include_run_log=include_run_log))
 
 
 def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optional[dict]]:
