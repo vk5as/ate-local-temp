@@ -201,3 +201,31 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Reviewers: Haiku MUST-FIX 1 (with screenshots), Strata MUST-FIX 2. Both: the one existing test the packet touched in `test_step_inputs.py` kept a bad-input schedule with no Action, so it failed on the new Action rule and its loose `"schedule.tslua:"` assertion passed without reaching input validation. Strata: `setStepNo("")` counted as a Step Number and slipped past the duplicate check.
 - Light review: the bad-input test now has an Action and asserts the ENUM message. An empty or non-string Step Number is a load error. `setInclude(nil)` / a table / `""` is a load error, where before `nil` silently made an ordinary step, and `is_header` now means "setInclude was called". A header's `""` number is stored null. The paused-run list skips headers like the finished list does. New tests cover these, plus two ordinary duplicates and `setEnable`/`setPrefix` on a header; each new check fails under its mutation. Suite 669 ×3.
 - Leftovers: a load error at run start escapes `RunEngine.run()` (the worker dies with no `test_run` row; same for every load error, no test); headers show a checkable row in the setup list that does nothing until 15d, with no header styling yet (mockup: grey band, bold name, Sub-schedule tag, caret, tri-state box; 15b/15d); `_StepParams.kind` is read only by a test; `instance_seq`/`parent_node_seq` are null on every node until 15b; a blank name leaves double spacing in rows (`'2.    →  PASS'`).
+
+## 15b — setInclude and Sub-schedule instances (merged 2026-10-27)
+- Strata implemented: 31 min, 151 steps (it said ~120), 0 compactions, 174k peak. It added include expansion at load (`host.tree`/`host.instances`), `catalog.include_map`, the engine walking the tree, `schedule_instance` (schema v4), include mismatches in the 06c pre-run scope, and an indented pre-run step list.
+- Round 1:
+  - Haiku (MUST-FIX 1, with screenshots): the finished Run view had no headers or indentation, so two channel instances read as duplicate rows.
+  - Strata (MUST-FIX 3): every include shared one global environment, so globals leaked between siblings and parent, and an include could redefine `Result`/`ATE`. Resolution used the top-level release's map at every level, so a dependency's schedule including its own file came out "ambiguous". My brief was wrong there: I said own + dependency is ambiguous, but the spec has own-first like `require`. Also, two tests passed with keyvals cut off from the chunk.
+- Opus rework (`f7d08c4`, effort high):
+  - Per-instance `_ENV` via a pre-lockdown loader (`load(code, name, "t", env)`; reads fall through to the shared globals).
+  - Read-only enums and Python API objects.
+  - `catalog.IncludeMap`, resolving each include from the including file's own release first, then that release's dependencies; ambiguous only among dependencies.
+  - Lua-visible tests, which exposed nested keyvals reaching Lua as userdata (fixed with recursive `table_from`).
+  - Headers and indentation in the Run view and the paused list.
+  - Clean errors for non-table or metatabled keyvals and for a bare-seam missing include.
+  - Dead store code removed; schema v4 pinned, with a v3-migration test.
+- Round 2 (Haiku, MUST-FIX 3, all through the `debug` library, which the lockdown never removed):
+  - `debug.getregistry()` reached the instance loader and, through it, the stock `load`, so arbitrary unchecked source could run.
+  - `debug.setmetatable(Result, nil)` undid the enum lock.
+  - `getmetatable(_ENV).__index` handed out the shared globals, so isolation could be bypassed.
+- Light review: schedules now get a `debug` table holding only `traceback` (lupa builds error tracebacks through the global `debug.traceback`; removing it outright broke 2 traceback tests), and the instance metatable has `__metatable = false`. A parametrised test replays each escape; each fails under its mutation. Suite 720 ×3.
+- Leftovers:
+  - A `require`d module runs in the shared table and can still reassign `ATE`/`Result` there (kept so `require` is unchanged).
+  - Standard-library tables (`string`, `math`, ...) are writable from an include.
+  - An error inside an included step reports the top-level file's line numbers (`_location()`).
+  - The Summary tab lists steps without headers.
+  - `definition_mismatches` reloads the include tree on every call, and flags nothing (not even the schedule's own file) when the schedule fails to load.
+  - The depth-32 guard rejects legal acyclic trees deeper than 32 (15c replaces it with cycle detection).
+  - `schedule_instance` text columns are nullable where the spec has them as text.
+  - Header styling is 15d.
