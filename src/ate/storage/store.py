@@ -199,8 +199,6 @@ class RunStore:
         # rely on; input_value shares _log_seq with actions because it is emitted inline with steps.
         self._media_seq: dict[str, int] = {}
         self._runfile_seq: dict[str, int] = {}
-        # Packet 15b: per-run counter for the schedule_instance rows (0 is the top-level schedule).
-        self._instance_seq: dict[str, int] = {}
         self._ensure_schema()
 
     def _run(self, stmt) -> Any:
@@ -515,7 +513,7 @@ class RunStore:
         self,
         run_uuid: str,
         *,
-        instance_seq: Optional[int] = None,
+        instance_seq: int,
         parent_instance_seq: Optional[int] = None,
         header_node_seq: Optional[int] = None,
         schedule_name: Optional[str] = None,
@@ -527,12 +525,8 @@ class RunStore:
         """Insert one schedule-instance row keyed by ``(run_uuid, instance_seq)``.
 
         Packet 15b: the top-level schedule is instance 0 and every `setInclude` is its own
-        instance, numbered in tree order as the tree is walked. ``instance_seq`` is normally the
-        host's own tree index (the engine knows it); omitting it falls back to the run's own
-        counter, the same shape as ``media_release``/``run_file``. ``keyvals`` is already JSON
-        text (an empty table is ``"{}"``)."""
-        if instance_seq is None:
-            instance_seq = self._instance_seq.get(run_uuid, 0)
+        instance, numbered in tree order as the tree is walked; ``instance_seq`` is the host's own
+        index for it. ``keyvals`` is already JSON text (an empty table is ``"{}"``)."""
         row = {
             "run_uuid": run_uuid,
             "instance_seq": instance_seq,
@@ -545,9 +539,6 @@ class RunStore:
             "keyvals": keyvals if keyvals is not None else "{}",
         }
         self._run(schedule_instance.insert().values(**row))
-        next_seq = instance_seq + 1
-        if next_seq > self._instance_seq.get(run_uuid, 0):
-            self._instance_seq[run_uuid] = next_seq
         return dict(row)
 
     # -- reads --------------------------------------------------------------

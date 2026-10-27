@@ -103,8 +103,8 @@ def test_setup_migrates_an_existing_database_without_recreating_it(tmp_path):
 
     (root / "data").mkdir(parents=True)  # a real install already has its data directory
 
-    # Bootstrap a real database (schema v3) before setup runs.
-    RunStore(db_path)  # creates the tables and sets user_version to 3
+    # Bootstrap a real database (the current schema) before setup runs.
+    RunStore(db_path)  # creates the tables and sets user_version to SCHEMA_VERSION
     inode_before = db_path.stat().st_ino
     version_before = int(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True).execute("PRAGMA user_version").fetchone()[0])
 
