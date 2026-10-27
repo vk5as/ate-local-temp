@@ -49,7 +49,7 @@ from ate.engine.run_engine import RunEngine
 
 from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
-from ..run_session.headless import HeadlessRunSession, SessionState
+from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 
 
 def _format_elapsed(delta: datetime) -> str:
@@ -343,10 +343,17 @@ class StepsOptionsStage(QWidget):
         # selected schedule's Stop on Fail default once a schedule has been chosen.
         self.stop_on_fail_radio.setChecked(True)
         self.run_button = QPushButton("Start run")
+        # The mockup's `.err` line for a run that cannot start (packet 05b review): the screen fills
+        # it when `begin_run` is refused, so the Operator sees why instead of a traceback.
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("run_error")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet(f"color: {_BROKEN_ERR}; font-size: 12px;")
 
         layout.addWidget(self.step_list)
         layout.addWidget(self.stop_on_fail_radio)
         layout.addWidget(self.continue_all_radio)
+        layout.addWidget(self.error_label)
         layout.addWidget(self.run_button)
 
     def load_steps(self, steps: Iterable[object]) -> None:
@@ -886,8 +893,11 @@ class StagedRunScreen(QWidget):
         self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
 
         # Selecting a row records that selection on the session, so starting later resolves
-        # exactly what the Operator picked; the notes label mirrors it for confirmation.
+        # exactly what the Operator picked; the notes label mirrors it for confirmation. Both the
+        # selection and the current item are watched: a broken row cannot be selected, yet it can
+        # still be made current, and then nothing stale may be left showing (packet 05b review).
         self.test_schedule_stage.schedule_list.itemSelectionChanged.connect(self._on_schedule_selected)
+        self.test_schedule_stage.schedule_list.currentItemChanged.connect(self._on_schedule_selected)
 
         # Packet 05b: the filter box narrows the list to rows matching name, release or error, and
         # Rescan reloads it from disk — broken rows included.
@@ -933,24 +943,39 @@ class StagedRunScreen(QWidget):
         self.steps_stack.setCurrentIndex(2)
 
     def _on_schedule_selected(self) -> None:
-        """Record the newly selected schedule on the session and mirror it in the notes label.
+        """Record the newly selected schedule on the session, or clear the picker when nothing runnable is current.
 
         The exact name is read back from the row's user data (set when the list was built),
         so this hands the session precisely what the Operator picked; ``select_schedule`` then
         moves the session to SELECTING while idle. A broken row carries no user data, so it can never
-        reach the session: the previous choice stands and Start stays disabled (packet 05b)."""
+        reach the session: the previous choice is dropped, the notes and the mismatch flag are
+        emptied, and Start stays disabled (packet 05b review)."""
         item = self.test_schedule_stage.schedule_list.currentItem()
-        if item is not None:
-            name = item.data(Qt.ItemDataRole.UserRole) or ""
-            if name:
-                self.session.select_schedule(name)
-                self.test_schedule_stage.notes_label.setText(item.text())
-                # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
-                flagged = self._mismatch_flags.get(name, [])
-                label = self.test_schedule_stage.mismatch_label
-                label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
-                label.setStyleSheet(_FLAG_STYLE if flagged else "")
+        name = (item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+        if name:
+            self.session.select_schedule(name)
+            self.test_schedule_stage.notes_label.setText(item.text())
+            # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
+            flagged = self._mismatch_flags.get(name, [])
+            label = self.test_schedule_stage.mismatch_label
+            label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
+            label.setStyleSheet(_FLAG_STYLE if flagged else "")
+        else:
+            self._clear_picker_selection()
         self._update_run_button()
+
+    def _clear_picker_selection(self) -> None:
+        """Nothing runnable is current — a broken row, or the picked row filtered away — so show nothing.
+
+        The notes and the mismatch line describe the schedule that *was* picked; leaving them filled
+        reads as if it were still the selection, and the session would still start a run from it
+        (packet 05b review). A run already in progress keeps its own selection."""
+        stage = self.test_schedule_stage
+        stage.notes_label.setText("")
+        stage.mismatch_label.setText("")
+        stage.mismatch_label.setStyleSheet("")
+        if self.session.selected_schedule and self.state != SessionState.STARTED:
+            self.session.clear_selection()
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
@@ -1035,7 +1060,15 @@ class StagedRunScreen(QWidget):
         store = self._confirm_store_choice(mismatches)
         if mismatches and store is None:
             return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
-        engine = self.session.start(store_mismatched=store)
+        try:
+            engine = self.session.start(store_mismatched=store)
+        except SessionError as exc:
+            # The schedule picked before this stage broke in the meantime (packet 05b review): name
+            # the reason on the stage the Operator is looking at rather than raising out of the
+            # button handler, and take Start away so it cannot be clicked again.
+            self.steps_options_stage.error_label.setText(f"⛔ {exc}")
+            self.steps_options_stage.run_button.setEnabled(False)
+            return
         self._engine = engine
         self._started_at = datetime.now(timezone.utc)
         # Switch to the Run view and hide the setup stages for the duration of the run.
@@ -1239,9 +1272,11 @@ class StagedRunScreen(QWidget):
         Usable rows come first in scan order and the broken rows follow them at the end of the list:
         they cannot be picked, so they sit below everything the Operator can still start from. The
         picked schedule, if the filter still shows it, is re-selected so Start stays enabled across a
-        filter change."""
+        filter change; when the filter hides it, the notes and the selection are cleared."""
         term = self.test_schedule_stage.filter_edit.text().strip().lower()
         list_widget = self.test_schedule_stage.schedule_list
+        # The pick has to be read before the list is emptied: clearing it makes the current item
+        # None, which the selection handler reads as "nothing runnable is current".
         chosen = self.session.selected_schedule
         # `clear()` leaves every `setItemWidget` widget behind as a child of the viewport, so each
         # rescan would add one orphan row per broken row (packet 05b review): hand them back to Qt
@@ -1266,6 +1301,8 @@ class StagedRunScreen(QWidget):
                 picked = item
         if picked is not None:
             list_widget.setCurrentItem(picked)
+        else:
+            self._clear_picker_selection()
         self._update_run_button()
 
     def _make_schedule_item(self, list_widget: QListWidget, row) -> QListWidgetItem:
@@ -1314,5 +1351,11 @@ class StagedRunScreen(QWidget):
         return item.data(Qt.ItemDataRole.UserRole) or None
 
     def _update_run_button(self) -> None:
-        """Start is enabled only while a runnable schedule is the current selection."""
-        self.test_schedule_stage.run_button.setEnabled(self._selected_schedule_name() is not None)
+        """Start is enabled only while a runnable schedule is the current selection.
+
+        The Steps stage's Start button follows the same rule (packet 05b review): the picked
+        schedule can break between stages — a Rescan finds a bad file — and `begin_run` would then
+        raise out of the button's handler."""
+        runnable = self._selected_schedule_name() is not None
+        self.test_schedule_stage.run_button.setEnabled(runnable)
+        self.steps_options_stage.run_button.setEnabled(runnable)
