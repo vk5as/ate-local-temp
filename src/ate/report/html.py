@@ -335,7 +335,7 @@ def _file_rows(store: RunStore, run_uuid: str) -> list[dict]:
             "expected": row.get("expected_sha256") or "",
             "computed": row.get("computed_sha256") or "",
             "mismatch": bool(row.get("mismatch")),
-            "stored": bool(row.get("content")),
+            "stored": row.get("content") is not None,  # an empty file stored is still stored
         }
         for row in store.run_files(run_uuid)
     ]

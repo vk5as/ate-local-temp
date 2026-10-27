@@ -89,6 +89,8 @@ def owner_keys(store: RunStore, run_uuid: str) -> list[str]:
     actions = store.actions(run_uuid)
     pre_instances = {a["instance_seq"] for a in actions if a.get("phase") == "pre"}
     post_instances = {a["instance_seq"] for a in actions if a.get("phase") == "post"}
+    pre_rows = [a["seq"] for a in actions if a.get("phase") == "pre" and a.get("seq") is not None]
+    last_pre_row = max(pre_rows) if pre_rows else None
 
     # A log line ties to a Pre-/Post-test Action through ``action_seq`` — the action's
     # ``instance_seq`` — and each phase enumerates its own actions from 0, so the Pre-test's
@@ -116,15 +118,15 @@ def owner_keys(store: RunStore, run_uuid: str) -> list[str]:
             keys.append(f"posttest:{action_seq}")
             continue
         # No step lines: a pre/post-only run. Both phases ran, so the Pre-test's lines precede
-        # the Post-test's; the action rows' sequential start/end windows separate them.
+        # the Post-test's. An action's row is written after its own lines and shares the run's
+        # seq counter, so a line recorded before the last Pre-test row is a Pre-test line —
+        # timestamps can't separate them, as both phases can land in the same millisecond.
         in_pre, in_post = action_seq in pre_instances, action_seq in post_instances
         if in_pre and not in_post:
             keys.append(f"pretest:{action_seq}")
         elif in_post and not in_pre:
             keys.append(f"posttest:{action_seq}")
-        elif any(a.get("phase") == "pre" and a.get("instance_seq") == action_seq and
-                a.get("started_at") and a.get("ended_at") and a["started_at"] <= ln["at"] <= a["ended_at"]
-                for a in actions):
+        elif last_pre_row is not None and ln.get("seq") is not None and ln["seq"] < last_pre_row:
             keys.append(f"pretest:{action_seq}")
         else:
             keys.append(f"posttest:{action_seq}" if in_post else "run")

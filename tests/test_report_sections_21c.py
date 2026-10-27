@@ -581,3 +581,63 @@ def test_log_line_and_equipment_markup_is_escaped(tmp_path: Path) -> None:
     assert _data_rows(html, "equip") == [["Scope <b>x</b>", "<b>SN-1</b>", "", "", ""]], "the escapes parse back to the given text"
     logged = [cells[3] for _, rows in _run_log_groups(html) for cells in rows if "log line with" in cells[3]]
     assert logged == ["log line with <b>x</b> in it"]
+
+EMPTY_MAIN = """\
+local e = require("empty")
+return ScheduleParams("Empty module schedule", "requires a zero-byte module")
+  :setSchedule({
+    StepParams("one"):setStepNo("1."):setAction(function() ATE.report(Result.PASS, "ok", "1", "1") end),
+  })
+"""
+
+PREFAIL_MAIN = """\
+return ScheduleParams("Pre-fail schedule", "its Pre-test Action raises")
+  :setPreTestAction(function() error("calibration failed") end)
+  :setPostTestAction(function() ATE.log(Log.INFO, "teardown ran") end)
+  :setSchedule({
+    StepParams("one"):setStepNo("1."):setAction(function() ATE.report(Result.PASS, "ok", "1", "1") end),
+  })
+"""
+
+
+def test_an_empty_mismatched_file_that_was_stored_says_yes(tmp_path: Path) -> None:
+    """Stored means the bytes were recorded, even when there are none (zero-byte file)."""
+    html = _report(
+        tmp_path,
+        {"top": {"mediaNumber": "MR-EMPTY", "name": "Empty release", "version": "1.0.0",
+                 "files": {"main.tslua": EMPTY_MAIN, "empty.lua": ("", WRONG_SHA)}}},
+        "Empty module schedule",
+        config_extra={"database": {"type": "sqlite", "path": str(tmp_path / "ate.db"), "storeMismatchedFiles": "always"}},
+        store_mismatched=True,
+    )
+    empty = next(cells for _, cells in _table(html, "files") if cells[0] == "empty.lua")
+    assert empty[4] == "yes"
+
+
+def test_the_pre_test_failure_explanation_is_grouped_with_the_failed_action(tmp_path: Path) -> None:
+    """With no step lines, the abort explanation still belongs to the Pre-test Action, not the Post-test."""
+    html = _report(
+        tmp_path,
+        {"top": {"mediaNumber": "MR-PREFAIL", "name": "Pre-fail release", "version": "1.0.0",
+                 "files": {"main.tslua": PREFAIL_MAIN}}},
+        "Pre-fail schedule",
+    )
+    groups = {label: [row[-1] for row in rows] for label, rows in _run_log_groups(html)}
+    pre = [texts for label, texts in groups.items() if label.startswith("Pre-test")]
+    post = [texts for label, texts in groups.items() if label.startswith("Post-test")]
+    assert pre and any("every step is NOTRUN" in t for t in pre[0]), groups
+    assert post and post[0] == ["teardown ran"], groups
+
+
+def test_a_mismatched_file_row_is_visibly_marked(tmp_path: Path) -> None:
+    """The mismatch class has a real rule: a background tint and a ⚠ marker that survives greyscale."""
+    html = _report(
+        tmp_path,
+        {"top": {"mediaNumber": "MR-MARK", "name": "Mark release", "version": "1.0.0",
+                 "files": {"main.tslua": FILE_MAIN, "helper.lua": (HELPER_SRC, WRONG_SHA)}}},
+        "Files schedule",
+        store_mismatched=False,
+    )
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    assert re.search(r"\.mismatch\s*\{[^}]*background", style)
+    assert re.search(r"tr\.mismatch td:first-child::before\s*\{[^}]*content", style)
