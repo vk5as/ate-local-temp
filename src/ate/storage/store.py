@@ -34,6 +34,7 @@ from .schema import (
     metadata,
     node,
     run_file,
+    schedule_instance,
     test_run,
 )
 
@@ -198,6 +199,8 @@ class RunStore:
         # rely on; input_value shares _log_seq with actions because it is emitted inline with steps.
         self._media_seq: dict[str, int] = {}
         self._runfile_seq: dict[str, int] = {}
+        # Packet 15b: per-run counter for the schedule_instance rows (0 is the top-level schedule).
+        self._instance_seq: dict[str, int] = {}
         self._ensure_schema()
 
     def _run(self, stmt) -> Any:
@@ -506,6 +509,47 @@ class RunStore:
             self._runfile_seq[run_uuid] = next_seq
         return dict(row)
 
+    # -- schedule_instance ---------------------------------------------------
+
+    def insert_schedule_instance(
+        self,
+        run_uuid: str,
+        *,
+        instance_seq: Optional[int] = None,
+        parent_instance_seq: Optional[int] = None,
+        header_node_seq: Optional[int] = None,
+        schedule_name: Optional[str] = None,
+        file: Optional[str] = None,
+        media_number: Optional[str] = None,
+        prefix: str = "",
+        keyvals: str = "{}",
+    ) -> dict:
+        """Insert one schedule-instance row keyed by ``(run_uuid, instance_seq)``.
+
+        Packet 15b: the top-level schedule is instance 0 and every `setInclude` is its own
+        instance, numbered in tree order as the tree is walked. ``instance_seq`` is normally the
+        host's own tree index (the engine knows it); omitting it falls back to the run's own
+        counter, the same shape as ``media_release``/``run_file``. ``keyvals`` is already JSON
+        text (an empty table is ``"{}"``)."""
+        if instance_seq is None:
+            instance_seq = self._instance_seq.get(run_uuid, 0)
+        row = {
+            "run_uuid": run_uuid,
+            "instance_seq": instance_seq,
+            "parent_instance_seq": parent_instance_seq,
+            "header_node_seq": header_node_seq,
+            "schedule_name": schedule_name or None,
+            "file": file or None,
+            "media_number": media_number or None,
+            "prefix": prefix or "",
+            "keyvals": keyvals if keyvals is not None else "{}",
+        }
+        self._run(schedule_instance.insert().values(**row))
+        next_seq = instance_seq + 1
+        if next_seq > self._instance_seq.get(run_uuid, 0):
+            self._instance_seq[run_uuid] = next_seq
+        return dict(row)
+
     # -- reads --------------------------------------------------------------
 
     def media_releases(self, run_uuid: str) -> list[dict]:
@@ -530,6 +574,21 @@ class RunStore:
         rows = self._run(stmt).fetchall()
         return [
             {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
+        ]
+
+    def schedule_instances(self, run_uuid: str) -> list[dict]:
+        """Return this run's schedule-instance rows as dicts in instance_seq order (packet 15b).
+
+        One row per schedule in the expanded tree: instance 0 is the top-level schedule, then one
+        row per `setInclude`, in tree order. Empty when the run is unknown."""
+        stmt = (
+            schedule_instance.select()
+            .where(schedule_instance.c.run_uuid == run_uuid)
+            .order_by(schedule_instance.c.instance_seq)
+        )
+        rows = self._run(stmt).fetchall()
+        return [
+            {str(c.name): value for c, value in zip(schedule_instance.columns, row)} for row in rows
         ]
 
     # -- log_line ------------------------------------------------------------
