@@ -6,9 +6,9 @@
 
 **Blocked by:** 07a (Media Release `depends` ranges)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Resolution is transitive; `require` searches the release's own files, then each dependency depth first in declaration order
-- [ ] Seam-1 tests cover a two-level chain and the search order
+- [x] Resolution is transitive; `require` searches the release's own files, then each dependency depth first in declaration order
+- [x] Seam-1 tests cover a two-level chain and the search order
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
