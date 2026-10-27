@@ -328,3 +328,21 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - `nodes()`/`attempts()` have no ORDER BY.
   - The PDF file is written 0600 while the HTML is 0664.
 - Medium-trial note: the defects were real behaviour or spec gaps, not just test gaps, but 2 of the 3 distinct ones came from 21a or my brief. The rework was clean.
+
+## 21c — report Equipment, Configuration, Run log (merged 2026-10-28) — third Strata medium run
+- Strata (medium) implemented it in 27.7 min / 146 steps / 0 compactions: Equipment, Configuration (Media Releases filtered to releases that supplied a used file, Files with highlight and stored flag, Sub-schedule instances) and a grouped Run log (run, every Pre/Post-test Action, then each step Attempt; DEBUG dropped). `include_run_log=False` gives a one-line note. `log_export.owner_keys` was extracted so the report and the export share ownership. 11 tests. The user then reverted implementers to high.
+- Haiku: MUST-FIX 0 (PDF screenshots). Layout notes: the Run log time column wrapped, each group's table had its own widths, headings were orphaned at page foot, and the pale mismatch tint was the only marker. Strata: MUST-FIX 2. With no step log lines, the "Pre-test Action failed … every step is NOTRUN" line fell outside both action windows and landed under Post-test in both the report and the export. `stored` used truthiness, so a zero-byte stored file said "no" while the Run log said it was stored.
+- Light review:
+  - The abort explanation is now written inside the failed Pre-test Action's window (`_record_phase_action`), so it is owned by and recorded with that Action.
+  - In a run with no step lines, `owner_keys` separates Pre-test and Post-test by `seq` against the last Pre-test action row. Timestamps can't: both land in the same millisecond.
+  - `stored` is now `content is not None`.
+  - Layout: a CSS ⚠ marker on mismatch rows, fixed log table columns with a nowrap time column, and `break-after: avoid` on headings.
+
+  Each fix has a test that fails under its mutation. Suite 818 ×3.
+- Leftovers:
+  - The Sub-schedule instances table includes the top-level instance. Spec text says "each instance"; the heading and glossary suggest inclusions only.
+  - `phase_label` counts Actions, not groups with lines.
+  - `_run_log_groups` drops a line whose owner key doesn't match (not reproduced).
+  - `.page-break` still has no rule.
+  - The Cover's Media Release and Schedule-file rows are blank (21a: `schedule_file: None`, `media_name/version` None).
+  - The `test_report_21a.py` docstring is stale.
