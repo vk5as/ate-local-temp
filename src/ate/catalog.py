@@ -419,18 +419,20 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
     """Resolve each definition's ``depends`` chain and mark cross-definition defects in place.
 
     Builds a registry of Media Releases by name (for matching) and media number, flags duplicate
-    media numbers, resolves every range to the highest matching release, detects ambiguous ranges
-    (two releases with the same name+version), dependency cycles, broken dependencies and module
-    names shared across more than one Media Release in a resolved chain. Every defect sets
-    ``Definition.broken``; runnable definitions are left untouched.
+    media numbers, resolves every range to the highest matching release, and detects every intrinsic
+    defect: ambiguous ranges (two releases with the same name+version), dependency cycles, and
+    module names provided by more than one Media Release of a resolved chain. Only then does it
+    propagate "broken dependency" up the chain, repeatedly, so a broken release breaks everything
+    above it. Every defect sets ``Definition.broken``; runnable definitions are left untouched.
     """
-    # Registry of structurally-valid Media Releases for matching depends entries.
+    # Registry of installed Media Releases for matching depends entries. A broken release still
+    # matches (with a readable name and version), so its dependents are told it is a broken
+    # dependency rather than that nothing is installed.
     by_name: dict[str, list[tuple[str, Definition]]] = {}
     for definition in definitions:
-        if not definition.broken:
+        if definition.name and isinstance(definition.version, str) and parse_version(definition.version):
             by_name.setdefault(definition.name, []).append((definition.version, definition))
 
-    broken_ids = {id(d) for d in definitions if d.broken}
     # Registry of structurally-valid Media Releases (with a real media number) for matching depends entries and collision checks.
     by_media = {d.media_number: d for d in definitions if d.media_number}
     # Two definitions with the same mediaNumber are both broken (media number is a unique identity); only Media Releases with a real media number can be matched or flagged as duplicates.
@@ -451,7 +453,7 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
         with that dependency's own resolved chain, and a release reached twice keeps its first
         position (packet 07b)."""
         definition = by_media.get(media_number)
-        if not definition or id(definition) in broken_ids:
+        if not definition or definition.broken:
             return
 
         chain: list[Definition] = [definition]  # own release first, then dependencies depth-first
@@ -493,49 +495,56 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
         definition._chain = tuple(d.media_number for d in chain)  # media numbers, for the module-collision check
 
     for definition in definitions:
-        if not definition.broken and id(definition) not in broken_ids:
+        if not definition.broken:
             resolve(definition.media_number, [definition.media_number])
 
-    # A dependency on a now-broken release breaks its dependents too ("a broken dependency").
+    # A module name provided by more than one Media Release of a resolved chain breaks the
+    # definition. Intrinsic defects are all found first, so a collision never hides a broken
+    # dependency further up the chain (packet 07c). A chain already holding a broken release is
+    # left to propagation, so the message names that release, not a collision with it.
+    broken_before = {id(d) for d in definitions if d.broken}
     for definition in definitions:
-        if definition.broken or id(definition) in broken_ids:
+        if definition.broken or any(id(member) in broken_before for member in getattr(definition, "chain", ())):
             continue
-        chain = getattr(definition, "_chain", ())
-        for media_number in chain:
-            member = by_media.get(media_number)
-            if member and member.broken and id(member) not in broken_ids:
-                _set_broken(definition, f"broken dependency '{member.name}'")
-
-    # A module name found in more than one Media Release of a resolved chain is ambiguous.
-    for definition in definitions:
-        if definition.broken or id(definition) in broken_ids:
-            continue
-        modules_by_media: dict[str, set[str]] = {}
-        for media_number in getattr(definition, "_chain", ()):
-            member = by_media.get(media_number)
-            if not member or member.broken:
-                continue
-            seen: set[str] = set()
+        providers: dict[str, set[str]] = {}
+        for member in getattr(definition, "chain", ()):
             for file_entry in member.files:
                 if file_entry.is_schedule or not file_entry.module_name:
                     continue
-                if file_entry.module_name in seen:
-                    continue
-                seen.add(file_entry.module_name)
-            modules_by_media[media_number] = seen
+                providers.setdefault(file_entry.module_name, set()).add(member.media_number)
 
-        collisions = {name for name, medias in modules_by_media.items() if len(set(medias)) > 1}
+        collisions = {name: medias for name, medias in providers.items() if len(medias) > 1}
         if collisions:
-            _set_broken(definition, f"module name collision across Media Releases: {', '.join(sorted(collisions))}")
+            detail = "; ".join(
+                f"{name} ({', '.join(sorted(medias))})" for name, medias in sorted(collisions.items())
+            )
+            _set_broken(definition, f"module name collision across Media Releases: {detail}")
+
+    # A broken release breaks every release whose chain contains it, and so on up the chain.
+    # Shortest chains first so each definition is broken by the closest broken member of its
+    # chain, and repeat until nothing new breaks. A definition keeps its own first error.
+    by_depth = sorted(definitions, key=lambda definition: len(getattr(definition, "chain", ())))
+    changed = True
+    while changed:
+        changed = False
+        for definition in by_depth:
+            if definition.broken:
+                continue
+            broken_member = next((member for member in definition.chain if member.broken), None)
+            if broken_member:
+                _set_broken(definition, f"broken dependency '{broken_member.name}'")
+                changed = True
 
     # A broken release has no usable chain, however far its own resolve got before the break.
     for definition in definitions:
-        if definition.broken or id(definition) in broken_ids:
+        if definition.broken:
             definition.chain = ()
 
 
 def _set_broken(definition: Definition, error: str) -> None:
-    definition.broken = error
+    """Mark ``definition`` broken; a definition keeps the first error found for it."""
+    if definition.broken is None:
+        definition.broken = error
 
 
 # --- scanning ----------------------------------------------------------------

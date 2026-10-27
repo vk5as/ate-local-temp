@@ -259,7 +259,31 @@ def test_a_grandchild_module_is_requireable_and_recorded(qapp, tmp_path):
 
 
 def test_a_release_own_module_wins_over_the_same_name_in_a_dependency(tmp_path):
-    """Own files are searched first: A's `util` beats the `util` reached through B and C."""
+    """`module_map` searches the release's own files first.
+
+    A module name provided by two releases of a chain is a defect (packet 07c), so the search
+    order is asserted on a hand-built chain; the same tree written on disk is broken by the
+    collision."""
+    dependency = Definition(
+        path=Path("/tmp/ate-chain-c"), media_number="MR-C", name="Release C", version="1.1.0",
+        files=(FileEntry(rel_path="util.lua", module_name="util"),),
+    )
+    middle = Definition(
+        path=Path("/tmp/ate-chain-b"), media_number="MR-B", name="Release B", version="1.0.0",
+        files=(FileEntry(rel_path="b_mod.lua", module_name="b_mod"),),
+    )
+    definition = Definition(
+        path=Path("/tmp/ate-chain-a"), media_number="MR-A", name="Release A", version="1.0.0",
+        files=(FileEntry(rel_path="main.tslua", is_schedule=True),
+               FileEntry(rel_path="util.lua", module_name="util")),
+    )
+    definition.chain = (definition, middle, dependency)
+    modules = module_map(definition)
+    assert modules == {
+        "util": Path("/tmp/ate-chain-a/util.lua"),
+        "b_mod": Path("/tmp/ate-chain-b/b_mod.lua"),
+    }, "the release's own util wins; the name reached twice is listed once"
+
     root = _write_releases(
         tmp_path,
         {
@@ -285,16 +309,40 @@ def test_a_release_own_module_wins_over_the_same_name_in_a_dependency(tmp_path):
     (root / "c" / "util.lua").write_text(B_UTIL_SRC, encoding="utf-8")
 
     by_media = _by_media(root)
-    assert all(d.broken is None for d in by_media.values()), {d.media_number: d.broken for d in by_media.values()}
-    modules = module_map(by_media["MR-A"])
-    assert modules["util"] == root / "a" / "util.lua", "the release's own file wins"
-    assert modules["b_mod"] == root / "b" / "b_mod.lua", "dependency modules are in the map too"
-    assert len(modules) == 2, "the shared name reached twice is listed once"
-    assert _media_chain(by_media["MR-A"]) == ("MR-A", "MR-B", "MR-C")
+    assert by_media["MR-A"].broken == "module name collision across Media Releases: util (MR-A, MR-C)"
+    assert by_media["MR-A"].chain == (), "a broken definition keeps no chain"
+    for media_number in ("MR-B", "MR-C"):
+        assert by_media[media_number].broken is None
 
 
 def test_the_chain_is_walked_depth_first_in_declaration_order(tmp_path):
-    """A depends [B, D] and B depends E: E (B's subtree) is searched before D."""
+    """A depends [B, D] and B depends E: E (B's subtree) is walked before D.
+
+    `shared` provided by both E and D is a defect (packet 07c), so the walk order is asserted on a
+    hand-built chain and the disk tree is asserted broken."""
+    d = Definition(
+        path=Path("/tmp/ate-chain-d"), media_number="MR-D", name="Release D", version="1.0.0",
+        files=(FileEntry(rel_path="shared.lua", module_name="shared"),
+               FileEntry(rel_path="d_mod.lua", module_name="d_mod")),
+    )
+    e = Definition(
+        path=Path("/tmp/ate-chain-e"), media_number="MR-E", name="Release E", version="1.0.0",
+        files=(FileEntry(rel_path="shared.lua", module_name="shared"),
+               FileEntry(rel_path="e_mod.lua", module_name="e_mod")),
+    )
+    b = Definition(
+        path=Path("/tmp/ate-chain-b"), media_number="MR-B", name="Release B", version="1.0.0",
+        files=(FileEntry(rel_path="b_mod.lua", module_name="b_mod"),),
+    )
+    definition = Definition(
+        path=Path("/tmp/ate-chain-a"), media_number="MR-A", name="Release A", version="1.0.0",
+        files=(FileEntry(rel_path="main.tslua", is_schedule=True),),
+    )
+    definition.chain = (definition, b, e, d)  # own release, then B's subtree, then D
+    modules = module_map(definition)
+    assert list(modules) == ["b_mod", "shared", "e_mod", "d_mod"], "depth-first, in declaration order"
+    assert modules["shared"] == Path("/tmp/ate-chain-e/shared.lua"), "B's subtree before D"
+
     root = _write_releases(
         tmp_path,
         {
@@ -323,9 +371,10 @@ def test_the_chain_is_walked_depth_first_in_declaration_order(tmp_path):
     (root / "e" / "shared.lua").write_text(E_SHARED_SRC, encoding="utf-8")
 
     by_media = _by_media(root)
-    assert all(d.broken is None for d in by_media.values()), {d.media_number: d.broken for d in by_media.values()}
-    assert _media_chain(by_media["MR-A"]) == ("MR-A", "MR-B", "MR-E", "MR-D")
-    assert module_map(by_media["MR-A"])["shared"] == root / "e" / "shared.lua", "B's subtree before D"
+    assert by_media["MR-A"].broken == "module name collision across Media Releases: shared (MR-D, MR-E)"
+    assert by_media["MR-A"].chain == (), "a broken definition keeps no chain"
+    for media_number in ("MR-B", "MR-D", "MR-E"):
+        assert by_media[media_number].broken is None
 
 
 def test_a_dependency_schedule_is_never_requireable():
