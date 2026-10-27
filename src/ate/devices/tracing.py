@@ -190,6 +190,3 @@ class TracedDevice:
     def close(self) -> Any:
         """Release the real device; the registry times and traces the close around this."""
         return self._device.close()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._device, name)

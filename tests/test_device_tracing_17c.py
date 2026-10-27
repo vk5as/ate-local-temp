@@ -491,3 +491,12 @@ def test_trace_lines_never_appear_in_the_html_report(app: QCoreApplication) -> N
     html = render_report(store, ru, Config(path=Path("/tmp/ate-trace-report-test")))
     assert "open TCP" not in html and 'bytes "' not in html
     assert "DEBUG" not in html
+
+
+def test_every_escape_and_raw_byte_truncation() -> None:
+    """Each simple escape, \\xNN for the rest, and the cap counted in raw bytes, not escaped text."""
+    from ate.devices.tracing import quoted_bytes
+
+    assert quoted_bytes(b'\t\n\r\\"a~', 64) == '"\\t\\n\\r\\\\\\"a~"'
+    # Ten control bytes capped at 8: eight \xNN escapes survive (raw cut), then the dropped count.
+    assert quoted_bytes(bytes(range(10)), 8) == '"' + "".join(f"\\x{b:02x}" for b in range(8)) + '"\u2026 (+2 bytes)'
