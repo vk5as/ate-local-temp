@@ -4,16 +4,15 @@ For implementer subagents working an ATE v1 packet. If you are stuck, hand the p
 
 ## When to ask
 
-You **must** hand off (this is not optional) once any of these is true:
+You **must** hand off (this is not optional) once your context has been compacted twice in this packet.
 
-- your context has been compacted twice in this packet, or
-- you have taken about 150 steps and the packet isn't finished.
+Use your judgement otherwise; a handoff is worth it when:
 
-You should also hand off earlier when:
-
-- The same test or error has survived two honest fix attempts, or
-- about 30 minutes or 60 steps have passed without a commit that moves the packet forward, or
+- the same test or error has survived two honest fix attempts, or
+- you have gone a long time without a commit that moves the packet forward, or
 - you are about to start a long debugging hunt (threads, Qt lifetimes, subprocesses, timing) that would fill your context.
+
+(There used to be a ~150-step limit. It was dropped on 2026-10-27: on a 262k context, long runs were not where things went wrong, and the orchestrator measures steps from the session logs.)
 
 At most two helpers per packet.
 
