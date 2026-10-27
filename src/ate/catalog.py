@@ -47,7 +47,9 @@ class Definition:
     ``broken`` carries an error string when the definition is unusable (a structural defect or a
     problem in its resolved dependency chain); ``None`` means it is usable. ``dependencies`` holds
     each raw ``(name, range)`` entry so dependency resolution can walk them without re-reading the
-    file; it is set by :func:`read_definition`.
+    file; it is set by :func:`read_definition`. ``chain`` is this release followed by the releases it
+    depends on, resolved transitively depth-first in declaration order, each listed once; it is empty
+    until :func:`resolve_dependencies` runs, and stays empty for a broken release.
     """
 
     path: Path  # directory holding the .atedef (its parent)
@@ -59,6 +61,7 @@ class Definition:
     dependencies: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     broken: Optional[str] = None
     atedef_path: Optional[Path] = None  # the .atedef file itself (packet 06b records its SHA-256)
+    chain: tuple[Definition, ...] = field(default_factory=tuple)  # this release, then its resolved dependencies depth-first (packet 07b)
 
 
 # --- semver (RFC 2.0.0) helpers ---------------------------------------------
@@ -442,12 +445,17 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
                 _set_broken(definition, f"duplicate mediaNumber '{media_number}'")
 
     def resolve(media_number: str, path: list[str]) -> None:
-        """Resolve one Media Release's dependency chain; ``path`` is the DFS stack (for cycles)."""
+        """Resolve one Media Release's dependency chain; ``path`` is the DFS stack (for cycles).
+
+        The chain is the release itself, then each ``depends`` entry in declaration order depth-first
+        with that dependency's own resolved chain, and a release reached twice keeps its first
+        position (packet 07b)."""
         definition = by_media.get(media_number)
         if not definition or id(definition) in broken_ids:
             return
 
-        chain = [media_number]
+        chain: list[Definition] = [definition]  # own release first, then dependencies depth-first
+        seen = {media_number}
         for dep_name, range_text in definition.dependencies:
             candidates = by_name.get(dep_name, [])
             matches = [(v, other) for (v, other) in candidates if matches_range(v, range_text)]
@@ -471,10 +479,18 @@ def resolve_dependencies(definitions: list[Definition]) -> None:
                     _set_broken(member, f"dependency cycle involving '{dep_name}'")
                 return
 
-            chain.append(dep_media)
+            if dep_media not in seen:  # a diamond: keep the first position it was reached at
+                seen.add(dep_media)
+                chain.append(chosen[1])
             resolve(dep_media, path + [dep_media])
+            for member in getattr(chosen[1], "chain", ()):  # transitive: the dependency's own chain
+                if member.media_number in seen:
+                    continue
+                seen.add(member.media_number)
+                chain.append(member)
 
-        definition._chain = tuple(chain)  # resolved Media Releases, for the module-collision check
+        definition.chain = tuple(chain)
+        definition._chain = tuple(d.media_number for d in chain)  # media numbers, for the module-collision check
 
     for definition in definitions:
         if not definition.broken and id(definition) not in broken_ids:
@@ -664,18 +680,36 @@ def resolve_schedule(*directories: str | Path, schedule_name: str) -> Path | Non
     return None
 
 
-def module_map(definition: Definition) -> dict[str, Path]:
-    """Map each listed helper module name to its absolute path (packet 06a).
+def _search_chain(definition: Definition) -> tuple[Definition, ...]:
+    """The release itself followed by its resolved chain, each release listed once (packet 07b).
 
-    Only non-schedule entries with a derived or explicit ``module_name`` are included — schedules run
-    as Test Schedules, not modules. Paths resolve against the definition's directory so the Lua host
-    can read them directly; a missing file is still listed here (its absence is a defect caught when
-    the module is loaded), never filtered out."""
-    return {
-        entry.module_name: definition.path / entry.rel_path
-        for entry in definition.files
-        if not entry.is_schedule and entry.module_name is not None
-    }
+    A definition never resolved (or a hand-built one) has an empty chain, so the search is just its
+    own files; ``resolve_dependencies`` always puts the release first in ``chain``."""
+    if not definition.chain:
+        return (definition,)
+    members = list(definition.chain)
+    if members[0] is not definition:
+        members.insert(0, definition)
+    return tuple(members)
+
+
+def module_map(definition: Definition) -> dict[str, Path]:
+    """Map each require-able helper module name to its absolute path (packets 06a, 07b).
+
+    Walks the resolved chain — the release's own files first, then each dependency depth-first in
+    declaration order — so a module only listed in a dependency is still require-able; a name found
+    in more than one release resolves to the first one in that order. Schedules are never modules.
+    Only non-schedule entries with a derived or explicit ``module_name`` are included. Paths resolve
+    against each release's own directory so the Lua host can read them directly; a missing file is
+    still listed here (its absence is a defect caught when the module is loaded), never filtered
+    out."""
+    modules: dict[str, Path] = {}
+    for member in _search_chain(definition):
+        for entry in member.files:
+            if entry.is_schedule or entry.module_name is None:
+                continue
+            modules.setdefault(entry.module_name, member.path / entry.rel_path)
+    return modules
 
 
 def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
@@ -712,17 +746,19 @@ def definition_mismatches(
     """Return ``(rel_path, expected_sha256, computed_sha256, media_number)`` for every mismatch.
 
     With ``schedule_name``, only the files a run of that schedule can load are checked: its own
-    ``.tslua`` and the release's ``.lua`` modules (any of which it may ``require``; which ones it
-    actually loads is only known at run time). Other schedules' files are left out, so a schedule
-    is never flagged for a sibling's mismatch. Without it, every listed file is checked.
+    ``.tslua`` and the ``.lua`` modules of the release and of every release in its resolved chain
+    (any of which it may ``require``; which ones it actually loads is only known at run time). Other
+    schedules' files are left out, so a schedule is never flagged for a sibling's mismatch. Without
+    it, every listed file is checked. The media number is the one of the release that owns the file.
     (The catalog rejects a definition entry with no ``sha256``, so ``expected`` is always set here.)"""
     own = None
     if schedule_name is not None:
         path = resolve_schedule_path(definition, schedule_name)
         own = path.relative_to(definition.path).as_posix() if path is not None else None
     return [
-        (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, definition.media_number)
-        for entry in definition.files
+        (entry.rel_path, entry.expected_sha256 or None, entry.computed_sha256, member.media_number)
+        for member in _search_chain(definition)
+        for entry in member.files
         if (entry.expected_sha256 or None) != entry.computed_sha256
         and (schedule_name is None or not entry.is_schedule or Path(entry.rel_path).as_posix() == own)
     ]
