@@ -22,10 +22,11 @@ from __future__ import annotations
 import html
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -184,10 +185,61 @@ _BROKEN_BG = "#fff5f5"
 _BROKEN_ERR = "#b71c1c"
 _MUTED_STYLE = "color: #777; font-size: 12px;"
 
+#: `.b-sched .it.broken { cursor: not-allowed }` (mockup line 97): the pointer says "can't pick this".
+_FORBIDDEN_CURSOR = Qt.CursorShape.ForbiddenCursor
+
+#: The broken row's layout margins; the row-height calculation below has to add them back.
+_ROW_MARGIN_X, _ROW_MARGIN_Y = 6, 4
+
 
 def _row_filter_text(row) -> str:
     """Everything the filter box matches a picker row against: name, release and error."""
     return f"{row.name or ''} {row.release or ''} {row.file or ''} {row.error or ''}".lower()
+
+
+def _short_error(error: str, release_dir: Optional[Path]) -> str:
+    """The one line a broken row shows: the message only, paths relative to their Media Release.
+
+    A schedule that raises on load arrives as `failed to load <absolute path>: <file>:<line>: <msg>`
+    followed by the Lua stack traceback, which repeats the file the row already names and prints the
+    scan directory (packet 05b review). The row keeps the message; the full text is the tooltip."""
+    line = (error or "").splitlines()[0]
+    if line.startswith("failed to load "):
+        line = line.split(": ", 1)[-1]
+    if release_dir is not None:
+        line = line.replace(f"{release_dir}/", "")
+    return line
+
+
+def _wrapped_height(text: str, font, width: int) -> int:
+    """How tall word-wrapped `text` is when squeezed into `width` pixels with ``font``."""
+    metrics = QFontMetrics(font)
+    lines = 0
+    for chunk in (text.splitlines() or [""]):
+        used = ""
+        for word in chunk.split():
+            if used and metrics.horizontalAdvance(f"{used} {word}") > width:
+                lines += 1
+                used = word
+            else:
+                used = f"{used} {word}" if used else word
+        lines += 1
+    return lines * metrics.lineSpacing()
+
+
+def _broken_row_size_hint(widget: QWidget, width: int) -> QSize:
+    """The size a broken row needs at list width ``width``, with the `.err` line wrapped.
+
+    `QLabel::sizeHint` knows nothing about the width the view will give the row, so a long error
+    would sit in a one-line-tall row and be cut off at the viewport edge (packet 05b review). The
+    wrapped height is counted here instead."""
+    if width <= 0:
+        return widget.sizeHint()
+    inner = max(width - 2 * _ROW_MARGIN_X, 1)
+    labels = widget.findChildren(QLabel)
+    height = 2 * _ROW_MARGIN_Y + sum(_wrapped_height(label.text(), label.font(), inner) for label in labels)
+    height += max(widget.layout().spacing(), 0) * max(len(labels) - 1, 0)
+    return QSize(width, height)
 
 
 def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
@@ -195,18 +247,22 @@ def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
 
     A list item cannot paint two colours on one row, so the mockup's three lines
     (`name`, `.muted` release, `.err` error) are three labels on a pale-red QWidget. The error label
-    is named ``schedule_error`` so a test can read the exact colour it draws."""
+    is named ``schedule_error`` so a test can read the exact colour it draws, and it word-wraps:
+    the row is as wide as the list, so a long error must wrap rather than run past it."""
     widget = QWidget()
     widget.setStyleSheet(f"background: {_BROKEN_BG};")
+    widget.setCursor(_FORBIDDEN_CURSOR)
     layout = QVBoxLayout(widget)
-    layout.setContentsMargins(6, 4, 6, 4)
+    layout.setContentsMargins(_ROW_MARGIN_X, _ROW_MARGIN_Y, _ROW_MARGIN_X, _ROW_MARGIN_Y)
     title = QLabel(f"⛔ {name}")
     subtitle = QLabel(release)
     subtitle.setStyleSheet(_MUTED_STYLE)
     err = QLabel(error)
     err.setObjectName("schedule_error")
+    err.setWordWrap(True)
     err.setStyleSheet(f"color: {_BROKEN_ERR}; font-size: 12px;")
     for label in (title, subtitle, err):
+        label.setCursor(_FORBIDDEN_CURSOR)
         layout.addWidget(label)
     return widget
 
@@ -1170,21 +1226,35 @@ class StagedRunScreen(QWidget):
             return
         self._schedule_rows = list_schedule_rows(*config.test_definition_dirs)
         self._mismatch_flags = list_schedule_mismatches(*config.test_definition_dirs)
+        definitions = find_definitions(*config.test_definition_dirs)
         # "MR-10422 · PSU-200 Tests 2.3.0", as the mockup names a release in the flag and the dialog.
-        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}"
-                                for d in find_definitions(*config.test_definition_dirs)}
+        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}" for d in definitions}
+        # Where each Media Release is on disk: a load error's absolute path is written relative to it.
+        self._release_dirs = {d.media_number: d.path for d in definitions}
         self._render_schedule_rows()
 
     def _render_schedule_rows(self) -> None:
         """Rebuild the picker from :attr:`_schedule_rows`, keeping only the rows the filter matches.
 
-        Usable rows come first in scan order and the broken rows follow them, as the mockup's list is
-        drawn. The picked schedule, if the filter still shows it, is re-selected so Start stays
-        enabled across a filter change."""
+        Usable rows come first in scan order and the broken rows follow them at the end of the list:
+        they cannot be picked, so they sit below everything the Operator can still start from. The
+        picked schedule, if the filter still shows it, is re-selected so Start stays enabled across a
+        filter change."""
         term = self.test_schedule_stage.filter_edit.text().strip().lower()
         list_widget = self.test_schedule_stage.schedule_list
-        list_widget.clear()
         chosen = self.session.selected_schedule
+        # `clear()` leaves every `setItemWidget` widget behind as a child of the viewport, so each
+        # rescan would add one orphan row per broken row (packet 05b review): hand them back to Qt
+        # and delete them before the list is emptied.
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            widget = list_widget.itemWidget(item)
+            if widget is None:
+                continue
+            list_widget.removeItemWidget(item)
+            widget.setParent(None)
+            widget.deleteLater()
+        list_widget.clear()
         picked: Optional[QListWidgetItem] = None
         usable = [row for row in self._schedule_rows if row.error is None]
         broken = [row for row in self._schedule_rows if row.error is not None]
@@ -1203,7 +1273,9 @@ class StagedRunScreen(QWidget):
 
         A usable row is unchanged from ticket 06c: the ⚠ flag, the schedule name and its description,
         and the exact name in the user data for the selection to read back. A broken row gets the
-        mockup's `.it.broken` look and no user data, so it can never be handed to the session."""
+        mockup's `.it.broken` look and no user data, so it can never be handed to the session. Its
+        error line is the short form (first line, paths relative to the release); the tooltip holds
+        the whole text."""
         if row.error is None:
             flag = "⚠ " if row.name in self._mismatch_flags else ""
             item = QListWidgetItem(f"{flag}{row.name} — {row.description}")
@@ -1216,16 +1288,17 @@ class StagedRunScreen(QWidget):
         # broken Test Definition has neither, and the mockup calls it "(Test Definition broken)".
         name = row.file or "(Test Definition broken)"
         release = row.release or row.media_number
-        item = QListWidgetItem(f"⛔ {name}\n{release}\n{row.error}")
+        error = _short_error(row.error, self._release_dirs.get(row.media_number))
+        item = QListWidgetItem(f"⛔ {name}\n{release}\n{error}")
         item.setBackground(QColor(_BROKEN_BG))
         # Not selectable and not enabled: a click can't pick it, and Qt won't even make it current.
         # UserRole is deliberately left empty so no path can pass a broken row to the session.
         item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled))
         item.setData(Qt.ItemDataRole.UserRole + 1, row.error)
         item.setToolTip(row.error)
-        widget = _broken_row_widget(name, release, row.error)
-        # The row is three lines tall, so let the widget's own height set the item's.
-        item.setSizeHint(widget.sizeHint())
+        widget = _broken_row_widget(name, release, error)
+        # The row is as tall as its three wrapped lines need to be, not one line per label.
+        item.setSizeHint(_broken_row_size_hint(widget, list_widget.viewport().width()))
         list_widget.addItem(item)
         list_widget.setItemWidget(item, widget)
         return item
