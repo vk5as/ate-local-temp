@@ -259,6 +259,15 @@ def test_the_filter_matches_broken_rows_by_name_release_and_error(qapp, tmp_path
     screen.test_schedule_stage.filter_edit.setText("nothing matches this")
     assert _texts(screen) == []
 
+    # The schedule the Operator already picked stays picked while the filter still shows it.
+    screen.test_schedule_stage.filter_edit.setText("")
+    list_widget = _list(screen)
+    good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
+    list_widget.setCurrentItem(good)
+    screen.test_schedule_stage.filter_edit.setText("PSU-200")
+    assert list_widget.currentItem() is not None and "Good schedule" in list_widget.currentItem().text()
+    assert screen.test_schedule_stage.run_button.isEnabled()
+
     screen.test_schedule_stage.filter_edit.setText("")
     assert len(_texts(screen)) == 5
 

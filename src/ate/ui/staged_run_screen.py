@@ -1222,6 +1222,7 @@ class StagedRunScreen(QWidget):
         # UserRole is deliberately left empty so no path can pass a broken row to the session.
         item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled))
         item.setData(Qt.ItemDataRole.UserRole + 1, row.error)
+        item.setToolTip(row.error)
         widget = _broken_row_widget(name, release, row.error)
         # The row is three lines tall, so let the widget's own height set the item's.
         item.setSizeHint(widget.sizeHint())
