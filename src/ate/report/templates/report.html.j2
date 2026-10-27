@@ -2,9 +2,8 @@
    self-contained with no external assets. The logo is a base64 data URI. Only reports.organisation,
    reports.logo and reports.paperSize customise it in v1.
 
-   Packet 21a builds the Cover section and 21b the Steps section here; Equipment / Configuration /
-   Run log are packet 21c — they are left as clearly-marked placeholders so that packet's scope
-   stays whole. #}
+   Packet 21a builds the Cover section, 21b the Steps section and 21c the Equipment, Configuration
+   and Run log sections here. #}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -52,6 +51,18 @@ tr { page-break-inside: avoid; }
 .retry { font-size: 7.5pt; color: #1f4e8c; }
 .override { color: #6b3e00; }
 .sub-row td { font-size: 8pt; color: #444; border-top: 0.1mm solid #d8d8d8; }
+/* Equipment, Configuration and log tables (packet 21c). */
+h3 { font-size: 10pt; margin: 3mm 0 1mm 0; color: #1f4e8c; }
+.equip th, .equip td, .config th, .config td, .log th, .log td { border: 0.15mm solid #c9c9c9; }
+.mismatch { background: #fdeceb; }
+tr.mismatch td:first-child::before { content: "\26A0  "; }  /* readable in greyscale print too */
+h2, h3 { break-after: avoid; page-break-after: avoid; }
+table.log { table-layout: fixed; width: 100%; }
+table.log td:nth-child(1), table.log th:nth-child(1) { width: 44mm; white-space: nowrap; }
+table.log td:nth-child(2), table.log th:nth-child(2) { width: 20mm; }
+table.log td:nth-child(3), table.log th:nth-child(3) { width: 18mm; }
+.lvl-warning { color: #b36b00; font-weight: bold; }
+.lvl-error { color: #a4161a; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -71,7 +82,7 @@ tr { page-break-inside: avoid; }
 <div class="small">{{ doc_id or '—' }}{% if doc_rev %} · revision {{ doc_rev }}{% endif %}</div>
 
 {% if interrupted %}<div class="banner">⚠ This Test Run was INTERRUPTED and did not finish.</div>{% endif %}
-{% if checksum_mismatch %}<div class="banner">⚠ One or more files did not match their recorded checksum. See Configuration (packet 21c).</div>{% endif %}
+{% if checksum_mismatch %}<div class="banner">⚠ One or more files did not match their recorded checksum. See the Configuration section.</div>{% endif %}
 {% if pretest_failed_schedule %}<div class="banner">⚠ {{ pretest_failed_schedule.name }} failed: {{ pretest_failed_schedule.error }}</div>{% endif %}
 {% if posttest_failed_schedule %}<div class="banner">⚠ {{ posttest_failed_schedule.name }} errored: {{ posttest_failed_schedule.error }}</div>{% endif %}
 
@@ -144,20 +155,80 @@ tr { page-break-inside: avoid; }
 </table>
 {% if not steps %}<p class="small"><i>No steps in this run.</i></p>{% endif %}
 
-<!-- ============ Equipment (packet 21c) — TODO: declared equipment in declaration order, or
-     "No equipment declared." Placeholder until 21c is implemented. ============ -->
+<!-- ============ Equipment (packet 21c) — what the schedule declared with ATE.addEquipment, in
+     declaration order; nil values print as blanks, and with no Equipment the section says so. ==== -->
 <h2 class="page-break">Equipment</h2>
-<p class="small"><i>[placeholder — packet 21c]</i></p>
+{% if equipment %}
+<table class="equip">
+<thead><tr><th>Name</th><th>Serial</th><th>Connection</th><th>Cal due</th><th>Notes</th></tr></thead>
+<tbody>
+{% for e in equipment %}<tr><td>{{ e.name }}</td><td>{{ e.serial }}</td><td>{{ e.connection }}</td><td>{{ e.cal_due }}</td><td>{{ e.notes }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No equipment declared.</i></p>
+{% endif %}
 
-<!-- ============ Configuration (packet 21c) — TODO: Media Releases, Files and Sub-schedule
-     instances used by this run. Placeholder until 21c is implemented. ============ -->
+<!-- ============ Configuration (packet 21c) — only what this run used: the releases that supplied
+     a file, every run_file row (mismatches highlighted), and the Sub-schedule instances. ==== -->
 <h2>Configuration</h2>
-<p class="small"><i>[placeholder — packet 21c]</i></p>
+<h3>Media Releases</h3>
+{% if media_releases %}
+<table class="config media">
+<thead><tr><th>Media Number</th><th>Name</th><th>Version</th><th>.atedef SHA-256</th></tr></thead>
+<tbody>
+{% for m in media_releases %}<tr><td>{{ m.media_number }}</td><td>{{ m.name }}</td><td>{{ m.version }}</td><td class="mono">{{ m.atedef_sha256 }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No media releases recorded for this run.</i></p>
+{% endif %}
 
-<!-- ============ Run log (packet 21c) — TODO: INFO/WARNING/ERROR lines grouped by owner, in time
-     order within each group. Always included at run end; placeholder until 21c is implemented. ============ -->
+<h3>Files</h3>
+{% if files %}
+<table class="config files">
+<thead><tr><th>Path</th><th>Media Number</th><th>Expected SHA-256</th><th>Computed SHA-256</th><th>Stored</th></tr></thead>
+<tbody>
+{% for f in files %}<tr class="{{ 'mismatch' if f.mismatch else '' }}"><td>{{ f.path }}</td><td>{{ f.media_number }}</td><td class="mono">{{ f.expected }}</td><td class="mono">{{ f.computed }}</td><td>{{ 'yes' if f.stored else 'no' }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No files used by this run.</i></p>
+{% endif %}
+
+<h3>Sub-schedule instances</h3>
+{% if instances %}
+<table class="config instances">
+<thead><tr><th>Schedule</th><th>File</th><th>Prefix</th></tr></thead>
+<tbody>
+{% for i in instances %}<tr><td style="padding-left: {{ (i.depth * 4) + 1.5 }}mm">{{ i.name }}</td><td class="mono">{{ i.file }}</td><td>{{ i.prefix }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No schedule instances.</i></p>
+{% endif %}
+
+<!-- ============ Run log (packet 21c) — INFO/WARNING/ERROR lines grouped by owner: the run, then
+     each Pre-test and Post-test Action, then each step Attempt, each group in time order. Left out
+     when regenerating from History with the toggle off, where a one-line note stands in for it. ==== -->
+{% if include_run_log %}
 <h2 class="page-break">Run log</h2>
-<p class="small"><i>[placeholder — packet 21c]</i></p>
+{% if run_log %}
+{% for g in run_log %}
+<h3>{{ g.label }}</h3>
+<table class="log">
+<thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Text</th></tr></thead>
+<tbody>
+{% for l in g.lines %}<tr><td class="small mono">{{ l.time }}</td><td class="lvl lvl-{{ l.level|lower }}">{{ l.level }}</td><td class="small">{{ l.source }}</td><td>{{ l.text }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% endfor %}
+{% else %}
+<p class="small"><i>No INFO, WARNING or ERROR lines recorded for this run.</i></p>
+{% endif %}
+{% else %}
+<p class="small"><i>Run log left out of this report.</i></p>
+{% endif %}
 
 </body>
 </html>

@@ -79,6 +79,60 @@ def _local(iso_utc: Optional[str], offset: str) -> Optional[str]:
     return f"{local.strftime('%Y-%m-%d %H:%M:%S')}.{local.microsecond // 1000:03d} {offset or '+00:00'}"
 
 
+def owner_keys(store: RunStore, run_uuid: str) -> list[str]:
+    """The owner key of every log line of a run, in recorded order.
+
+    One key per line: ``"run"``, ``"pretest:<instance_seq>"``, ``"posttest:<instance_seq>"`` or
+    ``"step:<node_seq>"``. Shared by the export dialog's owner filter and the report's Run log, so
+    the two can never disagree about who a line belongs to."""
+    lines = store.log_lines(run_uuid)
+    actions = store.actions(run_uuid)
+    pre_instances = {a["instance_seq"] for a in actions if a.get("phase") == "pre"}
+    post_instances = {a["instance_seq"] for a in actions if a.get("phase") == "post"}
+    pre_rows = [a["seq"] for a in actions if a.get("phase") == "pre" and a.get("seq") is not None]
+    last_pre_row = max(pre_rows) if pre_rows else None
+
+    # A log line ties to a Pre-/Post-test Action through ``action_seq`` — the action's
+    # ``instance_seq`` — and each phase enumerates its own actions from 0, so the Pre-test's
+    # and Post-test's first actions share ``action_seq`` 0. Disambiguate by position in the
+    # recorded log: every Pre-test line precedes the first step line, every Post-test line
+    # follows the last one (the phases run before/after all steps, in order).
+    step_indices = [i for i, ln in enumerate(lines) if ln.get("node_seq") is not None]
+    first_step = step_indices[0] if step_indices else None
+    last_step = step_indices[-1] if step_indices else None
+
+    keys: list[str] = []
+    for i, ln in enumerate(lines):
+        node_seq = ln.get("node_seq")
+        if node_seq is not None:
+            keys.append(f"step:{node_seq}")
+            continue
+        action_seq = ln.get("action_seq")
+        if action_seq is None:
+            keys.append("run")
+            continue
+        if first_step is not None and i < first_step:
+            keys.append(f"pretest:{action_seq}")
+            continue
+        if last_step is not None and i > last_step:
+            keys.append(f"posttest:{action_seq}")
+            continue
+        # No step lines: a pre/post-only run. Both phases ran, so the Pre-test's lines precede
+        # the Post-test's. An action's row is written after its own lines and shares the run's
+        # seq counter, so a line recorded before the last Pre-test row is a Pre-test line —
+        # timestamps can't separate them, as both phases can land in the same millisecond.
+        in_pre, in_post = action_seq in pre_instances, action_seq in post_instances
+        if in_pre and not in_post:
+            keys.append(f"pretest:{action_seq}")
+        elif in_post and not in_pre:
+            keys.append(f"posttest:{action_seq}")
+        elif last_pre_row is not None and ln.get("seq") is not None and ln["seq"] < last_pre_row:
+            keys.append(f"pretest:{action_seq}")
+        else:
+            keys.append(f"posttest:{action_seq}" if in_post else "run")
+    return keys
+
+
 def _build_rows(store: RunStore, run_uuid: str, *, levels: Optional[Iterable[str]] = None,
                 sources: Optional[Iterable[str]] = None, owners: Optional[Iterable[str]] = None) -> tuple[dict, list[ExportRow], dict[str, str]]:
     """Return ``(run_row, rows, owner_labels)`` for one run.
@@ -90,6 +144,7 @@ def _build_rows(store: RunStore, run_uuid: str, *, levels: Optional[Iterable[str
     if row is None:
         raise ValueError(f"no test run recorded for {run_uuid!r}")
     lines = store.log_lines(run_uuid)
+    keys = owner_keys(store, run_uuid)
     nodes = store.nodes(run_uuid)
     actions = store.actions(run_uuid)
 
@@ -109,50 +164,12 @@ def _build_rows(store: RunStore, run_uuid: str, *, levels: Optional[Iterable[str
     for node_seq, (number, _name) in step_info.items():
         owner_labels[f"step:{node_seq}"] = f"Step {number or ''}"
 
-    pre_instances = {a["instance_seq"] for a in actions if a.get("phase") == "pre"}
-    post_instances = {a["instance_seq"] for a in actions if a.get("phase") == "post"}
-
-    # A log line ties to a Pre-/Post-test Action through ``action_seq`` — the action's
-    # ``instance_seq`` — and each phase enumerates its own actions from 0, so the Pre-test's
-    # and Post-test's first actions share ``action_seq`` 0. Disambiguate by position in the
-    # recorded log: every Pre-test line precedes the first step line, every Post-test line
-    # follows the last one (the phases run before/after all steps, in order).
-    step_indices = [i for i, ln in enumerate(lines) if ln.get("node_seq") is not None]
-    first_step = step_indices[0] if step_indices else None
-    last_step = step_indices[-1] if step_indices else None
-
-    def _owner_key(i: int, ln: dict[str, Any]) -> str:
-        """The owner key for this line: run / pretest:<n> / posttest:<n> / step:<node_seq>."""
-        node_seq = ln.get("node_seq")
-        if node_seq is not None:
-            return f"step:{node_seq}"
-        action_seq = ln.get("action_seq")
-        if action_seq is None:
-            return "run"
-        if first_step is not None and i < first_step:
-            return f"pretest:{action_seq}"
-        if last_step is not None and i > last_step:
-            return f"posttest:{action_seq}"
-        # No step lines: a pre/post-only run. Both phases ran, so the Pre-test's lines precede
-        # the Post-test's; the action rows' sequential start/end windows separate them.
-        in_pre, in_post = action_seq in pre_instances, action_seq in post_instances
-        if in_pre and not in_post:
-            return f"pretest:{action_seq}"
-        if in_post and not in_pre:
-            return f"posttest:{action_seq}"
-        for a in actions:  # only one of the two windows can contain the line's recorded time
-            if a.get("phase") == "pre" and a.get("instance_seq") == action_seq and \
-               a.get("started_at") and a.get("ended_at") and a["started_at"] <= ln["at"] <= a["ended_at"]:
-                return f"pretest:{action_seq}"
-        return f"posttest:{action_seq}" if in_post else "run"
-
     level_set = None if levels is None else set(levels)
     source_set = None if sources is None else set(sources)
     owner_set = None if owners is None else set(owners)
 
     rows: list[ExportRow] = []
-    for i, ln in enumerate(lines):
-        key = _owner_key(i, ln)
+    for ln, key in zip(lines, keys):
         if key == "run":
             owner, schedule, number, name, attempt = "Run", None, None, None, None
         elif key.startswith("pretest:"):

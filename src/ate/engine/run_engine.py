@@ -543,6 +543,10 @@ class RunEngine(QThread):
                 outcome = "error"
                 error = str(exc).splitlines()[0] if str(exc) else ""
                 host.record_log("ERROR", str(exc))
+                if phase == "pre":
+                    # A Pre-test failure aborts the run (packet 14b). Say so inside this action's
+                    # window, so the line is owned by and recorded with the Action that failed.
+                    host.record_log("ERROR", f"Pre-test Action failed ({error}); the run aborted so every step is NOTRUN.", source="ate")
         finally:
             ended_at = _now_iso()
             # Packet 17b: the last drain inside this action's window — it also writes the action's
@@ -579,11 +583,8 @@ class RunEngine(QThread):
                 result="NOTRUN",
                 attempt_count=0,
             )
-        self._store.insert_log_lines(
-            run_uuid, 0,
-            [{"level": "ERROR", "source": "ate", "text": f"Pre-test Action failed ({error_text}); the run aborted so every step is NOTRUN."}],
-            action_seq=failed_seq,
-        )
+        # The explanation line itself is written inside the failed Action's window
+        # (_record_phase_action), so every reader groups it with that Pre-test Action.
 
     def _tree_children(self) -> dict[int, list[int]]:
         """Each expanded-tree row's direct children, keyed by its node seq (packet 15d)."""
