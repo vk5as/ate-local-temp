@@ -78,6 +78,8 @@ class RunEngine(QThread):
     state_changed = pyqtSignal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
+    step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
 
     def __init__(
         self,
@@ -804,9 +806,13 @@ class RunEngine(QThread):
         pretest_failed = False  # a Pre-test Action that raised aborts the whole run (packet 14b)
         pre_started: list[int] = []
         run_order = 0
+        # Packet 14d: the status bar shows "Pre-test n/total" as each Action starts, so announce
+        # every one with its phase, position and the phase's total before it runs.
+        pre_total = sum(len(self._phase_actions(host.instances[s].schedule, "pre")) for s in self._action_instances(host))
         for instance_seq in self._action_instances(host):
             pre_started.append(instance_seq)
             for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "pre"):
+                self.action_started.emit("pre", run_order + 1, pre_total)
                 outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="pre", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
                 run_order += 1
                 if outcome == "error":
@@ -873,6 +879,9 @@ class RunEngine(QThread):
             attempt_count = 0
             while True:
                 attempt_count += 1
+                # Packet 14d: announce the Attempt so the status bar restarts its current-item timer
+                # (a Retry is a new start of the same step, and gets its own timing).
+                self.step_started.emit(seq)
                 host._attempt_no = attempt_count  # ATE.input POLL reads its sticky state under this key
                 # Ticket 10: put this Attempt's OperatorInput context in place before the action runs
                 # so ATE.input(n) range-checks against THIS step's declarations, and announce each
@@ -1032,11 +1041,13 @@ class RunEngine(QThread):
         # Pre-test order above — an instance reached in the Pre-test pass gets its teardown even
         # when its own Pre-test Action failed, and one the pass never got to gets none.
         run_order = 0
+        post_total = sum(len(self._phase_actions(host.instances[s].schedule, "post")) for s in pre_started)
         for instance_seq in reversed(pre_started):
             for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "post"):
                 # Clear before every action, not just the first: a second abort ends only the action it
                 # lands in, so the flag must not carry over and kill the next one on its first hook tick.
                 self._abort_flag.clear()
+                self.action_started.emit("post", run_order + 1, post_total)
                 outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="post", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
                 run_order += 1
                 if outcome == "aborted":
