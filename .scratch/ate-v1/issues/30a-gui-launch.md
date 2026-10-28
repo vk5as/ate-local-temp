@@ -8,7 +8,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] `ate` with no subcommand (optionally `--config <path>`) starts the GUI. `ate --version` still prints the version and exits; `ate --help` prints usage and exits 0. The existing subcommands are unchanged.
+- [ ] `ate` with no subcommand (optionally `--config <path>`) starts the GUI. `ate --version` still prints the version and exits; `ate --help` prints usage and exits 0, and `ate <subcommand> --help` prints that subcommand's help without running it (today `ate setup --help` runs setup). The existing subcommands otherwise behave as before.
 - [ ] Launch sequence, each step reusing the existing code:
   - read the config once, showing the missing-config prompt as a dialog ("Create default config and launch" / "Abort");
   - open the per-launch application log;
