@@ -15,6 +15,7 @@ import time
 import tomllib
 from pathlib import Path
 
+import pytest
 from PyQt6.QtCore import QCoreApplication, Qt
 
 from ate import _version
@@ -201,18 +202,46 @@ def test_headless_run_records_the_ate_version(app: QCoreApplication, tmp_path: P
     assert row["ate_version"]  # never empty: every run says which ATE ran it
 
 
+def _package_data_patterns(package_data: dict) -> list[str]:
+    """The patterns setuptools applies to the ``ate`` packages, or a ValueError if a key names nothing we ship.
+
+    A key must be the whole tree: ``"*"``, ``"ate"`` or ``"ate.*"``. ``{"whatever": ["*.lua"]}`` is valid
+    TOML and ships nothing, because no package is named `whatever`.
+    """
+    if not package_data:
+        raise ValueError("package-data is empty: no resource would ship")
+    patterns = []
+    for key, value in package_data.items():
+        if key not in {"*", "ate", "ate.*"}:
+            raise ValueError(f"package-data key {key!r} names no ate package: {sorted(package_data)}")
+        if not isinstance(value, list):
+            raise ValueError(f"package-data key {key!r} is a nested table, not a list of patterns")
+        patterns.extend(value)
+    return patterns
+
+
 def test_bundled_modules_ship_inside_the_package() -> None:
     """``ate/lua/*.lua`` is package data. The tests run from the source tree, so this checks the
     config a wheel is built from: the keys must be quoted, because a bare dotted key (``ate.lua =``)
-    is a nested TOML table that setuptools rejects, and then no wheel builds at all."""
+    is a nested TOML table that setuptools rejects, and then no wheel builds at all. Packet 28a's
+    wildcard key ``"*"`` covers every package, so a new resource of a listed extension needs no
+    pyproject edit."""
     assert _bundled_bytes("devices"), "ATE ships a bundled devices module"
     lua_dir = importlib.resources.files("ate") / "lua"
     assert (lua_dir / "devices.lua").is_file()
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     package_data = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]
-    assert package_data.get("ate.lua") == ["*.lua"], f"package-data must ship ate/lua/*.lua: {package_data}"
-    assert package_data.get("ate.report") == ["templates/*.j2"], f"and the report template: {package_data}"
-    assert all(isinstance(v, list) for v in package_data.values()), f"no nested tables: {package_data}"
+    patterns = _package_data_patterns(package_data)
+    assert "*.lua" in patterns, f"package-data must ship ate/lua/*.lua: {package_data}"
+    assert "*.j2" in patterns, f"and the report template: {package_data}"
+
+
+def test_a_package_data_key_must_name_the_ate_packages() -> None:
+    """`{"whatever": ["*.lua"]}` looks right and matches no package: it must not pass the check."""
+    with pytest.raises(ValueError, match="names no ate package"):
+        _package_data_patterns({"whatever": ["*.lua"]})
+    for good in ({"*": ["*.lua", "*.j2"]}, {"ate": ["*.lua"]}, {"ate.*": ["*.j2"]}):
+        _package_data_patterns(good)
 
 
 def test_an_ate_name_cannot_walk_out_of_the_bundled_directory(app: QCoreApplication) -> None:
