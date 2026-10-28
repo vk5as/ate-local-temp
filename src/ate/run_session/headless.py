@@ -67,6 +67,8 @@ class HeadlessRunSession(QObject):
     input_answered = pyqtSignal(int, int, int, object)
     step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
+    step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
     def __init__(self, config: Config | None = None) -> None:
@@ -508,6 +510,10 @@ class HeadlessRunSession(QObject):
         # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
         # answer it through this session once it fires — same connection timing as input asks above.
         self._engine.failure_prompt.connect(self._on_failure_prompt)
+        # Forward the worker's phase announcements (packet 14d) so the Run screen's status bar can
+        # count Pre-/Post-test Actions and restart its current-item timer without polling the worker.
+        self._engine.action_started.connect(self._on_action_started)
+        self._engine.step_started.connect(self._on_step_started)
 
         self._engine.start()
         return self._engine
@@ -527,3 +533,16 @@ class HeadlessRunSession(QObject):
 
         Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
         self.failure_prompt.emit(node_seq, attempt_no)
+
+    def _on_action_started(self, phase: str, done: int, total: int) -> None:
+        """Forward the worker's Pre-/Post-test Action announcement for the status bar (packet 14d).
+
+        ``phase`` is "pre" or "post"; ``done`` is the 1-based position of the Action that has just
+        begun within its phase and ``total`` how many Actions that phase has."""
+        self.action_started.emit(phase, done, total)
+
+    def _on_step_started(self, node_seq: int) -> None:
+        """Forward the worker's Test Step start so the status bar restarts its current-item timer.
+
+        Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
+        self.step_started.emit(node_seq)
