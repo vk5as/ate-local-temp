@@ -14,7 +14,7 @@ version the frozen builds bundle). Anything older is refused by
 git clone <this repository> && cd ate-ornith
 python3.13 -m venv .venv            # or python3.14
 source .venv/bin/activate
-pip install -e ".[test]"
+pip install -e ".[test]"            # pytest, pytest-qt, and the build tooling (setuptools, build)
 pytest                              # needs no display: QT_QPA_PLATFORM=offscreen helps on CI
 ```
 
@@ -22,12 +22,16 @@ Run it:
 
 ```bash
 ate setup --root /tmp/ate-station   # creates the config, database and data directories
-ate                                 # opens the GUI (Qt needs a display)
-ate --version                       # the version baked from the git tag
+ate --version                       # the version baked from the git tag: the install check
 ```
 
-`ate setup` must be run as root (or with `--no-permissions`) to set the `ate`
-group and the file permissions; see the spec's Packaging section.
+`ate --version` is how you verify the install. The GUI is started with `ate` once the
+application shell is in place (packet 30a adds it); until then there is no GUI command.
+
+`ate setup` is best run as admin or root: elevated, it creates the `ate` group and sets
+the ownership and permissions of the station directories. Run unprivileged it warns and
+skips those steps (or force the skip with `--no-permissions`); the directories themselves
+are still created. See the spec's Packaging section.
 
 On Windows the venv paths are `.venv\Scripts\activate` instead.
 
@@ -47,7 +51,7 @@ Install it the way a Station operator would:
 ```bash
 pipx install dist/ate-0.0.0.dev0-py3-none-any.whl
 ate setup
-ate
+ate --version
 ```
 
 `pipx` puts `ate` on the PATH in its own virtual environment; `pip install` into
@@ -60,6 +64,6 @@ step is needed for them.
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen pytest -q
 ```
 
-The wheel test builds a wheel into a temporary directory and takes a few seconds;
-the one that installs it into a fresh venv is marked `slow` and needs a network.
-Skip both with `pytest -m "not slow"`.
+The wheel test builds a wheel from a clean copy into a temporary directory and takes a few
+seconds. The only test marked `slow` is the one that installs the wheel into a fresh venv
+from PyPI: `pytest -m "not slow"` deselects just that one.
