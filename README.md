@@ -31,6 +31,9 @@ pytest
 `ate --version` prints the version baked from the git tag at build time (a safe
 dev version when untagged).
 
+Full source-build and wheel instructions, including `pipx install` and
+`ate setup`, are in [docs/building-from-source.md](docs/building-from-source.md).
+
 ## Known limitation
 
 Ticket 01 builds the skeleton only. The pinned lupa wheel cannot host Lua
