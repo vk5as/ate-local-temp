@@ -23,7 +23,7 @@ import html
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFontMetrics
