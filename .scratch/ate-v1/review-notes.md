@@ -388,3 +388,25 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Its final reply cut off before the 3 suite runs, so I ran them.
 - Light review: 864 passed ×3 (~89 s, up from ~82 s); collection 853 → 864, none lost; screenshots in /tmp/14d-r2-shots OK.
 - Leftovers: during a pause, "Current" shows the failed step's time and keeps counting (by design).
+
+## 28a — Wheel and source build (merged 2026-10-29)
+- Implementer (Strata, high): 86 steps, 102 min, 1 of 4 parallel sessions.
+- Reviews: Haiku 5 must-fix; Strata 4 must-fix, all of them also in Haiku's list. The four:
+  - `pyvisa>=1.22` doesn't exist (1.16.2 is the newest);
+  - the test needs setuptools, which a fresh venv lacks;
+  - a stale `src/ate.egg-info` makes setuptools ship unlisted data files, so the resource test could pass on a broken wheel;
+  - the docs claimed bare `ate` opens the GUI.
+- **Gap found:** no packet launches the GUI at all; only the PDF helper creates a QApplication. Added packet 30a (GUI launch: main window, launch checks), and 25b now waits on it.
+- Rework (Strata, high, 0 compactions):
+  - floors are checked against the installed versions;
+  - `[test]` extra gains setuptools and build;
+  - the wheel builds from a clean temp copy, and the repo's `build/` and egg-info are never touched;
+  - the docs are honest;
+  - the package-data key is tied to `ate`;
+  - the network probe runs inside the test;
+  - a pip error fails the install test instead of skipping it.
+  - Each fix is mutation-proven.
+- Light review: collection 864 → 878, none lost.
+  - Suite: 1 failed + 877 passed on run 1 of 3. 7 later full runs and 8 runs of the 28a files all passed, and the failing test was not captured. It is likely a pre-existing flake; watch for it.
+  - Suite time is now ~95 s (was ~89 s; the wheel builds add ~6 s).
+- Leftovers: `ate --help` exits 1 and `ate setup --help` runs setup (pre-existing CLI issue). Fold this into 30a.
