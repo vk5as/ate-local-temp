@@ -337,17 +337,20 @@ def _append_input_rows(list_widget: QListWidget, widgets: list["StepInputWidget"
     """Add one row per Step Input widget, indented under the step that declared it.
 
     A list item can carry only one widget, so every Step Input gets its own row — the mockup's
-    `.inputs` block, one level deeper than its step. The row's text is the input's own description,
-    which the widget covers once it is drawn.
+    `.inputs` block, one level deeper than its step. The item text stays empty: any text would be
+    drawn *under* the widget, which already paints the input's description, and the row would read
+    twice (packet 10a review). The indent comes from the widget's own left margin, the mockup's
+    `.inputs { margin-left: 26px }`.
     """
     items: list[QListWidgetItem] = []
     for widget in widgets:
-        item = QListWidgetItem(_row_label("", widget.declaration.desc, depth))
+        item = QListWidgetItem("")
         # Not selectable: clicking the row itself means nothing; the controls inside it are the point.
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         item.setSizeHint(widget.sizeHint())
         list_widget.addItem(item)
         list_widget.setItemWidget(item, widget)
+        widget.input_item = item  # so the screen can scroll to the row an input is asked for
         items.append(item)
     return items
 
@@ -390,6 +393,9 @@ class StepInputWidget(QWidget):
         #: The Attempt this input was last asked for; a Retry re-asks the same index (packet 12c).
         self.attempt_no = 1
 
+        #: The list row this widget is attached to, set by _append_input_rows; None while detached.
+        self.input_item: Optional[QListWidgetItem] = None
+
         self.radios: list[QRadioButton] = []
         self.checks: list[QCheckBox] = []
         self.choice_buttons: list[QPushButton] = []
@@ -403,7 +409,9 @@ class StepInputWidget(QWidget):
             self.setToolTip(declaration.tooltip)
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(6, 2, 6, 2)
+        # The mockup's `.inputs` block is indented 26 px under its step; with the row item text
+        # empty, the indent has to come from the widget's own left margin (26 + the 6 px padding).
+        outer.setContentsMargins(32, 2, 6, 2)
         outer.setSpacing(8)
         outer.addWidget(QLabel(f"{self.index}. {declaration.desc}"))  # the mockup's .inp-desc
 
@@ -423,19 +431,26 @@ class StepInputWidget(QWidget):
             self.radios = [QRadioButton(label) for label in declaration.enum]
             for radio in self.radios:
                 controls.addWidget(radio)
+                self.controls.append(radio)
             self._add_ok(lambda: self._submit(next((r.text() for r in self.radios if r.isChecked()), None)))
         elif declaration.type == "ENUM" and declaration.widget == "CHECKBOX":
             self.checks = [QCheckBox(label) for label in declaration.enum]
             for check in self.checks:
                 controls.addWidget(check)
+                self.controls.append(check)
             self._add_ok(lambda: self._submit([c.text() for c in self.checks if c.isChecked()]))
         elif declaration.type == "ENUM":  # PUSHBUT: clicking a choice is the answer
             for label in declaration.enum:
                 self._add_button(label, lambda *_seen, label=label: self._submit(label))
         elif declaration.type in ("INTEGER", "FLOAT", "STRING"):
+            # `.inp input[type=text] { width: 140px }` — the line edit is one of the controls,
+            # not a decoration: it must sit in the layout (packet 10a review).
             self.line_edit = QLineEdit()
+            self.line_edit.setFixedWidth(140)
             self.line_edit.setPlaceholderText(self._placeholder())
             self.line_edit.returnPressed.connect(lambda: self._submit(self.line_edit.text()))
+            controls.addWidget(self.line_edit)
+            self.controls.append(self.line_edit)
             self._add_ok(lambda: self._submit(self.line_edit.text()))
         else:  # PROMPT and POLL: one button per prompt text
             for text in declaration.prompt:
@@ -443,7 +458,6 @@ class StepInputWidget(QWidget):
                     self._add_button(text, lambda *_seen, text=text: self._click_poll(text))
                 else:
                     self._add_button(text, lambda *_seen, text=text: self._submit(text))
-
         outer.addWidget(self._controls_widget, stretch=1)
         self.value_label = QLabel("")
         self.value_label.setObjectName("input_value")
@@ -453,6 +467,9 @@ class StepInputWidget(QWidget):
         self.error_label.setStyleSheet(_INPUT_ERROR_STYLE)
         outer.addWidget(self.value_label)
         outer.addWidget(self.error_label)
+        if declaration.type == "POLL":
+            # The mockup's POLL row: `clicked: ${inp.poll ?? '(none)'}` before the first click.
+            self.value_label.setText("clicked: (none)")
 
         # Always visible, inert until asked: the session decides when this input is live.
         self.deactivate()
@@ -471,6 +488,8 @@ class StepInputWidget(QWidget):
     def _add_ok(self, answer: Callable[[], Any]) -> None:
         """The OK button every line-edit and pick-one widget has."""
         self.ok_button = QPushButton("OK")
+        # `.inp-w` gives a button its content width; it must not stretch to the row (review).
+        self.ok_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.ok_button.clicked.connect(lambda *_seen: answer())
         self.controls.append(self.ok_button)
         self._controls_widget.layout().addWidget(self.ok_button)
@@ -478,6 +497,7 @@ class StepInputWidget(QWidget):
     def _add_button(self, text: str, answer: Callable[[], None]) -> None:
         """A PUSHBUT/PROMPT/POLL button: clicking it is the whole interaction."""
         button = QPushButton(text)
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         button.clicked.connect(answer)
         self.choice_buttons.append(button)
         self.controls.append(button)
@@ -495,7 +515,11 @@ class StepInputWidget(QWidget):
         for control in self.controls:
             control.setEnabled(True)
         self.setStyleSheet(_INPUT_ACTIVE_STYLE)
-        if self.controls:
+        # The mockup's `focusActive`: the waiting line edit takes the cursor, so Enter submits;
+        # a widget without one focuses its first control.
+        if self.line_edit is not None:
+            self.line_edit.setFocus()
+        elif self.controls:
             self.controls[0].setFocus()
 
     def deactivate(self) -> None:
@@ -505,8 +529,15 @@ class StepInputWidget(QWidget):
             control.setEnabled(False)
 
     def answer(self, value: Any) -> None:
-        """Show the recorded answer and stop accepting more of it."""
+        """Show the recorded answer; a blocking input then closes, a POLL stays open.
+
+        A blocking type is asked once, so it deactivates. A POLL is clickable for as long as its
+        step runs: every click updates the mockup's `clicked:` note and the button stays live
+        until the step ends (packet 10a review)."""
         decl = self.declaration
+        if decl.type == "POLL":
+            self.value_label.setText(f"clicked: {value}")
+            return
         if self.radios:
             for radio in self.radios:
                 radio.setChecked(radio.text() == value)
@@ -516,9 +547,7 @@ class StepInputWidget(QWidget):
                 check.setChecked(check.text() in chosen)
         elif self.line_edit is not None:
             self.line_edit.setText("" if value is None else str(value))
-        if decl.type == "POLL":
-            self.value_label.setText(f"clicked: {value}")
-        elif decl.type in ("PUSHBUT", "PROMPT") or (decl.type == "ENUM" and decl.widget == "PUSHBUT"):
+        if decl.type in ("PUSHBUT", "PROMPT") or (decl.type == "ENUM" and decl.widget == "PUSHBUT"):
             self.value_label.setText(f"chose: {value}")
         self.deactivate()
 
@@ -533,11 +562,19 @@ class StepInputWidget(QWidget):
         if error:
             self.error_label.setText(error)
             return
-        self.session.supply_input(self.node_seq, self.attempt_no, self.index, value)
+        try:
+            self.session.supply_input(self.node_seq, self.attempt_no, self.index, value)
+        except ValueError as exc:
+            # The session says this input is not waiting (or the value is not acceptable): show it
+            # rather than crashing the click, and the widget stays as it is (10a review).
+            self.error_label.setText(str(exc))
 
     def _click_poll(self, text: str) -> None:
         """Record a POLL click through the session; the sticky value is the button's text."""
-        self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
+        try:
+            self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
 
 
 class StepsOptionsStage(QWidget):
@@ -905,34 +942,71 @@ class RunView(QWidget):
         ever asks for one: the spec says every step is listed with its inputs always visible. The
         widgets are made from the schedule's validated declarations, exactly as the mockup's
         ``inputsHTML`` renders them."""
-        self._detach_input_rows()
         for widgets in self.input_widgets.values():
             for widget in widgets:
                 widget.setParent(None)
                 widget.deleteLater()
         self.input_widgets = {}
+        # Nothing carries a widget yet (they were deleted just above), so clearing is safe: an item
+        # takes its widget with it only when it is destroyed still holding one (packet 10a review).
         self.step_list.clear()
+        rows: list[tuple] = []
         for seq, step in enumerate(steps):
-            item = QListWidgetItem(
-                _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
-            )
-            if getattr(step, "is_header", False):
-                item.setBackground(QColor(_HEADER_BG))
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.step_list.addItem(item)
+            is_header = bool(getattr(step, "is_header", False))
+            rows.append((
+                _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0))),
+                None,
+                is_header,
+                QColor(_HEADER_BG) if is_header else None,
+                0,
+            ))
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
                 self.input_widgets[seq] = [StepInputWidget(decl, self.session, seq) for decl in declarations]
-                self.add_input_rows(seq, int(getattr(step, "depth", 0)) + 1)
+                for widget in self.input_widgets[seq]:
+                    rows.append(("", widget, False, None, 0))
+        self._render_rows(rows)
 
-    def add_input_rows(self, node_seq: int, depth: int) -> None:
-        """Attach this step's input widgets as rows, immediately after the row just added."""
-        widgets = self.input_widgets.get(node_seq)
-        if not widgets:
-            return
-        _append_input_rows(self.step_list, widgets, depth)
+    def _render_rows(self, rows: list[tuple]) -> list[QListWidgetItem]:
+        """Draw ``(text, input widget or None, is_header, background, font bump)`` into the step list.
+
+        Rows are updated in place rather than cleared (packet 10a review): a QListWidgetItem that
+        carries a Step Input widget deletes that widget when the item is destroyed, so rebuilding the
+        list with ``clear()`` wiped out every answer the Operator had given and left the view painting
+        a deleted widget. Every rebuild of a run has the same rows — one per step plus one per
+        declared input — so each row is reused and only its text, background and font change."""
+        list_widget = self.step_list
+        while list_widget.count() > len(rows):
+            extra = list_widget.takeItem(list_widget.count() - 1)
+            widget = list_widget.itemWidget(extra)  # a schedule with fewer rows: drop the orphan too
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        items: list[QListWidgetItem] = []
+        for index, (text, widget, is_header, background, bump) in enumerate(rows):
+            if index >= list_widget.count():
+                item = QListWidgetItem(text)
+                list_widget.addItem(item)
+                item.setData(Qt.ItemDataRole.UserRole, item.font().pointSize())  # the un-bumped size
+            else:
+                item = list_widget.item(index)
+                item.setText(text)
+            item.setBackground(background if background is not None else QBrush())
+            font = item.font()
+            base = item.data(Qt.ItemDataRole.UserRole)
+            font.setPointSize(int(base if base is not None else font.pointSize()) + bump)
+            font.setBold(is_header or bump > 0)
+            item.setFont(font)
+            if widget is not None:
+                # Not selectable: clicking the row itself means nothing; the controls inside it are
+                # the point. The indent is the widget's own left margin (the mockup's `.inputs`).
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                item.setSizeHint(widget.sizeHint())
+                if list_widget.itemWidget(item) is not widget:
+                    list_widget.setItemWidget(item, widget)
+                widget.input_item = item
+            items.append(item)
+        return items
 
     def input_widget(self, node_seq: int, index: int) -> Optional[StepInputWidget]:
         """The widget for the n-th (1-based) Step Input of the step at ``node_seq``, if any."""
@@ -940,17 +1014,6 @@ class RunView(QWidget):
             if widget.index == index:
                 return widget
         return None
-
-    def _detach_input_rows(self) -> None:
-        """Remove every item widget from the step list, keeping the widgets themselves alive.
-
-        ``clear()`` would leave each input widget parented to the viewport (packet 05b review);
-        detaching first lets the same widgets — the ones that hold the answers the Operator gave —
-        be re-attached when the list is rebuilt."""
-        for row in range(self.step_list.count()):
-            item = self.step_list.item(row)
-            if self.step_list.itemWidget(item) is not None:
-                self.step_list.removeItemWidget(item)
 
     def refresh(self, nodes: list[dict], attempts: list[dict], log_lines: list[dict]) -> None:
         """Render a finished run's steps, failure bar, and Log/Summary from the store.
@@ -970,8 +1033,6 @@ class RunView(QWidget):
         for widgets in self.input_widgets.values():
             for widget in widgets:
                 widget.deactivate()
-        self._detach_input_rows()
-        self.step_list.clear()
         # Packet 15b: header rows show their Step Number and name with no result, and every row is
         # indented by its depth in the expanded tree, as on the Steps & options stage. Packet 15d:
         # header rows get the mockup's `#eef1f5` background and bold name, and a rollup of the
@@ -980,7 +1041,8 @@ class RunView(QWidget):
         depths = _node_depths(nodes)
         children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
         by_seq = {node["node_seq"]: node for node in nodes}
-        last = None
+        rows: list[tuple] = []
+        last_step_row = None
         for node in nodes:
             text = _row_label(node.get("step_number"), node.get("step_name"), depths[node.get("node_seq")])
             is_header = node.get("kind") != "step"
@@ -992,22 +1054,16 @@ class RunView(QWidget):
                                      lambda seq: by_seq[seq].get("result"))
                 if rollup:
                     text += f"  {rollup}"
-            item = QListWidgetItem(text)
-            if is_header:
-                item.setBackground(QColor(_HEADER_BG))
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.step_list.addItem(item)
+            rows.append((text, None, is_header, QColor(_HEADER_BG) if is_header else None, 0))
             if not is_header:
-                self.add_input_rows(node["node_seq"], depths[node["node_seq"]] + 1)
-                last = item
+                last_step_row = len(rows) - 1
+                for widget in self.input_widgets.get(node["node_seq"], ()):
+                    rows.append(("", widget, False, None, 0))
         # The latest step is the current one; enlarge it so the eye lands on where we are.
-        if last is not None and self.step_list.count() > 1:
-            font = last.font()
-            font.setPointSize(font.pointSize() + 2)
-            font.setBold(True)
-            last.setFont(font)
+        if last_step_row is not None and len(rows) > 1:
+            text, widget, is_header, background, _ = rows[last_step_row]
+            rows[last_step_row] = (text, widget, is_header, background, 2)
+        self._render_rows(rows)
 
         failed = any(node.get("result") in ("FAIL", "ERROR") for node in nodes)
         if failed:
@@ -1222,6 +1278,8 @@ class StagedRunScreen(QWidget):
         # closed with the value showing.
         self.session.input_asked.connect(self._on_input_asked)
         self.session.input_answered.connect(self._on_input_answered)
+        # A step's Attempt loop ending closes its POLL widgets: they are live only while it runs.
+        self.session.step_finished.connect(self._on_step_finished)
 
         # Selecting a row records that selection on the session, so starting later resolves
         # exactly what the Operator picked; the notes label mirrors it for confirmation. Both the
@@ -1517,28 +1575,26 @@ class StagedRunScreen(QWidget):
         """Rebuild the step list mid-run: done steps from the store, the failing one marked, the rest pending.
 
         Rows normally only exist after FINISHED (refresh), so a pause renders its own list; the
-        failing step's row gets the pause highlight and is remembered so the choice can clear it."""
+        failing step's row gets the pause highlight and is remembered so the choice can clear it.
+        Packet 10a review: the rows are updated in place (``RunView._render_rows``) rather than
+        cleared and re-added — destroying an item that carries a Step Input widget deletes that
+        widget, and the pause then painted a dead widget (SIGSEGV while the run is paused)."""
         run_uuid = self.session.run_uuid
         nodes = self.session.store.nodes(run_uuid) if run_uuid else []
         done = {node.get("node_seq"): node for node in nodes if node.get("kind") == "step"}
         steps = self._load_schedule_steps(self.session.selected_schedule or "")
-        self.run_view.step_list.clear()
-        self._failed_row = None
         # Packet 15d: header rows are styled like the finished list and roll up the steps beneath
         # them, so a paused run still shows how far each Sub-schedule got.
         children = _children_of_rows(steps, lambda step: getattr(step, "parent", None))
+        rows: list[tuple] = []
+        failed_index = None
         for seq, step in enumerate(steps):
             text = _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
             if getattr(step, "is_header", False):  # a header row has no result, as in the finished list
                 rollup = _rollup_text(seq, children,
                                       lambda index: getattr(steps[index], "is_header", False),
                                       lambda index: done[index].get("result") if index in done else None)
-                item = QListWidgetItem(text + (f"  {rollup}" if rollup else ""))
-                item.setBackground(QColor(_HEADER_BG))
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-                self.run_view.step_list.addItem(item)
+                rows.append((text + (f"  {rollup}" if rollup else ""), None, True, QColor(_HEADER_BG), 0))
                 continue
             if seq == node_seq:
                 state = result
@@ -1546,13 +1602,14 @@ class StagedRunScreen(QWidget):
                 state = str(done[seq].get("result", ""))
             else:
                 state = "…"
-            item = QListWidgetItem(f"{text}  →  {state}")
+            # The pause highlight: a pale red row, cleared once the Operator chooses.
             if seq == node_seq:
-                # The pause highlight: a pale red row, cleared once the Operator chooses.
-                item.setBackground(QColor("#fff0f0"))
-                self._failed_row = item
-            self.run_view.step_list.addItem(item)
-            self.run_view.add_input_rows(seq, int(getattr(step, "depth", 0)) + 1)
+                failed_index = len(rows)
+            rows.append((f"{text}  →  {state}", None, False, QColor("#fff0f0") if seq == node_seq else None, 0))
+            for widget in self.run_view.input_widgets.get(seq, ()):
+                rows.append(("", widget, False, None, 0))
+        items = self.run_view._render_rows(rows)
+        self._failed_row = items[failed_index] if failed_index is not None else None
 
     def _set_paused_header(self) -> None:
         """While a prompt is pending the header goes red and reads WAITING (see _update_header)."""
@@ -1590,8 +1647,18 @@ class StagedRunScreen(QWidget):
         decides whether the input is answerable — the session announced it, so the layout renders it.
         """
         widget = self.run_view.input_widget(node_seq, index)
-        if widget is not None:
-            widget.activate(attempt_no)
+        if widget is None:
+            return
+        widget.activate(attempt_no)
+        # The mockup scrolls the asking row into view so the Operator sees it (packet 10a review).
+        if widget.input_item is not None:
+            self.run_view.step_list.scrollToItem(widget.input_item)
+
+    def _on_step_finished(self, node_seq: int) -> None:
+        """One step's Attempts are done: nothing may answer its POLL any more, so close its widgets."""
+        for widget in self.run_view.input_widgets.get(node_seq, ()):
+            if widget.declaration.type == "POLL":
+                widget.deactivate()
 
     def _on_input_answered(self, node_seq: int, attempt_no: int, index: int, value: object) -> None:
         """An answer arrived through the session: show it on the widget and close it."""
