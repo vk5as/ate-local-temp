@@ -1,6 +1,6 @@
 # Model evaluation — ATE v1 build
 
-Generated 2026-10-28 00:13 by `model_eval.py`, after 51 merged packets/tickets. Regenerated every 5 merged packets.
+Generated 2026-10-29 08:24 by `model_eval.py`, after 57 merged packets/tickets. Regenerated every 5 merged packets.
 
 ## Summary
 
@@ -68,7 +68,7 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | Model | Role | Runs | Packets | Total time | Median run | Sec / step | Output tok / s | Compactions / 100 steps | Max peak context |
 |---|---|---|---|---|---|---|---|---|---|
 | Claude Haiku 💲 | haiku-reviewer | 21 | 12 | 50 min | 2 min | 10 | 150 | 0.0 | 102,221 |
-| Claude Haiku 💲 | side-job | 20 | 0 | 57 min | 3 min | 10 | 136 | 0.0 | 106,301 |
+| Claude Haiku 💲 | side-job | 29 | 0 | 1.9 h | 3 min | 11 | 109 | 0.0 | 156,762 |
 | Claude Opus 💲 | opus-helper | 1 | 1 | 4 min | 4 min | 11 | 63 | 0.0 | 64,758 |
 | Claude Opus 💲 | opus-implementer | 7 | 5 | 1.5 h | 8 min | 22 | 46 | 0.0 | 178,993 |
 | Ornith 1.5 9B (LM Studio) | explorer | 1 | 1 | 2 min | 2 min | 15 | 31 | 0.0 | 50,451 |
@@ -79,8 +79,9 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | Qwen-long 3.8 27B Q4 (llama.cpp) | reviewer | 4 | 2 | 51 min | 12 min | 33 | 23 | 4.3 | 48,206 |
 | Qwen3.5 9B FP8 (vLLM) | implementer | 5 | 2 | 1.0 h | 14 min | 6 | 49 | 0.0 | 135,075 |
 | Qwen3.5 9B FP8 (vLLM) | reviewer | 7 | 2 | 27 min | 2 min | 5 | 44 | 0.0 | 109,577 |
-| Qwen3.8 Flash Next Q2 (Strata) | implementer | 17 | 16 | 8.2 h | 23 min | 15 | 38 | 0.3 | 185,612 |
-| Qwen3.8 Flash Next Q2 (Strata) | reviewer | 19 | 17 | 7.8 h | 20 min | 20 | 42 | 0.2 | 211,278 |
+| Qwen3.8 Flash Next Q2 (Strata) | explorer | 2 | 2 | 59 min | 30 min | 14 | 45 | 0.0 | 165,567 |
+| Qwen3.8 Flash Next Q2 (Strata) | implementer | 24 | 22 | 11.2 h | 26 min | 15 | 38 | 0.2 | 205,131 |
+| Qwen3.8 Flash Next Q2 (Strata) | reviewer | 25 | 23 | 13.9 h | 21 min | 20 | 42 | 0.3 | 211,278 |
 | saluki 27B IQ2_XS (llama.cpp) | implementer | 9 | 7 | 14.9 h | 87 min | 58 | 13 | 0.8 | 152,355 |
 | saluki 27B IQ2_XS (llama.cpp) | reviewer | 11 | 7 | 5.9 h | 30 min | 38 | 17 | 0.0 | 101,215 |
 
@@ -140,6 +141,12 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | 15b | Qwen3.8 Flash Next Q2 | 1 | Opus | 0 | 1.4 h | yes |
 | 17c | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 1.5 h | yes |
 | 15e | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 0.9 h | yes |
+| 15d | Qwen3.8 Flash Next Q2 | 2 | — | 0 | 1.6 h | yes |
+| 20 | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 0.9 h | yes |
+| 21b | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 1.2 h | yes |
+| 21c | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 1.0 h | yes |
+| 05b | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 17.6 h | yes |
+| 10a | Qwen3.8 Flash Next Q2 | 1 | — | 0 | 9.7 h | yes |
 | 01 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 02 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
 | 04 | Ornith 1.5 9B | 1 | — | 0 | — | yes (no merge commit) |
@@ -152,8 +159,8 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 
 | Model | Role | Input tokens | of which cache reads | Output tokens |
 |---|---|---|---|---|
-| Claude Opus | orchestrator | 430.5M | 420.3M | 1018k |
+| Claude Opus | orchestrator | 479.4M | 467.8M | 1140k |
+| Claude Haiku | side-job | 36.4M | 34.1M | 748k |
 | Claude Opus | opus-implementer | 22.7M | 22.0M | 250k |
-| Claude Haiku | side-job | 19.1M | 17.6M | 468k |
 | Claude Haiku | haiku-reviewer | 15.8M | 14.3M | 450k |
 | Claude Opus | opus-helper | 1.2M | 1.2M | 16k |

@@ -4,7 +4,7 @@
 
 **What to build:** The layout is selectable per Station and switchable mid-run.
 
-**Blocked by:** 25a (Three-pane Run screen)
+**Blocked by:** 25a (Three-pane Run screen), 30a (GUI launch: the main window the View menu lives in)
 
 **Status:** ready-for-agent
 

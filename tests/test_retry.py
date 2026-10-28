@@ -28,6 +28,7 @@ def _drive_with_choices(
     stop_on_fail: bool = True,
     values_by_index: dict[int, float] | None = None,
     values_by_attempt: dict[int, float] | None = None,
+    unread_by_attempt: dict[int, float] | None = None,
 ) -> tuple[RunStore, dict, list[tuple[int, int]], list[tuple[int, int, int]]]:
     """Drive ``source`` on a fresh engine; answer the n-th Stop-on-Fail prompt with ``choices[n-1]``.
 
@@ -35,7 +36,11 @@ def _drive_with_choices(
     failure_prompt in order and ``asks`` the (node_seq, attempt_no, index) of each input_asked. The
     pump loop runs in lock-step with the worker so the queued failure_prompt -> choose delivery
     wakes the blocked worker deterministically before we inspect rows (a bare QThread.wait races
-    the step boundary)."""
+    the step boundary).
+
+    ``unread_by_attempt`` supplies a blocking value for an Attempt whose action never asked for one
+    — the stale answer an Operator could have typed — so a test can check the next Attempt does not
+    read it (packet 12c checkbox 1)."""
     captured = {}
     prompts: list[tuple[int, int]] = []
     asks: list[tuple[int, int, int]] = []
@@ -45,6 +50,9 @@ def _drive_with_choices(
 
     def _on_failure(node_seq: int, attempt_no: int) -> None:
         prompts.append((node_seq, attempt_no))
+        if unread_by_attempt and attempt_no in unread_by_attempt:
+            # Answered for an input this Attempt never asked for; it must be cleared by the retry.
+            engine.operator_input.supply_input(0, unread_by_attempt[attempt_no])
         engine.choose(choices[len(prompts) - 1])  # answer the pending prompt; wakes the worker
 
     def _on_input_asked(node_seq: int, attempt_no: int, index: int) -> None:
@@ -309,12 +317,15 @@ def test_blocking_value_from_an_earlier_attempt_is_not_reused(app: QCoreApplicat
     action never read must not satisfy Attempt 2's ATE.input. Without the per-Attempt reset the stale
     value sits in the pending map and Attempt 2 reads it at once instead of waiting for its own."""
     store, row, prompts, asks = _drive_with_choices(
-        app, UNREAD_INPUT_SOURCE, ["RETRY"], values_by_attempt={1: 1.0, 2: 2.0}
+        app, UNREAD_INPUT_SOURCE, ["RETRY"], values_by_attempt={1: 1.0, 2: 2.0}, unread_by_attempt={1: 1.0}
     )
 
     assert row is not None
     assert prompts == [(0, 1)]
-    assert asks == [(0, 1, 1), (0, 2, 1)]
+    # Packet 10a review: input_asked fires when ATE.input(n) actually blocks, so Attempt 1 — which
+    # fails before reading its input — announces nothing; the 1.0 supplied at its prompt is the
+    # stale answer the retry must not read.
+    assert asks == [(0, 2, 1)]
     assert [(a["attempt_no"], a["pass_fail"], a["msg"]) for a in _attempts(store, row["run_uuid"])] == [
         (1, "FAIL", "failed before asking"),
         (2, "PASS", "voltage 2"),

@@ -359,3 +359,32 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Rework (Strata high, on `packet-05b-broken-rows-t3`): all of the above fixed and tested — widgets freed, the guard tested, word wrap, `ForbiddenCursor`, a one-line error with the full text in the tooltip, stale notes cleared via `session.clear_selection()`, stage-2 Start guarded. 17 tests.
 - Light review: the 640 px screenshot still clipped the last wrapped line. The size hint hand-counted lines, and was fixed at insert time before the list was laid out, so the rework's own test compared the hint to itself. Rows are now sized from the row layout's `heightForWidth` and re-sized by a viewport resize filter. The test compares the item rect with the layout's needed height, and fails under the old calculation. Suite 835 ×3.
 - Leftovers: usable rows show no release line (the mockup has one; 25a); broken rows sit after usable ones rather than in scan order; the filter box predates 25a's three-pane filter, so 25a should reuse or replace it; `list_schedules` is used only by tests now; `_release_label` duplicates the inline release-label code; the screenshot test only checks colours, it doesn't compare against the mockup.
+
+## 10a — Step Input widgets (merged 2026-10-29)
+- Implementer (Strata, high) 157 steps, 42 min. Reviews: Haiku 5 must-fix, Strata 6 must-fix (union 9).
+  - Defects: line edit never in the layout; radios/checks not in `controls`; row text drawn twice; widgets deleted at FINISHED; SIGSEGV on a Stop-on-Fail pause with input rows (Qt 6 `QListWidget.clear()` destroys item widgets); POLL disabled after one click; all inputs live at step start; an unclicked POLL hung the run; `supply_input`/`click_poll` accepted anything.
+  - The implementer's tests were vacuous (looped over the incomplete `controls`; typed into a hidden widget).
+- Rework (Strata, high, 2 compactions) fixed all 9, each mutation-proven, plus the SHOULD items (content-sized buttons, 26 px indent, `scrollToItem`).
+- Light review: 853 passed ×3; collection 835 → 853, none lost; screenshots /tmp/10a-r2-shots OK.
+- Leftovers:
+  - After FINISHED the setup stages re-show and squeeze the step list to ~68 px (pre-existing).
+  - Pre-existing teardown abort in single-file runs (`pdf_job.py` QProcess destroyed while running, exit 134).
+- Concurrency note: 14d/28a/29a ran as 3 parallel Strata implementers during the 10a review (4 sessions on 1 slot), giving 1,483 out-tok/min total vs ~2,400 solo. Avoid unless the orchestrator is unavailable.
+
+## 14d — Run status bar (merged 2026-10-29)
+- Implementer (Strata, high), 83 steps, 101 min; it ran slowly as 1 of 4 parallel sessions.
+- Reviews:
+  - Haiku: 5 must-fix (1 rejected).
+  - Strata: 3 must-fix, the same as Haiku's. It refuted Haiku's "the live QTimer is unproven".
+  - Kept:
+    - the bar was at the top (the spec says bottom);
+    - no Retry test;
+    - the Pre-test/Post-test totals were untested with more than one Action per phase.
+  - Rejected: freezing the timers during a pause. That came from loose wording in my brief; the elapsed time is the point of the bar.
+- Rework (Strata, high):
+  - merged integration (3 conflicts in `staged_run_screen.py` with 10a, both sides kept);
+  - moved the bar to the bottom, showing the Pre-test/Steps/Post-test tallies side by side and a "Paused" state;
+  - added tests for layout order, Retry, Sub-schedule totals, the pause and the live QTimer.
+  - Its final reply cut off before the 3 suite runs, so I ran them.
+- Light review: 864 passed ×3 (~89 s, up from ~82 s); collection 853 → 864, none lost; screenshots in /tmp/14d-r2-shots OK.
+- Leftovers: during a pause, "Current" shows the failed step's time and keeps counting (by design).
