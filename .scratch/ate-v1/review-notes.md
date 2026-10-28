@@ -346,3 +346,16 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - `.page-break` still has no rule.
   - The Cover's Media Release and Schedule-file rows are blank (21a: `schedule_file: None`, `media_name/version` None).
   - The `test_report_21a.py` docstring is stale.
+
+## 05b — broken rows on the Run screen (merged 2026-10-28)
+- Strata (high) implemented it: the picker uses `list_schedule_rows`. Broken definitions and schedules show as `setItemWidget` rows (name, `MR · name version`, error in `#b71c1c`, on `#fff5f5`), are unselectable and disabled, and Start refuses them. `ScheduleRow` gained `release` and `file`. It added a filter box next to Rescan, which the staged screen lacked. 8 tests.
+- Haiku (MUST-FIX 1, screenshots; real clicks and keys never start a broken row): no not-allowed cursor. Strata (MUST-FIX 4):
+  - every Rescan leaked the row widgets (+59 MB for 50 rows × 20);
+  - the start guard was untested;
+  - the error label didn't wrap;
+  - no not-allowed cursor.
+
+  Notes: the raw traceback (with ATE's own `instance-env` frames and absolute paths) was shown as the error; stale notes stayed when the pick was hidden; the stage-2 Start could raise `SessionError`.
+- Rework (Strata high, on `packet-05b-broken-rows-t3`): all of the above fixed and tested — widgets freed, the guard tested, word wrap, `ForbiddenCursor`, a one-line error with the full text in the tooltip, stale notes cleared via `session.clear_selection()`, stage-2 Start guarded. 17 tests.
+- Light review: the 640 px screenshot still clipped the last wrapped line. The size hint hand-counted lines, and was fixed at insert time before the list was laid out, so the rework's own test compared the hint to itself. Rows are now sized from the row layout's `heightForWidth` and re-sized by a viewport resize filter. The test compares the item rect with the layout's needed height, and fails under the old calculation. Suite 835 ×3.
+- Leftovers: usable rows show no release line (the mockup has one; 25a); broken rows sit after usable ones rather than in scan order; the filter box predates 25a's three-pane filter, so 25a should reuse or replace it; `list_schedules` is used only by tests now; `_release_label` duplicates the inline release-label code; the screenshot test only checks colours, it doesn't compare against the mockup.
