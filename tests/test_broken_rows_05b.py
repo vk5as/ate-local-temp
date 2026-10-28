@@ -600,6 +600,13 @@ def test_picker_r2_screenshot_shows_a_wrapped_error_at_640_px(qapp, tmp_path):
 
     shots = Path("/tmp/05b-shots")
     shots.mkdir(parents=True, exist_ok=True)
+    # Every broken row is tall enough for its wrapped labels at the width it is actually shown at.
+    for row in range(list_widget.count()):
+        item = list_widget.item(row)
+        widget = list_widget.itemWidget(item)
+        if widget is not None:
+            needed = widget.heightForWidth(list_widget.viewport().width())
+            assert list_widget.visualItemRect(item).height() >= needed, "the wrapped error is clipped"
     image = list_widget.grab()
     assert image.width() == 640, image.width()
     assert image.save(str(shots / "picker-r2.png")), "the picker-r2 grab did not save"

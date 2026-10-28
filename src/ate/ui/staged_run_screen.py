@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -153,6 +153,7 @@ class TestScheduleStage(QWidget):
         filter_row.addWidget(self.rescan_button)
 
         self.schedule_list = QListWidget()
+        self.schedule_list.viewport().installEventFilter(_ResizeBrokenRows(self.schedule_list))
         self.notes_label = QLabel()
         # The ⚠ line naming the mismatched files of the selected schedule (ticket 06c); empty when
         # the schedule's checksums all match.
@@ -235,11 +236,32 @@ def _broken_row_size_hint(widget: QWidget, width: int) -> QSize:
     wrapped height is counted here instead."""
     if width <= 0:
         return widget.sizeHint()
-    inner = max(width - 2 * _ROW_MARGIN_X, 1)
-    labels = widget.findChildren(QLabel)
-    height = 2 * _ROW_MARGIN_Y + sum(_wrapped_height(label.text(), label.font(), inner) for label in labels)
-    height += max(widget.layout().spacing(), 0) * max(len(labels) - 1, 0)
-    return QSize(width, height)
+    # The row's own layout knows how tall its wrapped error is at this width (QLabel word wrap is
+    # height-for-width); summing hand-counted lines came up short and clipped the last line.
+    height = widget.heightForWidth(width) if widget.hasHeightForWidth() else -1
+    return QSize(width, max(height, widget.sizeHint().height()))
+
+
+class _ResizeBrokenRows(QObject):
+    """Re-size the picker's broken rows whenever its viewport changes width.
+
+    A wrapped error needs more lines on a narrower list, and an item's size hint is fixed when it is
+    added, so without this a window resize (or a list laid out after its rows were built) clips the
+    last lines of the error."""
+
+    def __init__(self, list_widget: QListWidget) -> None:
+        super().__init__(list_widget)
+        self._list = list_widget
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt's name
+        if event.type() == QEvent.Type.Resize:
+            width = self._list.viewport().width()
+            for row in range(self._list.count()):
+                item = self._list.item(row)
+                widget = self._list.itemWidget(item)
+                if widget is not None:
+                    item.setSizeHint(_broken_row_size_hint(widget, width))
+        return False
 
 
 def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
