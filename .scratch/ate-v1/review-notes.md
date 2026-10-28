@@ -370,3 +370,21 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - After FINISHED the setup stages re-show and squeeze the step list to ~68 px (pre-existing).
   - Pre-existing teardown abort in single-file runs (`pdf_job.py` QProcess destroyed while running, exit 134).
 - Concurrency note: 14d/28a/29a ran as 3 parallel Strata implementers during the 10a review (4 sessions on 1 slot), giving 1,483 out-tok/min total vs ~2,400 solo. Avoid unless the orchestrator is unavailable.
+
+## 14d — Run status bar (merged 2026-10-29)
+- Implementer (Strata, high), 83 steps, 101 min; it ran slowly as 1 of 4 parallel sessions.
+- Reviews:
+  - Haiku: 5 must-fix (1 rejected).
+  - Strata: 3 must-fix, the same as Haiku's. It refuted Haiku's "the live QTimer is unproven".
+  - Kept:
+    - the bar was at the top (the spec says bottom);
+    - no Retry test;
+    - the Pre-test/Post-test totals were untested with more than one Action per phase.
+  - Rejected: freezing the timers during a pause. That came from loose wording in my brief; the elapsed time is the point of the bar.
+- Rework (Strata, high):
+  - merged integration (3 conflicts in `staged_run_screen.py` with 10a, both sides kept);
+  - moved the bar to the bottom, showing the Pre-test/Steps/Post-test tallies side by side and a "Paused" state;
+  - added tests for layout order, Retry, Sub-schedule totals, the pause and the live QTimer.
+  - Its final reply cut off before the 3 suite runs, so I ran them.
+- Light review: 864 passed ×3 (~89 s, up from ~82 s); collection 853 → 864, none lost; screenshots in /tmp/14d-r2-shots OK.
+- Leftovers: during a pause, "Current" shows the failed step's time and keeps counting (by design).
