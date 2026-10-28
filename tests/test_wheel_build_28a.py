@@ -169,6 +169,12 @@ def _has_network() -> bool:
         return False
 
 
+def _venv_exe(venv: Path, name: str) -> str:
+    """Path to an executable inside a venv, on Linux or Windows."""
+    exe_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+    return str(exe_dir / (name + (".exe" if os.name == "nt" else "")))
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not _has_network(), reason="no network to fetch dependencies")
 def test_installed_wheel_runs_ate_version(wheel_path: Path) -> None:
@@ -180,28 +186,22 @@ def test_installed_wheel_runs_ate_version(wheel_path: Path) -> None:
     """
     tmp = Path(tempfile.mkdtemp(prefix="ate-venv-"))
     venv = tmp / ".venv"
-    exe_dir = venv / ("Scripts" if os.name == "nt" else "bin")
-    exe = lambda name: str(exe_dir / (name + (".exe" if os.name == "nt" else "")))  # noqa: E731
+    # PYTHONPATH would put the checkout on the new venv's sys.path, and pip would
+    # then think `ate` is already installed and skip the wheel.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     try:
         create = subprocess.run([sys.executable, "-m", "venv", str(venv)], capture_output=True, text=True)
         if create.returncode != 0:
             pytest.skip(f"cannot create a venv: {create.stderr[-300:]}")
         install = subprocess.run(
-            [exe("python"), "-m", "pip", "install", "--no-deps", str(wheel_path), "SQLAlchemy>=2.0", "typing_extensions"],
+            [_venv_exe(venv, "python"), "-m", "pip", "install", "--no-deps", str(wheel_path), "SQLAlchemy>=2.0", "typing_extensions"],
             capture_output=True,
             text=True,
-            # PYTHONPATH would put the checkout on the new venv's sys.path, and pip
-            # would then think `ate` is already installed and skip the wheel.
-            env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+            env=env,
         )
         if install.returncode != 0:
             pytest.skip(f"could not install the wheel (pip failed): {install.stderr[-300:]}")
-        run = subprocess.run(
-            [exe("ate"), "--version"],
-            capture_output=True,
-            text=True,
-            env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
-        )
+        run = subprocess.run([_venv_exe(venv, "ate"), "--version"], capture_output=True, text=True, env=env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     assert run.returncode == 0, run.stderr
