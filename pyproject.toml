@@ -9,15 +9,23 @@ description = "Automated Test Execution — run Lua 5.5 Test Schedules against h
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
+classifiers = [
+    # The wheel targets Debian stable's system Python (3.13) and the frozen
+    # builds' CPython (3.14); see docs/building-from-source.md.
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+# Floors, not exact pins: the wheel floats to whatever PyPI has that works.
+# Lower bounds are the oldest versions this suite is known to pass against.
 dependencies = [
-    "PyQt6",
-    "PyQt6-WebEngine",
+    "PyQt6>=6.7",
+    "PyQt6-WebEngine>=6.7",
     "lupa>=2.8",
     "SQLAlchemy>=2.0",
-    "Jinja2",
-    "pyserial",
-    "pyvisa",
-    "pyvisa-py",
+    "Jinja2>=3.1",
+    "pyserial>=3.3",
+    "pyvisa>=1.22",
+    "pyvisa-py>=0.7",
 ]
 
 # Version is derived from the git tag at build time (see src/ate/_version.py),
@@ -35,14 +43,18 @@ ate = "ate.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ship the bundled Jinja2 report template (and any other data files) inside the package.
+# Ship everything the app reads at runtime, not just Python: the Jinja2 report
+# template, the bundled Lua modules, and any CSS or data file added later. The
+# wildcard covers every package, so a new resource needs no pyproject change.
 [tool.setuptools.package-data]
-"ate.report" = ["templates/*.j2"]
-"ate.lua" = ["*.lua"]  # packet 06d: the modules `require("ate.<name>")` resolves to
+"*" = ["*.j2", "*.css", "*.lua", "*.html", "*.txt", "*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "slow: seconds of work or a network; deselect with -m 'not slow'",
+]
 # The engine and run session must never import widgets. This is enforced by a
-# dedicated test (see tests/test_architecture_rules.py); keep this marker here
+# dedicated test (see tests/test_architecture_rules.py); keep this note here
 # so the rule is documented at configuration time too.

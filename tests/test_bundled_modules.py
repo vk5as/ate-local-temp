@@ -204,14 +204,16 @@ def test_headless_run_records_the_ate_version(app: QCoreApplication, tmp_path: P
 def test_bundled_modules_ship_inside_the_package() -> None:
     """``ate/lua/*.lua`` is package data. The tests run from the source tree, so this checks the
     config a wheel is built from: the keys must be quoted, because a bare dotted key (``ate.lua =``)
-    is a nested TOML table that setuptools rejects, and then no wheel builds at all."""
+    is a nested TOML table that setuptools rejects, and then no wheel builds at all. Packet 28a's
+    wildcard key ``"*"`` covers every package, so a new resource needs no pyproject edit."""
     assert _bundled_bytes("devices"), "ATE ships a bundled devices module"
     lua_dir = importlib.resources.files("ate") / "lua"
     assert (lua_dir / "devices.lua").is_file()
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     package_data = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]
-    assert package_data.get("ate.lua") == ["*.lua"], f"package-data must ship ate/lua/*.lua: {package_data}"
-    assert package_data.get("ate.report") == ["templates/*.j2"], f"and the report template: {package_data}"
+    patterns = [pattern for entry in package_data.values() for pattern in entry]
+    assert "*.lua" in patterns, f"package-data must ship ate/lua/*.lua: {package_data}"
+    assert any(pattern.endswith(".j2") for pattern in patterns), f"and the report template: {package_data}"
     assert all(isinstance(v, list) for v in package_data.values()), f"no nested tables: {package_data}"
 
 
