@@ -458,6 +458,10 @@ class StepInputWidget(QWidget):
                     self._add_button(text, lambda *_seen, text=text: self._click_poll(text))
                 else:
                     self._add_button(text, lambda *_seen, text=text: self._submit(text))
+        # The mockup's `.inp-w` items are content-sized: let the leftover row width fall after
+        # them rather than stretching each control (packet 14d made the view wider, and a
+        # stretched radio only answers clicks on its own indicator and label).
+        controls.addStretch()
         outer.addWidget(self._controls_widget, stretch=1)
         self.value_label = QLabel("")
         self.value_label.setObjectName("input_value")
@@ -882,15 +886,15 @@ class FailurePromptBar(QWidget):
 
 
 class RunView(QWidget):
-    """The view shown while and after a run: state header, status bar, live steps, Log/Summary.
+    """The view shown while and after a run: state header, live steps, Log/Summary, status bar.
 
     ``state_header`` shows the current :class:`SessionState` plus a live elapsed timer;
-    ``status_bar`` (packet 14d) carries the phase — Pre-test/Post-test progress as
-    "Pre-test 2/3" — the total run time and the time in the current action or step;
     ``step_list`` lists each step with its per-step Result (the latest step enlarged), with every
     declared Step Input on its own row under the step that asked for it (ticket 10a);
-    ``failure_bar`` is a full-width bar that surfaces any failing or errored step; and
-    ``tabs`` holds the attempt Log and a run Summary. All content is refreshed from the
+    ``failure_bar`` is a full-width bar that surfaces any failing or errored step;
+    ``tabs`` holds the attempt Log and a run Summary; and ``status_bar`` (packet 14d) is the last
+    widget, the mockup's ``statusBar()``: the run's state, the Pre-test / Steps / Post-test tallies
+    and the run and current-item timers. All content is refreshed from the
     store by :meth:`refresh`, never computed here.
     """
 
@@ -901,17 +905,23 @@ class RunView(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.state_header = QLabel()
-        # Status bar (packet 14d): the phase — Pre-test/Post-test progress as "Pre-test 2/3" —
-        # the total run time, and the time in the current action or step. The screen refreshes
-        # it from its one-second timer and from the engine's action/step announcements.
+        # Status bar (packet 14d), the mockup's statusBar(): the run state on the left, then the
+        # Pre-test / Steps / Post-test tallies side by side, then the total run time and the time
+        # in the current action or step. The screen refreshes it from its one-second timer and
+        # from the engine's action/step announcements.
         self.status_bar = QWidget()
-        self.status_phase = QLabel("Ready")
+        self.status_bar.setStyleSheet("background:#e4e4e4; border-top:1px solid #c4c4c4; padding:3px 10px;")
+        self.status_label = QLabel("Ready")
+        self.status_pre = QLabel("Pre-test 0/0")
+        self.status_steps = QLabel("Steps 0/0")
+        self.status_post = QLabel("Post-test 0/0")
         self.status_total = QLabel("Run --:--")
         self.status_current = QLabel("Current --:--")
         status_layout = QHBoxLayout(self.status_bar)
-        status_layout.addWidget(self.status_phase)
-        status_layout.addWidget(self.status_total)
-        status_layout.addWidget(self.status_current)
+        status_layout.addWidget(self.status_label)
+        status_layout.insertStretch(1)  # the mockup's `.grow`: the tallies sit to the right
+        for label in (self.status_pre, self.status_steps, self.status_post, self.status_total, self.status_current):
+            status_layout.addWidget(label)
         # Whole-run Abort control (packets 13a): asks the session to abort the current run so it
         # stops between steps and records ERROR / NOTRUN / ABORTED. Enabled only while a run is up;
         # the screen toggles it in _on_state_changed.
@@ -940,7 +950,6 @@ class RunView(QWidget):
         self.debug_window = _LogPane("Debug — every level")
 
         layout.addWidget(self.state_header)
-        layout.addWidget(self.status_bar)
         layout.addWidget(self.abort_button)
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=1)
@@ -948,6 +957,9 @@ class RunView(QWidget):
         layout.addWidget(self.tabs)
         layout.addWidget(self.log_pane)
         layout.addWidget(self.debug_window)
+        # Packet 14d review: the mockup's statusBar() closes the run view, so the bar is the last
+        # widget — under the step list and the Log/Summary tabs — not a header.
+        layout.addWidget(self.status_bar)
 
     def load_run_steps(self, steps: Iterable[object]) -> None:
         """Build the run's step rows, with each step's declared Step Inputs under it.
@@ -1254,9 +1266,16 @@ class StagedRunScreen(QWidget):
         # When the current action or step began (packet 14d); ``None`` between run start and the
         # first Action/Step. The status bar's "Current" timer reads this.
         self._item_started_at: Optional[datetime] = None
-        # The status bar's phase text (packet 14d): "Running", "Pre-test 1/2", "Post-test 1/2",
-        # "Finished"; "Ready" before any run has started.
+        #: The status bar's left label (packet 14d): "Ready" before a run, "Running" while it is up,
+        # "Paused" during a Stop-on-Fail pause, "Finished" when it ends. The three tallies beside it
+        # are what the mockup's statusBar() shows; they never overwrite each other.
         self._phase_text = "Ready"
+        # Pre-/Post-test Action progress as (done, total), read from the engine's action_started.
+        self._pre_counts: tuple[int, int] = (0, 0)
+        self._post_counts: tuple[int, int] = (0, 0)
+        # Steps that have started (a Retry counts once) and the enabled steps in the run.
+        self._started_steps: set[int] = set()
+        self._step_total = 0
         # The RunEngine worker for the current run, set by :meth:`_begin_run_from_selection` and
         # cleared on FINISHED so a new start() captures fresh fields; ``None`` otherwise. Exposed so
         # tests can drive inputs (supply/click) through the engine reached via the session.
@@ -1517,13 +1536,18 @@ class StagedRunScreen(QWidget):
         if state == SessionState.STARTED:
             # Begin the run and reveal it. Ticket 10a: the step rows and their Step Inputs are built
             # as the run starts, so every declared input is on screen, inert, before the worker asks.
-            self.run_view.load_run_steps(self._load_schedule_steps(self.session.selected_schedule or ""))
+            steps = self._load_schedule_steps(self.session.selected_schedule or "")
+            self.run_view.load_run_steps(steps)
             # Status bar (packet 14d): the run clock starts here and the one-second timer restarts,
             # because a previous run stopped it at FINISHED. No Action or Step has begun yet, so the
-            # current-item timer is blank.
+            # current-item timer is blank; the Steps tally knows its total from the rows just built.
             self._started_at = self._clock()
             self._item_started_at = None
             self._phase_text = "Running"
+            self._pre_counts = (0, 0)
+            self._post_counts = (0, 0)
+            self._started_steps = set()
+            self._step_total = self._enabled_step_count(steps)
             self._timer.start(1000)
             self._reveal_run_view()
         elif state == SessionState.FINISHED:
@@ -1585,9 +1609,17 @@ class StagedRunScreen(QWidget):
         self.run_view.state_header.setText(text)
 
     def _update_status_bar(self, now: datetime) -> None:
-        """Refresh the status bar (packet 14d): phase, total run time and current item time."""
+        """Refresh the status bar (packet 14d): the state, the three tallies and both timers.
+
+        Pre-test, Steps and Post-test progress are on the bar at the same time — starting an Action
+        or a Step never overwrites another phase's tally. The Run and Current timers keep ticking
+        through a Stop-on-Fail pause: the bar measures real elapsed time, which is how the Operator
+        can tell that something has hung."""
         view = self.run_view
-        view.status_phase.setText(self._phase_text)
+        view.status_label.setText(self._phase_text)
+        view.status_pre.setText(f"Pre-test {self._pre_counts[0]}/{self._pre_counts[1]}")
+        view.status_steps.setText(f"Steps {len(self._started_steps)}/{self._step_total}")
+        view.status_post.setText(f"Post-test {self._post_counts[0]}/{self._post_counts[1]}")
         if self._started_at is None:
             view.status_total.setText("Run --:--")
             view.status_current.setText("Current --:--")
@@ -1599,21 +1631,37 @@ class StagedRunScreen(QWidget):
             view.status_current.setText(f"Current {_format_elapsed(now - self._item_started_at)}")
 
     def _on_action_started(self, phase: str, done: int, total: int) -> None:
-        """A Pre-/Post-test Action has begun: name its progress and restart the current-item timer."""
+        """A Pre-/Post-test Action has begun: move its tally and restart the current-item timer."""
         now = self._clock()
-        self._phase_text = f"{'Pre' if phase == 'pre' else 'Post'}-test {done}/{total}"
+        if phase == "pre":
+            self._pre_counts = (done, total)
+        else:
+            self._post_counts = (done, total)
         self._item_started_at = now
         self._update_header(now=now)
 
     def _on_step_started(self, node_seq: int) -> None:
-        """A Test Step Attempt — or a Retry of one — has begun: restart the current-item timer.
+        """A Test Step Attempt — or a Retry of one — has begun.
 
-        ``node_seq`` locates the step for the row highlight; the timers only need to know that
-        a new current item has started (packet 14d)."""
+        ``node_seq`` is the step that started: the Steps tally counts each distinct step once, so a
+        Retry restarts the current-item timer without counting the step twice (packet 14d)."""
         now = self._clock()
-        self._phase_text = "Running"
+        self._started_steps.add(node_seq)
         self._item_started_at = now
         self._update_header(now=now)
+
+    def _enabled_step_count(self, steps: list[object]) -> int:
+        """How many expanded rows are Test Steps this run will execute (the Steps tally's total).
+
+        Header rows are not steps, and an Operator toggle (packet 11a) beats the row's :setEnable()
+        default exactly as :meth:`RunEngine._enabled` decides."""
+        overrides = self.session.node_enables or {}
+        return sum(
+            1
+            for seq, step in enumerate(steps)
+            if not getattr(step, "is_header", False)
+            and overrides.get(seq, bool(getattr(step, "default_enabled", getattr(step, "enabled", True))))
+        )
 
     # -- Stop-on-Fail prompt (packet 12d) -------------------------------------
 
@@ -1689,8 +1737,11 @@ class StagedRunScreen(QWidget):
         self._failed_row = items[failed_index] if failed_index is not None else None
 
     def _set_paused_header(self) -> None:
-        """While a prompt is pending the header goes red and reads WAITING (see _update_header)."""
+        """While a prompt is pending the header goes red and reads WAITING (see _update_header), and
+        the status bar says "Paused" (packet 14d) — its timers keep running, because the pause is
+        real time the Operator is spending on the run."""
         self.run_view.state_header.setStyleSheet("background-color: #c62828; color: white;")
+        self._phase_text = "Paused"
         self._update_header()
 
     def _on_prompt_choice(self, choice: str) -> None:
@@ -1711,6 +1762,7 @@ class StagedRunScreen(QWidget):
             self._failed_row.setBackground(QBrush())
             self._failed_row = None
         self.run_view.state_header.setStyleSheet("")
+        self._phase_text = "Running"  # the bar is back on the run's state (packet 14d)
         self._update_header()
 
     # -- Step Inputs (ticket 10a) ---------------------------------------------
