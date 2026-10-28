@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
@@ -62,6 +62,8 @@ class HeadlessRunSession(QObject):
 
     state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    # (node_seq, attempt_no, index, value): an asked input has been answered, through this session.
+    input_answered = pyqtSignal(int, int, int, object)
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
@@ -358,6 +360,32 @@ class HeadlessRunSession(QObject):
         if self._engine is None:
             raise SessionError("cannot choose when no run is in progress")
         self._engine.choose(choice)
+
+    def supply_input(self, node_seq: int, attempt_no: int, index: int, value: Any) -> None:
+        """Answer one blocking Step Input, exactly as the Operator's widget does (ticket 10a).
+
+        ``index`` is the 1-based ``n`` of ``ATE.input(n)`` — the same number the ``input_asked``
+        signal carries — while :class:`~ate.engine.operator_input.OperatorInput` keys its blocking
+        channels from 0, so this is where the two meet. The worker is blocked on
+        :meth:`OperatorInput.get_raw` and wakes as soon as the value arrives; nothing here decides
+        whether the value is valid (the layout checks that with :func:`step_inputs.value_error`).
+        Emits :attr:`input_answered` so the layout can mark the input answered.
+        """
+        if self._engine is None:
+            raise SessionError("cannot supply an input when no run is in progress")
+        self._engine.operator_input.supply_input(index - 1, value)
+        self.input_answered.emit(node_seq, attempt_no, index, value)
+
+    def click_poll(self, node_seq: int, attempt_no: int, index: int, text: str) -> None:
+        """Click a POLL button while its step runs (ticket 10a).
+
+        ``index`` is again the 1-based ``n`` in ``ATE.input(n)``. The click is sticky state for that
+        step's Attempt and is recorded as an ``input_value`` row when the Attempt's inputs are
+        snapshotted; this only forwards it to the worker's controller and announces the answer."""
+        if self._engine is None:
+            raise SessionError("cannot click a POLL when no run is in progress")
+        self._engine.operator_input.click_poll(node_seq, attempt_no, index - 1, text)
+        self.input_answered.emit(node_seq, attempt_no, index, text)
 
     # -- start ---------------------------------------------------------------
 
