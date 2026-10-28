@@ -30,18 +30,24 @@ class OperatorInput(QObject):
 
     # Emitted whenever a value is supplied or a POLL click changes state, so the GUI refreshes.
     values_changed = pyqtSignal()
+    # Emitted the moment a blocking ``ATE.input(n)`` actually starts waiting — the exact instant
+    # the n-th input becomes answerable (packet 10a review: only then is its widget live).
+    asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): 1-based index
 
     def __init__(self) -> None:
         super().__init__()
         # A Condition doubles as the lock for every other field (a Condition is also a Lock).
         self._lock = threading.Condition()
-        # How many announced inputs are still waiting on an answer — incremented when a step
-        # announces its n-th input, decremented when that answer arrives (supply_input / click_poll).
-        # The run engine waits for this to reach zero before recording the step's values so a POLL
-        # click is always recorded while it runs rather than lost if the worker records first.
+        # How many blocking ATE.input calls are still waiting on a supply — incremented when a
+        # blocking ask starts in :meth:`get_raw`, decremented when the answer arrives. The run
+        # engine waits for this to reach zero before recording a step so a blocking value that
+        # was delivered on another thread is never missed. POLL clicks never block the worker,
+        # so they are not counted (packet 10a review: a step's end must not wait for a POLL).
         self._outstanding = 0
         # index -> last raw value supplied; consumed when get_raw reads it or cleared on reset.
         self.pending: dict[int, Any] = {}
+        # 0-based indices whose get_raw is blocked right now — the only inputs whose widgets are live.
+        self._waiting: set[int] = set()
         # POLL sticky text keyed by (node_seq, attempt_no, index); reset at run/step start.
         self.poll_state: dict[tuple[int, int, int], Optional[str]] = {}
         # one blocking channel per input index so a supplied value wakes the waiting worker.
@@ -57,11 +63,6 @@ class OperatorInput(QObject):
         """Set the type map for this step's inputs (index -> StepInput)."""
         with self._lock:
             self.declarations = list(declarations)
-
-    def note_asked(self) -> None:
-        """Record that a step is asking for one more input (called before it is announced)."""
-        with self._lock:
-            self._outstanding += 1
 
     def _note_resolved(self) -> None:
         """An answer arrived for an outstanding ask — wake any worker waiting on :meth:`wait_for_asks`."""
@@ -88,6 +89,7 @@ class OperatorInput(QObject):
             self.pending.clear()
             self.poll_state.clear()
             self._outstanding = 0
+            self._waiting.clear()
             # Drop any queued values so a fresh run/step starts clean.
             for ch in self._channels.values():
                 while not ch.empty():
@@ -125,32 +127,62 @@ class OperatorInput(QObject):
                 ch.put_nowait(value)
             # Record the raw supply (typed later by the run engine from the step's declarations).
             self._supplies_log.append((index, value))
+            # Only a wait actually in progress is resolved by this answer (10a review).
+            was_waiting = index in self._waiting
         # Answered an outstanding ask outside the lock so a worker waiting on wait_for_asks can wake.
-        self._note_resolved()
+        if was_waiting:
+            self._note_resolved()
         self.values_changed.emit()
 
-    def get_raw(self, index: int, flag: Any = None) -> Any:
+    def is_waiting(self, index: int) -> bool:
+        """True while a worker thread is blocked in :meth:`get_raw` for this 0-based index.
+
+        A blocking input can only be answered at the moment its ``ATE.input(n)`` call actually
+        waits, which is what the session checks before a value is accepted (10a review)."""
+        with self._lock:
+            return index in self._waiting
+
+    def get_raw(self, index: int, flag: Any = None, node_seq: Optional[int] = None, attempt_no: Optional[int] = None) -> Any:
         """Block until a value is supplied for ``index``; raise if none ever arrives.
 
         A value supplied before the wait starts is returned either way. When ``flag`` (the run's
         shared abort flag) is given, the wait runs in short slices so an operator abort wakes the
-        thread and raises "aborted" into Lua (packet 13b); with no flag it blocks forever, as before."""
+        thread and raises "aborted" into Lua (packet 13b); with no flag it blocks forever, as before.
+
+        The wait is announced on :attr:`asked` the instant it starts, carrying the step and Attempt
+        that asked, and it is un-counted as soon as the answer arrives or the run is aborted — so a
+        step that declares inputs its action never reads never keeps the run waiting (10a review)."""
         with self._lock:
             # A value supplied before we started waiting is returned immediately.
             if index in self.pending:
                 return self.pending.pop(index)
             ch = self._channels.setdefault(index, queue.Queue())
+            self._outstanding += 1
+            self._waiting.add(index)
         # Released the lock before blocking so supply_input can deliver while we wait.
-        if flag is None:
-            return ch.get()
-        # Slice the wait so an abort is observed within ~50 ms even when no value is arriving;
-        # a value that does arrive is returned normally, ahead of any flag check.
-        while True:
-            try:
-                return ch.get(timeout=0.05)
-            except queue.Empty:
-                if flag.aborted:
-                    raise RuntimeError("aborted")
+        self.asked.emit(node_seq, attempt_no, index + 1)
+        try:
+            if flag is None:
+                value = ch.get()
+            else:
+                # Slice the wait so an abort is observed within ~50 ms even when no value is
+                # arriving; a value that does arrive is returned normally, ahead of any flag check.
+                while True:
+                    try:
+                        value = ch.get(timeout=0.05)
+                        break
+                    except queue.Empty:
+                        if flag.aborted:
+                            raise RuntimeError("aborted")
+        except RuntimeError:
+            # Nobody will answer an aborted ask: drop it from the count the engine waits on.
+            with self._lock:
+                self._waiting.discard(index)
+            self._note_resolved()
+            raise
+        with self._lock:
+            self._waiting.discard(index)
+        return value
 
     def click_poll(self, node_seq: int, attempt_no: int, index: int, text: str) -> None:
         """Record a POLL button click as sticky state for this step's context.
@@ -160,8 +192,7 @@ class OperatorInput(QObject):
         with self._lock:
             self.poll_state[(node_seq, attempt_no, index)] = text
             self._clicks_log.append((node_seq, attempt_no, index, _now_iso(), text))
-        # Answered an outstanding ask outside the lock so a worker waiting on wait_for_asks can wake.
-        self._note_resolved()
+        # A POLL never blocks the worker, so clicking one resolves no outstanding ask (10a review).
         self.values_changed.emit()
 
     def poll_value(self, node_seq: int, attempt_no: int, index: int) -> Optional[str]:
