@@ -581,13 +581,18 @@ class ScheduleRow:
     """One visible Test Schedule in the flat picker list, or a broken entry with its error.
 
     ``error`` is ``None`` for a runnable schedule; otherwise it names why that row can't start
-    (a definition-level defect, or a schedule that raised while loading).
+    (a definition-level defect, or a schedule that raised while loading). ``release`` is the
+    Media Release as the picker labels it, ``MR · name version``, so a broken row can name its
+    release the way a usable one does. ``file`` is the ``.tslua`` that failed to load, which is
+    the only thing a broken schedule can be identified by (its ScheduleParams never returned).
     """
 
     media_number: str
     name: Optional[str] = None
     description: Optional[str] = None
     error: Optional[str] = None
+    release: Optional[str] = None
+    file: Optional[str] = None
 
 
 def _schedule_summaries(definition: Definition) -> list[tuple[str, str, str]]:
@@ -629,6 +634,16 @@ def list_schedules(*directories: str | Path) -> list[tuple[str, str, str]]:
     return summaries
 
 
+def _release_label(definition: Definition) -> str:
+    """The picker's label for a Media Release: ``MR · name version``, as the mockup writes it.
+
+    A broken Test Definition may be missing its name or version (that is often what broke it), so
+    the label falls back to the media number alone rather than printing an empty name."""
+    if definition.name and definition.version:
+        return f"{definition.media_number} · {definition.name} {definition.version}"
+    return definition.media_number
+
+
 def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
     """Return one row per visible schedule across all Media Releases, runnable and broken.
 
@@ -638,8 +653,10 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
     """
     rows: list[ScheduleRow] = []
     for definition in find_definitions(*directories):
+        release = _release_label(definition)
         if definition.broken:
-            rows.append(ScheduleRow(media_number=definition.media_number, error=definition.broken))
+            rows.append(ScheduleRow(media_number=definition.media_number, error=definition.broken,
+                                   release=release))
             continue
         for file_entry in definition.files:
             if not file_entry.is_schedule or file_entry.hidden:
@@ -652,10 +669,14 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
                         media_number=definition.media_number,
                         name=host.schedule.name,
                         description=host.schedule.description,
+                        release=release,
                     )
                 )
             except HostError as exc:
-                rows.append(ScheduleRow(media_number=definition.media_number, error=str(exc)))
+                # The schedule never loaded, so its ScheduleParams name is unknown: the file is
+                # the only way to name the row (packet 05b).
+                rows.append(ScheduleRow(media_number=definition.media_number, error=str(exc),
+                                        release=release, file=file_entry.rel_path))
     return rows
 
 

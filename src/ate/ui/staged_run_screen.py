@@ -22,10 +22,11 @@ from __future__ import annotations
 import html
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -46,9 +47,9 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedules, module_map, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
-from ..run_session.headless import HeadlessRunSession, SessionState
+from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 
 
 def _format_elapsed(delta: datetime) -> str:
@@ -131,7 +132,8 @@ class UutOperatorStage(QWidget):
 class TestScheduleStage(QWidget):
     """Stage two: the list of available schedules and their notes.
 
-    ``schedule_list`` is populated from the catalog; ``rescan_button`` reloads it; and
+    ``schedule_list`` is populated from the catalog; ``rescan_button`` reloads it; ``filter_edit``
+    narrows the list to the rows whose name, release or error contains what the Operator typed; and
     ``notes_label`` shows the description of whatever row is selected. Selecting a row
     calls back into the session (``session.select_schedule``) — that binding lives here,
     which is where picking a schedule belongs.
@@ -142,18 +144,26 @@ class TestScheduleStage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
+        # The mockup's filter box and Rescan button sit side by side above the list.
+        filter_row = QHBoxLayout()
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter schedules")
+        self.rescan_button = QPushButton("Rescan schedules")
+        filter_row.addWidget(self.filter_edit, stretch=1)
+        filter_row.addWidget(self.rescan_button)
+
         self.schedule_list = QListWidget()
+        self.schedule_list.viewport().installEventFilter(_ResizeBrokenRows(self.schedule_list))
         self.notes_label = QLabel()
         # The ⚠ line naming the mismatched files of the selected schedule (ticket 06c); empty when
         # the schedule's checksums all match.
         self.mismatch_label = QLabel("")
-        self.rescan_button = QPushButton("Rescan schedules")
         self.run_button = QPushButton("Run this schedule")
 
+        layout.addLayout(filter_row)
         layout.addWidget(self.schedule_list)
         layout.addWidget(self.notes_label)
         layout.addWidget(self.mismatch_label)
-        layout.addWidget(self.rescan_button)
         layout.addWidget(self.run_button)
 
 
@@ -170,6 +180,113 @@ def _row_label(number: object, name: object, depth: int) -> str:
 
 #: The mockup's header row background (`.row.hdr` / `.b-row.hdr`), packet 15d.
 _HEADER_BG = "#eef1f5"
+
+#: A broken picker row, straight from the mockup: `.b-sched .it.broken` background and `.err` text.
+_BROKEN_BG = "#fff5f5"
+_BROKEN_ERR = "#b71c1c"
+_MUTED_STYLE = "color: #777; font-size: 12px;"
+
+#: `.b-sched .it.broken { cursor: not-allowed }` (mockup line 97): the pointer says "can't pick this".
+_FORBIDDEN_CURSOR = Qt.CursorShape.ForbiddenCursor
+
+#: The broken row's layout margins; the row-height calculation below has to add them back.
+_ROW_MARGIN_X, _ROW_MARGIN_Y = 6, 4
+
+
+def _row_filter_text(row) -> str:
+    """Everything the filter box matches a picker row against: name, release and error."""
+    return f"{row.name or ''} {row.release or ''} {row.file or ''} {row.error or ''}".lower()
+
+
+def _short_error(error: str, release_dir: Optional[Path]) -> str:
+    """The one line a broken row shows: the message only, paths relative to their Media Release.
+
+    A schedule that raises on load arrives as `failed to load <absolute path>: <file>:<line>: <msg>`
+    followed by the Lua stack traceback, which repeats the file the row already names and prints the
+    scan directory (packet 05b review). The row keeps the message; the full text is the tooltip."""
+    line = (error or "").splitlines()[0]
+    if line.startswith("failed to load "):
+        line = line.split(": ", 1)[-1]
+    if release_dir is not None:
+        line = line.replace(f"{release_dir}/", "")
+    return line
+
+
+def _wrapped_height(text: str, font, width: int) -> int:
+    """How tall word-wrapped `text` is when squeezed into `width` pixels with ``font``."""
+    metrics = QFontMetrics(font)
+    lines = 0
+    for chunk in (text.splitlines() or [""]):
+        used = ""
+        for word in chunk.split():
+            if used and metrics.horizontalAdvance(f"{used} {word}") > width:
+                lines += 1
+                used = word
+            else:
+                used = f"{used} {word}" if used else word
+        lines += 1
+    return lines * metrics.lineSpacing()
+
+
+def _broken_row_size_hint(widget: QWidget, width: int) -> QSize:
+    """The size a broken row needs at list width ``width``, with the `.err` line wrapped.
+
+    `QLabel::sizeHint` knows nothing about the width the view will give the row, so a long error
+    would sit in a one-line-tall row and be cut off at the viewport edge (packet 05b review). The
+    wrapped height is counted here instead."""
+    if width <= 0:
+        return widget.sizeHint()
+    # The row's own layout knows how tall its wrapped error is at this width (QLabel word wrap is
+    # height-for-width); summing hand-counted lines came up short and clipped the last line.
+    height = widget.heightForWidth(width) if widget.hasHeightForWidth() else -1
+    return QSize(width, max(height, widget.sizeHint().height()))
+
+
+class _ResizeBrokenRows(QObject):
+    """Re-size the picker's broken rows whenever its viewport changes width.
+
+    A wrapped error needs more lines on a narrower list, and an item's size hint is fixed when it is
+    added, so without this a window resize (or a list laid out after its rows were built) clips the
+    last lines of the error."""
+
+    def __init__(self, list_widget: QListWidget) -> None:
+        super().__init__(list_widget)
+        self._list = list_widget
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt's name
+        if event.type() == QEvent.Type.Resize:
+            width = self._list.viewport().width()
+            for row in range(self._list.count()):
+                item = self._list.item(row)
+                widget = self._list.itemWidget(item)
+                if widget is not None:
+                    item.setSizeHint(_broken_row_size_hint(widget, width))
+        return False
+
+
+def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
+    """The widget inside a broken picker row: name, Media Release, then the error in `.err` red.
+
+    A list item cannot paint two colours on one row, so the mockup's three lines
+    (`name`, `.muted` release, `.err` error) are three labels on a pale-red QWidget. The error label
+    is named ``schedule_error`` so a test can read the exact colour it draws, and it word-wraps:
+    the row is as wide as the list, so a long error must wrap rather than run past it."""
+    widget = QWidget()
+    widget.setStyleSheet(f"background: {_BROKEN_BG};")
+    widget.setCursor(_FORBIDDEN_CURSOR)
+    layout = QVBoxLayout(widget)
+    layout.setContentsMargins(_ROW_MARGIN_X, _ROW_MARGIN_Y, _ROW_MARGIN_X, _ROW_MARGIN_Y)
+    title = QLabel(f"⛔ {name}")
+    subtitle = QLabel(release)
+    subtitle.setStyleSheet(_MUTED_STYLE)
+    err = QLabel(error)
+    err.setObjectName("schedule_error")
+    err.setWordWrap(True)
+    err.setStyleSheet(f"color: {_BROKEN_ERR}; font-size: 12px;")
+    for label in (title, subtitle, err):
+        label.setCursor(_FORBIDDEN_CURSOR)
+        layout.addWidget(label)
+    return widget
 
 
 def _children_of_rows(rows: list[object], parent_of) -> dict[int, list[int]]:
@@ -248,10 +365,17 @@ class StepsOptionsStage(QWidget):
         # selected schedule's Stop on Fail default once a schedule has been chosen.
         self.stop_on_fail_radio.setChecked(True)
         self.run_button = QPushButton("Start run")
+        # The mockup's `.err` line for a run that cannot start (packet 05b review): the screen fills
+        # it when `begin_run` is refused, so the Operator sees why instead of a traceback.
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("run_error")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet(f"color: {_BROKEN_ERR}; font-size: 12px;")
 
         layout.addWidget(self.step_list)
         layout.addWidget(self.stop_on_fail_radio)
         layout.addWidget(self.continue_all_radio)
+        layout.addWidget(self.error_label)
         layout.addWidget(self.run_button)
 
     def load_steps(self, steps: Iterable[object]) -> None:
@@ -746,6 +870,9 @@ class StagedRunScreen(QWidget):
         # Mismatches per schedule name, refreshed with the list: the ⚠ prefix and the flag line read it.
         self._mismatch_flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
         self._release_labels: dict[str, str] = {}
+        # Every catalog row the picker shows, runnable and broken (packet 05b); the filter renders
+        # a subset of it without rescanning the directory.
+        self._schedule_rows: list[object] = []
         # Captured when STARTED fires; ``None`` before the first run or after FINISHED.
         self._started_at: Optional[datetime] = None
         # The RunEngine worker for the current run, set by :meth:`_begin_run_from_selection` and
@@ -788,8 +915,16 @@ class StagedRunScreen(QWidget):
         self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
 
         # Selecting a row records that selection on the session, so starting later resolves
-        # exactly what the Operator picked; the notes label mirrors it for confirmation.
+        # exactly what the Operator picked; the notes label mirrors it for confirmation. Both the
+        # selection and the current item are watched: a broken row cannot be selected, yet it can
+        # still be made current, and then nothing stale may be left showing (packet 05b review).
         self.test_schedule_stage.schedule_list.itemSelectionChanged.connect(self._on_schedule_selected)
+        self.test_schedule_stage.schedule_list.currentItemChanged.connect(self._on_schedule_selected)
+
+        # Packet 05b: the filter box narrows the list to rows matching name, release or error, and
+        # Rescan reloads it from disk — broken rows included.
+        self.test_schedule_stage.filter_edit.textChanged.connect(self._render_schedule_rows)
+        self.test_schedule_stage.rescan_button.clicked.connect(self._refresh_schedule_list)
 
         # Wire navigation and start; each button only advances or begins a run, never decides results.
         self.uut_operator_stage.next_button.clicked.connect(lambda: self._advance(1))
@@ -821,29 +956,48 @@ class StagedRunScreen(QWidget):
         to the session when the row was picked; this only previews its steps.
         """
         name = self.session.selected_schedule or ""
-        if not name:
+        # A broken row made current names no schedule, so there is nothing to preview and no run to
+        # begin: the selection must still be a runnable row (packet 05b).
+        if not name or self._selected_schedule_name() != name:
             return
         steps = self._load_schedule_steps(name)
         self.steps_options_stage.load_steps(steps)
         self.steps_stack.setCurrentIndex(2)
 
     def _on_schedule_selected(self) -> None:
-        """Record the newly selected schedule on the session and mirror it in the notes label.
+        """Record the newly selected schedule on the session, or clear the picker when nothing runnable is current.
 
         The exact name is read back from the row's user data (set when the list was built),
         so this hands the session precisely what the Operator picked; ``select_schedule`` then
-        moves the session to SELECTING while idle."""
+        moves the session to SELECTING while idle. A broken row carries no user data, so it can never
+        reach the session: the previous choice is dropped, the notes and the mismatch flag are
+        emptied, and Start stays disabled (packet 05b review)."""
         item = self.test_schedule_stage.schedule_list.currentItem()
-        if item is not None:
-            name = item.data(Qt.ItemDataRole.UserRole) or ""
-            if name:
-                self.session.select_schedule(name)
+        name = (item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+        if name:
+            self.session.select_schedule(name)
             self.test_schedule_stage.notes_label.setText(item.text())
             # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
             flagged = self._mismatch_flags.get(name, [])
             label = self.test_schedule_stage.mismatch_label
             label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
             label.setStyleSheet(_FLAG_STYLE if flagged else "")
+        else:
+            self._clear_picker_selection()
+        self._update_run_button()
+
+    def _clear_picker_selection(self) -> None:
+        """Nothing runnable is current — a broken row, or the picked row filtered away — so show nothing.
+
+        The notes and the mismatch line describe the schedule that *was* picked; leaving them filled
+        reads as if it were still the selection, and the session would still start a run from it
+        (packet 05b review). A run already in progress keeps its own selection."""
+        stage = self.test_schedule_stage
+        stage.notes_label.setText("")
+        stage.mismatch_label.setText("")
+        stage.mismatch_label.setStyleSheet("")
+        if self.session.selected_schedule and self.state != SessionState.STARTED:
+            self.session.clear_selection()
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
@@ -928,7 +1082,15 @@ class StagedRunScreen(QWidget):
         store = self._confirm_store_choice(mismatches)
         if mismatches and store is None:
             return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
-        engine = self.session.start(store_mismatched=store)
+        try:
+            engine = self.session.start(store_mismatched=store)
+        except SessionError as exc:
+            # The schedule picked before this stage broke in the meantime (packet 05b review): name
+            # the reason on the stage the Operator is looking at rather than raising out of the
+            # button handler, and take Start away so it cannot be clicked again.
+            self.steps_options_stage.error_label.setText(f"⛔ {exc}")
+            self.steps_options_stage.run_button.setEnabled(False)
+            return
         self._engine = engine
         self._started_at = datetime.now(timezone.utc)
         # Switch to the Run view and hide the setup stages for the duration of the run.
@@ -1111,23 +1273,111 @@ class StagedRunScreen(QWidget):
         """Populate the schedule list from the catalog and clear the notes label.
 
         A schedule whose Media Release has a checksum mismatch gets a ⚠ prefix in the row (ticket 06c)
-        so the Operator can see it before picking it."""
+        so the Operator can see it before picking it. Broken Test Definitions and Test Schedules are
+        listed too, each with its error, after the usable rows (packet 05b): the picker shows every
+        row the catalog found, not only the runnable ones."""
         config = self.session.config
         if config is None:
             return
-        summaries = [
-            (name, description, media_number)
-            for name, description, media_number in list_schedules(*config.test_definition_dirs)
-        ]
+        self._schedule_rows = list_schedule_rows(*config.test_definition_dirs)
         self._mismatch_flags = list_schedule_mismatches(*config.test_definition_dirs)
+        definitions = find_definitions(*config.test_definition_dirs)
         # "MR-10422 · PSU-200 Tests 2.3.0", as the mockup names a release in the flag and the dialog.
-        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}"
-                                for d in find_definitions(*config.test_definition_dirs)}
-        self.test_schedule_stage.schedule_list.clear()
-        for name, description, media_number in summaries:
-            flag = "⚠ " if name in self._mismatch_flags else ""
-            item = QListWidgetItem(f"{flag}{name} — {description}")
+        self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}" for d in definitions}
+        # Where each Media Release is on disk: a load error's absolute path is written relative to it.
+        self._release_dirs = {d.media_number: d.path for d in definitions}
+        self._render_schedule_rows()
+
+    def _render_schedule_rows(self) -> None:
+        """Rebuild the picker from :attr:`_schedule_rows`, keeping only the rows the filter matches.
+
+        Usable rows come first in scan order and the broken rows follow them at the end of the list:
+        they cannot be picked, so they sit below everything the Operator can still start from. The
+        picked schedule, if the filter still shows it, is re-selected so Start stays enabled across a
+        filter change; when the filter hides it, the notes and the selection are cleared."""
+        term = self.test_schedule_stage.filter_edit.text().strip().lower()
+        list_widget = self.test_schedule_stage.schedule_list
+        # The pick has to be read before the list is emptied: clearing it makes the current item
+        # None, which the selection handler reads as "nothing runnable is current".
+        chosen = self.session.selected_schedule
+        # `clear()` leaves every `setItemWidget` widget behind as a child of the viewport, so each
+        # rescan would add one orphan row per broken row (packet 05b review): hand them back to Qt
+        # and delete them before the list is emptied.
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            widget = list_widget.itemWidget(item)
+            if widget is None:
+                continue
+            list_widget.removeItemWidget(item)
+            widget.setParent(None)
+            widget.deleteLater()
+        list_widget.clear()
+        picked: Optional[QListWidgetItem] = None
+        usable = [row for row in self._schedule_rows if row.error is None]
+        broken = [row for row in self._schedule_rows if row.error is not None]
+        for row in usable + broken:
+            if term and term not in _row_filter_text(row):
+                continue
+            item = self._make_schedule_item(list_widget, row)
+            if chosen and row.name == chosen:
+                picked = item
+        if picked is not None:
+            list_widget.setCurrentItem(picked)
+        else:
+            self._clear_picker_selection()
+        self._update_run_button()
+
+    def _make_schedule_item(self, list_widget: QListWidget, row) -> QListWidgetItem:
+        """Add one catalog row to the picker and return its item.
+
+        A usable row is unchanged from ticket 06c: the ⚠ flag, the schedule name and its description,
+        and the exact name in the user data for the selection to read back. A broken row gets the
+        mockup's `.it.broken` look and no user data, so it can never be handed to the session. Its
+        error line is the short form (first line, paths relative to the release); the tooltip holds
+        the whole text."""
+        if row.error is None:
+            flag = "⚠ " if row.name in self._mismatch_flags else ""
+            item = QListWidgetItem(f"{flag}{row.name} — {row.description}")
             # Carry the exact selected name so a later selection can hand it to the session.
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(media_number or "")
-            self.test_schedule_stage.schedule_list.addItem(item)
+            item.setData(Qt.ItemDataRole.UserRole, row.name)
+            item.setToolTip(row.media_number or "")
+            list_widget.addItem(item)
+            return item
+        # A broken Test Schedule has no ScheduleParams name to show, so its file names the row; a
+        # broken Test Definition has neither, and the mockup calls it "(Test Definition broken)".
+        name = row.file or "(Test Definition broken)"
+        release = row.release or row.media_number
+        error = _short_error(row.error, self._release_dirs.get(row.media_number))
+        item = QListWidgetItem(f"⛔ {name}\n{release}\n{error}")
+        item.setBackground(QColor(_BROKEN_BG))
+        # Not selectable and not enabled: a click can't pick it, and Qt won't even make it current.
+        # UserRole is deliberately left empty so no path can pass a broken row to the session.
+        item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled))
+        item.setData(Qt.ItemDataRole.UserRole + 1, row.error)
+        item.setToolTip(row.error)
+        widget = _broken_row_widget(name, release, error)
+        # The row is as tall as its three wrapped lines need to be, not one line per label.
+        item.setSizeHint(_broken_row_size_hint(widget, list_widget.viewport().width()))
+        list_widget.addItem(item)
+        list_widget.setItemWidget(item, widget)
+        return item
+
+    def _selected_schedule_name(self) -> Optional[str]:
+        """The exact schedule name the picker's current row stands for, or ``None`` if it can't run.
+
+        A broken row carries no name in its user data, so it can never be the selection a run starts
+        from even if something bypasses its flags and makes it current (packet 05b)."""
+        item = self.test_schedule_stage.schedule_list.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole) or None
+
+    def _update_run_button(self) -> None:
+        """Start is enabled only while a runnable schedule is the current selection.
+
+        The Steps stage's Start button follows the same rule (packet 05b review): the picked
+        schedule can break between stages — a Rescan finds a bad file — and `begin_run` would then
+        raise out of the button's handler."""
+        runnable = self._selected_schedule_name() is not None
+        self.test_schedule_stage.run_button.setEnabled(runnable)
+        self.steps_options_stage.run_button.setEnabled(runnable)

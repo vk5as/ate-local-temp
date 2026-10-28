@@ -272,6 +272,17 @@ class HeadlessRunSession(QObject):
         if self._state in (SessionState.IDLE, SessionState.FINISHED):
             self._set_state(SessionState.SELECTING)
 
+    def clear_selection(self) -> None:
+        """Forget the selected schedule, so no run can start from it (packet 05b review).
+
+        The Run screen calls this when the picked row is no longer the current one — a broken row
+        made current, or the filter hiding the picked row — so the session cannot carry a choice the
+        Operator no longer sees. Nothing is announced: the state stays as it is, and ``start()``
+        then reports that no schedule is selected."""
+        self._selected_name = None
+        self._selected_stop_on_fail = None
+        self._pending_node_enables = None
+
     def set_operator(self, operator: str) -> None:
         """Set the Operator's name for the next run."""
         if not isinstance(operator, str):
