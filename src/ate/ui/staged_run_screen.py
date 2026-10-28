@@ -565,7 +565,6 @@ class StepsOptionsStage(QWidget):
         self._states: dict[int, bool] = {}  # each step's last-seen checked state
         self._rows: list[object] = []  # the expanded tree rows, in runner seq order
         self._step_items: dict[int, QListWidgetItem] = {}  # each step index -> its list row
-        self._input_items: dict[int, list[QListWidgetItem]] = {}  # step index -> its input rows
         self._children: dict[int, list[int]] = {}  # each row's direct children in the tree
         self._overrides: dict[int, bool] = {}  # the Operator's per-step toggles seen so far
         # Every declared Step Input of the selected schedule, under its step row (ticket 10a). They
@@ -612,7 +611,6 @@ class StepsOptionsStage(QWidget):
         self._states = {}
         self._rows = list(steps)
         self._step_items = {}
-        self._input_items = {}
         self._children = _children_of_rows(self._rows, lambda row: getattr(row, "parent", None))
         overrides = self.session.node_enables if self.session is not None else None
         self._overrides = dict(overrides) if overrides else {}
@@ -642,7 +640,7 @@ class StepsOptionsStage(QWidget):
                 self.input_widgets[seq] = [
                     StepInputWidget(decl, self.session, seq) for decl in declarations
                 ]
-                self._input_items[seq] = _append_input_rows(
+                _append_input_rows(
                     self.step_list, self.input_widgets[seq], int(getattr(step, "depth", 0)) + 1
                 )
         self._loading = False
