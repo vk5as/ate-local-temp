@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
@@ -29,6 +29,7 @@ from .._version import __version__  # packet 06d: the version written to test_ru
 from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
+from ..engine.step_inputs import value_error
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
 from ..report.pdf_job import start_pdf_job
@@ -62,6 +63,9 @@ class HeadlessRunSession(QObject):
 
     state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    # (node_seq, attempt_no, index, value): an asked input has been answered, through this session.
+    input_answered = pyqtSignal(int, int, int, object)
+    step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
@@ -359,6 +363,59 @@ class HeadlessRunSession(QObject):
             raise SessionError("cannot choose when no run is in progress")
         self._engine.choose(choice)
 
+    def supply_input(self, node_seq: int, attempt_no: int, index: int, value: Any) -> None:
+        """Answer one blocking Step Input, exactly as the Operator's widget does (ticket 10a).
+
+        ``index`` is the 1-based ``n`` of ``ATE.input(n)`` — the same number the ``input_asked``
+        signal carries — while :class:`~ate.engine.operator_input.OperatorInput` keys its blocking
+        channels from 0, so this is where the two meet. The worker is blocked on
+        :meth:`OperatorInput.get_raw` and wakes as soon as the value arrives.
+
+        Packet 10a review: nothing reaches the worker unless this session's own check says the answer
+        belongs where it is sent — the step and Attempt must be the ones running, the index must be
+        declared by that step, and that input's call must be waiting right now. A value the
+        declaration rejects (:func:`step_inputs.value_error`) raises :class:`ValueError` too, so a bad
+        value can never be recorded. Emits :attr:`input_answered` so the layout marks it answered.
+        """
+        if self._engine is None:
+            raise SessionError("cannot supply an input when no run is in progress")
+        engine = self._engine
+        decl = engine.input_declaration(node_seq, attempt_no, index)
+        if decl is None:
+            raise ValueError(f"step {node_seq} attempt {attempt_no} declares no input {index}")
+        if decl.type == "POLL":
+            raise ValueError(f"input {index} of step {node_seq} is a POLL: click it instead of supplying a value")
+        if not engine.is_asking(node_seq, attempt_no, index):
+            raise ValueError(f"step {node_seq} attempt {attempt_no} is not waiting for input {index}")
+        error = value_error(decl, value)
+        if error:
+            raise ValueError(error)
+        engine.operator_input.supply_input(index - 1, value)
+        self.input_answered.emit(node_seq, attempt_no, index, value)
+
+    def click_poll(self, node_seq: int, attempt_no: int, index: int, text: str) -> None:
+        """Click a POLL button while its step runs (ticket 10a).
+
+        ``index`` is again the 1-based ``n`` in ``ATE.input(n)``. The click is sticky state for that
+        step's Attempt and is recorded as an ``input_value`` row when the Attempt's inputs are
+        snapshotted; this forwards it to the worker's controller and announces the answer.
+
+        Packet 10a review: the session refuses a click for a step that is not running, an Attempt
+        that is not the current one, an index that is not this step's POLL, or a text the POLL never
+        offered — each raises :class:`ValueError` rather than quietly recording a phantom answer."""
+        if self._engine is None:
+            raise SessionError("cannot click a POLL when no run is in progress")
+        engine = self._engine
+        decl = engine.input_declaration(node_seq, attempt_no, index)
+        if decl is None or decl.type != "POLL":
+            raise ValueError(f"step {node_seq} attempt {attempt_no} has no POLL input {index}")
+        if not engine.is_poll_open(node_seq, attempt_no, index):
+            raise ValueError(f"step {node_seq} attempt {attempt_no} is no longer running, so its POLL is closed")
+        if text not in decl.prompt:
+            raise ValueError(f"input {index} of step {node_seq} offers no prompt {text!r}")
+        engine.operator_input.click_poll(node_seq, attempt_no, index - 1, text)
+        self.input_answered.emit(node_seq, attempt_no, index, text)
+
     # -- start ---------------------------------------------------------------
 
     def start(self, store_mismatched: Optional[bool] = None) -> RunEngine:
@@ -446,6 +503,8 @@ class HeadlessRunSession(QObject):
         # through this session before it starts — connecting here avoids the single-shot race of
         # grabbing the engine after start() has already begun.
         self._engine.input_asked.connect(self._on_input_asked)
+        # A step's Attempt loop ending closes its POLL widgets: the layout watches this signal.
+        self._engine.step_finished.connect(self.step_finished.emit)
         # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
         # answer it through this session once it fires — same connection timing as input asks above.
         self._engine.failure_prompt.connect(self._on_failure_prompt)
