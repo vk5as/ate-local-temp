@@ -1,0 +1,24 @@
+-- Example Media Release, schedule 3: Stop on Fail and the Operator's failure prompt.
+--
+-- What it demonstrates:
+--   * setStopOnFail(true): when a step ends FAIL or ERROR the run pauses for the Operator.
+--   * The harness answers the prompt two ways, and both endings are asserted by its tests:
+--       Continue -> the run carries on and finishes COMPLETED, still FAIL overall.
+--       Abort    -> the run stops here: the rest of the steps record NOTRUN and the End
+--                   Reason is STOPPED_ON_FAIL.
+--   * Each step's Attempts and the Operator's choice are recorded on the Attempt row.
+
+return ScheduleParams("Stop on fail", "a failing step pauses the run for the Operator")
+  :setDocTitle("Example Media Release - Stop on Fail")
+  :setDocId("MR-EXAMPLE-STOP")
+  :setDocRev("1.0")
+  :setStopOnFail(true)
+  :setSchedule({
+    -- 1. Fails, so the run pauses and asks the Operator to Continue, Retry or Abort.
+    StepParams("First check"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.FAIL, "rail low", 3.1, 5.0) end),
+
+    -- 2. Only reached if the Operator continued past step 1.
+    StepParams("Second check"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "rail ok", 5.0, 5.0) end),
+  })

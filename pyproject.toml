@@ -41,7 +41,9 @@ where = ["src"]
 "ate.lua" = ["*.lua"]  # packet 06d: the modules `require("ate.<name>")` resolves to
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# `examples` holds the seam-1 harness for the example Media Release (packet 29a), so the regular
+# suite runs it too and CI catches an example schedule that stops working.
+testpaths = ["tests", "examples"]
 addopts = "-ra"
 # The engine and run session must never import widgets. This is enforced by a
 # dedicated test (see tests/test_architecture_rules.py); keep this marker here
