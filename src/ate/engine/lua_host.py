@@ -1669,7 +1669,7 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
         # POLL reads sticky state keyed by the running step's context; nil until clicked.
         if decl.type == "POLL":
             return op.poll_value(self._node_seq, self._attempt_no, n - 1)
-        raw = op.get_raw(n - 1, self._abort_flag)  # blocks this worker thread until supplied (spec behavior); an abort raises "aborted"
+        raw = op.get_raw(n - 1, self._abort_flag, self._node_seq, self._attempt_no)  # blocks this worker thread until supplied (spec behavior); an abort raises "aborted"
         return self._map_input(decl, raw)
 
     @property
