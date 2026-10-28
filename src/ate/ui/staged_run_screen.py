@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ate.engine.run_engine import RunEngine
+from ate.engine.step_inputs import StepInput, value_error
 
 from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
@@ -332,6 +333,213 @@ def _node_depths(nodes: list[dict]) -> dict[object, int]:
     return depths
 
 
+def _append_input_rows(list_widget: QListWidget, widgets: list["StepInputWidget"], depth: int) -> list[QListWidgetItem]:
+    """Add one row per Step Input widget, indented under the step that declared it.
+
+    A list item can carry only one widget, so every Step Input gets its own row — the mockup's
+    `.inputs` block, one level deeper than its step. The row's text is the input's own description,
+    which the widget covers once it is drawn.
+    """
+    items: list[QListWidgetItem] = []
+    for widget in widgets:
+        item = QListWidgetItem(_row_label("", widget.declaration.desc, depth))
+        # Not selectable: clicking the row itself means nothing; the controls inside it are the point.
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setSizeHint(widget.sizeHint())
+        list_widget.addItem(item)
+        list_widget.setItemWidget(item, widget)
+        items.append(item)
+    return items
+
+
+# The mockup's active input, `.inp.inp-on` (prototype line 54): `#fff6cc` background and an
+# `#e0a800` left border. A plain QWidget paints both once it opts into styled backgrounds.
+_INPUT_ACTIVE_STYLE = "QWidget#step_input { background: #fff6cc; border-left: 3px solid #e0a800; }"
+
+#: The mockup's `.err` (line 28): the inline message an input shows without submitting anything.
+_INPUT_ERROR_STYLE = "color: #b71c1c; font-size: 12px;"
+
+#: `.inp` has no background when it is not asking, so an inert input reads as the list's own white.
+_INPUT_IDLE_STYLE = ""
+
+
+class StepInputWidget(QWidget):
+    """One declared Step Input, drawn under the step that declared it (ticket 10a).
+
+    The widget is a pure view of a :class:`~ate.engine.step_inputs.StepInput` and of the run session:
+    it decides nothing. Every answer is one call — ``session.supply_input`` for a blocking type,
+    ``session.click_poll`` for a POLL — and whether it is live at all is the session's doing: the
+    screen enables it when ``input_asked`` announces this step's n-th input and disables it again when
+    ``input_answered`` reports the answer, matching the run-screen spec ("a blocking input is enabled
+    only while its ``ATE.input(n)`` call waits; a POLL only while its step runs").
+
+    Rendering follows the mockup's ``inputHTML``: ``RADIOBUT`` is one radio per option plus OK,
+    ``CHECKBOX`` a checkbox per option plus OK, ``PUSHBUT``/``PROMPT``/``POLL`` one button per
+    choice, and ``INTEGER``/``FLOAT``/``STRING`` a line edit plus OK. ``orient`` stacks the controls
+    vertically or lays them out in a row, ``tooltip`` is the hover text, and an answered input shows
+    its value: the mockup's `chose:`/`clicked:` note for the button types, and for the others the
+    state the controls already carry (a ticked box, typed text)."""
+
+    def __init__(self, declaration: StepInput, session: HeadlessRunSession, node_seq: int) -> None:
+        super().__init__()
+        self.declaration = declaration
+        self.session = session
+        self.node_seq = node_seq
+        self.index = declaration.index  # the 1-based n in ATE.input(n)
+        self.blocking = declaration.type != "POLL"
+        #: The Attempt this input was last asked for; a Retry re-asks the same index (packet 12c).
+        self.attempt_no = 1
+
+        self.radios: list[QRadioButton] = []
+        self.checks: list[QCheckBox] = []
+        self.choice_buttons: list[QPushButton] = []
+        self.line_edit: Optional[QLineEdit] = None
+        self.ok_button: Optional[QPushButton] = None
+        self.controls: list[QWidget] = []
+
+        self.setObjectName("step_input")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        if declaration.tooltip:
+            self.setToolTip(declaration.tooltip)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(6, 2, 6, 2)
+        outer.setSpacing(8)
+        outer.addWidget(QLabel(f"{self.index}. {declaration.desc}"))  # the mockup's .inp-desc
+
+        # .inp-w: the controls. orient=VERT stacks them (`.inp.vert .inp-w`), otherwise they sit in a
+        # row, exactly as the mockup's flex layout does.
+        self._controls_widget = QWidget()
+        self._controls_widget.setObjectName("inp_w")
+        controls = (
+            QVBoxLayout(self._controls_widget)
+            if declaration.orient == "VERT"
+            else QHBoxLayout(self._controls_widget)
+        )
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+
+        if declaration.type == "ENUM" and declaration.widget == "RADIOBUT":
+            self.radios = [QRadioButton(label) for label in declaration.enum]
+            for radio in self.radios:
+                controls.addWidget(radio)
+            self._add_ok(lambda: self._submit(next((r.text() for r in self.radios if r.isChecked()), None)))
+        elif declaration.type == "ENUM" and declaration.widget == "CHECKBOX":
+            self.checks = [QCheckBox(label) for label in declaration.enum]
+            for check in self.checks:
+                controls.addWidget(check)
+            self._add_ok(lambda: self._submit([c.text() for c in self.checks if c.isChecked()]))
+        elif declaration.type == "ENUM":  # PUSHBUT: clicking a choice is the answer
+            for label in declaration.enum:
+                self._add_button(label, lambda *_seen, label=label: self._submit(label))
+        elif declaration.type in ("INTEGER", "FLOAT", "STRING"):
+            self.line_edit = QLineEdit()
+            self.line_edit.setPlaceholderText(self._placeholder())
+            self.line_edit.returnPressed.connect(lambda: self._submit(self.line_edit.text()))
+            self._add_ok(lambda: self._submit(self.line_edit.text()))
+        else:  # PROMPT and POLL: one button per prompt text
+            for text in declaration.prompt:
+                if declaration.type == "POLL":
+                    self._add_button(text, lambda *_seen, text=text: self._click_poll(text))
+                else:
+                    self._add_button(text, lambda *_seen, text=text: self._submit(text))
+
+        outer.addWidget(self._controls_widget, stretch=1)
+        self.value_label = QLabel("")
+        self.value_label.setObjectName("input_value")
+        self.value_label.setStyleSheet(_MUTED_STYLE)
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("input_error")
+        self.error_label.setStyleSheet(_INPUT_ERROR_STYLE)
+        outer.addWidget(self.value_label)
+        outer.addWidget(self.error_label)
+
+        # Always visible, inert until asked: the session decides when this input is live.
+        self.deactivate()
+
+    # -- rendering helpers --------------------------------------------------
+
+    def _placeholder(self) -> str:
+        """The line edit's hint: its range, else its pattern, as the mockup shows it."""
+        decl = self.declaration
+        if decl.range:
+            return f"{decl.range['min']} to {decl.range['max']}"
+        if decl.pattern:
+            return decl.tooltip or decl.pattern
+        return ""
+
+    def _add_ok(self, answer: Callable[[], Any]) -> None:
+        """The OK button every line-edit and pick-one widget has."""
+        self.ok_button = QPushButton("OK")
+        self.ok_button.clicked.connect(lambda *_seen: answer())
+        self.controls.append(self.ok_button)
+        self._controls_widget.layout().addWidget(self.ok_button)
+
+    def _add_button(self, text: str, answer: Callable[[], None]) -> None:
+        """A PUSHBUT/PROMPT/POLL button: clicking it is the whole interaction."""
+        button = QPushButton(text)
+        button.clicked.connect(answer)
+        self.choice_buttons.append(button)
+        self.controls.append(button)
+        self._controls_widget.layout().addWidget(button)
+
+    # -- state, driven entirely by the session ----------------------------
+
+    def activate(self, attempt_no: int) -> None:
+        """This input is being asked for: enable it, give it the mockup's active look, focus it.
+
+        The mockup's `focusActive` puts the cursor in whichever input is currently waiting, so the
+        Operator can type without reaching for the mouse."""
+        self.attempt_no = attempt_no
+        self.error_label.setText("")
+        for control in self.controls:
+            control.setEnabled(True)
+        self.setStyleSheet(_INPUT_ACTIVE_STYLE)
+        if self.controls:
+            self.controls[0].setFocus()
+
+    def deactivate(self) -> None:
+        """Not being asked for: every control is disabled and the row has no active styling."""
+        self.setStyleSheet(_INPUT_IDLE_STYLE)
+        for control in self.controls:
+            control.setEnabled(False)
+
+    def answer(self, value: Any) -> None:
+        """Show the recorded answer and stop accepting more of it."""
+        decl = self.declaration
+        if self.radios:
+            for radio in self.radios:
+                radio.setChecked(radio.text() == value)
+        elif self.checks:
+            chosen = set(value if isinstance(value, (list, tuple)) else [value])
+            for check in self.checks:
+                check.setChecked(check.text() in chosen)
+        elif self.line_edit is not None:
+            self.line_edit.setText("" if value is None else str(value))
+        if decl.type == "POLL":
+            self.value_label.setText(f"clicked: {value}")
+        elif decl.type in ("PUSHBUT", "PROMPT") or (decl.type == "ENUM" and decl.widget == "PUSHBUT"):
+            self.value_label.setText(f"chose: {value}")
+        self.deactivate()
+
+    # -- the only calls out ----------------------------------------------
+
+    def _submit(self, value: Any) -> None:
+        """Hand one blocking answer to the session — after step_inputs says it is acceptable.
+
+        A value that fails the declaration's own range/pattern is shown as the mockup's inline error
+        and never reaches the session, so the step keeps waiting."""
+        error = value_error(self.declaration, value)
+        if error:
+            self.error_label.setText(error)
+            return
+        self.session.supply_input(self.node_seq, self.attempt_no, self.index, value)
+
+    def _click_poll(self, text: str) -> None:
+        """Record a POLL click through the session; the sticky value is the button's text."""
+        self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
+
+
 class StepsOptionsStage(QWidget):
     """Stage three: the run's steps and the stop-on-fail option.
 
@@ -354,10 +562,15 @@ class StepsOptionsStage(QWidget):
         self._checkable = True  # setup state: the boxes stay checkable until a run starts
         self._loading = False  # True while load_steps re-syncs check states, so itemChanged
         # is not mistaken for an Operator toggle.
-        self._states: dict[int, bool] = {}  # each row's last-seen checked state
+        self._states: dict[int, bool] = {}  # each step's last-seen checked state
         self._rows: list[object] = []  # the expanded tree rows, in runner seq order
+        self._step_items: dict[int, QListWidgetItem] = {}  # each step index -> its list row
+        self._input_items: dict[int, list[QListWidgetItem]] = {}  # step index -> its input rows
         self._children: dict[int, list[int]] = {}  # each row's direct children in the tree
         self._overrides: dict[int, bool] = {}  # the Operator's per-step toggles seen so far
+        # Every declared Step Input of the selected schedule, under its step row (ticket 10a). They
+        # are always shown here, but inert until the run asks for them.
+        self.input_widgets: dict[int, list[StepInputWidget]] = {}
         self.step_list.itemChanged.connect(self._on_check_toggled)
         self.stop_on_fail_radio = QRadioButton("Stop on first failure")
         self.continue_all_radio = QRadioButton("Run every step regardless of failures")
@@ -389,16 +602,21 @@ class StepsOptionsStage(QWidget):
         step list as the runner seq. A header row's box is DERIVED (packet 15d): Checked when every
         step beneath it is on, Unchecked when none is, partial when mixed, and clicking it sets
         them all. Header rows also get the mockup's look: ``#eef1f5`` background and a bold name.
+        Each step's declared Step Inputs sit under it as their own rows (ticket 10a), disabled until
+        the run asks for them.
         Also re-applies the selected schedule's Stop on Fail default to the radio pair so it is not
         stuck at construction-time; the Operator can still toggle either choice."""
         self._loading = True
+        self._clear_input_widgets()
         self.step_list.clear()
         self._states = {}
         self._rows = list(steps)
+        self._step_items = {}
+        self._input_items = {}
         self._children = _children_of_rows(self._rows, lambda row: getattr(row, "parent", None))
         overrides = self.session.node_enables if self.session is not None else None
         self._overrides = dict(overrides) if overrides else {}
-        for step in self._rows:
+        for seq, step in enumerate(self._rows):
             label = getattr(step, "name", "") or ""
             number = getattr(step, "step_no", "") or ""
             item = QListWidgetItem(_row_label(number, label, int(getattr(step, "depth", 0))))
@@ -408,17 +626,25 @@ class StepsOptionsStage(QWidget):
             checkable = Qt.ItemFlag.ItemIsUserCheckable if self._checkable else Qt.ItemFlag.NoItemFlags
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | checkable)
             self.step_list.addItem(item)
-            row = self.step_list.row(item)
+            self._step_items[seq] = item
             if getattr(step, "is_header", False):
                 item.setBackground(QColor(_HEADER_BG))
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-                state = self._header_state(row)
+                state = self._header_state(seq)
             else:
-                state = Qt.CheckState.Checked if self._effective(row) else Qt.CheckState.Unchecked
-            self._states[row] = state == Qt.CheckState.Checked
+                state = Qt.CheckState.Checked if self._effective(seq) else Qt.CheckState.Unchecked
+            self._states[seq] = state == Qt.CheckState.Checked
             item.setCheckState(state)
+            declarations = getattr(step, "_validated_inputs", None) or []
+            if declarations and self.session is not None:
+                self.input_widgets[seq] = [
+                    StepInputWidget(decl, self.session, seq) for decl in declarations
+                ]
+                self._input_items[seq] = _append_input_rows(
+                    self.step_list, self.input_widgets[seq], int(getattr(step, "depth", 0)) + 1
+                )
         self._loading = False
         if self.session is not None:
             self._apply_stop_on_fail(self.session.selected_stop_on_fail)
@@ -463,10 +689,10 @@ class StepsOptionsStage(QWidget):
             parent = getattr(self._rows[parent], "parent", None)
         return headers
 
-    def _set_box(self, row: int, state: Qt.CheckState) -> None:
-        """Set one row's box without it reading as a new Operator toggle (the state is recorded first)."""
-        self._states[row] = state == Qt.CheckState.Checked
-        self.step_list.item(row).setCheckState(state)
+    def _set_box(self, seq: int, state: Qt.CheckState) -> None:
+        """Set one step's box without it reading as a new Operator toggle (the state is recorded first)."""
+        self._states[seq] = state == Qt.CheckState.Checked
+        self._step_items[seq].setCheckState(state)
 
     def _on_check_toggled(self, item: QListWidgetItem, *_args: int) -> None:
         """A checkbox toggle reaches the session as ``toggle_node(row, checked)`` — no logic here.
@@ -477,16 +703,19 @@ class StepsOptionsStage(QWidget):
         reaches the session. A locked box (a run in progress) has no toggle: the handler
         returns before touching the session. Packet 15d: clicking a header is not an override of
         its own row — it calls toggle_node for every Test Step beneath it, and the header's box
-        (and every header above it) then reads back from those steps."""
+        (and every header above it) then reads back from those steps. Ticket 10a: the input rows
+        under a step have no box, so their itemChanged events are ignored."""
         if self._loading or self.session is None or not self._checkable:
             return
-        row = self.step_list.row(item)
-        if getattr(self._rows[row], "is_header", False):
+        seq = next((step for step, step_item in self._step_items.items() if step_item is item), None)
+        if seq is None:
+            return  # an input row (ticket 10a), not a step with a box
+        if getattr(self._rows[seq], "is_header", False):
             on = item.checkState() == Qt.CheckState.Checked
-            if self._states.get(row) == on:
+            if self._states.get(seq) == on:
                 return
-            self._states[row] = on
-            beneath = self._subtree(row)
+            self._states[seq] = on
+            beneath = self._subtree(seq)
             for child in beneath:
                 if getattr(self._rows[child], "is_header", False):
                     continue
@@ -496,16 +725,16 @@ class StepsOptionsStage(QWidget):
             for child in beneath:
                 if getattr(self._rows[child], "is_header", False):
                     self._set_box(child, self._header_state(child))
-            for header in self._header_rows_above(row):  # a nested header's click changes its ancestors too
+            for header in self._header_rows_above(seq):  # a nested header's click changes its ancestors too
                 self._set_box(header, self._header_state(header))
             return
         checked = item.checkState() == Qt.CheckState.Checked
-        if self._states.get(row) == checked:
+        if self._states.get(seq) == checked:
             return
-        self._states[row] = checked
-        self._overrides[row] = checked
-        self.session.toggle_node(row, checked)
-        for header in self._header_rows_above(row):
+        self._states[seq] = checked
+        self._overrides[seq] = checked
+        self.session.toggle_node(seq, checked)
+        for header in self._header_rows_above(seq):
             self._set_box(header, self._header_state(header))
 
     def set_checkable(self, checkable: bool) -> None:
@@ -515,14 +744,23 @@ class StepsOptionsStage(QWidget):
         self._checkable = checkable
         # Re-sync the last-seen state before the flag pass, so the flag events the pass emits
         # are read back as the same state and never reach the session as phantom toggles.
-        for i in range(self.step_list.count()):
-            item = self.step_list.item(i)
-            self._states[i] = item.checkState() == Qt.CheckState.Checked
+        for seq, item in self._step_items.items():
+            self._states[seq] = item.checkState() == Qt.CheckState.Checked
         keep = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         flag = keep | (Qt.ItemFlag.ItemIsUserCheckable if checkable else Qt.ItemFlag.NoItemFlags)
-        for i in range(self.step_list.count()):
-            item = self.step_list.item(i)
+        for item in self._step_items.values():
             item.setFlags(item.flags() & keep | flag)
+
+    def _clear_input_widgets(self) -> None:
+        """Delete the previous schedule's input widgets before the stage is rebuilt.
+
+        ``clear()`` leaves every `setItemWidget` widget parented to the viewport (packet 05b
+        review), so each reload would otherwise orphan one row per Step Input."""
+        for widgets in self.input_widgets.values():
+            for widget in widgets:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.input_widgets = {}
 
     def _apply_stop_on_fail(self, value: bool) -> None:
         """Set the radio pair to ``value`` (True = stop on first failure)."""
@@ -612,14 +850,16 @@ class RunView(QWidget):
     """The view shown while and after a run: state header, live steps, Log/Summary.
 
     ``state_header`` shows the current :class:`SessionState` plus a live elapsed timer;
-    ``step_list`` lists each step with its per-step Result (the latest step enlarged);
+    ``step_list`` lists each step with its per-step Result (the latest step enlarged), with every
+    declared Step Input on its own row under the step that asked for it (ticket 10a);
     ``failure_bar`` is a full-width bar that surfaces any failing or errored step; and
     ``tabs`` holds the attempt Log and a run Summary. All content is refreshed from the
     store by :meth:`refresh`, never computed here.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session: Optional[HeadlessRunSession] = None) -> None:
         super().__init__()
+        self.session = session
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -629,6 +869,10 @@ class RunView(QWidget):
         # the screen toggles it in _on_state_changed.
         self.abort_button = QPushButton("Abort")
         self.step_list = QListWidget()
+        # Ticket 10a: each step's Step Input widgets, keyed by the runner seq of the step they
+        # belong to, in declaration order. They are built once per run and re-attached whenever the
+        # step list is rebuilt, so the answers the Operator gave survive every refresh.
+        self.input_widgets: dict[int, list[StepInputWidget]] = {}
         # Full-width failure bar: a fixed-height label that spans the view's width in the layout.
         self.failure_bar = QLabel()
         self.failure_bar.setFixedHeight(24)
@@ -656,6 +900,60 @@ class RunView(QWidget):
         layout.addWidget(self.log_pane)
         layout.addWidget(self.debug_window)
 
+    def load_run_steps(self, steps: Iterable[object]) -> None:
+        """Build the run's step rows, with each step's declared Step Inputs under it.
+
+        Called when a run starts (ticket 10a) so every input is on screen, inert, before the worker
+        ever asks for one: the spec says every step is listed with its inputs always visible. The
+        widgets are made from the schedule's validated declarations, exactly as the mockup's
+        ``inputsHTML`` renders them."""
+        self._detach_input_rows()
+        for widgets in self.input_widgets.values():
+            for widget in widgets:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.input_widgets = {}
+        self.step_list.clear()
+        for seq, step in enumerate(steps):
+            item = QListWidgetItem(
+                _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
+            )
+            if getattr(step, "is_header", False):
+                item.setBackground(QColor(_HEADER_BG))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.step_list.addItem(item)
+            declarations = getattr(step, "_validated_inputs", None) or []
+            if declarations and self.session is not None:
+                self.input_widgets[seq] = [StepInputWidget(decl, self.session, seq) for decl in declarations]
+                self.add_input_rows(seq, int(getattr(step, "depth", 0)) + 1)
+
+    def add_input_rows(self, node_seq: int, depth: int) -> None:
+        """Attach this step's input widgets as rows, immediately after the row just added."""
+        widgets = self.input_widgets.get(node_seq)
+        if not widgets:
+            return
+        _append_input_rows(self.step_list, widgets, depth)
+
+    def input_widget(self, node_seq: int, index: int) -> Optional[StepInputWidget]:
+        """The widget for the n-th (1-based) Step Input of the step at ``node_seq``, if any."""
+        for widget in self.input_widgets.get(node_seq, ()):
+            if widget.index == index:
+                return widget
+        return None
+
+    def _detach_input_rows(self) -> None:
+        """Remove every item widget from the step list, keeping the widgets themselves alive.
+
+        ``clear()`` would leave each input widget parented to the viewport (packet 05b review);
+        detaching first lets the same widgets — the ones that hold the answers the Operator gave —
+        be re-attached when the list is rebuilt."""
+        for row in range(self.step_list.count()):
+            item = self.step_list.item(row)
+            if self.step_list.itemWidget(item) is not None:
+                self.step_list.removeItemWidget(item)
+
     def refresh(self, nodes: list[dict], attempts: list[dict], log_lines: list[dict]) -> None:
         """Render a finished run's steps, failure bar, and Log/Summary from the store.
 
@@ -670,11 +968,17 @@ class RunView(QWidget):
         log_tab = self.tabs.widget(0)
         summary_tab = self.tabs.widget(1)
 
+        # The run is over: nothing can be asked for any more, so every input closes.
+        for widgets in self.input_widgets.values():
+            for widget in widgets:
+                widget.deactivate()
+        self._detach_input_rows()
         self.step_list.clear()
         # Packet 15b: header rows show their Step Number and name with no result, and every row is
         # indented by its depth in the expanded tree, as on the Steps & options stage. Packet 15d:
         # header rows get the mockup's `#eef1f5` background and bold name, and a rollup of the
-        # steps beneath them — `N/M done`, plus `, K failed` when some failed.
+        # steps beneath them — `N/M done`, plus `, K failed` when some failed. Ticket 10a: each step
+        # keeps its Step Input rows under it, showing the answers the Operator gave.
         depths = _node_depths(nodes)
         children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
         by_seq = {node["node_seq"]: node for node in nodes}
@@ -698,6 +1002,7 @@ class RunView(QWidget):
                 item.setFont(font)
             self.step_list.addItem(item)
             if not is_header:
+                self.add_input_rows(node["node_seq"], depths[node["node_seq"]] + 1)
                 last = item
         # The latest step is the current one; enlarge it so the eye lands on where we are.
         if last is not None and self.step_list.count() > 1:
@@ -886,7 +1191,7 @@ class StagedRunScreen(QWidget):
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage()
         self.steps_options_stage = StepsOptionsStage(self.session)
-        self.run_view = RunView()
+        self.run_view = RunView(self.session)
         # Disabled until a run starts; _on_state_changed enables it only while STARTED. The session's
         # initial IDLE emit precedes this connection, so set the default here explicitly.
         self.run_view.abort_button.setEnabled(False)
@@ -913,6 +1218,12 @@ class StagedRunScreen(QWidget):
         # buttons answer it. Both are display-only — the session's choose() is the only call out.
         self.session.failure_prompt.connect(self._on_failure_prompt)
         self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
+
+        # Ticket 10a: Step Input widgets are driven by these two signals and answer through the
+        # session's supply_input/click_poll. The layout decides nothing: asked → live, answered →
+        # closed with the value showing.
+        self.session.input_asked.connect(self._on_input_asked)
+        self.session.input_answered.connect(self._on_input_answered)
 
         # Selecting a row records that selection on the session, so starting later resolves
         # exactly what the Operator picked; the notes label mirrors it for confirmation. Both the
@@ -1113,16 +1424,18 @@ class StagedRunScreen(QWidget):
     def engine(self) -> Optional[RunEngine]:
         """The RunEngine worker for the current run, or ``None`` before it starts / after FINISHED.
 
-        Exposed so tests can drive inputs (supply/click) through the engine reached via the session;
-        the GUI never needs it — input widgets are a later ticket."""
+        Exposed so tests can inspect the worker a run is going through; the Step Input widgets
+        (ticket 10a) answer through the session's ``supply_input``/``click_poll``, never the engine."""
         return self._engine
 
     def _on_state_changed(self, state: SessionState) -> None:
         """React to a session state change — the only place run truth reaches the layout."""
         self.state = state
         if state == SessionState.STARTED:
-            # Begin the run and reveal it.
+            # Begin the run and reveal it. Ticket 10a: the step rows and their Step Inputs are built
+            # as the run starts, so every declared input is on screen, inert, before the worker asks.
             self._started_at = datetime.now(timezone.utc)
+            self.run_view.load_run_steps(self._load_schedule_steps(self.session.selected_schedule or ""))
             self._reveal_run_view()
         elif state == SessionState.FINISHED:
             # Release the finished worker so a new start() captures fresh fields; the next run owns
@@ -1241,6 +1554,7 @@ class StagedRunScreen(QWidget):
                 item.setBackground(QColor("#fff0f0"))
                 self._failed_row = item
             self.run_view.step_list.addItem(item)
+            self.run_view.add_input_rows(seq, int(getattr(step, "depth", 0)) + 1)
 
     def _set_paused_header(self) -> None:
         """While a prompt is pending the header goes red and reads WAITING (see _update_header)."""
@@ -1266,6 +1580,26 @@ class StagedRunScreen(QWidget):
             self._failed_row = None
         self.run_view.state_header.setStyleSheet("")
         self._update_header()
+
+    # -- Step Inputs (ticket 10a) ---------------------------------------------
+
+    def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
+        """The worker is waiting on this step's n-th input, so its widget becomes live.
+
+        A blocking input is enabled only while its ``ATE.input(n)`` call waits; a POLL opens when
+        its step's inputs are announced, which is while that step runs. The mockup's `focusActive`
+        puts the cursor in the input that is currently asking, which `activate` does. Nothing here
+        decides whether the input is answerable — the session announced it, so the layout renders it.
+        """
+        widget = self.run_view.input_widget(node_seq, index)
+        if widget is not None:
+            widget.activate(attempt_no)
+
+    def _on_input_answered(self, node_seq: int, attempt_no: int, index: int, value: object) -> None:
+        """An answer arrived through the session: show it on the widget and close it."""
+        widget = self.run_view.input_widget(node_seq, index)
+        if widget is not None:
+            widget.answer(value)
 
     # -- schedule list ------------------------------------------------------
 
