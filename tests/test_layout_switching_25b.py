@@ -202,6 +202,8 @@ def test_the_layout_not_showing_is_inert_from_launch(qapp, tmp_path, layout):
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
     rows = window.session.store.input_values(window.session.run_uuid)
     assert len(rows) == 1 and rows[0]["value"] == "42", rows
+    run_row = window.session.store.get_test_run(window.session.run_uuid)
+    assert run_row["end_reason"] != "ABORTED", "the hidden layout's Abort stopped the run"
     _finish(qapp, window)
 
 
@@ -698,9 +700,8 @@ def test_a_step_box_on_the_hidden_layout_does_not_change_the_run(qapp, tmp_path)
     assert staged.steps_options_stage.step_list.item(0).checkState() == Qt.CheckState.Checked
 
 
-def test_a_hidden_layouts_prompt_bar_and_abort_answer_nothing(qapp, tmp_path):
-    """The layout that is not showing mirrors the pause but cannot answer it: neither its prompt bar
-    nor its Abort reaches the session."""
+def test_a_hidden_staged_layouts_prompt_and_abort_answer_nothing(qapp, tmp_path):
+    """While the staged layout is hidden, its prompt bar and Abort reach neither the pause nor the run."""
     env = write_ate_env(tmp_path)
     RunStore(env["db"])
     schedule = _add_pause_and_block_schedule(tmp_path)
@@ -714,19 +715,50 @@ def test_a_hidden_layouts_prompt_bar_and_abort_answer_nothing(qapp, tmp_path):
     _pick_and_start(qapp, window, schedule)
     assert window.session.pause_pending(), "the run is paused on the failure"
     assert three.table.banner.isVisible(), "the visible layout shows the pause"
-    assert staged.run_view.failure_prompt_bar.isVisible(), "the hidden layout mirrors the pause"
 
     staged.run_view.failure_prompt_bar.continue_button.click()
     staged.run_view.abort_button.click()
     qapp.processEvents()
     assert window.session.pause_pending(), "the hidden layout answered the pause"
     assert window.session.state == SessionState.STARTED, "the hidden layout ended the run"
-    attempts = window.session.store.attempts(window.session.run_uuid)
-    assert all(row.get("prompt_choice") is None for row in attempts), attempts
+    assert all(row.get("prompt_choice") is None for row in window.session.store.attempts(window.session.run_uuid))
 
     three.table._prompt_bars[0].continue_button.click()
     qapp.processEvents()
     assert _wait(qapp, lambda: not window.session.pause_pending()), "the visible layout did not resume the run"
+    assert any(row.get("prompt_choice") == "CONTINUE" for row in window.session.store.attempts(window.session.run_uuid))
+    _finish(qapp, window)
+
+
+def test_a_hidden_three_pane_layouts_prompt_and_abort_answer_nothing(qapp, tmp_path):
+    """The mirror case: switch away mid-pause and the three-pane layout, still showing the prompt it
+    painted, cannot answer it or abort the run."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    three, staged = window.three_pane_screen, window.staged_screen
+
+    _pick_and_start(qapp, window, schedule)
+    assert window.session.pause_pending(), "the run is paused on the failure"
+    assert three.table._prompt_bars[0].isVisible(), "the visible layout painted its prompt"
+
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    assert three.is_active() is False and staged.is_active()
+    three.table._prompt_bars[0].continue_button.click()
+    three.abort_button.click()
+    qapp.processEvents()
+    assert window.session.pause_pending(), "the hidden layout answered the pause"
+    assert window.session.state == SessionState.STARTED, "the hidden layout ended the run"
+
+    staged.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: not window.session.pause_pending()), "the visible layout did not resume the run"
+    assert three._paused_seq is None and three.table.banner.isVisible() is False, "the hidden layout kept the pause"
     _finish(qapp, window)
 
 
