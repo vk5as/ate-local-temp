@@ -255,9 +255,9 @@ return ScheduleParams("Isolated schedule", "A step that calls an isolated failin
   })
 """
 
-# A whole-run abort fixture (packets 13a). Its first step blocks on a single INTEGER input, so the
-# driver has a guaranteed window between steps: while that step waits it supplies its value and
-# requests an abort. The engine then records the blocked step PASS, marks the next step ERROR
+# A whole-run abort fixture (packets 13a, 30b review). Its first step blocks on a single INTEGER
+# input, so the driver has a guaranteed window between steps: while that step waits it supplies its
+# value and requests an abort. The engine then records the blocked step PASS, marks the next step ERROR
 # "Aborted by Operator", leaves every later step NOTRUN, and closes ABORTED / FAIL — cleanly, with
 # no busy-loop or blocking interruption (those come in 13b/13c).
 ABORTABLE = """\
@@ -268,6 +268,23 @@ return ScheduleParams("Abortable schedule", "several passing steps; first blocks
       :setAction(function() local v=ATE.input(1); ATE.report(Result.PASS, "ok "..v) end),
     StepParams("second"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "should not run") end),
+    StepParams("third"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "also should not run") end),
+  })
+"""
+
+# The same abort shape with a second blocking step (packet 30b review): the driver can prove the
+# worker is parked inside step 2 before it clicks Abort, so a worker that races through steps 2 and
+# 3 first cannot make the test read PASS instead of FAIL.
+ABORTABLE_TWO_INPUTS = """\
+return ScheduleParams("Abortable two-input schedule", "two steps block on an input")
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function() local v=ATE.input(1); ATE.report(Result.PASS, "ok "..v) end),
+    StepParams("second"):setStepNo("2.")
+      :setInputs({ [1] = { desc = "current", type = "INTEGER" } })
+      :setAction(function() local v=ATE.input(1); ATE.report(Result.PASS, "ok "..v) end),
     StepParams("third"):setStepNo("3.")
       :setAction(function() ATE.report(Result.PASS, "also should not run") end),
   })
@@ -706,6 +723,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8")
     (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
     (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
+    (defs_dir / "abortable_two_inputs.tslua").write_text(ABORTABLE_TWO_INPUTS, encoding="utf-8")
     (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
     (defs_dir / "fail_then_pass.tslua").write_text(STEPS_FAIL_THEN_PASS, encoding="utf-8")
     (defs_dir / "passes_on_retry.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8")
@@ -732,6 +750,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "poll_input.tslua", "sha256": _sha256(defs_dir / "poll_input.tslua")},
             {"path": "all_types_inputs.tslua", "sha256": _sha256(defs_dir / "all_types_inputs.tslua")},
             {"path": "abortable.tslua", "sha256": _sha256(defs_dir / "abortable.tslua")},
+            {"path": "abortable_two_inputs.tslua", "sha256": _sha256(defs_dir / "abortable_two_inputs.tslua")},
             {"path": "enable_disabled.tslua", "sha256": _sha256(defs_dir / "enable_disabled.tslua")},
             {"path": "fail_then_pass.tslua", "sha256": _sha256(defs_dir / "fail_then_pass.tslua")},
             {"path": "passes_on_retry.tslua", "sha256": _sha256(defs_dir / "passes_on_retry.tslua")},
