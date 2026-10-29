@@ -742,6 +742,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(db)},
         "reports": {"directory": str(reports_dir)},
         "testDefinitions": {"directories": [str(defs_dir)]},

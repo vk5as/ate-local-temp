@@ -117,12 +117,18 @@ def test_stages_render_with_required_fields(qapp, tmp_path):
     assert "Log" in tab_labels and "Summary" in tab_labels
 
 
-def test_project_prefilled_from_config_station_name(qapp, tmp_path):
-    """The Project field is prefilled from the station name in config (BENCH-03)."""
+def test_project_prefills_from_config_default_project(qapp, tmp_path):
+    """Project is prefilled from config's `defaultProject`; the Station name never appears there."""
+    import json
+
     env = write_ate_env(tmp_path)
-    session = HeadlessRunSession(env["config"])
-    screen = StagedRunScreen(session)
-    assert screen.uut_operator_stage.project_edit.text() == "BENCH-03"
+    data = json.loads(env["config"].read_text(encoding="utf-8"))
+    data["defaultProject"] = "PSU-200 Production"
+    config_path = tmp_path / "project-config.json"
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    screen = StagedRunScreen(HeadlessRunSession(config_path))
+    assert screen.uut_operator_stage.project_edit.text() == "PSU-200 Production", screen.uut_operator_stage.project_edit.text()
+    assert "BENCH-03" not in screen.uut_operator_stage.project_edit.text()
 
 
 def test_selecting_schedule_and_running_reaches_started_then_finished(qapp, tmp_path):

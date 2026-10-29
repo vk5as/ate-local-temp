@@ -1322,10 +1322,12 @@ class StagedRunScreen(QWidget):
         root.addWidget(self.run_view)
         self.run_view.hide()
 
-        # Prefill the Project field from the station name in config (ticket 03). This is
-        # a display convenience only; it does not capture into the session.
+        # Prefill the Project field from config's `defaultProject` (spec 08). The Station name is
+        # not a Project: it is recorded on the run row separately, and never lands in this field.
         if self.session.config is not None:
-            self.uut_operator_stage.project_edit.setText(self.session.config.station_name or "")
+            self.uut_operator_stage.project_edit.setText(self.session.config.default_project or "")
+        # A Test Run cannot start with an empty Project, so the field gates Start (packet 30a r3).
+        self.uut_operator_stage.project_edit.textChanged.connect(self._update_run_button)
 
         # Bind to the session's observable state — the single source of run truth.
         self.session.state_changed.connect(self._on_state_changed)
@@ -1504,8 +1506,9 @@ class StagedRunScreen(QWidget):
 
         if operator:
             self.session.set_operator(operator)
-        if project:
-            self.session.set_project(project)
+        # Project is pushed even when blank: a Test Run cannot start without one (spec 08), so the
+        # field's content is exactly what the run records rather than whatever an earlier run left.
+        self.session.set_project(project)
         if uut_type:
             self.session.set_uut_type(uut_type)
         if serial:
@@ -1925,7 +1928,13 @@ class StagedRunScreen(QWidget):
 
         The Steps stage's Start button follows the same rule (packet 05b review): the picked
         schedule can break between stages — a Rescan finds a bad file — and `begin_run` would then
-        raise out of the button's handler."""
+        raise out of the button's handler. A blank Project keeps Start away too (spec 08: a Test
+        Run cannot start with an empty Project), with the reason on the stage's error line."""
         runnable = self._selected_schedule_name() is not None
-        self.test_schedule_stage.run_button.setEnabled(runnable)
-        self.steps_options_stage.run_button.setEnabled(runnable)
+        project = self.uut_operator_stage.project_edit.text().strip()
+        self.test_schedule_stage.run_button.setEnabled(runnable and bool(project))
+        self.steps_options_stage.run_button.setEnabled(runnable and bool(project))
+        if runnable:
+            self.steps_options_stage.error_label.setText(
+                "" if project else "⛔ Project is required before a Test Run can start"
+            )

@@ -201,7 +201,7 @@ defs.mkdir(parents=True, exist_ok=True)
     "format": 1, "mediaNumber": "MR-10a", "name": "Pause release", "version": "1.0.0",
     "files": [{"path": "pause.tslua", "sha256": hashlib.sha256(source.encode()).hexdigest()}],
 }), encoding="utf-8")
-config = {"format": 1, "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+config = {"format": 1, "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"}, "defaultProject": "Power board",
           "database": {"type": "sqlite", "path": str(work / "ate.db")},
           "reports": {"directory": str(work / "reports")},
           "testDefinitions": {"directories": [str(defs)]}}
@@ -279,6 +279,7 @@ def _write_env(tmp_path: Path, schedules: dict[str, str]) -> dict[str, Path]:
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(defs)]},

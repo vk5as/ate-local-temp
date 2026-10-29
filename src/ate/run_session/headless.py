@@ -103,6 +103,9 @@ class HeadlessRunSession(QObject):
                 self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
+        # Spec 08: Project is prefilled from config's `defaultProject` — the same value the Run
+        # screen shows — and the Operator's typing replaces it. A run cannot start without one.
+        self._pending_project: str = self._config.default_project if self._config is not None else ""
         # Packet 11a: the Operator's enable/disable toggles for expanded-tree positions, keyed by
         # the runner seq each step is assigned. Applied at start() as engine overrides; absent here
         # every step keeps its :setEnable() default (see RunEngine._enabled). ``None`` until set.
@@ -463,6 +466,11 @@ class HeadlessRunSession(QObject):
 
         if self._selected_name is None:
             raise SessionError("no schedule selected before start()")
+
+        # Spec 08/11: a Test Run never has an empty Project. The Run screen keeps Start disabled,
+        # but the session is the authority, so a blank Project refuses the run here too.
+        if not (getattr(self, "_pending_project", "") or "").strip():
+            raise SessionError("a Test Run cannot start with an empty Project")
 
         config = self._config
         assert config is not None, "session was constructed without a config"

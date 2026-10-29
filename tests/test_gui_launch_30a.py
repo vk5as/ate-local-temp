@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import QMainWindow, QMessageBox
 from ate._version import __version__
 from ate.app import _alert_dialog, _close_confirm_dialog, _missing_config_dialog, launch
 from ate.cli import main
-from ate.run_session.headless import SessionState
+from ate.run_session.headless import SessionError, SessionState
 from ate.storage.store import SCHEMA_VERSION, RunStore
 from ate.ui.history_screen import HistoryScreen
 from ate.ui.staged_run_screen import StagedRunScreen
@@ -39,13 +39,19 @@ def fake_pdf(monkeypatch):
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
 
 
-def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None, confirm_close=None):
-    """Launch against ``env`` with the dialogs captured instead of shown. Returns (outcome, alerts)."""
+def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None, confirm_close=None, default_project=None):
+    """Launch against ``env`` with the dialogs captured instead of shown. Returns (outcome, alerts).
+
+    ``ui`` and ``default_project`` are spliced into the config file first, so a test can launch
+    against a Station setting without rewriting the fixture."""
     config_path = env["config"]
-    if ui is not None:
+    if ui is not None or default_project is not None:
         data = json.loads(config_path.read_text(encoding="utf-8"))
-        data["ui"] = ui
-        config_path = tmp_path / "ui-config.json"
+        if ui is not None:
+            data["ui"] = ui
+        if default_project is not None:
+            data["defaultProject"] = default_project
+        config_path = tmp_path / "launch-config.json"
         config_path.write_text(json.dumps(data), encoding="utf-8")
     alerts: list[str] = []
     outcome = launch(
@@ -94,7 +100,7 @@ def test_launch_closes_a_run_left_open_by_a_crash(qapp, tmp_path):
     """Spec 98: an interrupted run is closed as INTERRUPTED/FAIL at launch."""
     env = write_ate_env(tmp_path)
     store = RunStore(env["db"])
-    run_uuid = store.insert_test_run({"uut_type": "PowerSupply", "uut_serial": "PS-1", "station_name": "BENCH-03"})["run_uuid"]
+    run_uuid = store.insert_test_run({"uut_type": "PowerSupply", "uut_serial": "PS-1", "station_name": "BENCH-03", "project": "PSU-200 Production"})["run_uuid"]
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     assert outcome.code == 0, alerts
     row = store.get_test_run(run_uuid)
@@ -127,6 +133,7 @@ def _start_a_blocking_run(qapp, window):
     session.input_asked.connect(lambda seq, attempt, index: asked.append((seq, attempt, index)))
     session.select_schedule("Blocking input schedule")
     session.set_operator("op")
+    session.set_project("PSU-200 Production")  # a run cannot start with an empty Project (spec 08)
     session.set_uut_type("PowerSupply")
     session.set_uut_serial("PS-1")
     session.start()
@@ -358,7 +365,7 @@ def test_one_application_log_per_launch_carries_launch_and_session_lines(qapp, t
 
     env = write_ate_env(tmp_path)
     store = RunStore(env["db"])
-    store.insert_test_run({"uut_type": "PowerSupply", "uut_serial": "PS-1", "station_name": "BENCH-03"})
+    store.insert_test_run({"uut_type": "PowerSupply", "uut_serial": "PS-1", "station_name": "BENCH-03", "project": "PSU-200 Production"})
     import ate.log as log_module
 
     monkeypatch.setattr(log_module, "datetime", _TickingClock())
@@ -558,6 +565,51 @@ def test_first_stage_fields_have_visible_buddy_labels(qapp, tmp_path):
         assert edit.placeholderText() == placeholder
 
 
+# -- Project comes from defaultProject, never the Station (30a r3) -----------------------
+
+
+def test_project_prefills_from_default_project_not_the_station_name(qapp, tmp_path):
+    """`defaultProject` prefills Project on the Run screen; the station name never appears there.
+
+    Spec app-config-format: `defaultProject` (default "") "Prefills the Project on the Run
+    screen" — BENCH-03 is the Station, and the run row records it separately."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path, default_project="PSU-200 Production")
+    assert outcome.code == 0, alerts
+    stage = outcome.window.run_screen.uut_operator_stage
+    assert stage.project_edit.text() == "PSU-200 Production", stage.project_edit.text()
+    assert "BENCH-03" not in stage.project_edit.text(), "the station name is being used as the project"
+
+
+def test_an_empty_project_keeps_start_disabled_and_refuses_the_run(qapp, tmp_path):
+    """With `defaultProject: ""` the field is blank: Start is disabled with a reason, and the session refuses to start."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path, default_project="")
+    assert outcome.code == 0, alerts
+    screen = outcome.window.run_screen
+    stage = screen.uut_operator_stage
+    assert stage.project_edit.text() == "", stage.project_edit.text()
+
+    rows = screen.test_schedule_stage.schedule_list
+    row = next(i for i in range(rows.count()) if rows.item(i).data(Qt.ItemDataRole.UserRole) == "Blocking input schedule")
+    rows.setCurrentRow(row)
+    qapp.processEvents()
+
+    assert not screen.test_schedule_stage.run_button.isEnabled(), "Start is enabled with an empty Project"
+    assert not screen.steps_options_stage.run_button.isEnabled(), "Start is enabled with an empty Project"
+    assert "Project" in screen.steps_options_stage.error_label.text(), screen.steps_options_stage.error_label.text()
+
+    with pytest.raises(SessionError):
+        outcome.window.session.start()
+
+    stage.project_edit.setText("PSU-200 Production")
+    qapp.processEvents()
+    assert screen.steps_options_stage.run_button.isEnabled(), "typing a Project did not re-enable Start"
+    assert screen.steps_options_stage.error_label.text() == ""
+
+
 # -- History -> "New run for this UUT" prefills the Run screen (item 8) ------------------
 
 
@@ -588,7 +640,10 @@ def test_new_run_from_history_returns_to_a_prefilled_run_screen(qapp, tmp_path, 
     stage = window.run_screen.uut_operator_stage
     assert stage.uut_type_edit.text() == "PowerSupply", stage.uut_type_edit.text()
     assert stage.serial_edit.text() == "PS-1", stage.serial_edit.text()
-    assert stage.project_edit.text() == "BENCH-03", stage.project_edit.text()
+    # "New run for this UUT" prefills the Project the run recorded, not the Station's name.
+    assert stage.project_edit.text() == "PSU-200 Production", stage.project_edit.text()
+    recorded = RunStore(env["db"]).get_test_run(window.session.run_uuid)
+    assert recorded["project"] == "PSU-200 Production" and recorded["station_name"] == "BENCH-03", recorded
     item = window.run_screen.test_schedule_stage.schedule_list.currentItem()
     assert item is not None and item.data(Qt.ItemDataRole.UserRole) == "Blocking input schedule"
     assert window.session.selected_schedule == "Blocking input schedule"
