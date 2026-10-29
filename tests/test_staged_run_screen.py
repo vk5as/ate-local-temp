@@ -480,3 +480,12 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
     ).fetchone()
     assert err is not None and err["pass_fail"] == "ERROR"
     assert err["msg"] == "Aborted by Operator"
+
+    # The run is over: let its report helper exit before the session can be collected, or the
+    # QProcess is destroyed mid-run and Qt aborts the test process at teardown (packet 25a review).
+    # The helper finishes only while the event loop spins, so pump rather than block on a wait.
+    report_deadline = time.monotonic() + 10.0
+    while not report_done.is_set() and time.monotonic() < report_deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert report_done.is_set(), "the PDF helper never reported done"
