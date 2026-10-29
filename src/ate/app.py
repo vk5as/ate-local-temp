@@ -161,13 +161,16 @@ class MainWindow(QMainWindow):
         # is where the store reads it deferred while hidden are drawn (packet 25b).
         self._carry_over(previous, self.run_screen)
         self.run_screen.set_active(True)
+        # The page comes to the front before the keyboard: a layout the stack has not revealed yet
+        # has nothing on screen to take focus (packet 30b review — the hidden layout no longer shows
+        # itself, so it cannot be focused before it is the page the Operator is looking at).
+        if self.stack.currentWidget() in (previous, self.run_screen):
+            self.stack.setCurrentWidget(self.run_screen)
         # The layout that just came to the front takes the keyboard: its waiting input, or the prompt
         # it is paused on (packet 25b). `activate` only focuses the layout that is showing, so a
         # mid-run switch has to hand the focus over here.
         self.run_screen.focus_waiting()
         self._mark_layout()
-        if self.stack.currentWidget() in (previous, self.run_screen):
-            self.stack.setCurrentWidget(self.run_screen)
 
     def _mark_layout(self) -> None:
         """Tick the Layout action that matches the screen on screen."""
