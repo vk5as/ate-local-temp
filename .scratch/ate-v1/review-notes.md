@@ -552,3 +552,31 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Leftovers:
   - Spec ambiguity: line 110 says "every close traced" vs line 126 "a second close does nothing". The engine follows 126.
   - New packet 30b covers the finished-run window growth seen in the screenshots.
+
+## 30b — Finished-run layout (merged 2026-10-30)
+- New packet from the 10a/29c/29d screenshots: the window grew past 1280x800 after FINISHED.
+- Implementer (Strata, high, 0 compactions).
+  - Root cause: FINISHED re-showed the setup stages beside the run view, so the central minimumSizeHint was the sum of both. The Log/Summary QLabels also grew with their text.
+  - Fixed: stages hidden at FINISHED, a New run button, scrollable TextPanes, size floors.
+- Reviews: Haiku 4 must-fix, Strata 4 must-fix (union 5):
+  - **the hidden staged screen painted over three-pane** (`_reveal_run_view` called `self.show()`; a 25b bug, also on integration);
+  - New run left the session FINISHED (options locked);
+  - History "New run" prefilled hidden fields;
+  - a layout switch after FINISHED moved the session to SELECTING (lost the finished view);
+  - the Log tab accumulated across runs.
+- Rework (Strata, high, 0 compactions). Principle applied: a view action never changes session state.
+  - `_show_if_on_screen` guard;
+  - `new_run()` re-selects the schedule and re-applies stop-on-fail (enable overrides carry);
+  - three-pane gained New run;
+  - History goes through New run;
+  - carry-over never calls the session;
+  - run text cleared at start;
+  - read-only TextPanes;
+  - stretch instead of caps;
+  - hermetic tests (opt-in screenshot test skipped by default);
+  - the staged abort race made deterministic (`ABORTABLE_TWO_INPUTS`).
+- Light review: 1032 passed + 1 skipped ×3 (~153 s); collection 1020 → 1033, none lost; screenshots /tmp/30b-r2-shots OK.
+- Leftovers:
+  - The staged Debug pane shows a doubled vertical scrollbar.
+  - Below ~725 px window height the window still grows.
+  - The finished header has no PASS/FAIL chip or Report button (mockup).
