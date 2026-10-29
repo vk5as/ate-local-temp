@@ -122,8 +122,9 @@ class MainWindow(QMainWindow):
 
 def _missing_config_dialog(path: str) -> bool:
     """The Operator's missing-config prompt: create the default config, or abort."""
-    app = QApplication.instance() or QApplication([])
-    box = QMessageBox(app)
+    # QMessageBox takes a QWidget parent or None, never the QApplication itself (30a review).
+    QApplication.instance() or QApplication([])  # Qt needs an application before any widget
+    box = QMessageBox()
     box.setWindowTitle("ATE")
     box.setText(f"No config file at {path}")
     box.setInformativeText("Create a default config and launch, or stop?")
@@ -135,8 +136,10 @@ def _missing_config_dialog(path: str) -> bool:
 
 def _alert_dialog(message: str) -> None:
     """Show a launch refusal and stop."""
-    app = QApplication.instance() or QApplication([])
-    QMessageBox.critical(None, "ATE", message)
+    QApplication.instance() or QApplication([])
+    # Built (not via QMessageBox.critical) so the exec seam stays visible to callers and tests.
+    box = QMessageBox(QMessageBox.Icon.Critical, "ATE", message, QMessageBox.StandardButton.Ok, None)
+    box.exec()
 
 
 def launch(
@@ -163,7 +166,8 @@ def launch(
     try:
         config = read_config(args.config, on_missing_prompt=prompt)
     except MissingConfigError as exc:
-        alert(f"no config file at {exc}")  # the Operator chose Abort
+        # The Operator chose Abort at the prompt: one clear line, not a re-worded restatement (30a review).
+        alert(str(exc))
         return LaunchOutcome(1)
     except ConfigError as exc:
         alert(str(exc))

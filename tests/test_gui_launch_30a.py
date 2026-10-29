@@ -13,10 +13,10 @@ import sqlite3
 import time
 
 import pytest
-from PyQt6.QtWidgets import QMainWindow
+from PyQt6.QtWidgets import QMainWindow, QMessageBox
 
 from ate._version import __version__
-from ate.app import launch
+from ate.app import _alert_dialog, _missing_config_dialog, launch
 from ate.cli import main
 from ate.run_session.headless import SessionState
 from ate.storage.store import SCHEMA_VERSION, RunStore
@@ -298,3 +298,67 @@ def test_db_help_and_config_flag_parse(capsys, tmp_path):
         main(["--config", str(tmp_path / "config.json"), "db", "--help"])
     assert exit_code.value.code == 0
     assert "usage: ate db" in capsys.readouterr().out
+
+
+# -- the real default dialogs (30a review item 1) --------------------------------------
+
+
+def _stub_dialogs(monkeypatch, boxes, choose):
+    """Make QMessageBox.exec return at once, recording each box, with clickedButton answering ``choose``.
+
+    This runs the real `_missing_config_dialog`/`_alert_dialog` code without blocking on a modal box."""
+    from PyQt6.QtWidgets import QPushButton
+
+    def fake_exec(self, *args):
+        boxes.append(self)
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: choose(self))
+    return boxes
+
+
+def _button(box, text):
+    """The box's button with this exact text — how a test 'clicks' a stubbed dialog."""
+    from PyQt6.QtWidgets import QPushButton
+
+    return next(b for b in box.findChildren(QPushButton) if b.text() == text)
+
+
+def test_default_missing_config_dialog_builds_and_create_choice_returns_true(qapp, monkeypatch):
+    """The real prompt constructs (it crashed when the QApplication was passed as parent) and
+    answering "Create default config and launch" returns True."""
+    boxes: list[QMessageBox] = []
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "Create default config and launch"))
+    assert _missing_config_dialog("/nowhere/config.json") is True
+    box = boxes[0]
+    assert box.parent() is None, "the prompt must not be parented to the QApplication"
+    assert box.text() == "No config file at /nowhere/config.json"
+    assert box.informativeText() == "Create a default config and launch, or stop?"
+
+
+def test_default_missing_config_dialog_abort_choice_returns_false(qapp, monkeypatch):
+    boxes: list[QMessageBox] = []
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "Abort"))
+    assert _missing_config_dialog("/nowhere/config.json") is False
+
+
+def test_default_alert_dialog_builds_with_no_parent(qapp, monkeypatch):
+    boxes: list[QMessageBox] = []
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "OK"))
+    _alert_dialog("this ATE is too old")
+    assert boxes and boxes[0].text() == "this ATE is too old"
+    assert boxes[0].parent() is None
+
+
+def test_bare_launch_with_default_dialogs_exits_one_on_abort(qapp, tmp_path, monkeypatch):
+    """``ate --config <missing>`` with the real dialogs: prompt, one clear alert, exit 1."""
+    boxes: list[QMessageBox] = []
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "Abort"))
+    config = tmp_path / "gone.json"
+    outcome = launch(["--config", str(config)], exec_=False)
+    assert outcome.code == 1
+    assert len(boxes) == 2, "prompt then alert — exactly two boxes on the abort path"
+    assert boxes[0].parent() is None and boxes[1].parent() is None
+    alert = boxes[1].text()
+    assert alert == f"config file not found at {config.resolve()}", f"duplicated wording: {alert!r}"
