@@ -71,9 +71,11 @@ class HeadlessRunSession(QObject):
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
-    def __init__(self, config: Config | None = None) -> None:
+    def __init__(self, config: Config | str | Path | None = None, app_log: Optional[AppLog] = None) -> None:
         super().__init__()
-        self._config = read_config(config) if config is not None else None
+        # Accept an already-read Config (the GUI launch reads the file once, spec "read once at
+        # launch") or the path form used by existing callers (30a review).
+        self._config = config if isinstance(config, Config) else (read_config(config) if config is not None else None)
         self._store = RunStore(self._config.database_path) if self._config is not None else None
         self._selected_name: Optional[str] = None
         # The selected schedule's declared Stop on Fail default, captured when it is chosen;
@@ -82,19 +84,28 @@ class HeadlessRunSession(QObject):
         self._selected_stop_on_fail: Optional[bool] = None
         # The current observable state; updated on the owning thread by signal handlers.
         self._state = SessionState.IDLE
-        # ATE's logger seam (ticket 08); interrupted-run recovery logs through it. Defaults to
-        # the launch application log when a config is present (see below), so ATE-level events —
-        # config load and interrupted-run recovery — are recorded in that one file per launch; a
+        # ATE's logger seam (ticket 08); interrupted-run recovery logs through it. The launch's
+        # AppLog is passed in by the GUI (one application log per launch, spec 17); without one,
+        # a session given a config opens its own so ATE-level events still land in a file. A
         # broken log directory must not block launch, so a failure leaves on_log as None.
         self.on_log: Optional[Callable[[str, str, str], None]] = None
-        if self._config is not None:
+        self._app_log: Optional[AppLog] = None
+        self._owns_app_log = False
+        if app_log is not None:
+            self._app_log = app_log
+            self.on_log = app_log.log
+        elif self._config is not None:
             try:
                 self._app_log = open_app_log(self._config.log_directory, level=self._config.log_level)
                 self.on_log = self._app_log.log
+                self._owns_app_log = True
             except LogError:
                 self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
+        # Spec 08: Project is prefilled from config's `defaultProject` — the same value the Run
+        # screen shows — and the Operator's typing replaces it. A run cannot start without one.
+        self._pending_project: str = self._config.default_project if self._config is not None else ""
         # Packet 11a: the Operator's enable/disable toggles for expanded-tree positions, keyed by
         # the runner seq each step is assigned. Applied at start() as engine overrides; absent here
         # every step keeps its :setEnable() default (see RunEngine._enabled). ``None`` until set.
@@ -114,6 +125,19 @@ class HeadlessRunSession(QObject):
         """The run store this session records through."""
         assert self._store is not None, "session was constructed without a config"
         return self._store
+
+    @property
+    def state(self) -> SessionState:
+        """The session's current observable state."""
+        return self._state
+
+    def close(self) -> None:
+        """Release this session's resources: close the store, and the application log if the
+        session opened its own (a log handed in by the launch belongs to the launch)."""
+        if self._store is not None:
+            self._store.close()
+        if self._app_log is not None and self._owns_app_log:
+            self._app_log.close()
 
     @property
     def selected_schedule(self) -> Optional[str]:
@@ -442,6 +466,11 @@ class HeadlessRunSession(QObject):
 
         if self._selected_name is None:
             raise SessionError("no schedule selected before start()")
+
+        # Spec 08/11: a Test Run never has an empty Project. The Run screen keeps Start disabled,
+        # but the session is the authority, so a blank Project refuses the run here too.
+        if not (getattr(self, "_pending_project", "") or "").strip():
+            raise SessionError("a Test Run cannot start with an empty Project")
 
         config = self._config
         assert config is not None, "session was constructed without a config"

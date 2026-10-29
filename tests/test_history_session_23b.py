@@ -61,6 +61,7 @@ def _record_open(tmp_path: Path, app: object, source: str = DOC_FIELDS) -> tuple
         store,
         str(schedule_path),
         operator="Alice",
+        project="Power board",
         uut_type="PowerSupply",
         uut_serial="PS7",
         station_name="BENCH-03",
@@ -208,7 +209,9 @@ def test_uut_filter_missing_run_raises(tmp_path: Path, app: object):
 
 
 def test_new_run_prefill_fills_uut_and_project(tmp_path: Path, app: object):
-    """new_run_prefill fills UUT Type, serial and Project (from config.station_name); schedule empty."""
+    """new_run_prefill fills UUT Type, serial and the run's own Project; schedule empty.
+
+    The Station (BENCH-03) is not the Project: the prefill takes what the run recorded."""
     store, _dir, ru = _record_open(tmp_path, app, DOC_FIELDS)
     s = HistorySession(store, config=_cfg(_dir, station_name="BENCH-03"))
     prefill = s.new_run_prefill(ru)
@@ -216,7 +219,7 @@ def test_new_run_prefill_fills_uut_and_project(tmp_path: Path, app: object):
     assert prefill == {
         "uut_type": "PowerSupply",
         "uut_serial": "PS7",
-        "project": "BENCH-03",
+        "project": "Power board",
         "schedule_name": "",
     }
 

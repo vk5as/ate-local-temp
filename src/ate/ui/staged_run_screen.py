@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterable, Optional
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFontMetrics
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -108,14 +109,15 @@ class _LogPane(QWidget):
 class UutOperatorStage(QWidget):
     """Stage one: the Operator and UUT fields.
 
-    Holds no run logic — it only owns four text inputs (Operator, Project, UUT type,
-    UUT serial) plus a button that advances to the Test Schedule stage. The screen wires
-    the button up; nothing here calls into the session until a run actually starts.
+    Holds no run logic — it only owns the mockup's compact first-stage form: four labelled
+    text inputs (Project, Operator, UUT Type, Serial) and a button that advances to the Test
+    Schedule stage. Every label is the buddy of its input (30a review item 14). The screen
+    wires the button up; nothing here calls into the session until a run actually starts.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.operator_edit = QLineEdit()
@@ -123,11 +125,29 @@ class UutOperatorStage(QWidget):
         self.uut_type_edit = QLineEdit()
         self.serial_edit = QLineEdit()
 
-        for widget in (self.operator_edit, self.project_edit, self.uut_type_edit, self.serial_edit):
-            layout.addWidget(widget)
+        self.operator_label = QLabel("Operator")
+        self.project_label = QLabel("Project")
+        self.uut_type_label = QLabel("UUT Type")
+        self.serial_label = QLabel("Serial")
+
+        # Mockup order and placeholders: Project is prefilled from the station, so it carries
+        # no placeholder; Operator, UUT Type and Serial are marked "required" in the mockup.
+        rows = [
+            (self.project_label, self.project_edit, ""),
+            (self.operator_label, self.operator_edit, "required"),
+            (self.uut_type_label, self.uut_type_edit, "required"),
+            (self.serial_label, self.serial_edit, "required"),
+        ]
+        for index, (label, edit, placeholder) in enumerate(rows):
+            label.setBuddy(edit)
+            if placeholder:
+                edit.setPlaceholderText(placeholder)
+            layout.addWidget(label, index, 0)
+            layout.addWidget(edit, index, 1)
 
         self.next_button = QPushButton("Next")
-        layout.addWidget(self.next_button)
+        layout.addWidget(self.next_button, len(rows), 1)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
 
 class TestScheduleStage(QWidget):
@@ -1302,10 +1322,12 @@ class StagedRunScreen(QWidget):
         root.addWidget(self.run_view)
         self.run_view.hide()
 
-        # Prefill the Project field from the station name in config (ticket 03). This is
-        # a display convenience only; it does not capture into the session.
+        # Prefill the Project field from config's `defaultProject` (spec 08). The Station name is
+        # not a Project: it is recorded on the run row separately, and never lands in this field.
         if self.session.config is not None:
-            self.uut_operator_stage.project_edit.setText(self.session.config.station_name or "")
+            self.uut_operator_stage.project_edit.setText(self.session.config.default_project or "")
+        # A Test Run cannot start with an empty Project, so the field gates Start (packet 30a r3).
+        self.uut_operator_stage.project_edit.textChanged.connect(self._update_run_button)
 
         # Bind to the session's observable state — the single source of run truth.
         self.session.state_changed.connect(self._on_state_changed)
@@ -1470,10 +1492,11 @@ class StagedRunScreen(QWidget):
     def begin_run(self) -> None:
         """Capture the Operator's fields and start a run. Clears nothing on purpose.
 
-        Fields are only pushed to the session when a widget is non-empty, so a new run keeps
-        every field it did not change; blanking one drops that value for this run. The run
-        then starts through ``session.start()`` and the Run view is shown. This never blocks:
-        ``start()`` queues its signals and returns immediately.
+        Operator, UUT Type and serial are only pushed when a widget is non-empty, so a new run keeps
+        every field it did not change; Project is pushed as typed, because a blank Project must
+        refuse the run rather than carry an earlier one (spec 08). The run then starts through
+        ``session.start()`` and the Run view is shown. This never blocks: ``start()`` queues its
+        signals and returns immediately.
         """
         operator = self.uut_operator_stage.operator_edit.text().strip()
         project = self.uut_operator_stage.project_edit.text().strip()
@@ -1484,8 +1507,9 @@ class StagedRunScreen(QWidget):
 
         if operator:
             self.session.set_operator(operator)
-        if project:
-            self.session.set_project(project)
+        # Project is pushed even when blank: a Test Run cannot start without one (spec 08), so the
+        # field's content is exactly what the run records rather than whatever an earlier run left.
+        self.session.set_project(project)
         if uut_type:
             self.session.set_uut_type(uut_type)
         if serial:
@@ -1905,7 +1929,13 @@ class StagedRunScreen(QWidget):
 
         The Steps stage's Start button follows the same rule (packet 05b review): the picked
         schedule can break between stages — a Rescan finds a bad file — and `begin_run` would then
-        raise out of the button's handler."""
+        raise out of the button's handler. A blank Project keeps Start away too (spec 08: a Test
+        Run cannot start with an empty Project), with the reason on the stage's error line."""
         runnable = self._selected_schedule_name() is not None
-        self.test_schedule_stage.run_button.setEnabled(runnable)
-        self.steps_options_stage.run_button.setEnabled(runnable)
+        project = self.uut_operator_stage.project_edit.text().strip()
+        self.test_schedule_stage.run_button.setEnabled(runnable and bool(project))
+        self.steps_options_stage.run_button.setEnabled(runnable and bool(project))
+        if runnable:
+            self.steps_options_stage.error_label.setText(
+                "" if project else "⛔ Project is required before a Test Run can start"
+            )

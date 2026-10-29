@@ -297,6 +297,7 @@ def _run(tmp_path: Path, files: dict[str, str], schedule: str, *, enables: Optio
             {
                 "format": 1,
                 "station": {"name": "BENCH-21B", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c21"},
+                "defaultProject": "Power board",
                 "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
                 "reports": {"directory": str(tmp_path / "reports")},
                 "testDefinitions": {"directories": [str(root)]},

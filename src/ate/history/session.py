@@ -272,9 +272,13 @@ class HistorySession:
         """Prefill for a new run of this UUT (UUT Type, serial, Project and Test Schedule).
 
         The session has no notion of an Operator's selected schedule, so ``schedule_name`` is left
-        empty — the app shell fills it from its own selection when it connects ``new_run_requested``."""
+        empty — the app shell fills it from its own selection when it connects ``new_run_requested``.
+        The Project is the one this run recorded (spec 19); a legacy row that recorded none falls
+        back to config's `defaultProject`, never the Station name."""
         row = self.store.get_test_run(run_uuid)
         if row is None:
             raise ValueError(f"no test run recorded for {run_uuid!r}")
-        project = self.config.station_name if self.config is not None else ""
+        project = (row.get("project") or "").strip()
+        if not project and self.config is not None:
+            project = self.config.default_project or ""
         return {"uut_type": row.get("uut_type") or "", "uut_serial": row.get("uut_serial") or "", "project": project, "schedule_name": ""}

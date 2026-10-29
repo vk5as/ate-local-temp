@@ -62,44 +62,113 @@ def _cmd_pdf_helper(argv: list[str]) -> int:
     return code
 
 
-def main(argv=None) -> int:
-    """Run the ``ate`` CLI. Returns the intended process exit code."""
-    argv = list(sys.argv[1:] if argv is None else argv)
+def _build_parser() -> argparse.ArgumentParser:
+    """The whole ``ate`` command line, so ``--help`` works at every level (packet 30a).
 
-    if not argv or argv[0] in ("-V", "--version"):
+    Subparsers only make the help text: the subcommands themselves are still dispatched to their
+    existing handlers with their original arguments, so nothing about them changes — and stray
+    arguments after a subcommand stay tolerated, as in the base CLI (30a review item 5). The
+    ``metavar`` keeps the hidden helper ``_pdf`` out of the usage line (item 12).
+    """
+    parser = argparse.ArgumentParser(
+        prog="ate",
+        description="ATE — Automated Test Equipment. With no subcommand, opens the application.",
+    )
+    parser.add_argument("--config", metavar="PATH", help="config file for the GUI launch (default: the platform config)")
+    parser.add_argument("-V", "--version", action="store_true", help="print ATE's version and exit")
+
+    sub = parser.add_subparsers(dest="command", metavar="db|setup|definition")
+
+    db = sub.add_parser("db", help="create or check the database")
+    db.add_argument("--yes", "-y", action="store_true", help="skip the migrate confirmation prompt")
+
+    setup = sub.add_parser("setup", help="create the Station directories, config and database")
+    setup.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root")
+    setup.add_argument("--data-dir", metavar="DIR")
+    setup.add_argument("--config-dir", metavar="DIR")
+    setup.add_argument("--no-permissions", action="store_true", help="skip group/ownership/ACL setup")
+
+    definition = sub.add_parser("definition", help="Test Definition commands")
+
+    return parser
+
+
+def _subcommand_args(argv: list[str], command: str) -> list[str]:
+    """The arguments following ``command``, whatever global flags came before it."""
+    for index, token in enumerate(argv):
+        if token == command:
+            return argv[index + 1 :]
+    return []
+
+
+def main(argv=None) -> int:
+    """Run the ``ate`` CLI. Returns the intended process exit code.
+
+    Packet 30a: bare ``ate`` (optionally ``--config PATH``) opens the GUI. ``--version`` still
+    prints the version, and ``--help`` at any level prints usage instead of running the command.
+    The existing subcommands keep the base CLI's tolerance of stray arguments (parse_known_args);
+    a token that is no known command exits 1 with the "no command given" hint, as in the base
+    (30a review item 5).
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Hidden helper subcommand (ticket 22): the PDF child process runs `ate _pdf <html> <pdf>`.
+    # It is dispatched before parsing so it is not advertised in --help (30a review item 12).
+    if argv and argv[0] == "_pdf":
+        return _cmd_pdf_helper(argv[1:])
+    try:
+        args, unknown = _build_parser().parse_known_args(argv)
+    except SystemExit as exc:
+        if exc.code == 2:
+            # argparse's "invalid choice" for an unknown command; the base CLI answered with a
+            # hint and exit 1 instead of usage and exit 2.
+            print(
+                "ate: no command given\ntry 'ate --version', 'ate db status', 'ate setup' or 'ate definition update <file.atedef>'",
+                file=sys.stderr,
+            )
+            return 1
+        raise
+
+    if args.version:
         return _print_version()
 
-    command = argv[0]
-    if command == "db":
-        return _cmd_db(argv[1:])
-    if command == "setup":
-        return _cmd_setup(argv[1:])
-    if command == "definition":
-        return _cmd_definition(argv[1:])
-    # Hidden helper subcommand (ticket 22): render a saved HTML report to PDF in a child process.
-    if command == "_pdf":
-        return _cmd_pdf_helper(argv[1:])
+    command = args.command
+    if command is None:
+        if unknown:
+            print(
+                "ate: no command given\ntry 'ate --version', 'ate db status', 'ate setup' or 'ate definition update <file.atedef>'",
+                file=sys.stderr,
+            )
+            return 1
+        from .app import launch
 
-    prog = "ate"
-    print(
-        f"{prog}: no command given\ntry '{prog} --version', '{prog} db status', '{prog} setup' or '{prog} definition update <file.atedef>'",
-        file=sys.stderr,
-    )
+        return launch(argv).code
+    if command == "db":
+        return _cmd_db(_subcommand_args(argv, command))
+    if command == "setup":
+        return _cmd_setup(_subcommand_args(argv, command))
+    if command == "definition":
+        return _cmd_definition(_subcommand_args(argv, command))
+
+    print(f"ate: unknown command '{command}'", file=sys.stderr)
     return 1
 
 
 def _cmd_db(argv: list[str]) -> int:
-    """Dispatch ``ate db <status|migrate> [PATH]``."""
+    """Dispatch ``ate db <status|migrate> [PATH] [--yes]``.
+
+    The path is the first non-flag token after the subcommand, so `--yes` may appear anywhere
+    in the db arguments without being taken as the path (30a review item 6)."""
     if not argv:
         print("ate db: no subcommand given\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
         return 1
 
     sub = argv[0]
-    path = argv[1] if len(argv) > 1 else "ate.db"
+    rest = argv[1:]
+    path = next((token for token in rest if not token.startswith("-")), "ate.db")
     if sub == "status":
         return _db_status(path)
     if sub == "migrate":
-        return _db_migrate(path, argv[2:])
+        return _db_migrate(path, rest)
     print(f"ate db: unknown command '{sub}'\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
     return 1
 

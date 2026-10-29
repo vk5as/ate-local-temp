@@ -25,8 +25,10 @@ ate setup --root /tmp/ate-station   # creates the config, database and data dire
 ate --version                       # the version baked from the git tag: the install check
 ```
 
-`ate --version` is how you verify the install. The GUI is started with `ate` once the
-application shell is in place (packet 30a adds it); until then there is no GUI command.
+`ate --version` is how you verify the install. Bare `ate` opens the GUI: it reads the config,
+refuses a missing or mismatched database, and opens the main window with the Run screen.
+`ate --config <path>` points the launch at a specific config file; `ate --help` and
+`ate <subcommand> --help` print usage without running anything.
 
 `ate setup` is best run as admin or root: elevated, it creates the `ate` group and sets
 the ownership and permissions of the station directories. Run unprivileged it warns and

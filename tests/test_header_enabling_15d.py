@@ -112,6 +112,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
     path.write_text(json.dumps({
         "format": 1,
         "station": {"name": "BENCH-15D", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c12"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(root)]},

@@ -727,6 +727,16 @@ class RunStore:
 
     # -- interrupted-run recovery -------------------------------------------
 
+    def close(self) -> None:
+        """Release the store's database handles (stdlib connection and Engine).
+
+        Idempotent; the application calls it when the main window closes (packet 30a)."""
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+        self._engine.dispose()
+
     def close_interrupted_runs(self, on_log: Optional[callable] = None) -> list[str]:
         """Close every open run as INTERRUPTED / FAIL. Returns the closed UUIDs.
 

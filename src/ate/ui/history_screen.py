@@ -206,6 +206,11 @@ class HistoryScreen(QWidget):
 
     # -- paging --------------------------------------------------------------
 
+    def refresh(self) -> None:
+        """Reload the current page from the store — e.g. right after a run has just ended, so
+        the table shows the new row (packet 30a wires this to the session's FINISHED state)."""
+        self._load_page(self._page_index)
+
     def _load_page(self, page: int) -> None:
         """Fetch ``page`` and rebuild the table; hide 'Load more' once every row is shown."""
         rows = self.session.page(page)
@@ -466,11 +471,19 @@ class HistoryScreen(QWidget):
         self._load_page(0)
 
     def _emit_new_run(self) -> None:
-        """Emit ``new_run_requested`` with the prefill for a new run of this UUT."""
+        """Emit ``new_run_requested`` with the prefill for a new run of this UUT.
+
+        The session's prefill leaves the Test Schedule empty (it has no notion of an Operator
+        selection); the selected row's own schedule closes that gap (packet 23b: "prefills UUT
+        Type, serial, Project and Test Schedule", 30a review item 8)."""
         run_uuid = self._selected_run_uuid()
         if not run_uuid:
             return
-        self.new_run_requested.emit(self.session.new_run_prefill(run_uuid))
+        prefill = dict(self.session.new_run_prefill(run_uuid))
+        if not prefill.get("schedule_name"):
+            row = self.session.store.get_test_run(run_uuid)
+            prefill["schedule_name"] = (row or {}).get("schedule_name") or ""
+        self.new_run_requested.emit(prefill)
 
     # -- header sort ---------------------------------------------------------
 

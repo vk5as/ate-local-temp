@@ -85,6 +85,7 @@ def _write_env(tmp_path: Path) -> dict[str, Path]:
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(defs)]},
@@ -345,6 +346,7 @@ def _write_long_error_env(tmp_path: Path) -> Path:
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(defs)]},
@@ -369,6 +371,7 @@ def _write_flagged_env(tmp_path: Path) -> Path:
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
+        "defaultProject": "Power board",
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(defs)]},
