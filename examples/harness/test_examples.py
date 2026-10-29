@@ -5,7 +5,8 @@ session with scripted Operator answers, and its recorded Test Run is checked her
 Definition scans clean (no broken rows, no checksum mismatch), the schedule metadata and Step
 Numbers are recorded, every `Result` value appears, a step that never reports records NOREPORT, a
 step that raises records ERROR, the log levels and Equipment are recorded, the step disabled by
-default stays NOTRUN, and Stop on Fail ends both ways.
+default stays NOTRUN until the Operator enables it, Stop on Fail ends both ways, and every run
+writes its report.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -14,6 +15,7 @@ Run it on its own with `pytest examples/`, or as part of the regular suite (`pyt
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -30,8 +32,10 @@ from examples.harness.run_examples import RELEASE_DIR, RUNS, run_all, visible_sc
 
 @pytest.fixture(scope="module")
 def records(tmp_path_factory) -> dict[str, dict[str, Any]]:
-    """Every example schedule run once headless, keyed by the harness's run key."""
-    return run_all(tmp_path_factory.mktemp("example-release"), stub_pdf=True)
+    """Every example schedule run once headless, keyed by the harness's run key.
+
+    The PDF helper is the one conftest.py installs for every test, so nothing here patches it."""
+    return run_all(tmp_path_factory.mktemp("example-release"))
 
 
 def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> None:
@@ -65,8 +69,12 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
 
 
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
-    """Each example schedule runs to a recorded Test Run through the headless session."""
-    assert len(records) == len(RUNS)
+    """Each example schedule runs to a recorded Test Run through the headless session.
+
+    Three schedules, five runs: Stop on fail is run twice (Continue and Abort) and Example basics
+    twice (its optional step left disabled, then enabled by the Operator), so the record count is
+    the schedule count plus those two extra runs."""
+    assert len(records) == len(visible_schedules()) + 2
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
@@ -77,6 +85,17 @@ def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[st
         assert [release["media_number"] for release in record["media_releases"]] == ["MR-EXAMPLE"]
         assert all(file["expected_sha256"] == file["computed_sha256"] for file in record["run_files"])
         assert record["run_files"], "the run records the schedule file it loaded"
+
+        # The report really arrives: HTML on disk, PDF beside it, named after this run's UUT.
+        assert record["reports"], "report_written fired for this run"
+        html, pdf = record["reports"][0]
+        assert html and Path(html).exists(), f"the HTML report is missing: {html!r}"
+        assert pdf and Path(pdf).exists(), f"the PDF report is missing: {pdf!r}"
+        assert "EX-0001" in html and run["result"] in Path(html).name, "the report is this run's"
+
+        # Every prompt was one the harness scripted: a schedule that pauses when it does not say it
+        # will is a bug, not something to answer.
+        assert record["unexpected_prompts"] == [], f"{run['schedule_name']} paused unexpectedly"
 
 
 def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[str, dict[str, Any]]) -> None:
@@ -93,6 +112,7 @@ def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[st
     assert run["uut_serial"] == "EX-0001"
     assert run["result"] == "PASS"
     assert run["end_reason"] == "COMPLETED"
+    assert run["station_name"] == "BENCH-EXAMPLE"
 
     nodes = record["nodes"]
     assert [node["step_number"] for node in nodes] == ["1.", "2.", "3.", "4.", "5.", "6."]
@@ -104,15 +124,17 @@ def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[st
     assert (disabled["default_enabled"], disabled["enabled"]) == (0, 0)
     assert disabled["attempt_count"] == 0
 
-    # ATE.run is readable from a step action.
+    # ATE.run is readable from a step action: the schedule logs the Station, Project, UUT serial,
+    # its own name and the Media Release it came from, and reports the Operator it read back.
     first = record["attempts"][0]
     assert first["msg"] == "operator Ada Lovelace"
     assert (first["actual"], first["expected"]) == ("Ada Lovelace", "Ada Lovelace")
 
-    # ATE.log at every level, plus print, which ATE redirects to INFO.
     schedule_logs = [(line["level"], line["text"]) for line in record["logs"] if line["source"] == "schedule"]
     assert schedule_logs == [
         ("DEBUG", "reading ATE.run for the run context"),
+        ("INFO", "station BENCH-EXAMPLE project Example project uut EX-0001"),
+        ("INFO", "schedule Example basics release MR-EXAMPLE"),
         ("DEBUG", "debug detail"),
         ("INFO", "info message"),
         ("WARNING", "warning 42"),
@@ -126,7 +148,10 @@ def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[st
     assert (declared["name"], declared["serial"], declared["connection"]) == ("Bench power supply", "PSU-123", "GPIB::1")
     assert (declared["cal_due"], declared["notes"]) == ("2026-12-01", "0-60 V, 4 quadrant")
 
-    # The scripted answer to the step's FLOAT input is recorded as an input_value row.
+    # Step 6's FLOAT input is declared with range {min = 0.1, max = 10}. The harness answers it
+    # through the session, which first refuses the out-of-range value with a ValueError (packet 10a)
+    # and then records the valid one.
+    assert record["refused_inputs"] == ["input 1: 99.0 refused: Must be 0.1 to 10"]
     answers = [(value["input_index"], value["type"], value["value"]) for value in record["input_values"]]
     assert answers == [(1, "FLOAT", "1.5")]
 
@@ -138,6 +163,12 @@ def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]
     assert run["result"] == "FAIL", "a FAIL and an ERROR step make the run fail"
     assert run["end_reason"] == "COMPLETED", ":setStopOnFail(false) means no pause"
 
+    # No pause at all: nothing was asked of the Operator, so no Attempt carries a prompt choice.
+    assert run["stop_on_fail"] == 0
+    assert all(attempt["prompt_choice"] is None for attempt in record["attempts"]), (
+        "a run with Stop on Fail off never prompts, so no Attempt records a choice"
+    )
+
     steps = [(node["step_number"], node["result"]) for node in record["nodes"]]
     assert steps == [
         ("1.", "PASS"), ("2.", "PASS"), ("3.", "PASS"), ("4.", "PASS"), ("5.", "FAIL"),
@@ -148,17 +179,19 @@ def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]
     by_node = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
     assert len(by_node) == len(record["nodes"])
 
-    # Numbers, strings and booleans all reach the record as text.
+    # Numbers, strings and booleans all reach the record as text — Lua's tostring, so `true` not
+    # Python's `True`, and Lua's float repr rather than Python's.
     assert (by_node[0]["actual"], by_node[0]["expected"]) == ("Green", "Green")
     assert (by_node[1]["actual"], by_node[1]["expected"]) == ("42", "42")
-    assert (by_node[2]["actual"], by_node[2]["expected"]) == ("true", "true")  # Lua tostring, not Python str(True)
+    assert (by_node[2]["actual"], by_node[2]["expected"]) == ("true", "true")
 
     # Two reports in one step: the last one is the step's result.
     assert (by_node[3]["pass_fail"], by_node[3]["msg"]) == ("PASS", "second reading")
 
-    # The step that never reported has no message and ATE logged the warning.
+    # The step that never reported has no message, and ATE logged the warning at WARNING from "ate".
     assert by_node[8]["pass_fail"] == "NOREPORT" and by_node[8]["msg"] is None
-    assert any("never reported" in line["text"] for line in record["logs"])
+    assert any(line["level"] == "WARNING" and line["source"] == "ate" and "never reported" in line["text"]
+               for line in record["logs"])
 
     # The step that raised: ERROR with the Lua message, and a traceback in the log.
     assert by_node[9]["pass_fail"] == "ERROR"
@@ -169,22 +202,39 @@ def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]
 
 
 def test_stop_on_fail_continues_when_the_operator_continues(records: dict[str, dict[str, Any]]) -> None:
-    """Continue at the prompt: the run carries on, still FAIL, End Reason COMPLETED."""
+    """Continue at both prompts: the run carries on, still FAIL, End Reason COMPLETED."""
     record = records["continue"]
     run = record["run"]
     assert run["stop_on_fail"] == 1, ":setStopOnFail(true) is the run's default"
     assert run["result"] == "FAIL"
     assert run["end_reason"] == "COMPLETED"
-    assert record["attempts"][0]["prompt_choice"] == "CONTINUE"
-    assert [(node["step_number"], node["result"]) for node in record["nodes"]] == [("1.", "FAIL"), ("2.", "PASS")]
+    assert [(attempt["pass_fail"], attempt["prompt_choice"]) for attempt in record["attempts"]] == [
+        ("FAIL", "CONTINUE"), ("PASS", None), ("ERROR", "CONTINUE"), ("PASS", None)
+    ]
+    assert [(node["step_number"], node["result"]) for node in record["nodes"]] == [
+        ("1.", "FAIL"), ("2.", "PASS"), ("3.", "ERROR"), ("4.", "PASS")
+    ]
 
 
 def test_stop_on_fail_aborts_when_the_operator_aborts(records: dict[str, dict[str, Any]]) -> None:
-    """Abort at the prompt: the later step never runs and the End Reason is STOPPED_ON_FAIL."""
+    """Abort at the first prompt: the later steps never run and the End Reason is STOPPED_ON_FAIL."""
     record = records["abort"]
     run = record["run"]
     assert run["result"] == "FAIL"
     assert run["end_reason"] == "STOPPED_ON_FAIL"
     assert record["attempts"][0]["prompt_choice"] == "ABORT"
     nodes = [(node["step_number"], node["result"], node["attempt_count"]) for node in record["nodes"]]
-    assert nodes == [("1.", "FAIL", 1), ("2.", "NOTRUN", 0)]
+    assert nodes == [("1.", "FAIL", 1), ("2.", "NOTRUN", 0), ("3.", "NOTRUN", 0), ("4.", "NOTRUN", 0)]
+    assert all(a["prompt_choice"] is None for a in record["attempts"][1:]), "the run stopped at step 1"
+
+
+def test_the_operator_can_enable_a_step_disabled_by_default(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 11a: the same schedule, with step 4 toggled on before the run — it runs and passes."""
+    record = records["basics_enabled"]
+    by_number = {node["step_number"]: node for node in record["nodes"]}
+    optional = by_number["4."]
+    assert optional["step_name"] == "Optional check"
+    assert (optional["default_enabled"], optional["enabled"]) == (0, 1)
+    assert (optional["result"], optional["attempt_count"]) == ("PASS", 1)
+    assert any(a["msg"] == "only runs when enabled" for a in record["attempts"])
+    assert record["run"]["result"] == "PASS"

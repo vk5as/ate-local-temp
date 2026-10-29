@@ -14,10 +14,15 @@ return ScheduleParams("Example basics", "Schedule metadata, step numbers and the
   :setDocRev("1.0")
   :setStopOnFail(false)
   :setSchedule({
-    -- 1. ATE.run describes the Test Run: Operator, Station, Project, UUT, schedule, release.
+    -- 1. ATE.run is the run's own context, read-only: UUT_serial, Operator, Station, Project,
+    --    Test_Schedule_Name and Media_Release_Media_Number. Reading them here puts them in the log.
     StepParams("Who is running"):setStepNo("1.")
       :setAction(function()
         ATE.log(Log.DEBUG, "reading ATE.run for the run context")
+        ATE.log(Log.INFO, "station " .. ATE.run.Station .. " project " .. ATE.run.Project
+                             .. " uut " .. ATE.run.UUT_serial)
+        ATE.log(Log.INFO, "schedule " .. ATE.run.Test_Schedule_Name
+                             .. " release " .. ATE.run.Media_Release_Media_Number)
         ATE.report(Result.PASS, "operator " .. ATE.run.Operator, ATE.run.Operator, "Ada Lovelace")
       end),
 

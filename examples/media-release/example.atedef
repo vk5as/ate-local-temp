@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "schedule_basics.tslua",
-      "sha256": "3600bdb0f42a172782d80ba677d3f94c662f79ffc0f056dcc99cfa275c2222d1"
+      "sha256": "cbd20636566690726a304788e06b351fef3079b56eb722dfe184dbbb10b2f7b4"
     },
     {
       "path": "report_results.tslua",
@@ -14,7 +14,7 @@
     },
     {
       "path": "stop_on_fail.tslua",
-      "sha256": "dbc113e95146034bc07d6598a3e407f03aa6b88094f143d640ccaab77641078b"
+      "sha256": "97b360eb15b1af4b81dd3819b537fbf840b339a89cade56c32f83b60ea98cb98"
     }
   ]
 }

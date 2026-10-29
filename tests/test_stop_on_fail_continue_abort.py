@@ -190,6 +190,37 @@ def test_no_pause_when_stop_on_fail_off(app: QCoreApplication) -> None:
     assert row["end_reason"] == "COMPLETED"
 
 
+def test_a_step_that_reports_error_pauses_like_one_that_raises(app: QCoreApplication) -> None:
+    """Packet 29a review: Stop on Fail pauses on a step that REPORTS Result.ERROR, not only a raised one.
+
+    `test-schedule-format.md` "Flow control" pauses "when a step ends FAIL or ERROR". Packet 12b's
+    condition tested the raise path (`error_text is not None`), so a step that reported ERROR walked
+    straight on. Reverting this line to `last_result == "FAIL" or error_text is not None` makes this
+    test fail: no prompt fires, no prompt_choice is recorded, and step 2 runs."""
+    store, row, prompts = _drive_with_choice(app, REPORTED_ERROR_SOURCE, "CONTINUE")
+
+    assert row is not None
+    assert prompts == 1, "the reported ERROR paused the run"
+    assert row["result"] == "FAIL"
+    assert row["end_reason"] == "COMPLETED"
+
+    conn = store._conn
+    conn.row_factory = sqlite3.Row
+    att = conn.execute(
+        "SELECT pass_fail, prompt_choice FROM attempt WHERE run_uuid=? AND node_seq=?",
+        (row["run_uuid"], _failing_node_seq(store, row["run_uuid"])),
+    ).fetchone()
+    assert att is not None
+    assert att["pass_fail"] == "ERROR"
+    assert att["prompt_choice"] == "CONTINUE"
+
+    nodes = {n["step_number"]: dict(n) for n in conn.execute(
+        "SELECT step_number, result FROM node WHERE run_uuid=? ORDER BY node_seq", (row["run_uuid"],)
+    ).fetchall()}
+    assert nodes["1."]["result"] == "ERROR"
+    assert nodes["2."]["result"] == "PASS"  # the Operator continued, so the run carried on
+
+
 # --- schedules ----------------------------------------------------------------
 
 
@@ -236,5 +267,16 @@ return ScheduleParams("Raising schedule", "a step that raises; abort at the fail
       :setAction(function() error("kaboom from Lua") end),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "should not run", "x", "y") end),
+  })
+"""
+
+REPORTED_ERROR_SOURCE = """\
+return ScheduleParams("Reported error schedule", "a step that reports Result.ERROR, then one that passes")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("probe"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.ERROR, "probe not connected") end),
+    StepParams("after"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "reconnected", 5.0, 5.0) end),
   })
 """
