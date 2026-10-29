@@ -11,8 +11,9 @@ Launch sequence (each step reuses the module that already does it):
    :class:`~ate.storage.store.RunStore` would create the tables;
 4. create the run session, which opens the launch log and the store, and close every run left
    open by a crash (spec 98) through the session's own store;
-5. open the main window: the staged Run screen as the default view (constructing it scans the
-   configured Test Definition directories, spec 31), the History screen reachable from the View
+5. open the main window: the Run screen in the layout `ui.layout` names (staged, or threePane) —
+   both layouts are built and bound to the session so the View menu's Layout group can switch them
+   for this session without touching a run (packet 25b) — the History screen reachable from the View
    menu, and the Run view's debug window inside the Run screen.
 
 Both dialogs are injectable (`prompt`, `alert`) so tests never block on a real
@@ -29,6 +30,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
@@ -38,7 +40,9 @@ from .log import LogError, open_app_log
 from .run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .storage.store import DbLaunchStatus, check_database_at_launch
 from .ui.history_screen import HistoryScreen
+from .ui.run_widgets import load_schedule_steps
 from .ui.staged_run_screen import StagedRunScreen
+from .ui.three_pane_run_screen import ThreePaneRunScreen
 
 
 @dataclass
@@ -56,6 +60,10 @@ class MainWindow(QMainWindow):
 
     ``session`` is the run session both screens bind to; the History switch is disabled while a
     Test Run is in progress when ``ui.allowHistoryDuringRun`` is false (spec 23c).
+
+    Both Run layouts are built at launch and both listen to the same session, so the View menu's
+    Layout group only changes which screen is visible (packet 25b): a run in progress is untouched,
+    and the layout that is not showing keeps mirroring the session while its controls stay inert.
     """
 
     def __init__(
@@ -63,7 +71,7 @@ class MainWindow(QMainWindow):
         session: HeadlessRunSession,
         config: Config,
         *,
-        run_screen: Optional[StagedRunScreen] = None,
+        run_screen: Optional[StagedRunScreen | ThreePaneRunScreen] = None,
         history_screen: Optional[HistoryScreen] = None,
         app_log=None,
         confirm_close: Optional[Callable[[str], bool]] = None,
@@ -79,23 +87,133 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"ATE {__version__} — {config.station_name}")
 
         self.history_session = HistorySession(session.store, config=session.config)
-        self.run_screen = run_screen or StagedRunScreen(session)
+
+        # The two layouts, both bound to this session from the start (packet 25b).
+        self.staged_screen = run_screen if isinstance(run_screen, StagedRunScreen) else StagedRunScreen(session)
+        self.three_pane_screen = (
+            run_screen if isinstance(run_screen, ThreePaneRunScreen) else ThreePaneRunScreen(session)
+        )
         self.history_screen = history_screen or HistoryScreen(self.history_session)
+        self.run_screens = {"staged": self.staged_screen, "threePane": self.three_pane_screen}
+        # `ui.layout` is the Station's default layout; the View menu overrides it for this session only.
+        self.layout = config.ui_layout if config.ui_layout in self.run_screens else "staged"
+        self.run_screen = self.run_screens[self.layout]
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.run_screen)  # stage 1: the Run screen is the launch view
+        self.stack.addWidget(self.staged_screen)
+        self.stack.addWidget(self.three_pane_screen)
         self.stack.addWidget(self.history_screen)
         self.setCentralWidget(self.stack)
+        self.stack.setCurrentWidget(self.run_screen)  # stage 1: the Run screen is the launch view
+        # Exactly one layout acts and the other mirrors the session (packet 25b): both are named
+        # explicitly, so neither screen carries a stale default at launch or after a switch.
+        for name, screen in self.run_screens.items():
+            screen.set_active(name == self.layout)
 
         view_menu = self.menuBar().addMenu("View")
+        self.view_menu = view_menu
         self.run_action = view_menu.addAction("Run")
         self.history_action = view_menu.addAction("History")
         self.run_action.triggered.connect(self.show_run)
         self.history_action.triggered.connect(self.show_history)
+        self.layout_menu = view_menu.addMenu("Layout")
+        self.staged_layout_action = self.layout_menu.addAction("Staged")
+        self.three_pane_layout_action = self.layout_menu.addAction("Three-pane")
+        self.layout_actions = {
+            "staged": self.staged_layout_action,
+            "threePane": self.three_pane_layout_action,
+        }
+        self.layout_group = QActionGroup(self)
+        self.layout_group.setExclusive(True)
+        for name, action in self.layout_actions.items():
+            action.setCheckable(True)
+            self.layout_group.addAction(action)
+            action.triggered.connect(lambda *_seen, name=name: self.set_layout(name))
+        if not config.ui_allow_layout_switch:
+            # The Station is fixed to its configured layout (spec: `ui.allowLayoutSwitch` off).
+            for action in self.layout_actions.values():
+                action.setEnabled(False)
+        self._mark_layout()
 
         session.state_changed.connect(self._on_state_changed)
         # History's "New run for this UUT" comes back to the Run screen with the fields filled in.
         self.history_screen.new_run_requested.connect(self._new_run_from_history)
+
+    # -- layout switching ---------------------------------------------------
+
+    def set_layout(self, layout: str) -> None:
+        """Show the Run screen in ``layout``, for this session only: the config is never written.
+
+        The run is not touched — both layouts are listening to the same session, so the new screen
+        already shows the step results so far, the input waiting, a pending failure prompt, the
+        counts, the status-bar timers and the log. Only the visible pane changes, and the layout
+        that is no longer showing goes inert (packet 25b).
+        """
+        if layout not in self.run_screens or layout == self.layout:
+            return
+        if not self.config.ui_allow_layout_switch:
+            return
+        previous = self.run_screen
+        previous.set_active(False)
+        self.layout = layout
+        self.run_screen = self.run_screens[layout]
+        # Carry the setup across while the target is still inert, then make it the acting layout: that
+        # is where the store reads it deferred while hidden are drawn (packet 25b).
+        self._carry_over(previous, self.run_screen)
+        self.run_screen.set_active(True)
+        # The layout that just came to the front takes the keyboard: its waiting input, or the prompt
+        # it is paused on (packet 25b). `activate` only focuses the layout that is showing, so a
+        # mid-run switch has to hand the focus over here.
+        self.run_screen.focus_waiting()
+        self._mark_layout()
+        if self.stack.currentWidget() in (previous, self.run_screen):
+            self.stack.setCurrentWidget(self.run_screen)
+
+    def _mark_layout(self) -> None:
+        """Tick the Layout action that matches the screen on screen."""
+        for name, action in self.layout_actions.items():
+            action.setChecked(name == self.layout)
+
+    def _carry_over(self, source, target) -> None:
+        """Copy the Operator's setup from one layout to the other (packet 25b).
+
+        Each layout holds its own widgets, so a switch that only changed the visible pane would show
+        empty fields: the four setup edits, the filter, the On failure pair and the picked schedule
+        are copied across, and the target's steps preview is loaded for a run not yet started."""
+        for name in ("operator_edit", "project_edit", "uut_type_edit", "serial_edit"):
+            src = getattr(source.fields, name, None)
+            dst = getattr(target.fields, name, None)
+            if src is not None and dst is not None:
+                dst.setText(src.text())
+        target.picker.filter_edit.setText(source.picker.filter_edit.text())
+        # Re-rendering against the session's selection makes the picked schedule current here too, but
+        # a switch is not the Operator picking a schedule: the target must not rebuild its step table
+        # from that preview (packet 25b review).
+        target._carrying_over = True
+        try:
+            target.picker.render()
+        finally:
+            target._carrying_over = False
+        # A run that is up, or one this session just finished, already has its rows on both layouts:
+        # reloading the schedule here would blank the Result/Attempts/Actual/Expected/Message cells and
+        # the log the Operator switched to look at (packet 25b review). The target redraws from the
+        # store instead; only the setup preview is re-loaded, and only when there is no run to show.
+        has_run_to_show = self.session.run_uuid is not None and self.session.state in (
+            SessionState.STARTED, SessionState.FINISHED
+        )
+        if has_run_to_show:
+            target.mark_store_dirty()  # drawn as soon as this layout becomes the visible one
+        elif self.session.selected_schedule:
+            steps = load_schedule_steps(self.session, self.session.selected_schedule)
+            if target is self.staged_screen:
+                target.steps_options_stage.load_steps(steps)
+            else:
+                target._steps = steps
+                target.table.load_steps(steps)
+        # The On failure pair last: loading the steps re-applies the schedule's own default.
+        stop_on_fail = source.stop_on_fail_radio.isChecked()
+        target.stop_on_fail_radio.setChecked(stop_on_fail)
+        target.continue_all_radio.setChecked(not stop_on_fail)
 
     # -- navigation ---------------------------------------------------------
 
@@ -129,7 +247,8 @@ class MainWindow(QMainWindow):
         into the first-stage edits, and the Test Schedule picker is made current, which selects
         it on the session through the screen's own wiring."""
         self.show_run()
-        stage = self.run_screen.uut_operator_stage
+        # Either layout carries the same fields; the staged one keeps them in its first stage.
+        stage = getattr(self.run_screen, "uut_operator_stage", None) or self.run_screen.fields
         setters = {
             "uut_type": (self.session.set_uut_type, stage.uut_type_edit),
             "uut_serial": (self.session.set_uut_serial, stage.serial_edit),
@@ -143,7 +262,7 @@ class MainWindow(QMainWindow):
                 widget.setText(value)
         schedule = (prefill or {}).get("schedule_name")
         if schedule:
-            picker = self.run_screen.test_schedule_stage.schedule_list
+            picker = self.run_screen.picker.schedule_list
             for index in range(picker.count()):
                 item = picker.item(index)
                 if item.data(Qt.ItemDataRole.UserRole) == schedule:

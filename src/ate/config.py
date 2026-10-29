@@ -243,6 +243,13 @@ def _validate_and_fill(raw: Any, path: str, hostname: str = "") -> dict[str, Any
             f"got {database.get('storeMismatchedFiles')!r}"
         )
 
+    # The Run screen layout is one of the two shipped layouts (packet 25b); anything else is a typo.
+    ui = raw.get("ui")
+    if isinstance(ui, dict) and ui.get("layout", "staged") not in ("staged", "threePane"):
+        raise ConfigError(
+            f"config file {path}: 'ui.layout' must be 'staged' or 'threePane', got {ui.get('layout')!r}"
+        )
+
     return result
 
 

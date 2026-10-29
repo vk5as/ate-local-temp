@@ -114,6 +114,21 @@ def app(qapp: QApplication) -> QApplication:
 
 
 @pytest.fixture(autouse=True)
+def _stop_pdf_jobs_after_test() -> None:
+    """End every Test Report PDF helper before the next test starts (packet 25b review).
+
+    The helper is a ``QProcess`` parented to the session that started it. A test that finishes with
+    the render still in flight drops its session, Qt destroys the process underneath it, and the
+    job's ``finished`` callback then runs against a session whose Qt side is gone: PyQt aborts the
+    interpreter. Stopping the jobs at the end of each test keeps a helper from outliving its session.
+    """
+    from ate.report.pdf_job import stop_pdf_jobs
+
+    yield
+    stop_pdf_jobs()
+
+
+@pytest.fixture(autouse=True)
 def _clean_qt_state(qapp: QApplication) -> None:
     """Give every test a clean Qt slate, regardless of which module runs.
 
@@ -163,9 +178,20 @@ def _stop_running_engines(monkeypatch):
     yield
     for engine in list(_started_engines):
         try:
-            if engine.isRunning():
-                engine.request_abort()
-                engine.wait(5000)
+            running = engine.isRunning()
         except RuntimeError:  # its C++ side is already gone
-            pass
+            continue
+        if not running:
+            continue
+        try:
+            if engine.pause_pending():
+                # A worker parked in a Stop-on-Fail pause only wakes on a choice, so an abort
+                # requested from outside would sit here for the whole join timeout.
+                engine.choose("ABORT")
+            engine.request_abort()
+            joined = engine.wait(5000)
+        except RuntimeError:  # its C++ side is already gone
+            continue
+        if not joined:
+            raise RuntimeError("a RunEngine worker outlived its test: abort did not stop it")
     _started_engines.clear()

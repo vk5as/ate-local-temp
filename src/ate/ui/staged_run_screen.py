@@ -131,9 +131,12 @@ class StepsOptionsStage(QWidget):
     starts the run through the screen.
     """
 
-    def __init__(self, session: Optional["HeadlessRunSession"] = None) -> None:
+    def __init__(self, session: Optional["HeadlessRunSession"] = None, screen: Optional["StagedRunScreen"] = None) -> None:
         super().__init__()
         self.session = session
+        # The layout this stage sits in (packet 25b): its Step Inputs answer only when the layout
+        # is the one showing.
+        self.screen = screen
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -218,7 +221,7 @@ class StepsOptionsStage(QWidget):
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
                 self.input_widgets[seq] = [
-                    StepInputWidget(decl, self.session, seq) for decl in declarations
+                    StepInputWidget(decl, self.session, seq, owner=self.screen) for decl in declarations
                 ]
                 _append_input_rows(
                     self.step_list, self.input_widgets[seq], int(getattr(step, "depth", 0)) + 1
@@ -261,6 +264,8 @@ class StepsOptionsStage(QWidget):
         have no box, so their itemChanged events are ignored."""
         if self._loading or self.session is None or not self._checkable:
             return
+        if self.screen is not None and not self.screen.is_active():
+            return  # the layout that is not showing cannot change what the next run runs (packet 25b)
         seq = next((step for step, step_item in self._step_items.items() if step_item is item), None)
         if seq is None:
             return  # an input row (ticket 10a), not a step with a box
@@ -315,9 +320,12 @@ class RunView(QWidget):
     store by :meth:`refresh`, never computed here.
     """
 
-    def __init__(self, session: Optional[HeadlessRunSession] = None) -> None:
+    def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["StagedRunScreen"] = None) -> None:
         super().__init__()
         self.session = session
+        # The layout this view belongs to (packet 25b): a Step Input here answers only while this
+        # layout is the one the Operator is looking at.
+        self.screen = screen
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -396,7 +404,9 @@ class RunView(QWidget):
             ))
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
-                self.input_widgets[seq] = [StepInputWidget(decl, self.session, seq) for decl in declarations]
+                self.input_widgets[seq] = [
+                    StepInputWidget(decl, self.session, seq, owner=self.screen) for decl in declarations
+                ]
                 for widget in self.input_widgets[seq]:
                     rows.append(("", widget, False, None, 0))
         self._render_rows(rows)
@@ -475,6 +485,12 @@ class RunView(QWidget):
         depths = _node_depths(nodes)
         children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
         by_seq = {node["node_seq"]: node for node in nodes}
+        # Attempts per step, from the recorded Attempt rows: a step retried after a pause has more
+        # than one, and the spec's "Retried steps show their Attempts" (packet 25b review) means the
+        # staged list has to say so too, not only the three-pane table.
+        attempt_count: dict[int, int] = {}
+        for attempt in attempts:
+            attempt_count[attempt["node_seq"]] = attempt_count.get(attempt["node_seq"], 0) + 1
         rows: list[tuple] = []
         last_step_row = None
         for node in nodes:
@@ -482,6 +498,9 @@ class RunView(QWidget):
             is_header = node.get("kind") != "step"
             if not is_header:
                 text += f"  →  {node.get('result', '')}"
+                tries = attempt_count.get(node["node_seq"], 0)
+                if tries > 1:
+                    text += f"  ({tries} Attempts)"
             else:
                 rollup = _rollup_text(node["node_seq"], children,
                                      lambda seq: by_seq[seq].get("kind") != "step",
@@ -586,8 +605,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage(session)
-        self.steps_options_stage = StepsOptionsStage(self.session)
-        self.run_view = RunView(self.session)
+        self.steps_options_stage = StepsOptionsStage(self.session, screen=self)
+        self.run_view = RunView(self.session, screen=self)
         # The shared run handlers (packet 25a) read these names on either layout: the Operator's
         # form, the picker, the stop-on-fail pair, the line a refused Start writes on, the Start
         # button and the two log panes. They are the stage widgets themselves, not copies.
@@ -626,6 +645,9 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # A Stop-on-Fail pause names its failing step in the prompt bar (packet 12d); the bar's
         # buttons answer it. Both are display-only — the session's choose() is the only call out.
         self.session.failure_prompt.connect(self._on_failure_prompt)
+        # The pause ends when the session says it ends, not when this layout's own button is clicked
+        # (packet 25b): a prompt answered in the other layout has to clear here too.
+        self.session.prompt_answered.connect(self._on_prompt_answered)
         self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
 
         # Status bar (packet 14d): every new Action or Step names the phase and restarts the
@@ -659,6 +681,27 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_header)
         self._timer.start(1000)
+
+        # A screen built without a window is the layout that acts: MainWindow names which of the two
+        # layouts acts when it builds both for one session (packet 25b).
+        self.set_active(True)
+
+    def _sync_from_store(self) -> None:
+        """Draw what this layout skipped while it was hidden (packet 25b).
+
+        A finished run whose read was deferred is drawn here from the store, rows and log together;
+        a run still in progress needs only the log lines it did not read, since its step rows were
+        built when it started and its pause is painted by the prompt handler."""
+        run_uuid = self._deferred_run_uuid
+        self._deferred_run_uuid = None
+        if run_uuid:
+            self.run_view.refresh(
+                self.session.store.nodes(run_uuid),
+                self.session.store.attempts(run_uuid),
+                self.session.store.log_lines(run_uuid),
+            )
+        else:
+            self._refresh_log()
 
     # -- navigation ---------------------------------------------------------
 
@@ -707,7 +750,12 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         the pending prompt with ABORT instead (the bar's own Abort path). Otherwise the worker is
         free to stop at its next step boundary (records ERROR / NOTRUN / ABORTED); ``request_abort``
         raises if there is no run in progress (the button is disabled whenever one is not)."""
-        if self.run_view.failure_prompt_bar.isVisible():
+        if not self.is_active():
+            return  # the layout that is not showing cannot abort the run (packet 25b)
+        if self.session.pause_pending():
+            # The worker is blocked on a prompt: answer it with ABORT (packet 25b). The decision comes
+            # from the session, not from this layout's bar — the pause may have been answered in the
+            # other layout, and then this bar would be stale.
             self._on_prompt_choice("ABORT")
             return
         self.session.request_abort()
@@ -749,10 +797,20 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             self._failed_row = None
             # Read results from the store (never compute them here) and refresh the view.
             run_uuid = self.session.run_uuid
-            nodes = self.session.store.nodes(run_uuid) if run_uuid else []
-            attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-            log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
-            self.run_view.refresh(nodes, attempts, log_lines)
+            if self.is_active():
+                # Read results from the store (never compute them here) and refresh the view.
+                nodes = self.session.store.nodes(run_uuid) if run_uuid else []
+                attempts = self.session.store.attempts(run_uuid) if run_uuid else []
+                log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
+                self.run_view.refresh(nodes, attempts, log_lines)
+            else:
+                # The layout that is not showing defers the read and draws it when it comes back
+                # (packet 25b review); meanwhile every input it holds is closed, since nothing can
+                # be answered on a run that is over.
+                for widgets in self.run_view.input_widgets.values():
+                    for widget in widgets:
+                        widget.deactivate()
+                self.defer_finished_run(run_uuid)
             # The run is over: the status bar keeps these final timings (packet 14d).
             self._phase_text = "Finished"
             # Return to the first setup stage so a new run can be started.
@@ -907,6 +965,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         still held on an item refresh() would delete; the session's worker unblocks on choose().
         The bar hides itself in _on_choice, but the header-Abort path answers without the bar, so
         hide it here too (a no-op when the bar already hid itself)."""
+        if not self.is_active():
+            return  # the hidden layout's prompt bar never answers the pause (packet 25b)
         self.run_view.failure_prompt_bar.hide()
         self._clear_paused_display()
         self.session.choose(choice)
@@ -919,6 +979,20 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.run_view.state_header.setStyleSheet("")
         self._phase_text = "Running"  # the bar is back on the run's state (packet 14d)
         self._update_header()
+
+    def _on_prompt_answered(self, node_seq: int, attempt_no: int, choice: str) -> None:
+        """The session says the pause is over: clear this layout's prompt UI, whoever answered it.
+
+        Packet 25b: a prompt answered in the layout that was showing must not leave the other one
+        still holding a bar, a red highlight and "Paused" — the run resumed, so both layouts say so.
+        This is driven by the session's signal, never by this layout's own button."""
+        self.run_view.failure_prompt_bar.hide()
+        self._clear_paused_display()
+
+    def _paused_prompt_widget(self):
+        """The prompt bar's Continue button while this layout has a prompt up."""
+        bar = self.run_view.failure_prompt_bar
+        return bar.continue_button if bar.isVisible() else None
 
     # -- Step Inputs (ticket 10a) ---------------------------------------------
 

@@ -37,6 +37,9 @@ def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> N
     worker thread ever touches the session; when it ends, ``on_done(error_or_None)`` fires — ``None``
     means success, otherwise an error string names the failure (spec 22b). Nothing here raises into
     the caller. The PDF is confirmed to exist and be non-empty before a success is reported.
+
+    The process must not outlive ``parent``: :func:`stop_pdf_jobs` kills it and disconnects its
+    signals, and :func:`finish` below ignores a callback whose owner's Qt side is already gone.
     """
     program, args, env = pdf_helper_command(str(html_path), str(pdf_path), paper)
     proc = QProcess(parent)
@@ -58,10 +61,18 @@ def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> N
         # A success with no bytes on disk is a failed render, not a clean exit.
         if error is None and not (Path(pdf_path).exists() and Path(pdf_path).stat().st_size > 0):
             error = "PDF helper wrote no PDF"
-        if on_done is not None:
-            on_done(error)
+        try:
+            if on_done is not None:
+                on_done(error)
+        except RuntimeError:
+            # The session that owned this job was destroyed while the helper was still running:
+            # there is nothing left to report to, and raising here aborts the process.
+            pass
         _live_pdf_jobs.discard(proc)
-        proc.deleteLater()
+        try:
+            proc.deleteLater()
+        except RuntimeError:
+            pass  # its Qt side went away with the parent, so there is nothing to delete
 
     def on_finished(code: int, status: QProcess.ExitStatus) -> None:
         if status != QProcess.ExitStatus.NormalExit:
@@ -81,3 +92,37 @@ def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> N
     _live_pdf_jobs.add(proc)
     timer.start(PDF_TIMEOUT_MS)
     proc.start(program, args)
+
+
+# A helper killed by :func:`stop_pdf_jobs` is waited for only briefly: the point is to end it, not to
+# watch it render, and ``waitForFinished`` returns as soon as the child exits.
+STOP_WAIT_MS = 1_000
+
+
+def stop_pdf_jobs(parent=None) -> None:
+    """End every helper process owned by ``parent`` (all of them when ``parent`` is None).
+
+    The connections are cut first so the job's callback never fires against a session that is going
+    away, then the process is killed and waited for briefly, so Qt never destroys a QProcess that is
+    still running (packet 25b review: that is what aborted the test run at teardown). With nothing
+    live this does no work at all, so calling it after every test costs nothing.
+    """
+    for proc in list(_live_pdf_jobs):
+        if parent is not None and proc.parent() is not parent:
+            continue
+        try:
+            proc.finished.disconnect()
+            proc.errorOccurred.disconnect()
+        except (RuntimeError, TypeError):
+            pass  # already disconnected, or its Qt side is gone
+        timer = next((child for child in proc.children() if isinstance(child, QTimer)), None)
+        if timer is not None:
+            timer.stop()
+        try:
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.kill()
+                proc.waitForFinished(STOP_WAIT_MS)
+        except RuntimeError:
+            pass
+        _live_pdf_jobs.discard(proc)
+        proc.deleteLater()

@@ -32,7 +32,7 @@ from ..engine.run_engine import RunEngine, RunStatus
 from ..engine.step_inputs import value_error
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
-from ..report.pdf_job import start_pdf_job
+from ..report.pdf_job import start_pdf_job, stop_pdf_jobs
 from ..storage.store import RunStore
 
 
@@ -67,6 +67,8 @@ class HeadlessRunSession(QObject):
     input_answered = pyqtSignal(int, int, int, object)
     step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    # (node_seq, attempt_no, choice): that pause was answered and the worker moved on (packet 25b).
+    prompt_answered = pyqtSignal(int, int, str)
     action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
@@ -132,12 +134,25 @@ class HeadlessRunSession(QObject):
         return self._state
 
     def close(self) -> None:
-        """Release this session's resources: close the store, and the application log if the
-        session opened its own (a log handed in by the launch belongs to the launch)."""
+        """Release this session's resources: end its PDF helper, close the store, and close the
+        application log if the session opened its own (a log handed in by the launch belongs to the
+        launch)."""
+        stop_pdf_jobs(self)  # a helper still running when the session dies aborts the process
         if self._store is not None:
             self._store.close()
         if self._app_log is not None and self._owns_app_log:
             self._app_log.close()
+
+    def __del__(self) -> None:
+        """A session dropped without ``close()`` still must not leave its helper running.
+
+        Qt destroys a ``QProcess`` together with its parent while the render is in flight, and the
+        job's ``finished`` callback then fires against a session whose Qt side is gone (packet 25b
+        review: this is what aborted the test run at teardown)."""
+        try:
+            stop_pdf_jobs(self)
+        except Exception:  # the Qt side is already gone; there is nothing left to stop
+            pass
 
     @property
     def selected_schedule(self) -> Optional[str]:
@@ -380,6 +395,13 @@ class HeadlessRunSession(QObject):
             raise SessionError("cannot abort when no run is in progress")
         self._engine.request_abort()
 
+    def pause_pending(self) -> bool:
+        """True while the worker is blocked on a Stop-on-Fail prompt (packet 25b).
+
+        The layouts decide Abort from this rather than from their own prompt bar: the bar of the
+        layout that is not showing says nothing about whether the run is paused."""
+        return bool(self._engine is not None and self._engine.pause_pending())
+
     def choose(self, choice: str) -> None:
         """Answer a Stop-on-Fail failure prompt (CONTINUE / RETRY / ABORT).
 
@@ -539,6 +561,9 @@ class HeadlessRunSession(QObject):
         # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
         # answer it through this session once it fires — same connection timing as input asks above.
         self._engine.failure_prompt.connect(self._on_failure_prompt)
+        # The pause's end, not each layout's own button, is what clears a prompt UI (packet 25b):
+        # whichever layout is showing, both see the run resume.
+        self._engine.prompt_answered.connect(self.prompt_answered.emit)
         # Forward the worker's phase announcements (packet 14d) so the Run screen's status bar can
         # count Pre-/Post-test Actions and restart its current-item timer without polling the worker.
         self._engine.action_started.connect(self._on_action_started)

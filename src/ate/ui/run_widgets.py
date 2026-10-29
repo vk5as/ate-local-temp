@@ -923,11 +923,16 @@ class StepInputWidget(QWidget):
     its value: the mockup's `chose:`/`clicked:` note for the button types, and for the others the
     state the controls already carry (a ticked box, typed text)."""
 
-    def __init__(self, declaration: StepInput, session: HeadlessRunSession, node_seq: int) -> None:
+    def __init__(
+        self, declaration: StepInput, session: HeadlessRunSession, node_seq: int, owner: Optional[object] = None
+    ) -> None:
         super().__init__()
         self.declaration = declaration
         self.session = session
         self.node_seq = node_seq
+        #: The layout this widget belongs to (packet 25b): a click on the hidden layout's input is
+        # not the Operator's answer, so the widget asks its owner before it reaches the session.
+        self.owner = owner
         self.index = declaration.index  # the 1-based n in ATE.input(n)
         self.blocking = declaration.type != "POLL"
         #: The Attempt this input was last asked for; a Retry re-asks the same index (packet 12c).
@@ -1060,11 +1065,13 @@ class StepInputWidget(QWidget):
             control.setEnabled(True)
         self.setStyleSheet(_INPUT_ACTIVE_STYLE)
         # The mockup's `focusActive`: the waiting line edit takes the cursor, so Enter submits;
-        # a widget without one focuses its first control.
-        if self.line_edit is not None:
-            self.line_edit.setFocus()
-        elif self.controls:
-            self.controls[0].setFocus()
+        # a widget without one focuses its first control. Only the layout that is showing takes
+        # the focus, so the hidden one cannot steal it (packet 25b).
+        if self.owner is None or self.owner.is_active():
+            if self.line_edit is not None:
+                self.line_edit.setFocus()
+            elif self.controls:
+                self.controls[0].setFocus()
 
     def deactivate(self) -> None:
         """Not being asked for: every control is disabled and the row has no active styling."""
@@ -1102,6 +1109,8 @@ class StepInputWidget(QWidget):
 
         A value that fails the declaration's own range/pattern is shown as the mockup's inline error
         and never reaches the session, so the step keeps waiting."""
+        if self.owner is not None and not self.owner.is_active():
+            return  # this layout is not the one showing (packet 25b): its input stays inert
         error = value_error(self.declaration, value)
         if error:
             self.error_label.setText(error)
@@ -1116,6 +1125,8 @@ class StepInputWidget(QWidget):
 
     def _click_poll(self, text: str) -> None:
         """Record a POLL click through the session; the sticky value is the button's text."""
+        if self.owner is not None and not self.owner.is_active():
+            return  # the hidden layout never clicks on the run's behalf (packet 25b)
         try:
             self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
         except (ValueError, SessionError) as exc:
@@ -1131,6 +1142,82 @@ class RunScreenMixin:
     `debug_window` and `step_input_widgets()` — and decides nothing about a run itself: every call
     here goes to the session or to the store.
     """
+
+    #: Which layout the window is showing (packet 25b). A screen starts inert until MainWindow makes
+    #: it the one on screen: the hidden layout mirrors the session but never acts on it, so a control
+    #: on it can never answer a run twice. The default is False so a screen built without a window,
+    #: or a window that never named its layout, cannot act on a run by accident.
+    _active = False
+
+    #: A layout that is not showing defers its store reads (packet 25b review): it marks itself dirty
+    #: instead of reading, and :meth:`set_active` draws the deferred rows when it comes back.
+    _store_dirty = False
+
+    #: Set while MainWindow is copying the Operator's setup across a layout switch: the picker is
+    #: re-rendered as part of that, which is not the Operator choosing a schedule (packet 25b).
+    _carrying_over = False
+
+    #: A finished run whose rows this layout did not read while it was hidden, drawn the moment it
+    #: is showing again (packet 25b review).
+    _deferred_run_uuid: Optional[str] = None
+
+    def set_active(self, active: bool) -> None:
+        """Make this the layout that acts, or the one that only mirrors the session.
+
+        Coming back to the visible layout is also when its deferred store reads are made, so the
+        results, the prompt state and the log it skipped while hidden are on screen the moment the
+        Operator switches to it (packet 25b)."""
+        self._active = bool(active)
+        if active and self._store_dirty:
+            self._store_dirty = False
+            self._sync_from_store()
+
+    def is_active(self) -> bool:
+        """True when this screen is the layout the window is showing."""
+        return bool(getattr(self, "_active", False))
+
+    def mark_store_dirty(self) -> None:
+        """Something the hidden layout did not read needs reading when it is showing again."""
+        self._store_dirty = True
+
+    def defer_finished_run(self, run_uuid: Optional[str]) -> None:
+        """Remember a finished run this layout will draw when the Operator switches to it.
+
+        The rows come from the store when the layout comes back, never from a read while it is
+        hidden: a hidden layout has nothing on screen to draw them into (packet 25b review)."""
+        self._deferred_run_uuid = run_uuid or None
+        self.mark_store_dirty()
+
+    def _sync_from_store(self) -> None:
+        """Redraw this layout from the store it mirrors.
+
+        The staged layout only needs the log lines its Run view shows; the three-pane centre pane
+        overrides this with its table, tallies and log."""
+        self._deferred_run_uuid = None
+        self._refresh_log()
+
+    def focus_waiting(self) -> bool:
+        """Hand the keyboard to whatever this layout is waiting on (packet 25b).
+
+        A waiting line edit gets the cursor, so Enter answers it; a Stop-on-Fail prompt answers with
+        its Continue button. Only the layout on screen can take the focus: the hidden one is not what
+        the Operator is looking at."""
+        if not self.is_active():
+            return False
+        paused = self._paused_prompt_widget()
+        if paused is not None:
+            paused.setFocus()
+            return True
+        for widgets in self.step_input_widgets().values():
+            for widget in widgets:
+                if widget.blocking and widget.line_edit is not None and widget.line_edit.isEnabled():
+                    widget.line_edit.setFocus()
+                    return True
+        return False
+
+    def _paused_prompt_widget(self) -> Optional[QWidget]:
+        """The button that answers this layout's pending prompt, or None if there is none."""
+        return None
 
     def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
         """Ask the Operator what to do with mismatched files before the run starts (ticket 06c).
@@ -1166,6 +1253,8 @@ class RunScreenMixin:
         every field it did not change; Project is pushed as typed, because a blank Project must
         refuse the run rather than carry an earlier one (spec 08). The run then starts through
         `session.start()`, which queues its signals and returns immediately."""
+        if not self.is_active():
+            return  # the layout that is not showing must not start a run (packet 25b)
         operator = self.fields.operator_edit.text().strip()
         project = self.fields.project_edit.text().strip()
         uut_type = self.fields.uut_type_edit.text().strip()
@@ -1270,7 +1359,11 @@ class RunScreenMixin:
 
         The worker flushes every ATE log call into the store as it happens, so a line logged before
         a step blocks on an input is already readable when the ask is announced. The panes hold no
-        buffer of their own: they show only these rows."""
+        buffer of their own: they show only these rows. A layout that is not showing defers the read
+        (packet 25b review) and picks it up when it becomes the visible one."""
+        if not self.is_active():
+            self.mark_store_dirty()
+            return
         run_uuid = self.session.run_uuid
         self._show_log(self.session.store.log_lines(run_uuid) if run_uuid else [])
 

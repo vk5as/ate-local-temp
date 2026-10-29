@@ -6,6 +6,7 @@ are recorded on the run row; interrupted runs left open by a crash are closed as
 at launch (spec rule 98). No widgets, no mocks.
 """
 
+import gc
 import os
 import re
 import sys
@@ -15,7 +16,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, Qt
+from PyQt6.QtCore import QCoreApplication, QObject, QProcess, Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
@@ -472,6 +473,69 @@ def test_error_level_log_line_is_recorded(tmp_path) -> None:
     error_line = next(ln for ln in lines_by_seq.values() if ln["level"] == "ERROR")
     assert (error_line["source"], error_line["text"]) == ("schedule", "something failed")
     assert error_line["node_seq"] == 2 and error_line["attempt_no"] == 1
+
+
+def test_a_closed_session_ends_its_pdf_helper_process(qapp, monkeypatch, tmp_path) -> None:
+    """Packet 25b review, teardown crash: closing a session must end the helper it started.
+
+    The Test Report PDF is rendered by a ``QProcess`` parented to the session. If the session is
+    released while that process is still running, Qt destroys the process underneath it, the job's
+    ``finished`` callback then fires against objects whose Qt side is gone, and the interpreter
+    aborts — which is what made the run-end tests crash at teardown. ``close()`` therefore kills the
+    helper it owns before releasing anything else."""
+    slow_helper = "import sys, time; time.sleep(5); open(sys.argv[1], 'wb').write(b'%PDF-1.4 stub')"
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", _fake_helper(slow_helper))
+
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    session.select_schedule("Passing schedule")
+    session.start()
+    assert _wait_finished(session), "the run never finished"
+
+    from ate.report.pdf_job import _live_pdf_jobs
+
+    jobs = [proc for proc in _live_pdf_jobs if proc.parent() is session]
+    assert jobs, "the finished run started no PDF helper to test"
+    assert all(proc.state() != QProcess.ProcessState.NotRunning for proc in jobs), (
+        "the helper had already exited, so this test proves nothing"
+    )
+
+    session.close()
+
+    assert not [proc for proc in _live_pdf_jobs if any(proc is job for job in jobs)], (
+        "the closed session left its PDF helper registered as live"
+    )
+    for job in jobs:
+        assert job.state() == QProcess.ProcessState.NotRunning, "the helper process outlived its session"
+        assert job.parent() is session, "the helper was orphaned from the session that owned it"
+
+
+def test_a_pdf_helper_whose_owner_is_gone_reports_nothing(qapp, monkeypatch, tmp_path) -> None:
+    """Packet 25b review, teardown crash: a job whose owner dies mid-render reports nothing.
+
+    Qt destroys a ``QProcess`` together with its parent while the render is still in flight, and the
+    job's ``finished`` callback then runs against a process whose Qt side is gone. Reporting into
+    that dead process raises inside a Qt slot, which PyQt turns into ``Fatal Python error: Aborted``.
+    The callback therefore has to swallow it and drop the job from the live set."""
+    slow_helper = "import sys, time; time.sleep(3); open(sys.argv[1], 'wb').write(b'%PDF-1.4 stub')"
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", _fake_helper(slow_helper))
+
+    from ate.report.pdf_job import _live_pdf_jobs, start_pdf_job
+
+    owner = QObject()
+    start_pdf_job(owner, tmp_path / "report.html", tmp_path / "report.pdf")
+    job = next(proc for proc in _live_pdf_jobs if proc.parent() is owner)
+
+    del owner  # released while the render is in flight: Qt destroys the process underneath it
+    gc.collect()
+
+    deadline = time.monotonic() + 10
+    while any(proc is job for proc in _live_pdf_jobs) and time.monotonic() < deadline:
+        qapp.processEvents()
+
+    assert not any(proc is job for proc in _live_pdf_jobs), (
+        "a job whose owner was destroyed stayed registered as live"
+    )
 
 
 def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qapp, tmp_path) -> None:

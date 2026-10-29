@@ -115,6 +115,25 @@ def test_wrong_type_names_the_file_and_key(tmp_path):
     assert "'ui.theme'" in str(exc.value)
 
 
+def test_ui_layout_is_read_as_written(tmp_path):
+    """`ui.layout` is either `staged` or `threePane`, and either is accepted as given (packet 25b)."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"format": 1, "ui": {"layout": "threePane"}}), encoding="utf-8")
+    assert read_config(str(cfg)).ui_layout == "threePane"
+    cfg.write_text(json.dumps({"format": 1, "ui": {"layout": "staged"}}), encoding="utf-8")
+    assert read_config(str(cfg)).ui_layout == "staged"
+
+
+def test_unknown_ui_layout_is_rejected(tmp_path):
+    """A layout word that is not `staged` or `threePane` refuses startup, naming the key."""
+    bad = tmp_path / "config.json"
+    bad.write_text(json.dumps({"format": 1, "ui": {"layout": "panes"}}), encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        read_config(str(bad))
+    assert "'ui.layout'" in str(exc.value)
+    assert "staged" in str(exc.value) and "threePane" in str(exc.value)
+
+
 def test_unknown_key_names_the_file_and_key(tmp_path):
     """An unknown key refuses startup, naming the file and key."""
     bad = tmp_path / "config.json"
