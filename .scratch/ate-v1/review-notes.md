@@ -532,3 +532,23 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - `test_poll_recorded_when_clicked` made deterministic: a blocking PROMPT is held until the POLL click lands, bounded in ticks. It went from 13/50 failures under load to 0.
 - Light review: 999 passed ×3 (~136 s); collection 993 → 999, none lost; the harness ran 8 runs of 5 schedules.
 - Leftovers: `test_layout_switching_25b.py::test_a_mid_run_switch_answers_the_input_in_the_new_layout` failed once under 3-way load (seen by Strata only). Watch it.
+
+## 29d — Example: Devices (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions): SCPI/UDP peers in the harness; TCP, SERIAL (`socket://`), VISA (pyvisa-py SOCKET) and UDP exercised end to end.
+  - It found and fixed an engine bug: a traced Device opened with `onError` raised a TypeError, because `TracedDevice.__slots__` had no `__weakref__`.
+- Reviews: Haiku 2 must-fix (false header claims: a per-call readTerm, the real-hardware instructions); Strata 1 must-fix:
+  - **engine: a non-Device handle crashed with a Python AttributeError traceback** (`describe()` before the handle check);
+  - `ATE.close("")` returned ok;
+  - the example's Pre-test `onError` returned `""`;
+  - the port placeholders silently fell back to 5025.
+- Rework (Strata, high, 0 compactions):
+  - handle validation in read/write/flush/close ("not a Device" through onError, never a traceback), with 13 engine tests;
+  - the Pre-test onError returns nil, and a new `devices_peer_down` run asserts PRETEST_FAILED with no traceback;
+  - env-var ports (`ATE_SCPI_*`/`ATE_UDP_*`), so the harness runs the shipped bytes;
+  - a per-call readTerm demo;
+  - peers stop promptly;
+  - the double close is pinned (ok, no trace line).
+- Light review: 1020 passed ×3 (~146 s); collection 999 → 1020, none lost; the harness ran 11 runs of 6 schedules. The env is restored after each run.
+- Leftovers:
+  - Spec ambiguity: line 110 says "every close traced" vs line 126 "a second close does nothing". The engine follows 126.
+  - New packet 30b covers the finished-run window growth seen in the screenshots.
