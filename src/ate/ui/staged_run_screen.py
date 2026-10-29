@@ -392,10 +392,10 @@ class RunView(QWidget):
         # 200 px, so together they ate the whole view and the step list collapsed to 68 px. A floor
         # for the list and ceilings for the band keep the steps readable at 1280x800 without the
         # window having to grow (the minimum here stays well under 800 px tall).
-        self.step_list.setMinimumHeight(120)
-        self.tabs.setMaximumHeight(240)
-        self.log_pane.setMaximumHeight(160)
-        self.debug_window.setMaximumHeight(120)
+        self.step_list.setMinimumHeight(150)
+        self.tabs.setMaximumHeight(220)
+        self.log_pane.setMaximumHeight(150)
+        self.debug_window.setMaximumHeight(110)
 
         # Header row (mockup variant C): the state label grows, the buttons sit at its right —
         # Abort while the run is up, New run once it is finished (packet 30b).
@@ -881,6 +881,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
 
         # The Abort button is only meaningful while a run is in progress.
         self.run_view.abort_button.setEnabled(state == SessionState.STARTED)
+        # Packet 30b: the New run button offers the next run once this one is over.
+        self.run_view.new_run_button.setEnabled(state == SessionState.FINISHED)
 
         self._update_header(state)
         if state == SessionState.FINISHED:
