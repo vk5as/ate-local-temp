@@ -485,6 +485,12 @@ class RunView(QWidget):
         depths = _node_depths(nodes)
         children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
         by_seq = {node["node_seq"]: node for node in nodes}
+        # Attempts per step, from the recorded Attempt rows: a step retried after a pause has more
+        # than one, and the spec's "Retried steps show their Attempts" (packet 25b review) means the
+        # staged list has to say so too, not only the three-pane table.
+        attempt_count: dict[int, int] = {}
+        for attempt in attempts:
+            attempt_count[attempt["node_seq"]] = attempt_count.get(attempt["node_seq"], 0) + 1
         rows: list[tuple] = []
         last_step_row = None
         for node in nodes:
@@ -492,6 +498,9 @@ class RunView(QWidget):
             is_header = node.get("kind") != "step"
             if not is_header:
                 text += f"  →  {node.get('result', '')}"
+                tries = attempt_count.get(node["node_seq"], 0)
+                if tries > 1:
+                    text += f"  ({tries} Attempts)"
             else:
                 rollup = _rollup_text(node["node_seq"], children,
                                      lambda seq: by_seq[seq].get("kind") != "step",
