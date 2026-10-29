@@ -869,6 +869,91 @@ def _drive_with_operator(app, engine, op, strategy=INPUTS_BLOCKING, values_by_in
     _pump_until_finished(app, engine, op, strategy, values_by_index=values_by_index)
 
 
+# --- Packet 25a schedules ------------------------------------------------------
+#
+# Added onto the demo Test Definition by a helper rather than in write_ate_env, so the tests that
+# count the picker's rows are unaffected until they ask for these.
+
+
+def _append_file(defs_dir: Path, name: str, source: str) -> None:
+    """Write one schedule file into the demo Test Definition and register its checksum."""
+    path = defs_dir / name
+    path.write_text(source, encoding="utf-8")
+    atedef = json.loads((defs_dir / "demo.atedef").read_text(encoding="utf-8"))
+    atedef["files"].append({"path": name, "sha256": _sha256(path)})
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+
+
+def add_long_schedule(tmp_path: Path, steps: int = 60, fail_at: int = 30) -> str:
+    """Add a 60-step schedule that pauses on a Stop-on-Fail failure at step 30.
+
+    Long enough for the Run screen to read the store while the worker is still inserting rows,
+    which is where packet 25a's "database is locked" abort showed up: a read whose statement is
+    still open when its connection goes back to the pool collides with the next INSERT on it."""
+    defs = tmp_path / "defs"
+    schedule = ",\n".join(
+        f'    StepParams("step {i}"):setStepNo("{i}.")\n'
+        f'      :setAction(function() ATE.log(Log.INFO, "step {i} running") '
+        f'ATE.report({"Result.FAIL" if i == fail_at else "Result.PASS"}, "ok {i}") end)'
+        for i in range(1, steps + 1)
+    )
+    source = (
+        f'return ScheduleParams("Long 60 schedule", "sixty steps, Stop on Fail at {fail_at}")\n'
+        "  :setStopOnFail(true)\n"
+        f"  :setSchedule({{\n{schedule}\n  }})\n"
+    )
+    _append_file(defs, "long60.tslua", source)
+    return "Long 60 schedule"
+
+
+def add_header_schedule(tmp_path: Path) -> str:
+    """Add a schedule with two Sub-schedule headers, each holding one Test Step.
+
+    The headers are `setInclude` rows (packet 15b) over a child file in the same Media Release, so
+    the step table has a header box whose state is derived from the steps below it."""
+    defs = tmp_path / "defs"
+    child = (
+        'return ScheduleParams("Channel sub-schedule", "one step per channel")\n'
+        "  :setSchedule({\n"
+        '    StepParams("measure"):setStepNo("1.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "channel " .. (kv.channel or 0)) end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "channel.tslua", child)
+    parent = (
+        'return ScheduleParams("Sub-schedule header schedule", "two headers, one step each")\n'
+        "  :setSchedule({\n"
+        '    StepParams("channel 1"):setStepNo("2."):setPrefix("2."):setInclude("channel.tslua", { channel = 1 }),\n'
+        '    StepParams("channel 2"):setStepNo("3."):setPrefix("3."):setInclude("channel.tslua", { channel = 2 }),\n'
+        "  })\n"
+    )
+    _append_file(defs, "headers.tslua", parent)
+    return "Sub-schedule header schedule"
+
+
+def add_logging_input_schedule(tmp_path: Path) -> str:
+    """Add a schedule that logs at INFO and DEBUG, then blocks on one INTEGER input.
+
+    The lines logged before `ATE.input` are in the store by the time the ask is announced, so a log
+    pane refreshed on the session's signals shows them while the step is still waiting."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Logging input schedule", "logs, then blocks on an input")\n'
+        "  :setSchedule({\n"
+        '    StepParams("voltage"):setStepNo("1.")\n'
+        '      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })\n'
+        "      :setAction(function()\n"
+        '        ATE.log(Log.INFO, "measuring before the Operator answers")\n'
+        '        ATE.log(Log.DEBUG, "probe chatter before the ask")\n'
+        "        local v = ATE.input(1)\n"
+        '        ATE.report(Result.PASS, "voltage " .. v)\n'
+        "      end),\n"
+        "  })\n"
+    )
+    _append_file(defs, "logging_input.tslua", source)
+    return "Logging input schedule"
+
+
 def fake_pdf_helper(script: str):
     """A stand-in for :func:`ate.report.pdf.pdf_helper_command`: a tiny Python process that gets the
     PDF path as ``argv[1]``, so tests exercise the real QProcess path without QWebEngine."""

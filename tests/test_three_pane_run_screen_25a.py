@@ -13,6 +13,7 @@ here mocks the engine.
 import hashlib
 import json
 import time
+from collections import Counter
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -28,11 +29,13 @@ from PyQt6.QtWidgets import (
 )
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import COLUMNS, ThreePaneRunScreen
 
-from ._fixtures import write_ate_env
+from ._fixtures import add_header_schedule, add_logging_input_schedule, add_long_schedule, write_ate_env
 
 SHOTS = Path("/tmp/25a-shots")
+R2_SHOTS = Path("/tmp/25a-r2-shots")
 
 
 def _wait_finished(qapp, session, timeout=10.0):
@@ -160,6 +163,68 @@ def _break_a_schedule(tmp_path) -> str:
     atedef["files"].append({"path": "bad.tslua", "sha256": hashlib.sha256(bad.read_bytes()).hexdigest()})
     (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
     return "bad.tslua"
+
+
+def _start_staged_run(screen, schedule_name):
+    """Select a schedule on the staged screen and start it from the Steps & options stage."""
+    list_widget = screen.test_schedule_stage.schedule_list
+    for i in range(list_widget.count()):
+        if schedule_name in list_widget.item(i).text():
+            list_widget.setCurrentItem(list_widget.item(i))
+            break
+    else:
+        raise AssertionError(f"no schedule row containing {schedule_name!r}")
+    screen._begin_run_from_selection()
+    screen.steps_options_stage.run_button.click()
+
+
+def test_a_sixty_step_run_finishes_through_both_layouts(qapp, tmp_path):
+    """Packet 25a review: a long run through either layout reaches FINISHED, not "database is locked".
+
+    `RunStore._run` used to return the open Result, and the caller read it after the connection had
+    gone back to the pool. The run worker then drew that same sqlite3 connection out of the pool and
+    INSERTed on it while the GUI thread's read statement was still unfinalised — SQLite answered BUSY
+    and the run died mid-schedule. Sixty steps is long enough for both screens to read the store while
+    the worker is still writing: the three-pane table syncs on every step and the staged screen
+    rebuilds its step list at the Stop-on-Fail pause. The whole thing must be deterministic and well
+    inside ten seconds."""
+    env = write_ate_env(tmp_path)
+    name = add_long_schedule(tmp_path)
+    elapsed = []
+
+    for build in (ThreePaneRunScreen, StagedRunScreen):
+        session = HeadlessRunSession(env["config"])
+        session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
+        screen = build(session)
+        screen.resize(1280, 800)
+        screen.show()
+        qapp.processEvents()
+        if build is ThreePaneRunScreen:
+            _pick(screen, name)
+            screen.fields.operator_edit.setText("Ada")
+            screen.start_button.click()
+        else:
+            screen.uut_operator_stage.operator_edit.setText("Ada")
+            screen._advance(1)
+            _start_staged_run(screen, name)
+
+        started = time.monotonic()
+        assert _wait_finished(qapp, session), f"{build.__name__} never reached FINISHED"
+        elapsed.append(time.monotonic() - started)
+
+        run = session.store.get_test_run(session.run_uuid)
+        nodes = [n for n in session.store.nodes(session.run_uuid) if n.get("kind") == "step"]
+        assert run is not None, f"{build.__name__}: the run was never recorded"
+        assert len(nodes) == 60, f"{build.__name__}: {len(nodes)} of 60 steps recorded"
+        results = Counter(n.get("result") for n in nodes)
+        assert results["FAIL"] == 1 and results["PASS"] == 59, results
+        assert run["result"] == "FAIL"
+        assert run["end_reason"] == "COMPLETED", run["end_reason"]
+        assert screen.state == SessionState.FINISHED
+        _settle(qapp, session)
+        screen.close()
+
+    assert max(elapsed) < 10.0, f"a 60-step run took {max(elapsed):.1f} s: {elapsed}"
 
 
 def test_three_panes_are_built_and_split_25_50_25(qapp, tmp_path):
