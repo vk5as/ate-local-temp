@@ -1,0 +1,67 @@
+-- Example Media Release, schedule 4: flow control, Sub-schedules and modules.
+--
+-- What it demonstrates:
+--   * Retry: step 1 reports FAIL on its first Attempt and PASS on the second. The attempt count is
+--     kept in a required module (ATE gives a step no way to read its own Attempt number).
+--   * Pre-test and Post-test Actions on the top-level schedule and on every included Sub-schedule:
+--     all Pre-test Actions run before the first step, depth first, parent first; all Post-test
+--     Actions run afterwards in the reverse order (test-schedule-format.md, "Flow control").
+--   * Sub-schedules: one hidden .tslua included twice with different keyvals and setPrefix, a
+--     nested include (nest_a -> nest_b -> nest_c), and a header whose setEnable(false) disables
+--     everything beneath it - which also skips that Sub-schedule's Actions.
+--   * Modules: require with the derived module name (lib/attempts.lua -> "lib.attempts"), require
+--     with an explicit module name in the Test Definition (modules/helper.lua -> "example_helper"),
+--     and the bundled require("ate.devices") builders used without opening anything.
+--
+-- The harness runs this schedule twice: with Stop on Fail turned off by the Operator (no pause,
+-- step 1 stays FAIL) and with the schedule's own Stop on Fail plus a scripted Retry.
+
+local attempts = require("lib.attempts")  -- derived name: the path minus .lua, with / as .
+local helper = require("example_helper")  -- explicit "module" name in example.atedef
+local devices = require("ate.devices")    -- ATE's bundled Device params builders
+
+return ScheduleParams("Flow and retry", "Retry, Pre/Post-test Actions, Sub-schedules and modules")
+  :setDocTitle("Example Media Release - Flow and Sub-schedules")
+  :setDocId("MR-EXAMPLE-FLOW")
+  :setDocRev("1.0")
+  :setStopOnFail(true)
+  -- Runs before any step, and again after the last one with the run's overall result.
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "top-level pre-test sees " .. passFail) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "top-level post-test sees " .. passFail) end)
+  :setSchedule({
+    -- 1. Attempt 1 fails, so the run pauses; the Operator's Retry runs the action again and it passes.
+    StepParams("Retry this one"):setStepNo("1.")
+      :setAction(function()
+        local n = attempts.nextAttempt()
+        if n == 1 then
+          ATE.report(Result.FAIL, "attempt " .. n .. " joint is cold", 0.2, 2.4)
+        else
+          ATE.report(Result.PASS, "attempt " .. n .. " joint is warm", 2.4, 2.4)
+        end
+      end),
+
+    -- 2. and 3. the same hidden Sub-schedule, included twice, parameterised and prefixed differently.
+    StepParams("Channel 1"):setStepNo("2.")
+      :setInclude("sub_channel.tslua", { channel = 1, label = "left rail" }):setPrefix("2."),
+    StepParams("Channel 2"):setStepNo("3.")
+      :setInclude("sub_channel.tslua", { channel = 2, label = "right rail" }):setPrefix("3."),
+
+    -- 4. a nested include: this header pulls in nest_a, which pulls in nest_b, which pulls in nest_c.
+    StepParams("Nested chain"):setStepNo("4.")
+      :setInclude("nest_a.tslua"):setPrefix("4."),
+
+    -- 5. a disabled header: setEnable on an include forces the default of every step beneath it, so
+    --    its steps record NOTRUN and its Pre/Post-test Actions are skipped.
+    StepParams("Channel not fitted"):setStepNo("5.")
+      :setEnable(false)
+      :setInclude("sub_channel.tslua", { channel = 3, label = "not fitted" }):setPrefix("5."),
+
+    -- 6. the ate.devices builders build a params table only; nothing is opened, so no Device I/O is
+    --    involved (opening Devices is packet 29d).
+    StepParams("Device params, not opened"):setStepNo("6.")
+      :setAction(function()
+        local params = devices.Tcp("127.0.0.1", 5025):setTimeout(2.5)
+        ATE.log(Log.INFO, helper.describe("SCPI instrument", params.host, params.port))
+        ATE.report(Result.PASS, "built params, opened nothing", params.timeout, 2.5)
+      end),
+  })

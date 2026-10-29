@@ -1,0 +1,24 @@
+-- Example Media Release: the outer file of a nested include chain, flow.tslua -> nest_a.tslua ->
+-- nest_b.tslua -> nest_c.tslua. Nesting is any depth, and each level's setPrefix stacks from the
+-- outside in: "4." here becomes "4.2." for the steps nest_b pulls in.
+--
+-- This file requires the same module as flow.tslua and sub_channel.tslua. require is cached for the
+-- Test Run, so all three files share one counter - which is what the harness asserts.
+local shared = require("lib.attempts")
+
+return ScheduleParams("Nested A", "the outer of three nested Sub-schedules")
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pre-test of nest A") end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "post-test of nest A") end)
+  :setSchedule({
+    -- 1. A step of its own, beside the include, to show a header sits in the parent's numbering.
+    StepParams("A step"):setStepNo("1.")
+      :setAction(function()
+        -- The counter belongs to the module, not this schedule, so it carries the attempts the
+        -- top-level step and the two Channel includes already made.
+        ATE.report(Result.PASS, "nest A ready, shared attempts so far", shared.state.attempts, shared.state.attempts)
+      end),
+
+    -- 2. The header for the Sub-schedule this one includes.
+    StepParams("B header"):setStepNo("2.")
+      :setInclude("nest_b.tslua"):setPrefix("2."),
+  })

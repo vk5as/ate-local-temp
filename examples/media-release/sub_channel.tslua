@@ -1,0 +1,32 @@
+-- Example Media Release: a hidden Sub-schedule (sub_channel.tslua), included twice from
+-- flow.tslua with different keyvals and a different prefix. Runnable on its own too.
+--
+-- What it demonstrates:
+--   * keyvals: ATE runs this chunk once per include and passes the include's keyvals as `...`, so
+--     each instance has its own channel and label while the Step Numbers come from each header's
+--     setPrefix.
+--   * Pre-test and Post-test Actions on an included Sub-schedule.
+--   * Shared module state: require is cached for the Test Run, so the two includes - and the
+--     top-level schedule - all see the same lib.attempts table.
+
+local kv = ...                      -- this include's keyvals; {} for a top-level schedule
+local channel = kv.channel or 0
+local label = kv.label or "unlabelled"
+local shared = require("lib.attempts")
+
+return ScheduleParams("Channel check", "one output channel, parameterised by keyvals")
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pre-test for channel " .. channel .. " (" .. passFail .. ")") end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "post-test for channel " .. channel .. " (" .. passFail .. ")") end)
+  :setSchedule({
+    -- 1. The proof that requires stay shared across includes: this logs 1 in the first include and
+    --    2 in the second, and puts both in the step's Message.
+    StepParams("Shared state " .. channel):setStepNo("1.")
+      :setAction(function()
+        local count = shared.noteInclude(label)
+        ATE.report(Result.PASS, label .. " channel " .. channel .. " is shared call " .. count, count, channel)
+      end),
+
+    -- 2. A plain step, so the twice-included Sub-schedule has two Step Numbers under each prefix.
+    StepParams("Output off " .. channel):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "channel " .. channel .. " off", 0.0, 0.0) end),
+  })

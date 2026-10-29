@@ -19,6 +19,39 @@
     {
       "path": "step_inputs.tslua",
       "sha256": "6dea586389e0f0f3b018cb15cdcd002396e7abaf34fb8673724bb0fabfaf742c"
+    },
+    {
+      "path": "flow.tslua",
+      "sha256": "d52b29f4752311c9b7df17bc090e9c35120c9896a75d6ed27aa03de0166ca197"
+    },
+    {
+      "path": "sub_channel.tslua",
+      "sha256": "f1593bc829a79bc58ba849e1ee307b62326c0ed5b6b8cafa488916afc935e045",
+      "hidden": true
+    },
+    {
+      "path": "nest_a.tslua",
+      "sha256": "b2ba90649b05cb15783f746994029dee59489f633ddc3ac061c79b979f87ddad",
+      "hidden": true
+    },
+    {
+      "path": "nest_b.tslua",
+      "sha256": "5f7969c3981ff8f1fad3e864dbdcee7176e65f6fc18dbdf66f6d945815e60153",
+      "hidden": true
+    },
+    {
+      "path": "nest_c.tslua",
+      "sha256": "5e44a6b86b63f395b90f07902e931b88c7f5a2992db2d1fcfae0ddcf914a3e6c",
+      "hidden": true
+    },
+    {
+      "path": "lib/attempts.lua",
+      "sha256": "f90f69fe8d6f18c4f0249a10ca0e3a6c39b363d97c72436489fd025b760f1bf6"
+    },
+    {
+      "path": "modules/helper.lua",
+      "sha256": "815b4c22299f2376712f8c8764489e9d55ceea89f7889e45ea92356c85845757",
+      "module": "example_helper"
     }
   ]
 }

@@ -1,4 +1,4 @@
-"""CI harness for the example Media Release (packets 29a and 29b).
+"""CI harness for the example Media Release (packets 29a, 29b and 29c).
 
 Every visible Test Schedule in ``examples/media-release/`` runs headless through the seam-1 run
 session with scripted Operator answers, and its recorded Test Run is checked here: the Test
@@ -6,7 +6,10 @@ Definition scans clean (no broken rows, no checksum mismatch), the schedule meta
 Numbers are recorded, every `Result` value appears, a step that never reports records NOREPORT, a
 step that raises records ERROR, the log levels and Equipment are recorded, the step disabled by
 default stays NOTRUN until the Operator enables it, Stop on Fail ends both ways, every Step Input
-type and widget is declared, answered and recorded, and every run writes its report.
+type and widget is declared, answered and recorded, and every run writes its report. Packet 29c
+adds the flow schedule: a step that fails on Attempt 1 and passes on a scripted Retry, Pre-test and
+Post-test Actions across a Sub-schedule tree, a hidden Sub-schedule included twice with different
+keyvals and prefixes, a nested include, a disabled header, and modules shared between the includes.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -26,6 +29,7 @@ from ate.catalog import (
     find_definitions,
     list_schedule_mismatches,
     list_schedule_rows,
+    module_map,
 )
 
 from examples.harness.run_examples import RELEASE_DIR, RUNS, run_all, visible_schedules
@@ -65,17 +69,33 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
     rows = list_schedule_rows(RELEASE_DIR)
     assert all(row.error is None for row in rows), "no broken rows in the picker"
     names = sorted(row.name for row in rows)
-    assert names == ["Example basics", "Report every Result", "Step inputs", "Stop on fail"]
+    assert names == ["Example basics", "Flow and retry", "Report every Result", "Step inputs", "Stop on fail"]
     assert sorted(visible_schedules()) == names
+
+    # Packet 29c: the Sub-schedules are listed so includes can resolve them, but hidden means the
+    # Operator is never offered one as a Test Schedule in its own right.
+    hidden = sorted(entry.rel_path for entry in definition.files if entry.hidden)
+    assert hidden == ["nest_a.tslua", "nest_b.tslua", "nest_c.tslua", "sub_channel.tslua"]
+    sub_schedule_names = {"Channel check", "Nested A", "Nested B", "Nested C"}
+    assert not sub_schedule_names & set(names), "hidden Sub-schedules are not offered in the picker"
+
+    # Module names: derived from the path (lib/attempts.lua -> lib.attempts), and explicit where the
+    # Test Definition gives a "module" field (modules/helper.lua -> example_helper).
+    modules = module_map(definition)
+    assert sorted(modules) == ["example_helper", "lib.attempts"]
+    explicit = next(e for e in definition.files if e.rel_path == "modules/helper.lua")
+    derived = next(e for e in definition.files if e.rel_path == "lib/attempts.lua")
+    assert (explicit.module_name, derived.module_name) == ("example_helper", "lib.attempts")
 
 
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Four schedules, six runs: Stop on fail is run twice (Continue and Abort) and Example basics
-    twice (its optional step left disabled, then enabled by the Operator), so the record count is
-    the schedule count plus those two extra runs."""
-    assert len(records) == len(visible_schedules()) + 2
+    Five schedules, eight runs: Stop on fail is run twice (Continue and Abort), Example basics twice
+    (its optional step left disabled, then enabled by the Operator) and Flow and retry twice (Stop on
+    Fail with a Retry, and with Stop on Fail switched off), so the record count is the schedule count
+    plus those three extra runs."""
+    assert len(records) == len(visible_schedules()) + 3
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
@@ -84,8 +104,12 @@ def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[st
         assert run["end_reason"] in ("COMPLETED", "STOPPED_ON_FAIL")
         assert run["ended_at"], "the run was closed, not left open"
         assert [release["media_number"] for release in record["media_releases"]] == ["MR-EXAMPLE"]
-        assert all(file["expected_sha256"] == file["computed_sha256"] for file in record["run_files"])
-        assert record["run_files"], "the run records the schedule file it loaded"
+        # Every file the run loaded is recorded with its expected and computed checksum. ATE's own
+        # bundled modules (require("ate.devices")) are not in any Test Definition, so they have no
+        # expected checksum and cannot mismatch.
+        assert [file["kind"] for file in record["run_files"]], "the run records the files it loaded"
+        assert all(file["expected_sha256"] == file["computed_sha256"]
+                   for file in record["run_files"] if file["kind"] != "ate-module")
 
         # The report really arrives: HTML on disk, PDF beside it, named after this run's UUT.
         assert record["reports"], "report_written fired for this run"
@@ -338,3 +362,185 @@ def test_the_operator_can_enable_a_step_disabled_by_default(records: dict[str, d
     assert (optional["result"], optional["attempt_count"]) == ("PASS", 1)
     assert any(a["msg"] == "only runs when enabled" for a in record["attempts"])
     assert record["run"]["result"] == "PASS"
+
+
+def test_flow_retries_a_failed_step_under_stop_on_fail(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 29c: Attempt 1 FAILs, the Operator's Retry gives Attempt 2, and the step's Result is
+    its last Attempt's. The attempt count lives in a required module: ATE gives a step no way to
+    read its own Attempt number, so the schedule keeps the counter."""
+    record = records["flow_retry"]
+    run = record["run"]
+    assert run["stop_on_fail"] == 1, ":setStopOnFail(true) is this schedule's default"
+    assert run["end_reason"] == "COMPLETED", "a Retry that passes ends the run normally"
+    assert run["result"] == "PASS", "no step's last Attempt failed"
+
+    step = record["nodes"][0]
+    assert (step["step_number"], step["step_name"]) == ("1.", "Retry this one")
+    assert (step["attempt_count"], step["result"]) == (2, "PASS")
+
+    attempts = [a for a in record["attempts"] if a["node_seq"] == 0]
+    assert [(a["attempt_no"], a["pass_fail"], a["prompt_choice"]) for a in attempts] == [
+        (1, "FAIL", "RETRY"), (2, "PASS", None)
+    ]
+    assert [a["msg"] for a in attempts] == ["attempt 1 joint is cold", "attempt 2 joint is warm"]
+    assert [(a["actual"], a["expected"]) for a in attempts] == [("0.2", "2.4"), ("2.4", "2.4")]
+
+    # Every other step in the tree ran exactly once, so the pause happened at step 1 only.
+    assert all(a["attempt_no"] == 1 for a in record["attempts"] if a["node_seq"] != 0)
+
+
+def test_flow_with_continue_on_fail_never_prompts(records: dict[str, dict[str, Any]]) -> None:
+    """The same schedule with the Operator turning Stop on Fail off: no pause, no Retry, and step 1
+    stays FAIL. The End Reason is still COMPLETED because the run walked every step."""
+    record = records["flow_continue"]
+    run = record["run"]
+    assert run["stop_on_fail"] == 0, "the Operator's choice overrides :setStopOnFail(true)"
+    assert run["end_reason"] == "COMPLETED", "continue on fail never stops the run"
+    assert run["result"] == "FAIL", "step 1 failed on its only Attempt"
+    assert record["unexpected_prompts"] == [], "a run with Stop on Fail off never pauses"
+    assert all(a["prompt_choice"] is None for a in record["attempts"])
+
+    step = record["nodes"][0]
+    assert (step["attempt_count"], step["result"]) == (1, "FAIL")
+    by_node = {a["node_seq"]: a for a in record["attempts"]}
+    assert by_node[0]["msg"] == "attempt 1 joint is cold"
+
+    # A Post-test Action is called with the run's overall result: FAIL here, PASS in the retry run.
+    assert any(line["text"] == "top-level post-test sees FAIL" for line in record["logs"])
+
+
+def test_pre_and_post_actions_run_depth_first_across_the_tree(records: dict[str, dict[str, Any]]) -> None:
+    """Every Pre-test Action runs before the first step, depth first with parents first, and the
+    Post-test Actions run afterwards in exactly the reverse order (test-schedule-format.md)."""
+    for key in ("flow_retry", "flow_continue"):
+        record = records[key]
+        actions = record["actions"]
+        pre = [a for a in actions if a["phase"] == "pre"]
+        post = [a for a in actions if a["phase"] == "post"]
+        assert all(a["outcome"] == "ok" for a in actions)
+        assert len(pre) == len(post) == 6, "the top level plus five Sub-schedule instances"
+        assert [a["run_order"] for a in pre] == [0, 1, 2, 3, 4, 5]
+        assert [a["run_order"] for a in post] == [0, 1, 2, 3, 4, 5]
+        # 0 top level, 1 and 2 the two Channel includes, 3/4/5 the nested chain, each before its own
+        # includes, in step order.
+        assert [a["instance_seq"] for a in pre] == [0, 1, 2, 3, 4, 5]
+        assert [a["instance_seq"] for a in post] == [5, 4, 3, 2, 1, 0]
+
+        # The Sub-schedule under the disabled header runs no step at all, so both of its Actions are
+        # skipped even though its instance is recorded.
+        assert {i["instance_seq"] for i in record["schedule_instances"]} == {0, 1, 2, 3, 4, 5, 6}
+        assert all(a["instance_seq"] != 6 for a in actions), "instance 6 is disabled end to end"
+
+        logs = record["logs"]
+        phase_lines = [line for line in logs if line["action_seq"] is not None]
+        assert [line["text"] for line in phase_lines[:6]] == [
+            "top-level pre-test sees PASS", "pre-test for channel 1 (PASS)", "pre-test for channel 2 (PASS)",
+            "pre-test of nest A", "pre-test of nest B", "pre-test of nest C",
+        ]
+        assert [line["text"] for line in phase_lines[6:]] == [
+            "post-test of nest C", "post-test of nest B", "post-test of nest A",
+            f"post-test for channel 2 ({record['run']['result']})",
+            f"post-test for channel 1 ({record['run']['result']})",
+            f"top-level post-test sees {record['run']['result']}",
+        ]
+
+        first_step_line = min(i for i, line in enumerate(logs) if line["node_seq"] is not None)
+        last_pre = max(i for i, line in enumerate(logs)
+                       if line["action_seq"] is not None and "pre-test" in line["text"])
+        first_post = min(i for i, line in enumerate(logs)
+                        if line["action_seq"] is not None and "post-test" in line["text"])
+        assert last_pre < first_step_line < first_post, (
+            "every Pre-test Action ran before the first step, and every Post-test Action after the last"
+        )
+
+
+def test_a_hidden_sub_schedule_included_twice_gets_its_own_keyvals_and_prefix(records: dict[str, dict[str, Any]]) -> None:
+    """The expanded tree, its headers, and the per-instance keyvals and prefixes of one hidden file."""
+    record = records["flow_retry"]
+    tree = [(node["step_number"], node["kind"], node["step_name"], node["result"]) for node in record["nodes"]]
+    assert tree == [
+        ("1.", "step", "Retry this one", "PASS"),
+        ("2.", "header", "Channel 1", None),
+        ("2.1.", "step", "Shared state 1", "PASS"),
+        ("2.2.", "step", "Output off 1", "PASS"),
+        ("3.", "header", "Channel 2", None),
+        ("3.1.", "step", "Shared state 2", "PASS"),
+        ("3.2.", "step", "Output off 2", "PASS"),
+        ("4.", "header", "Nested chain", None),
+        ("4.1.", "step", "A step", "PASS"),
+        ("4.2.", "header", "B header", None),
+        ("4.2.1.", "step", "B step", "PASS"),
+        ("4.2.2.", "header", "C header", None),
+        ("4.2.2.1.", "step", "C step", "PASS"),
+        ("5.", "header", "Channel not fitted", None),
+        ("5.1.", "step", "Shared state 3", "NOTRUN"),
+        ("5.2.", "step", "Output off 3", "NOTRUN"),
+        ("6.", "step", "Device params, not opened", "PASS"),
+    ]
+    # A header is not a Test Step: no Result, no Attempt, and its number comes from the parent's
+    # numbering, not its own setPrefix.
+    assert all(node["attempt_count"] == 0 for node in record["nodes"] if node["kind"] == "header")
+
+    included = [i for i in record["schedule_instances"] if i["file"] == "sub_channel.tslua"]
+    assert [(i["prefix"], json.loads(i["keyvals"])) for i in included] == [
+        ("2.", {"channel": 1, "label": "left rail"}),
+        ("3.", {"channel": 2, "label": "right rail"}),
+        ("5.", {"channel": 3, "label": "not fitted"}),
+    ]
+
+    # The keyvals show up in the step's own recorded Message, and the prefixes in its Step Number.
+    by_node = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
+    assert by_node[2]["msg"] == "left rail channel 1 is shared call 1"
+    assert by_node[5]["msg"] == "right rail channel 2 is shared call 2"
+    assert [(node["step_number"], node["instance_seq"]) for node in record["nodes"]
+            if node["step_name"].startswith("Shared state")] == [("2.1.", 1), ("3.1.", 2), ("5.1.", 6)]
+
+
+def test_a_nested_include_expands_and_a_disabled_header_runs_nothing(records: dict[str, dict[str, Any]]) -> None:
+    """A includes B includes C, prefixes stack outside in, and setEnable on a header forces every
+    step beneath it off - which records NOTRUN with no Attempt."""
+    record = records["flow_retry"]
+    nested = [(node["step_number"], node["step_name"], node["kind"], node["result"])
+              for node in record["nodes"] if node["step_number"].startswith("4.")]
+    assert nested == [
+        ("4.", "Nested chain", "header", None),
+        ("4.1.", "A step", "step", "PASS"),
+        ("4.2.", "B header", "header", None),
+        ("4.2.1.", "B step", "step", "PASS"),
+        ("4.2.2.", "C header", "header", None),
+        ("4.2.2.1.", "C step", "step", "PASS"),
+    ]
+
+    header = next(node for node in record["nodes"] if node["step_number"] == "5.")
+    assert (header["step_name"], header["default_enabled"], header["enabled"]) == ("Channel not fitted", 0, 0)
+    beneath = [node for node in record["nodes"]
+               if node["step_number"].startswith("5.") and node["kind"] == "step"]
+    assert [(node["result"], node["attempt_count"], node["default_enabled"], node["enabled"])
+            for node in beneath] == [("NOTRUN", 0, 0, 0), ("NOTRUN", 0, 0, 0)]
+
+
+def test_required_modules_share_one_state_across_the_includes(records: dict[str, dict[str, Any]]) -> None:
+    """require is cached for the Test Run, so flow.tslua, sub_channel.tslua (twice) and nest_a.tslua
+    all see the same lib.attempts table: one counter, one set of include calls."""
+    record = records["flow_retry"]
+    by_node = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
+    assert (by_node[2]["actual"], by_node[5]["actual"]) == ("1", "2"), "one counter, two includes"
+    assert (by_node[2]["expected"], by_node[5]["expected"]) == ("1", "2")
+    # nest_a.tslua reads the same table the top-level step incremented twice through its Retry.
+    assert (by_node[8]["actual"], by_node[8]["expected"]) == ("2", "2")
+
+    # In the run with no Retry the same module still holds flow.tslua's counter, at 1.
+    other = {attempt["node_seq"]: attempt for attempt in records["flow_continue"]["attempts"]}
+    assert other[8]["actual"] == "1"
+
+    # The module listed with an explicit module name is the one the step required: its describe()
+    # built the line from params the ate.devices builder made.
+    assert any(line["text"] == "SCPI instrument at 127.0.0.1:5025" for line in record["logs"])
+
+    used = {file["path"]: file for file in record["run_files"]}
+    assert {"flow.tslua", "sub_channel.tslua", "nest_a.tslua", "nest_b.tslua", "nest_c.tslua",
+            "lib/attempts.lua", "modules/helper.lua"} <= set(used)
+    bundled = used["ate.devices"]
+    assert bundled["kind"] == "ate-module" and bundled["expected_sha256"] is None
+    assert len(bundled["computed_sha256"]) == 64, "ATE records the checksum of the bundled module it used"
+    assert bundled["mismatch"] == 0
