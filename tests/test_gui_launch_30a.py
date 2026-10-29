@@ -8,6 +8,7 @@ are the real :class:`StagedRunScreen` and :class:`HistoryScreen` bound to a real
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -18,10 +19,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QMainWindow, QMessageBox
 
 from ate._version import __version__
-from ate.app import _alert_dialog, _missing_config_dialog, launch
+from ate.app import _alert_dialog, _close_confirm_dialog, _missing_config_dialog, launch
 from ate.cli import main
 from ate.run_session.headless import SessionState
 from ate.storage.store import SCHEMA_VERSION, RunStore
@@ -37,7 +39,7 @@ def fake_pdf(monkeypatch):
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
 
 
-def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None):
+def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None, confirm_close=None):
     """Launch against ``env`` with the dialogs captured instead of shown. Returns (outcome, alerts)."""
     config_path = env["config"]
     if ui is not None:
@@ -51,6 +53,7 @@ def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None):
         exec_=exec_,
         prompt=prompt,
         alert=alerts.append,
+        confirm_close=confirm_close,
     )
     return outcome, alerts
 
@@ -148,6 +151,35 @@ def _finish_run(qapp, window, asked):
     return written
 
 
+@contextlib.contextmanager
+def blocking_run(qapp, window):
+    """Start a blocking run and guarantee it ends: the body may finish it, but whatever happens,
+    the run is aborted and awaited in the teardown (30a review item 15: a test that dies mid-run
+    must not leave the worker or its PDF helper live, which aborts pytest with rc 134)."""
+    asked = _start_a_blocking_run(qapp, window)
+    try:
+        yield asked
+    finally:
+        if window.session.state != SessionState.FINISHED:
+            try:
+                window.session.request_abort()
+            except Exception:
+                pass
+            deadline = time.time() + 10
+            while window.session.state != SessionState.FINISHED and time.time() < deadline:
+                qapp.processEvents()
+        _wait_pdf_jobs(qapp)
+
+
+def _wait_pdf_jobs(qapp, timeout: float = 12.0) -> None:
+    """Pump the event loop until every started PDF helper has exited."""
+    from ate.report.pdf_job import _live_pdf_jobs
+
+    deadline = time.time() + timeout
+    while _live_pdf_jobs and time.time() < deadline:
+        qapp.processEvents()
+
+
 def test_history_is_disabled_during_a_run_when_the_config_forbids_it(qapp, tmp_path, fake_pdf):
     """``ui.allowHistoryDuringRun: false`` disables the History switch while a run is up."""
     env = write_ate_env(tmp_path)
@@ -156,12 +188,12 @@ def test_history_is_disabled_during_a_run_when_the_config_forbids_it(qapp, tmp_p
     window = outcome.window
     assert window.history_action.isEnabled()  # not running yet
 
-    asked = _start_a_blocking_run(qapp, window)
-    assert window.history_action.isEnabled() is False
-    window.show_history()
-    assert window.stack.currentWidget() is window.run_screen, "History stays out of reach"
+    with blocking_run(qapp, window) as asked:
+        assert window.history_action.isEnabled() is False
+        window.show_history()
+        assert window.stack.currentWidget() is window.run_screen, "History stays out of reach"
 
-    _finish_run(qapp, window, asked)
+        _finish_run(qapp, window, asked)
     assert window.history_action.isEnabled()
     window.show_history()
     assert window.stack.currentWidget() is window.history_screen
@@ -173,11 +205,11 @@ def test_history_stays_available_during_a_run_by_default(qapp, tmp_path, fake_pd
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
-    asked = _start_a_blocking_run(qapp, window)
-    assert window.history_action.isEnabled()
-    window.show_history()
-    assert window.stack.currentWidget() is window.history_screen
-    _finish_run(qapp, window, asked)
+    with blocking_run(qapp, window) as asked:
+        assert window.history_action.isEnabled()
+        window.show_history()
+        assert window.stack.currentWidget() is window.history_screen
+        _finish_run(qapp, window, asked)
     assert window.history_action.isEnabled()
 
 
@@ -271,6 +303,8 @@ def test_launch_keeps_its_qapplication_alive_without_pytest_qt(tmp_path):
         "window = out.window\n"
         "assert window is not None and window.findChild(object) is not None, 'window was destroyed'\n"
         "assert window.session.store is not None and window.session.config is not None\n"
+        "window.close()\n"
+        "out.app.processEvents()\n"
         "print('ALIVE')\n"
     )
     proc = subprocess.run(
@@ -497,3 +531,194 @@ def test_bare_launch_with_default_dialogs_exits_one_on_abort(qapp, tmp_path, mon
     assert boxes[0].parent() is None and boxes[1].parent() is None
     alert = boxes[1].text()
     assert alert == f"config file not found at {config.resolve()}", f"duplicated wording: {alert!r}"
+
+
+# -- the Run screen's first stage carries labels (item 14) --------------------------------
+
+
+def test_first_stage_fields_have_visible_buddy_labels(qapp, tmp_path):
+    """Every first-stage input is labelled by a buddy label, as in the mockup form."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    window = outcome.window
+    window.show()  # offscreen: widgets report visible only once the window is shown
+    qapp.processEvents()
+    stage = window.run_screen.uut_operator_stage
+    pairs = [
+        (stage.project_label, stage.project_edit, "Project", ""),
+        (stage.operator_label, stage.operator_edit, "Operator", "required"),
+        (stage.uut_type_label, stage.uut_type_edit, "UUT Type", "required"),
+        (stage.serial_label, stage.serial_edit, "Serial", "required"),
+    ]
+    for label, edit, text, placeholder in pairs:
+        assert label.text() == text, f"missing label {text!r}"
+        assert label.buddy() is edit, f"{text} label is not the buddy of its field"
+        assert label.isVisible(), f"{text} label is not visible"
+        assert edit.placeholderText() == placeholder
+
+
+# -- History -> "New run for this UUT" prefills the Run screen (item 8) ------------------
+
+
+def test_new_run_from_history_returns_to_a_prefilled_run_screen(qapp, tmp_path, fake_pdf):
+    """After a finished run, History's 'New run for this UUT' returns to the Run screen with
+    UUT Type, serial, Project and the Test Schedule selection filled in, not just the session."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    window = outcome.window
+    with blocking_run(qapp, window) as asked:
+        _finish_run(qapp, window, asked)
+
+    window.show_history()
+    qapp.processEvents()
+    screen = window.history_screen
+    screen.refresh()
+    qapp.processEvents()
+    model = screen.table_view.model()
+    serial_col = 2  # HISTORY_COLUMNS: started_at, uut_type, uut_serial, ...
+    row = next(r for r in range(model.rowCount()) if model.item(r, serial_col).text() == "PS-1")
+    screen.table_view.setCurrentIndex(model.index(row, 0))
+    qapp.processEvents()
+    screen.new_run_button.click()
+    qapp.processEvents()
+
+    assert window.stack.currentWidget() is window.run_screen
+    stage = window.run_screen.uut_operator_stage
+    assert stage.uut_type_edit.text() == "PowerSupply", stage.uut_type_edit.text()
+    assert stage.serial_edit.text() == "PS-1", stage.serial_edit.text()
+    assert stage.project_edit.text() == "BENCH-03", stage.project_edit.text()
+    item = window.run_screen.test_schedule_stage.schedule_list.currentItem()
+    assert item is not None and item.data(Qt.ItemDataRole.UserRole) == "Blocking input schedule"
+    assert window.session.selected_schedule == "Blocking input schedule"
+
+
+# -- the History *screen* gets the run-in-progress state (item 9) ------------------------
+
+
+def test_history_screen_shows_in_progress_state_when_history_is_forbidden(qapp, tmp_path, fake_pdf):
+    """The screen (not only its session) is told a run is in progress: it says so and
+    disables its table, restoring afterwards."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path, ui={"allowHistoryDuringRun": False})
+    window = outcome.window
+    screen = window.history_screen
+    assert screen.table_view.isEnabled()
+
+    with blocking_run(qapp, window):
+        qapp.processEvents()
+        assert screen._status_label.text() == "A Test Run is in progress", "the screen never got the state"
+        assert screen.table_view.isEnabled() is False
+
+    window.show_history()
+    assert window.stack.currentWidget() is screen
+    assert screen._status_label.text() == ""
+    assert screen.table_view.isEnabled()
+
+
+def test_history_screen_stays_usable_during_a_run_when_allowed(qapp, tmp_path, fake_pdf):
+    """With the default allowHistoryDuringRun, the screen's state updates without locking itself."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    window = outcome.window
+    screen = window.history_screen
+    with blocking_run(qapp, window):
+        qapp.processEvents()
+        window.show_history()
+        assert window.stack.currentWidget() is screen
+        assert screen._status_label.text() == ""
+        assert screen.table_view.isEnabled()
+
+
+# -- closing the window releases resources (item 10) --------------------------------------
+
+
+def test_close_without_a_run_closes_store_and_app_log(qapp, tmp_path):
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    window = outcome.window
+    store, app_log = window.session.store, window.app_log
+    window.close()
+    qapp.processEvents()
+    try:
+        store._conn.execute("SELECT 1")
+        raise AssertionError("the store connection survived the close")
+    except sqlite3.ProgrammingError:
+        pass
+    with pytest.raises(ValueError):
+        app_log._fh.write("written after close")
+
+
+def test_close_confirm_dialog_builds_and_answers(qapp, monkeypatch):
+    boxes: list[QMessageBox] = []
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "Abort the run and quit"))
+    assert _close_confirm_dialog("A Test Run is in progress. Abort it and quit?") is True
+    assert boxes[0].text() == "A Test Run is in progress. Abort it and quit?"
+    assert boxes[0].parent() is None
+    boxes.clear()
+    _stub_dialogs(monkeypatch, boxes, lambda self: _button(self, "Keep running"))
+    assert _close_confirm_dialog("A Test Run is in progress. Abort it and quit?") is False
+
+
+def test_close_during_a_run_asks_and_aborts_when_confirmed(qapp, tmp_path, fake_pdf):
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    db_path = env["db"]
+    outcome, alerts = _launch(env, tmp_path=tmp_path, confirm_close=lambda message: False)
+    window = outcome.window
+    _start_a_blocking_run(qapp, window)
+    qapp.processEvents()
+    try:
+        window.close()  # answered "No": the close is ignored, nothing is released
+        qapp.processEvents()
+        assert window.session.state == SessionState.STARTED, "the run must survive a refused close"
+        assert window.app_log.path.exists()
+        window.app_log.log("INFO", "ate", "still running")
+
+        window._confirm_close = lambda message: True
+        window.close()  # answered "Yes": abort, wait for the record, then close
+        qapp.processEvents()
+        _wait_pdf_jobs(qapp)  # the aborted run's report job must also end (item 15)
+        assert window.session.state == SessionState.FINISHED, "the aborted run did not finish recording"
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT end_reason, result FROM test_run ORDER BY started_at DESC LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        assert row == ("ABORTED", "FAIL"), row
+        try:
+            window.session.store._conn.execute("SELECT 1")
+            raise AssertionError("the session's store survived the close")
+        except sqlite3.ProgrammingError:
+            pass
+        with pytest.raises(ValueError):
+            window.app_log._fh.write("after close")
+    finally:
+        if window.session.state != SessionState.FINISHED:
+            try:
+                window.session.request_abort()
+            except Exception:
+                pass
+            deadline = time.time() + 10
+            while window.session.state != SessionState.FINISHED and time.time() < deadline:
+                qapp.processEvents()
+        _wait_pdf_jobs(qapp)
+
+
+def test_a_test_that_dies_mid_run_still_aborts_its_run(qapp, tmp_path, fake_pdf):
+    """The blocking_run helper aborts and awaits the run even when the test body raises,
+    so no worker or PDF helper outlives the test (30a review item 15)."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    window = outcome.window
+    with pytest.raises(RuntimeError):
+        with blocking_run(qapp, window):
+            raise RuntimeError("simulated test failure")
+    assert window.session.state == SessionState.FINISHED
+    row = window.session.store.get_test_run(window.session.run_uuid)
+    assert row["end_reason"] == "ABORTED", row

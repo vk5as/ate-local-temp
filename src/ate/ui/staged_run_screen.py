@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterable, Optional
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFontMetrics
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -108,14 +109,15 @@ class _LogPane(QWidget):
 class UutOperatorStage(QWidget):
     """Stage one: the Operator and UUT fields.
 
-    Holds no run logic — it only owns four text inputs (Operator, Project, UUT type,
-    UUT serial) plus a button that advances to the Test Schedule stage. The screen wires
-    the button up; nothing here calls into the session until a run actually starts.
+    Holds no run logic — it only owns the mockup's compact first-stage form: four labelled
+    text inputs (Project, Operator, UUT Type, Serial) and a button that advances to the Test
+    Schedule stage. Every label is the buddy of its input (30a review item 14). The screen
+    wires the button up; nothing here calls into the session until a run actually starts.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.operator_edit = QLineEdit()
@@ -123,11 +125,29 @@ class UutOperatorStage(QWidget):
         self.uut_type_edit = QLineEdit()
         self.serial_edit = QLineEdit()
 
-        for widget in (self.operator_edit, self.project_edit, self.uut_type_edit, self.serial_edit):
-            layout.addWidget(widget)
+        self.operator_label = QLabel("Operator")
+        self.project_label = QLabel("Project")
+        self.uut_type_label = QLabel("UUT Type")
+        self.serial_label = QLabel("Serial")
+
+        # Mockup order and placeholders: Project is prefilled from the station, so it carries
+        # no placeholder; Operator, UUT Type and Serial are marked "required" in the mockup.
+        rows = [
+            (self.project_label, self.project_edit, ""),
+            (self.operator_label, self.operator_edit, "required"),
+            (self.uut_type_label, self.uut_type_edit, "required"),
+            (self.serial_label, self.serial_edit, "required"),
+        ]
+        for index, (label, edit, placeholder) in enumerate(rows):
+            label.setBuddy(edit)
+            if placeholder:
+                edit.setPlaceholderText(placeholder)
+            layout.addWidget(label, index, 0)
+            layout.addWidget(edit, index, 1)
 
         self.next_button = QPushButton("Next")
-        layout.addWidget(self.next_button)
+        layout.addWidget(self.next_button, len(rows), 1)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
 
 class TestScheduleStage(QWidget):

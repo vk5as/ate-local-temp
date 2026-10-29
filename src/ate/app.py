@@ -24,16 +24,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
 from .config import Config, ConfigError, MissingConfigError, read_config
 from .history.session import HistorySession
 from .log import LogError, open_app_log
-from .run_session.headless import HeadlessRunSession, SessionState
+from .run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .storage.store import DbLaunchStatus, check_database_at_launch
 from .ui.history_screen import HistoryScreen
 from .ui.staged_run_screen import StagedRunScreen
@@ -64,11 +66,16 @@ class MainWindow(QMainWindow):
         run_screen: Optional[StagedRunScreen] = None,
         history_screen: Optional[HistoryScreen] = None,
         app_log=None,
+        confirm_close: Optional[Callable[[str], bool]] = None,
     ) -> None:
         super().__init__()
         self.session = session
         self.config = config
         self.app_log = app_log
+        # Injectable "abort the run and quit?" answer so tests never block on a modal box (30a item 10).
+        self._confirm_close = confirm_close or _close_confirm_dialog
+        self._run_active = False
+        self._released = False
         self.setWindowTitle(f"ATE {__version__} — {config.station_name}")
 
         self.history_session = HistorySession(session.store, config=session.config)
@@ -103,23 +110,76 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.history_screen)
 
     def _on_state_changed(self, state: SessionState) -> None:
-        """Tell History whether a run is up, and disable its switch when the config says so."""
+        """Tell the History screen whether a run is up, and disable its switch when the config says so.
+
+        The *screen* method is called, not the session's: the screen refreshes its "A Test Run is
+        in progress" state and re-enables its widgets through it (30a review item 9)."""
         running = state == SessionState.STARTED
-        self.history_session.set_run_in_progress(running)
+        self._run_active = running
+        self.history_screen.set_run_in_progress(running)
         self.history_action.setEnabled(running is False or self.config.ui_allow_history_during_run)
+        if state == SessionState.FINISHED:
+            self.history_screen.refresh()  # the finished run should appear in the table
 
     def _new_run_from_history(self, prefill: dict) -> None:
-        """Switch to the Run screen and copy History's prefill into the session's fields."""
+        """Switch to the Run screen prefilled from History's "New run for this UUT".
+
+        The Run screen reads its widgets at Start, so prefilling only the session would be
+        re-applied empty by the first Start (30a review item 8): UUT Type, serial and Project go
+        into the first-stage edits, and the Test Schedule picker is made current, which selects
+        it on the session through the screen's own wiring."""
         self.show_run()
+        stage = self.run_screen.uut_operator_stage
         setters = {
-            "uut_type": self.session.set_uut_type,
-            "uut_serial": self.session.set_uut_serial,
-            "project": self.session.set_project,
+            "uut_type": (self.session.set_uut_type, stage.uut_type_edit),
+            "uut_serial": (self.session.set_uut_serial, stage.serial_edit),
+            "project": (self.session.set_project, stage.project_edit),
         }
         for key, value in (prefill or {}).items():
-            setter = setters.get(key)
-            if setter is not None and value:
+            entry = setters.get(key)
+            if entry is not None and value:
+                setter, widget = entry
                 setter(value)
+                widget.setText(value)
+        schedule = (prefill or {}).get("schedule_name")
+        if schedule:
+            picker = self.run_screen.test_schedule_stage.schedule_list
+            for index in range(picker.count()):
+                item = picker.item(index)
+                if item.data(Qt.ItemDataRole.UserRole) == schedule:
+                    picker.setCurrentItem(item)  # _on_schedule_selected selects it on the session
+                    break
+
+    # -- closing -------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        """Release the session, store and application log on exit; a run in progress must be
+        aborted (with confirmation) and allowed to finish recording first (30a review item 10)."""
+        if self._run_active:
+            if not self._confirm_close("A Test Run is in progress. Abort it and quit?"):
+                event.ignore()  # the Operator chose to keep the run going: the window stays open
+                return
+            try:
+                self.session.request_abort()
+            except SessionError:
+                pass  # raced with a natural finish: nothing to abort
+            deadline = time.time() + 10
+            while self._run_active and time.time() < deadline:
+                QApplication.processEvents()
+        self._release_resources()
+        event.accept()
+
+    def _release_resources(self) -> None:
+        """Close the session (store included) and the launch's application log, once."""
+        if self._released:
+            return
+        self._released = True
+        self.session.close()
+        if self.app_log is not None:
+            try:
+                self.app_log.close()
+            except LogError:
+                pass
 
 
 def _missing_config_dialog(path: str) -> bool:
@@ -144,18 +204,30 @@ def _alert_dialog(message: str) -> None:
     box.exec()
 
 
+def _close_confirm_dialog(message: str) -> bool:
+    """Ask whether to abort a Test Run that is still in progress when closing the window."""
+    QApplication.instance() or QApplication([])
+    box = QMessageBox(QMessageBox.Icon.Warning, "ATE", message)
+    abort = box.addButton("Abort the run and quit", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("Keep running", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    return box.clickedButton() is abort
+
+
 def launch(
     argv: Optional[list[str]] = None,
     *,
     exec_: bool = True,
     prompt: Optional[Callable[[str], bool]] = None,
     alert: Optional[Callable[[str], None]] = None,
+    confirm_close: Optional[Callable[[str], bool]] = None,
 ) -> LaunchOutcome:
     """Open the application from ``ate``'s arguments. Returns the exit code and the window.
 
     ``prompt`` answers the missing-config dialog (True creates the defaults), ``alert`` reports a
-    refusal. With ``exec_=False`` the window is built but neither shown nor looped — the tests use
-    that; the real launch shows it and enters the event loop.
+    refusal, and ``confirm_close`` answers the "abort the run and quit?" question when the window
+    is closed while a Test Run is in progress. With ``exec_=False`` the window is built but
+    neither shown nor looped — the tests use that; the real launch shows it and enters the loop.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="ate", description="Open the ATE application")
@@ -195,7 +267,7 @@ def launch(
     session.store.close_interrupted_runs(on_log=session.on_log)  # spec 98, logged by the store itself
 
     app = QApplication.instance() or QApplication([])  # reused when a test already has one
-    window = MainWindow(session, config, app_log=app_log)
+    window = MainWindow(session, config, app_log=app_log, confirm_close=confirm_close)
     if not exec_:
         # Keep the application referenced: a local QApplication dying here would take the
         # window (and the session's store) with it (30a review item 2).
