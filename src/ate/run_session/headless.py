@@ -32,7 +32,7 @@ from ..engine.run_engine import RunEngine, RunStatus
 from ..engine.step_inputs import value_error
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
-from ..report.pdf_job import start_pdf_job
+from ..report.pdf_job import start_pdf_job, stop_pdf_jobs
 from ..storage.store import RunStore
 
 
@@ -134,12 +134,25 @@ class HeadlessRunSession(QObject):
         return self._state
 
     def close(self) -> None:
-        """Release this session's resources: close the store, and the application log if the
-        session opened its own (a log handed in by the launch belongs to the launch)."""
+        """Release this session's resources: end its PDF helper, close the store, and close the
+        application log if the session opened its own (a log handed in by the launch belongs to the
+        launch)."""
+        stop_pdf_jobs(self)  # a helper still running when the session dies aborts the process
         if self._store is not None:
             self._store.close()
         if self._app_log is not None and self._owns_app_log:
             self._app_log.close()
+
+    def __del__(self) -> None:
+        """A session dropped without ``close()`` still must not leave its helper running.
+
+        Qt destroys a ``QProcess`` together with its parent while the render is in flight, and the
+        job's ``finished`` callback then fires against a session whose Qt side is gone (packet 25b
+        review: this is what aborted the test run at teardown)."""
+        try:
+            stop_pdf_jobs(self)
+        except Exception:  # the Qt side is already gone; there is nothing left to stop
+            pass
 
     @property
     def selected_schedule(self) -> Optional[str]:

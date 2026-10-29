@@ -114,6 +114,21 @@ def app(qapp: QApplication) -> QApplication:
 
 
 @pytest.fixture(autouse=True)
+def _stop_pdf_jobs_after_test() -> None:
+    """End every Test Report PDF helper before the next test starts (packet 25b review).
+
+    The helper is a ``QProcess`` parented to the session that started it. A test that finishes with
+    the render still in flight drops its session, Qt destroys the process underneath it, and the
+    job's ``finished`` callback then runs against a session whose Qt side is gone: PyQt aborts the
+    interpreter. Stopping the jobs at the end of each test keeps a helper from outliving its session.
+    """
+    from ate.report.pdf_job import stop_pdf_jobs
+
+    yield
+    stop_pdf_jobs()
+
+
+@pytest.fixture(autouse=True)
 def _clean_qt_state(qapp: QApplication) -> None:
     """Give every test a clean Qt slate, regardless of which module runs.
 

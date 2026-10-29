@@ -749,7 +749,8 @@ def test_a_hidden_three_pane_layouts_prompt_and_abort_answer_nothing(qapp, tmp_p
     window.staged_layout_action.trigger()
     qapp.processEvents()
     assert three.is_active() is False and staged.is_active()
-    three.table._prompt_bars[0].continue_button.click()
+    # The hidden layout's own prompt signal is inert: it cannot answer the pause.
+    three.table.prompt_choice.emit("CONTINUE")
     three.abort_button.click()
     qapp.processEvents()
     assert window.session.pause_pending(), "the hidden layout answered the pause"
