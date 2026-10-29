@@ -119,6 +119,10 @@ def test_staged_finished_run_keeps_the_window_size_and_the_status_bar(qapp, tmp_
         qapp.processEvents()
 
     assert window.size() == QSize(*WINDOW_SIZE), f"the window grew to {window.size()} after the run finished"
+    # The mockup's finished state (variant C) is the run view alone: no setup stage stacked above it.
+    assert not staged.steps_stack.isVisible(), "the setup stages reappeared above the finished run view"
+    assert staged.run_view.isVisible(), "the finished run view is not on screen"
+    assert staged.run_view.tabs.isVisible() and staged.run_view.status_bar.isVisible(), "the tabs or status bar went off-screen"
     _status_bar_inside(window, staged.run_view)
     viewport_finished = staged.run_view.step_list.viewport().height()
     assert viewport_finished >= viewport_running, (
