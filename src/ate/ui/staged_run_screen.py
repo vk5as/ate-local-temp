@@ -1492,10 +1492,11 @@ class StagedRunScreen(QWidget):
     def begin_run(self) -> None:
         """Capture the Operator's fields and start a run. Clears nothing on purpose.
 
-        Fields are only pushed to the session when a widget is non-empty, so a new run keeps
-        every field it did not change; blanking one drops that value for this run. The run
-        then starts through ``session.start()`` and the Run view is shown. This never blocks:
-        ``start()`` queues its signals and returns immediately.
+        Operator, UUT Type and serial are only pushed when a widget is non-empty, so a new run keeps
+        every field it did not change; Project is pushed as typed, because a blank Project must
+        refuse the run rather than carry an earlier one (spec 08). The run then starts through
+        ``session.start()`` and the Run view is shown. This never blocks: ``start()`` queues its
+        signals and returns immediately.
         """
         operator = self.uut_operator_stage.operator_edit.text().strip()
         project = self.uut_operator_stage.project_edit.text().strip()
