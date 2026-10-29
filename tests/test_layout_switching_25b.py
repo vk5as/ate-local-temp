@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
 from ate.app import launch
 from ate.run_session.headless import SessionState
@@ -116,6 +117,92 @@ def _fill_fields(screen, values: dict[str, str]) -> None:
 def _field_texts(screen) -> dict[str, str]:
     """What every setup field on this layout currently says."""
     return {key: getattr(screen.fields, f"{key}_edit").text() for key in FIELDS}
+
+
+def _abort_button(screen) -> QPushButton:
+    """The Abort control of either layout: the staged one keeps its in the Run view."""
+    abort = getattr(screen, "abort_button", None)
+    return abort if abort is not None else screen.run_view.abort_button
+
+
+def _inert_widgets(screen) -> list[QWidget]:
+    """Every control a layout that is not showing must not act on, or hold the keyboard for."""
+    widgets = [
+        screen.start_button,
+        screen.fields.operator_edit,
+        screen.fields.project_edit,
+        screen.fields.uut_type_edit,
+        screen.fields.serial_edit,
+        screen.picker.filter_edit,
+        screen.stop_on_fail_radio,
+    ]
+    abort = getattr(screen, "abort_button", None)
+    if abort is not None:
+        widgets.append(abort)
+    return widgets
+
+
+# -- only the layout on screen is live -----------------------------------------
+
+
+@pytest.mark.parametrize("layout", ("staged", "threePane"))
+def test_the_layout_not_showing_is_inert_from_launch(qapp, tmp_path, layout):
+    """Whichever layout `ui.layout` names, the other is inactive: Start, Abort, Enter do nothing and
+    none of its widgets holds the keyboard."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = add_logging_input_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path, ui={"layout": layout})
+    window = outcome.window
+    window.show()  # a widget that is not visible cannot take the focus at all
+    qapp.processEvents()
+    shown = window.run_screens[layout]
+    hidden = window.run_screens["threePane" if layout == "staged" else "staged"]
+    assert shown.is_active() is True, "the layout on screen is not marked active"
+    assert hidden.is_active() is False, "the layout not on screen is active at launch"
+
+    # No widget of the layout that is not showing can have the focus.
+    focus = QApplication.focusWidget()
+    for widget in _inert_widgets(hidden):
+        assert widget is not focus and widget.hasFocus() is False, f"{widget.objectName() or widget} holds focus"
+
+    # Its Start does not start a run, even though its own fields and picker are filled in.
+    _fill_fields(hidden, {"operator": "Ada Lovelace", "project": "Board A", "uut_type": "PowerSupply", "serial": "PS-9"})
+    assert _select_schedule(hidden, schedule)
+    hidden.start_button.click()
+    qapp.processEvents()
+    assert window.session.state != SessionState.STARTED, "the hidden layout started a run"
+    assert window.session.run_uuid is None
+
+    # Its Abort does not abort a run the visible layout is running.
+    asked, _prompts = _pick_and_start(qapp, window, schedule)
+    seq, _attempt, _first_index = asked[0]
+    index = 1  # the blocking INTEGER input; the POLL (index 2) is announced first
+    assert _wait(qapp, lambda: any(a[2] == index for a in asked)), "the step is waiting for its input"
+    hidden_abort = _abort_button(hidden)
+    assert hidden_abort.isEnabled(), "both layouts keep their Abort live while a run is up"
+    hidden_abort.click()
+    qapp.processEvents()
+    assert window.session.state == SessionState.STARTED, "the hidden layout aborted the run"
+
+    # Enter in the hidden layout's waiting input answers nothing, and it does not have the focus.
+    hidden_widget = hidden.input_widget(seq, index)
+    assert hidden_widget is not None and hidden_widget.ok_button.isEnabled()
+    assert QApplication.focusWidget() is not hidden_widget.line_edit
+    QTest.keyClicks(hidden_widget.line_edit, "42")
+    QTest.keyClick(hidden_widget.line_edit, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert hidden_widget.error_label.text() == "", "the hidden layout answered an input"
+    assert window.session.store.input_values(window.session.run_uuid) == []
+
+    shown_widget = shown.input_widget(seq, index)
+    assert QApplication.focusWidget() is shown_widget.line_edit, "the waiting input did not take the focus"
+    shown_widget.line_edit.setText("42")
+    shown_widget.ok_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    rows = window.session.store.input_values(window.session.run_uuid)
+    assert len(rows) == 1 and rows[0]["value"] == "42", rows
+    _finish(qapp, window)
 
 
 # -- the configured layout -----------------------------------------------------
