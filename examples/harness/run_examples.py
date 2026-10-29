@@ -53,6 +53,8 @@ RELEASE_DIR = Path(__file__).resolve().parents[1] / "media-release"
 #                 left is a failure: a schedule that pauses when it claims not to is a bug, not a
 #                 question to answer.
 #   enable      - steps the Operator turns on or off before the run starts (packet 11a).
+#   stop_on_fail - the Operator's Stop on Fail choice for this run, when the schedule's own
+#                 :setStopOnFail default should be overridden (packet 29c).
 #   polls       - Step Name -> (n, button text) for a POLL input, clicked once the step's read loop
 #                 has had POLL_CLICK_AFTER_SECONDS to read it as nil (packet 29b).
 # `run_all` checks the schedules against the catalog, so a new example schedule has to be added
@@ -60,6 +62,10 @@ RELEASE_DIR = Path(__file__).resolve().parents[1] / "media-release"
 RUNS: list[dict[str, Any]] = [
     {"key": "basics", "schedule": "Example basics", "inputs": {"Operator input": 1.5},
       "bad_inputs": {"Operator input": 99.0}},
+    # The flow schedule twice: once answered with a Retry (its own Stop on Fail default), once with
+    # the Operator turning Stop on Fail off so the run never pauses.
+    {"key": "flow_retry", "schedule": "Flow and retry", "choices": ["RETRY"]},
+    {"key": "flow_continue", "schedule": "Flow and retry", "stop_on_fail": False},
     {"key": "results", "schedule": "Report every Result"},
     {"key": "continue", "schedule": "Stop on fail", "choices": ["CONTINUE", "CONTINUE"]},
     {"key": "abort", "schedule": "Stop on fail", "choices": ["ABORT"]},
@@ -141,13 +147,14 @@ def run_schedule(
     bad_inputs: dict[str, Any] | None = None,
     choices: list[str] | None = None,
     enable: dict[str, bool] | None = None,
+    stop_on_fail: bool | None = None,
     polls: dict[str, tuple[int, str]] | None = None,
     operator: str = "Ada Lovelace",
     project: str = "Example project",
     uut_type: str = "Example board",
     uut_serial: str = "EX-0001",
 ) -> dict[str, Any]:
-    """Run one schedule headless and return its record: run row, nodes, attempts, logs, inputs, Equipment, reports."""
+    """Run one schedule headless and return its record: run row, nodes, attempts, actions, schedule instances, logs, inputs, Equipment, reports."""
     session = HeadlessRunSession(config)
     reports: list[tuple[str, str]] = []
     session.report_written.connect(lambda html, pdf: reports.append((html, pdf)))
@@ -173,6 +180,8 @@ def run_schedule(
     # (packet 11a: toggle_node is refused while a run is in progress, so this is the idle window).
     for name, on in (enable or {}).items():
         session.toggle_node(_seq(name), on)
+    if stop_on_fail is not None:
+        session.set_stop_on_fail(stop_on_fail)
     session.start()
 
     values = {_seq(name): value for name, value in (inputs or {}).items()}
@@ -242,6 +251,8 @@ def run_schedule(
         "run": store.get_test_run(run_uuid),
         "nodes": store.nodes(run_uuid),
         "attempts": store.attempts(run_uuid),
+        "actions": store.actions(run_uuid),
+        "schedule_instances": store.schedule_instances(run_uuid),
         "logs": store.log_lines(run_uuid),
         "equipment": store.equipment(run_uuid),
         "input_values": store.input_values(run_uuid),

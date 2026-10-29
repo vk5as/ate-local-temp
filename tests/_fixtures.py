@@ -773,15 +773,27 @@ return ScheduleParams("Blocking input schedule", "a step that blocks on one INTE
   })
 """
 
-# A schedule whose single step's only input is a POLL button. It returns nil until the operator
-# clicks one of its buttons (recorded as an input_value row of type POLL), then that text; sticky
-# across the step and reset at each run/step start.
+# A schedule whose one step asks for a POLL and a blocking PROMPT. The POLL returns nil until its
+# button is clicked (recorded as an input_value row of type POLL), then that text; sticky across the
+# step and reset at each run/step start.
+#
+# The PROMPT is not decoration: a POLL click never blocks the worker, so in a POLL-only step the
+# worker's read and the operator thread's click race, and a click that arrives after the Attempt's
+# input window closes is dropped. The driver holds the blocking answer back until the click has
+# landed, so the worker is provably still inside the window when the click happens.
 POLL_INPUT = """\
-return ScheduleParams("Poll input schedule", "a step whose only input is a POLL button")
+return ScheduleParams("Poll input schedule", "a step whose POLL button is clicked while it waits on a blocking input")
   :setSchedule({
     StepParams("status check"):setStepNo("1.")
-      :setInputs({ [1] = { desc = "device status", type = "POLL", prompt = {"OK", "Error"} } })
-      :setAction(function() local s=ATE.input(1); ATE.report(Result.PASS, "status "..s) end),
+      :setInputs({
+        [1] = { desc = "device status", type = "POLL", prompt = {"OK", "Error"} },
+        [2] = { desc = "operator go", type = "PROMPT", prompt = {"go"} },
+      })
+      :setAction(function()
+        ATE.input(2)                -- blocks this worker until the operator thread answers
+        local s = ATE.input(1)      -- POLL: nil until clicked, then the button text
+        ATE.report(Result.PASS, "status " .. s)
+      end),
   })
 """
 

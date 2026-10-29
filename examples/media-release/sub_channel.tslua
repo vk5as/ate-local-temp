@@ -1,0 +1,40 @@
+-- Example Media Release: a hidden Sub-schedule (sub_channel.tslua), included from flow.tslua more
+-- than once with different keyvals and a different prefix. It loads on its own, but `hidden` means
+-- the Operator is never offered it as a Test Schedule in the picker.
+--
+-- What it demonstrates:
+--   * keyvals: ATE runs this chunk once per include and passes the include's keyvals as `...`, so
+--     each instance has its own channel and label while the Step Numbers come from each header's
+--     setPrefix.
+--   * Pre-test and Post-test Actions on an included Sub-schedule.
+--   * Shared module state: require is cached for the Test Run, so every include - and the
+--     top-level schedule - sees the same lib.attempts and example_helper tables.
+
+local kv = ...                      -- this include's keyvals; {} for a top-level schedule
+local channel = kv.channel or 0
+local label = kv.label or "unlabelled"
+local shared = require("lib.attempts")
+local helper = require("example_helper")   -- the same module flow.tslua requires
+
+return ScheduleParams("Channel check", "one output channel, parameterised by keyvals")
+  -- A Pre-test Action takes no argument: nothing has run yet, so there is no result to report.
+  :setPreTestAction(function() ATE.log(Log.INFO, "pre-test for channel " .. channel) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "post-test for channel " .. channel .. " (" .. passFail .. ")") end)
+  :setSchedule({
+    -- 1. The proof that requires stay shared across includes: this reports 1 in the first include
+    --    and 2 in the second, and puts both in the step's Message.
+    StepParams("Shared state " .. channel):setStepNo("1.")
+      :setAction(function()
+        local count = shared.noteInclude(label)
+        ATE.report(Result.PASS, label .. " channel " .. channel .. " is shared call " .. count, count, channel)
+      end),
+
+    -- 2. A plain step, so every include of this Sub-schedule has two Step Numbers under its prefix.
+    --    helper is the one module table the whole run shares, so its use count keeps climbing:
+    --    channel 1 is use 1, channel 2 use 2, channel 4 use 3, and flow.tslua's own step use 4.
+    StepParams("Output off " .. channel):setStepNo("2.")
+      :setAction(function()
+        ATE.log(Log.INFO, helper.describe("channel " .. channel .. " probe", "127.0.0.1", 5020 + channel))
+        ATE.report(Result.PASS, "channel " .. channel .. " off", 0.0, 0.0)
+      end),
+  })
