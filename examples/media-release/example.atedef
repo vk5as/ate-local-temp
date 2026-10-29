@@ -26,7 +26,7 @@
     },
     {
       "path": "devices.tslua",
-      "sha256": "bbe833bae5c6998c1b003489473b8d528ae792a9a69a2a3e895f6e47643e7503"
+      "sha256": "cc206850f0e2f2aecd4066cd47f39f42572d09ac64d527d4583b75c1704f946a"
     },
     {
       "path": "sub_device.tslua",

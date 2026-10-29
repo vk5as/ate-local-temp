@@ -62,7 +62,7 @@ return ScheduleParams("Device types", "TCP, UDP, SERIAL and VISA Devices against
       end)
     ATE.addEquipment("SCPI simulator", "SIM-1",
       "TCP " .. bench.scpiHost .. ":" .. bench.scpiPort, "2026-01-01",
-      "opened in the Pre-test Action, used by steps 1 and 6")
+      "opened in the Pre-test Action, used by steps 1, 6 and 7")
   end)
   :setPostTestAction(function(passFail) ATE.log(Log.INFO, "device run finished: " .. passFail) end)
   :setSchedule({
