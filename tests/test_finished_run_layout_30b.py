@@ -233,11 +233,30 @@ def test_new_run_unlocks_the_session_and_carries_everything_over(qapp, tmp_path,
 
     A FINISHED session has its step boxes locked and its options shut, so stage 3 was inert. Picking
     the schedule again is the Operator action that returns it to SELECTING (spec 37), and the second
-    run then honours a step toggle made on the visible stage."""
-    window, schedule = _shown_window(qapp, tmp_path, "staged")
+    run then honours a step toggle made on the visible stage. The first run's own overrides — step 20
+    turned off, continue-on-fail — are still set when the second run is set up, and are still applied
+    when it starts."""
+    window, schedule = _shown_window(qapp, tmp_path, "staged", steps=20, fail_at=5)
     staged = window.staged_screen
-    _fill_and_start(qapp, window, schedule)
-    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the run never finished"
+    for key, value in FIELDS.items():
+        getattr(staged.fields, f"{key}_edit").setText(value)
+    picker = staged.picker.schedule_list
+    for index in range(picker.count()):
+        item = picker.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == schedule:
+            picker.setCurrentItem(item)
+            break
+    staged.uut_operator_stage.next_button.click()
+    staged.test_schedule_stage.run_button.click()
+    for _ in range(100):
+        qapp.processEvents()
+    staged.steps_options_stage.step_list.item(19).setCheckState(Qt.CheckState.Unchecked)  # step 20 off
+    staged.steps_options_stage.continue_all_radio.setChecked(True)  # not this schedule's own default
+    staged.steps_options_stage.run_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the first run never finished"
+    first = {n["step_number"]: n for n in window.session.store.nodes(window.session.run_uuid)}
+    assert first["20."]["result"] == "NOTRUN", f"the first run did not honour the step toggle: {first['20.']}"
+    assert first["5."]["result"] == "FAIL", "continue on fail did not carry the run past step 5"
 
     staged.run_view.new_run_button.click()
     for _ in range(100):
@@ -249,8 +268,10 @@ def test_new_run_unlocks_the_session_and_carries_everything_over(qapp, tmp_path,
     for key, value in FIELDS.items():
         assert getattr(staged.fields, f"{key}_edit").text() == value, f"New run cleared the {key} field"
     assert window.session.selected_schedule == schedule, "New run dropped the selected Test Schedule"
+    assert window.session.node_enables.get(19) is False, "New run dropped the step-enable overrides"
 
-    # Click through the visible stages, and toggle a step box on the way: the boxes are live again.
+    # Click through the visible stages: the boxes are live again, and the options are still the ones
+    # the Operator chose for the last run.
     staged.uut_operator_stage.next_button.click()
     qapp.processEvents()
     assert staged.test_schedule_stage.run_button.isEnabled(), "stage 2 lost the carried-over schedule"
@@ -259,19 +280,21 @@ def test_new_run_unlocks_the_session_and_carries_everything_over(qapp, tmp_path,
         qapp.processEvents()
     assert staged.steps_stack.currentIndex() == 2, "stage 3 never came up"
     step_item = staged.steps_options_stage.step_list.item(19)
-    assert step_item.checkState() == Qt.CheckState.Checked, "the carried-over step list is not showing its boxes"
-    step_item.setCheckState(Qt.CheckState.Unchecked)
+    assert step_item.checkState() == Qt.CheckState.Unchecked, "stage 3 lost the carried-over step override"
+    assert staged.steps_options_stage.continue_all_radio.isChecked(), "New run reset the On failure choice to the schedule default"
+    step_item.setCheckState(Qt.CheckState.Checked)  # put step 20 back on for the next run
     for _ in range(100):
         qapp.processEvents()
-    assert staged.session.node_enables.get(19) is False, "the step toggle never reached the session"
-    assert staged.steps_options_stage.stop_on_fail_radio.isChecked() is True, "New run reset the On failure choice"
+    assert staged.session.node_enables.get(19) is True, "the step toggle never reached the session"
 
     staged.steps_options_stage.run_button.click()
     assert _wait(qapp, lambda: window.session.state == SessionState.STARTED), "the carried-over setup could not start a run"
-    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the second run never finished"
-    nodes = {n["step_number"]: n for n in window.session.store.nodes(window.session.run_uuid)}
-    assert nodes["20."]["result"] == "NOTRUN", f"the toggled step still ran: {nodes['20.']}"
-    assert nodes["19."]["result"] == "PASS", "the run stopped at the step before the one that was turned off"
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), (
+        "the second run stopped on step 5: the continue-on-fail choice did not carry over"
+    )
+    second = {n["step_number"]: n for n in window.session.store.nodes(window.session.run_uuid)}
+    assert second["20."]["result"] == "PASS", f"the second run did not honour the new toggle: {second['20.']}"
+    assert second["5."]["result"] == "FAIL", "the second run lost the continue-on-fail choice"
     assert window.size() == QSize(*WINDOW_SIZE), "the second run resized the window"
     _finish(window)
 

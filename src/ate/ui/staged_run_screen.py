@@ -229,7 +229,9 @@ class StepsOptionsStage(QWidget):
                 )
         self._loading = False
         if self.session is not None:
-            self._apply_stop_on_fail(self.session.selected_stop_on_fail)
+            # The session's effective choice, not the schedule's raw default: after a run the
+            # Operator's own On failure selection carries into the next one (spec 37, packet 30b).
+            self._apply_stop_on_fail(self.session.stop_on_fail)
 
     def _effective(self, row: int) -> bool:
         """Whether row ``row``'s box is on: the Operator's override if there is one, else the default."""

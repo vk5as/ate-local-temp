@@ -512,7 +512,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self._steps = load_schedule_steps(self.session, name)
             self.table.load_steps(self._steps)
             self.table.set_checkable(self.session.state in (SessionState.IDLE, SessionState.SELECTING))
-            self._apply_stop_on_fail(self.session.selected_stop_on_fail)
+            self._apply_stop_on_fail(self.session.stop_on_fail)
         self._update_start_button()
 
     def start_new_run(self) -> None:
