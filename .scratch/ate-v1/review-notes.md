@@ -517,3 +517,18 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Leftovers:
   - `StepInputWidget._placeholder` shows the tooltip instead of the pattern when a STRING has both.
   - The POLL click delay is 0.3 s of wall time (bounded loop of 8).
+
+## 29c — Example: flow, Sub-schedules and modules (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions). It found no engine deviation from the spec. No API lets a step read its Attempt number, so the Retry is driven by a module counter.
+- Reviews: Haiku 3 must-fix, Strata 4 must-fix (union 5).
+  - Strata showed the "depth first" assertion couldn't fail: with the nested include last, DFS and BFS coincide, and a BFS mutation passed `pytest examples/`.
+  - The rest were false comments or README claims (the Pre-test "runs again after", the nest_a counter, "both modules shared").
+  - The examples passed `passFail` to Pre-test, an argument the spec doesn't define.
+  - The `expected_sha256 = NULL` skip for `ate.` modules was confirmed correct (`test-run-record.md:78`).
+- Rework (Strata, high, 0 compactions):
+  - an include after the nested chain pins DFS (the BFS mutation now fails);
+  - `passFail` dropped from Pre-test;
+  - comments and README made true, with `example_helper` now required from an include and its sharing asserted;
+  - `test_poll_recorded_when_clicked` made deterministic: a blocking PROMPT is held until the POLL click lands, bounded in ticks. It went from 13/50 failures under load to 0.
+- Light review: 999 passed ×3 (~136 s); collection 993 → 999, none lost; the harness ran 8 runs of 5 schedules.
+- Leftovers: `test_layout_switching_25b.py::test_a_mid_run_switch_answers_the_input_in_the_new_layout` failed once under 3-way load (seen by Strata only). Watch it.
