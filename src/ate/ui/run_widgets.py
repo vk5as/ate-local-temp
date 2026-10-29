@@ -1003,6 +1003,11 @@ class StepInputWidget(QWidget):
                     self._add_button(text, lambda *_seen, text=text: self._click_poll(text))
                 else:
                     self._add_button(text, lambda *_seen, text=text: self._submit(text))
+        # Qt shows the tooltip of the widget the cursor is on, so the hover text goes on every
+        # control as well as the row: a line edit with no tooltip of its own would show none (29b).
+        if declaration.tooltip:
+            for control in self.controls:
+                control.setToolTip(declaration.tooltip)
         # The mockup's `.inp-w` items are content-sized: let the leftover row width fall after
         # them rather than stretching each control (packet 14d made the view wider, and a
         # stretched radio only answers clicks on its own indicator and label).

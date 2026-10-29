@@ -14,7 +14,9 @@ import pytest
 
 from ate.engine.lua_host import NotAllowedError, LuaHost
 from ate.engine.operator_input import OperatorInput
+from ate.engine.run_engine import RunEngine, RunStatus
 from ate.engine.step_inputs import InvalidStepInput, StepInput
+from ate.storage.store import RunStore
 
 from ._fixtures import _drive
 
@@ -89,11 +91,28 @@ def test_enum_pushbutton_returns_single_label():
     assert host.inputs(1) == "Fast"
 
 
-def test_enum_checkbox_returns_array_of_labels():
+def test_enum_checkbox_returns_one_lua_table_not_a_tuple():
+    """A CHECKBOX answer crosses into Lua as one real table, never a Python tuple.
+
+    Packet 29b review: lupa is configured with ``unpack_returned_tuples=True``, so a Python tuple
+    returned by ``ATE.input`` arrives in Lua as several return values and ``local v = ATE.input(1)``
+    binds only the first label. The mapping therefore builds a Lua table."""
     op = OperatorInput()
     op.supply_input(0, ["A", "C"])
     host = _host_with(op, [StepInput(index=1, desc="channels", type="ENUM", widget="CHECKBOX", enum=("A", "B", "C"))])
-    assert host.inputs(1) == ("A", "C")
+    value = host.inputs(1)
+    assert isinstance(value, host._table_cls), f"got {type(value)}: a tuple would spread into separate values"
+    assert not isinstance(value, tuple)
+    assert value[1] == "A" and value[2] == "C"
+
+
+def test_empty_checkbox_selection_is_an_empty_lua_table():
+    op = OperatorInput()
+    op.supply_input(0, [])
+    host = _host_with(op, [StepInput(index=1, desc="channels", type="ENUM", widget="CHECKBOX", enum=("A", "B", "C"))])
+    value = host.inputs(1)
+    assert isinstance(value, host._table_cls)
+    assert len(value) == 0
 
 
 # --- blocking behaviour -------------------------------------------------------
@@ -216,3 +235,80 @@ def test_undeclared_input_through_lua_raises_invalid_step_input(app):
         with pytest.raises(InvalidStepInput) as excinfo:
             host.ate.input(9)  # the real Lua entry point, not a direct host.inputs() bypass
         assert "undeclared input 9" in str(excinfo.value)
+
+
+# --- what a step action actually binds (packet 29b review) ---------------------
+
+# One step whose action reads its input into a single local and reports what Lua sees: the type,
+# the length and the joined contents. A CHECKBOX that spread into several return values would bind
+# only the first label, so `#v` and `table.concat` would fail rather than report.
+_READ_BACK = """\
+return ScheduleParams("Read back schedule", "one step that inspects what ATE.input returns")
+  :setSchedule({
+    StepParams("__TYPE__"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "value", type = "__TYPE__"__EXTRA__ } })
+      :setAction(function()
+        local v = ATE.input(1)
+        if type(v) == "table" then
+          ATE.report(Result.PASS, type(v) .. " " .. #v .. " " .. table.concat(v, "|"))
+        else
+          ATE.report(Result.PASS, type(v) .. " " .. tostring(v))
+        end
+      end),
+  })
+"""
+
+
+def _run_read_back(app, type_name: str, extra: str, value):
+    """Run one step that reads its input into a local and reports Lua's view of it."""
+    op = OperatorInput()
+    with tempfile.TemporaryDirectory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        path = Path(td) / "read_back.tslua"
+        path.write_text(
+            _READ_BACK.replace("__TYPE__", type_name).replace("__EXTRA__", extra), encoding="utf-8"
+        )
+        engine = RunEngine(store, str(path), operator_input=op)
+        engine.input_asked.connect(lambda seq, attempt, index: op.supply_input(index - 1, value))
+        uuid = {}
+        engine.run_uuid_reported.connect(lambda u: uuid.__setitem__("u", u))
+        finished = threading.Event()
+        engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+        engine.start()
+        deadline = time.time() + 10.0
+        while not finished.is_set():
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("run did not reach FINISHED within 10 s")
+        attempts = store.attempts(uuid["u"])
+    return attempts[0]["pass_fail"], attempts[0]["msg"]
+
+
+def test_checkbox_reads_back_as_one_lua_table_in_a_step_action(app):
+    """`local v = ATE.input(1)` on a CHECKBOX binds one table holding every label."""
+    result, msg = _run_read_back(app, "ENUM", ', input = "CHECKBOX", enum = {"A", "B", "C"}', ["A", "B"])
+    assert result == "PASS", f"the action errored: {msg}"
+    assert msg == "table 2 A|B", msg
+
+
+def test_empty_checkbox_reads_back_as_an_empty_lua_table(app):
+    """Nothing ticked is a legitimate answer: an empty table, not nil and not several values."""
+    result, msg = _run_read_back(app, "ENUM", ', input = "CHECKBOX", enum = {"A", "B", "C"}', [])
+    assert result == "PASS", f"the action errored: {msg}"
+    assert msg == "table 0 ", msg
+
+
+@pytest.mark.parametrize(
+    "type_name,extra,supplied,expected",
+    [
+        ("INTEGER", ", range = {min = 1, max = 10}", 42, "number 42"),
+        ("FLOAT", ", range = {min = 0.5, max = 2.0}", 1.25, "number 1.25"),
+        ("STRING", ", pattern = \"^AB\"", "AB12", "string AB12"),
+        ("PROMPT", ", prompt = {\"GO\"}", "GO", "string GO"),
+    ],
+)
+def test_other_input_types_stay_scalars(app, type_name, extra, supplied, expected):
+    """Only CHECKBOX returns a table; every other type still binds one number or string."""
+    result, msg = _run_read_back(app, type_name, extra, supplied)
+    assert result == "PASS", f"the action errored: {msg}"
+    assert msg == expected, msg
