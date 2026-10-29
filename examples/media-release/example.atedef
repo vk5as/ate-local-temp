@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "mediaNumber": "MR-EXAMPLE",
+  "name": "ATE Example Release",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "schedule_basics.tslua",
+      "sha256": "cbd20636566690726a304788e06b351fef3079b56eb722dfe184dbbb10b2f7b4"
+    },
+    {
+      "path": "report_results.tslua",
+      "sha256": "860334376e4cd077f061d6b7cfb0fa9af7ff76432b15f01a74926b6b5c531d66"
+    },
+    {
+      "path": "stop_on_fail.tslua",
+      "sha256": "97b360eb15b1af4b81dd3819b537fbf840b339a89cade56c32f83b60ea98cb98"
+    }
+  ]
+}

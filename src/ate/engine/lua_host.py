@@ -1014,6 +1014,12 @@ class _LuaHost:
         # it is stable across lupa releases (the module name changes with the Lua version). Used to
         # convert a schedule's input declarations out of Lua tables into plain Python.
         self._table_cls = type(self._runtime.table_from({}))
+        # Packet 29a review: ATE stores a reported value as text "using tostring" (ate-table-reference
+        # "Results"). Python's str() is not Lua's: it writes True/False and 0.3333333333333333 where
+        # Lua writes true/false and 0.33333333333333331. Every value that crosses out of Lua into a
+        # text column goes through this one Lua function, so the stored text is what the schedule
+        # itself would have printed. :meth:`to_text` is the only way in.
+        self._to_lua_text = self._runtime.eval("function(v) return tostring(v) end")
         # Packet 16b: lupa decodes every Lua string it hands Python as UTF-8, which fails on (or
         # mangles) raw device bytes such as 0xFF. This returns a table field's string as hex — always
         # ASCII — so ATE.write/ATE.read params can be rebuilt as the exact bytes (see _raw_params).
@@ -1275,9 +1281,22 @@ class _LuaHost:
         finally:
             self._context = None
 
+    def to_text(self, value: Any) -> Optional[str]:
+        """Return Lua's own ``tostring(value)``, or ``None`` for `nil`.
+
+        The one path a value takes from Lua into a text column (report Actual/Expected, log text,
+        a recorded Step Input value): a boolean is `true`/`false`, a float prints the way Lua prints
+        floats, and an integer keeps no decimal point. Anything else is left to Lua to decide, so
+        nothing here can disagree with what the schedule saw."""
+        if value is None:
+            return None
+        return str(self._to_lua_text(value))
+
     def record_report(self, pass_fail: Any, msg: Any, actual: Any, expected: Any) -> None:
-        """Record one ATE.report call from a running schedule."""
-        self.reports.append((pass_fail, msg, actual, expected))
+        """Record one ATE.report call from a running schedule, its values already Lua-text."""
+        self.reports.append(
+            (pass_fail, self.to_text(msg), self.to_text(actual), self.to_text(expected))
+        )
 
     def record_log(self, level: Any, *args: Any, source: str = "schedule") -> None:
         """Append one log line as ``(level, source, text)``.
@@ -1287,7 +1306,7 @@ class _LuaHost:
         so they attach to the run as a whole rather than to any step. Every argument goes through
         ``tostring`` and is joined with spaces; the global ``print`` is wired to this so stray prints
         land at INFO (see :meth:`_bind_print`). The emission time goes to :attr:`log_times`."""
-        self.logs.append((str(level), source, " ".join(str(a) for a in args)))
+        self.logs.append((str(level), source, " ".join(str(self._to_lua_text(a)) for a in args)))
         self.log_times.append(time.monotonic())
 
     def take_device_warnings(self) -> list[tuple[float, str]]:

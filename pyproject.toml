@@ -59,7 +59,9 @@ where = ["src"]
 "*" = ["*.j2", "*.css", "*.lua", "*.html", "*.txt", "*.json"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# `examples` holds the seam-1 harness for the example Media Release (packet 29a), so the regular
+# suite runs it too and CI catches an example schedule that stops working.
+testpaths = ["tests", "examples"]
 addopts = "-ra"
 markers = [
     "slow: seconds of work or a network; deselect with -m 'not slow'",

@@ -481,7 +481,7 @@ class HeadlessRunSession(QObject):
             station_name=self._config.station_name or "",
             station_uuid=self._config.station_uuid or "",
             ate_version=__version__,  # packet 06d: every run records the ATE build that ran it
-            media_number="",
+            media_number=definition.media_number or "",  # the Media Release this schedule came from
             modules=modules,  # packet 06a: forward the release's require'd module map to this run
             definition=definition,  # packet 06b: record the owning Media Release and files used with checksums
             store_mismatched_files=store,  # packet 06c: keep the bytes of a mismatched file when asked to
