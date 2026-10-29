@@ -141,7 +141,18 @@ def _validate_one(index: int, raw: Mapping[str, Any]) -> StepInput:
     if decl_type in ("INTEGER", "FLOAT"):
         _range = raw.get("range")
         bounds = _as_bounds(_range) if isinstance(_range, dict) else {}
-        return StepInput(index=index, desc=desc, type=decl_type, range=bounds)
+        # tooltip and orient apply to every input type (test-schedule-format.md), the line edits
+        # included — packet 29b review found them dropped here.
+        orient = _orient(raw.get("orient"), index)
+        tooltip = _tooltip(raw.get("tooltip"))
+        return StepInput(
+            index=index,
+            desc=desc,
+            type=decl_type,
+            range=bounds,
+            orient=orient,
+            tooltip=tooltip,
+        )
 
     if decl_type == "STRING":
         pattern = raw.get("pattern")

@@ -58,6 +58,22 @@ def test_valid_string_with_pattern():
     assert got[0].pattern == r"COM\d+" and got[0].orient == "VERT"
 
 
+def test_integer_and_float_keep_tooltip_and_orient():
+    """tooltip and orient are declared on every type (test-schedule-format.md), the line edits too.
+
+    Packet 29b review found INTEGER and FLOAT dropping both at validation."""
+    got = validate_inputs({
+        1: {"desc": "soak", "type": "INTEGER", "range": {"min": 1, "max": 10},
+            "tooltip": "Whole minutes only", "orient": "VERT"},
+        2: {"desc": "rail", "type": "FLOAT", "tooltip": "Read the meter", "orient": "HORIZ"},
+    })
+    assert got[0].tooltip == "Whole minutes only" and got[0].orient == "VERT"
+    assert got[1].tooltip == "Read the meter" and got[1].orient == "HORIZ"
+    # and they reach the stored node JSON in schedule form
+    assert got[0].to_dict()["tooltip"] == "Whole minutes only"
+    assert got[0].to_dict()["orient"] == "VERT"
+
+
 def test_valid_prompt_and_poll():
     """PROMPT blocks on a string prompt; POLL accepts an array of prompt strings."""
     decls = {1: {"desc": "continue", "type": "PROMPT", "prompt": "Press to continue"}}

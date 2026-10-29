@@ -64,8 +64,10 @@ return ScheduleParams("Widget types schedule", "a step declaring every input typ
                 enum = {"Low", "Med", "High"}, orient = "VERT", tooltip = "Tick every mode present" },
         [3] = { desc = "Probe fitted?", type = "ENUM", input = "PUSHBUT",
                 enum = {"Yes", "No"}, tooltip = "Was the probe fitted to TP3" },
-        [4] = { desc = "Soak minutes", type = "INTEGER", range = {min = 1, max = 10}, tooltip = "Whole minutes only" },
-        [5] = { desc = "Rail voltage", type = "FLOAT", range = {min = 0.5, max = 2.0}, orient = "HORIZ" },
+        [4] = { desc = "Soak minutes", type = "INTEGER", range = {min = 1, max = 10},
+                tooltip = "Whole minutes only", orient = "VERT" },
+        [5] = { desc = "Rail voltage", type = "FLOAT", range = {min = 0.5, max = 2.0},
+                tooltip = "Read the meter, not the supply", orient = "HORIZ" },
         [6] = { desc = "Serial on label", type = "STRING", pattern = "^PSU-[0-9]{5}$" },
         [7] = { desc = "Remove the probe", type = "PROMPT", prompt = {"Done"} },
         [8] = { desc = "Front panel button", type = "POLL", prompt = {"Pressed", "Not working"},
@@ -373,15 +375,25 @@ def test_every_declared_input_has_a_widget_under_its_step(qapp, tmp_path):
     assert [b.text() for b in prompt.choice_buttons] == ["Done"]
     assert [b.text() for b in poll.choice_buttons] == ["Pressed", "Not working"]
 
-    # orient: VERT stacks the controls, HORIZ (the mockup default) puts them in a row.
-    for widget, vertical in ((radio, False), (check, True), (flt, False)):
+    # orient: VERT stacks the controls, HORIZ (the mockup default) puts them in a row. The line
+    # edits are checked too — orient applies to every type, not just the ones with several controls.
+    for widget, vertical in ((radio, False), (check, True), (integer, True), (flt, False)):
         layout = widget.findChild(QWidget, "inp_w").layout()
         assert isinstance(layout, QVBoxLayout if vertical else QHBoxLayout), widget.declaration.desc
 
-    # tooltip: the hover text the declaration carries.
+    # VERT stacks the numeric line edit and its OK button, in that order.
+    stack = integer.findChild(QWidget, "inp_w").layout()
+    assert stack.itemAt(0).widget() is integer.line_edit, "the INTEGER line edit is not first in the stack"
+    assert stack.itemAt(1).widget() is integer.ok_button, "the INTEGER OK button is not stacked under it"
+
+    # tooltip: the hover text the declaration carries — on the row and on the control under the
+    # cursor, for every type including the INTEGER and FLOAT line edits.
     assert radio.toolTip() == "Colour of the POWER LED"
     assert push.toolTip() == "Was the probe fitted to TP3"
-    assert flt.toolTip() == ""
+    assert integer.toolTip() == "Whole minutes only"
+    assert integer.line_edit.toolTip() == "Whole minutes only"
+    assert integer.ok_button.toolTip() == "Whole minutes only"
+    assert flt.toolTip() == "Read the meter, not the supply"
 
 
 def test_inputs_sit_as_rows_under_the_step_that_declared_them(qapp, tmp_path):

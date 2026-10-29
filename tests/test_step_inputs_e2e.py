@@ -154,6 +154,10 @@ def test_every_input_type_recorded_with_checkbox_as_json(app):
     assert [d["type"] for d in decls] == ["INTEGER", "FLOAT", "STRING", "ENUM", "ENUM", "PROMPT"]
     checkbox = next(d for d in decls if d["type"] == "ENUM" and d["input"] == "CHECKBOX")
     assert checkbox["enum"] == ["A", "B", "C"]
+    # tooltip and orient apply to every type (test-schedule-format.md), so the line-edit
+    # declarations keep them; packet 29b review found INTEGER/FLOAT dropping them at validation.
+    assert decls[0]["tooltip"] == "Supply voltage in volts" and decls[0]["orient"] == "VERT"
+    assert decls[1]["tooltip"] == "Ammeter reading in amps" and decls[1]["orient"] == "HORIZ"
 
 
 def test_poll_reset_between_runs_clears_stale_pending(app):

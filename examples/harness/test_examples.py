@@ -1,12 +1,12 @@
-"""CI harness for the example Media Release (packet 29a).
+"""CI harness for the example Media Release (packets 29a and 29b).
 
 Every visible Test Schedule in ``examples/media-release/`` runs headless through the seam-1 run
 session with scripted Operator answers, and its recorded Test Run is checked here: the Test
 Definition scans clean (no broken rows, no checksum mismatch), the schedule metadata and Step
 Numbers are recorded, every `Result` value appears, a step that never reports records NOREPORT, a
 step that raises records ERROR, the log levels and Equipment are recorded, the step disabled by
-default stays NOTRUN until the Operator enables it, Stop on Fail ends both ways, and every run
-writes its report.
+default stays NOTRUN until the Operator enables it, Stop on Fail ends both ways, every Step Input
+type and widget is declared, answered and recorded, and every run writes its report.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -15,6 +15,7 @@ Run it on its own with `pytest examples/`, or as part of the regular suite (`pyt
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -64,14 +65,14 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
     rows = list_schedule_rows(RELEASE_DIR)
     assert all(row.error is None for row in rows), "no broken rows in the picker"
     names = sorted(row.name for row in rows)
-    assert names == ["Example basics", "Report every Result", "Stop on fail"]
+    assert names == ["Example basics", "Report every Result", "Step inputs", "Stop on fail"]
     assert sorted(visible_schedules()) == names
 
 
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Three schedules, five runs: Stop on fail is run twice (Continue and Abort) and Example basics
+    Four schedules, six runs: Stop on fail is run twice (Continue and Abort) and Example basics
     twice (its optional step left disabled, then enabled by the Operator), so the record count is
     the schedule count plus those two extra runs."""
     assert len(records) == len(visible_schedules()) + 2
@@ -154,6 +155,105 @@ def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[st
     assert record["refused_inputs"] == ["input 1: 99.0 refused: Must be 0.1 to 10"]
     answers = [(value["input_index"], value["type"], value["value"]) for value in record["input_values"]]
     assert answers == [(1, "FLOAT", "1.5")]
+
+
+def test_step_inputs_record_every_type_and_widget(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 29b: one step per Step Input type and widget, each answered through the session.
+
+    The harness supplies an out-of-range INTEGER, an out-of-range FLOAT and a pattern-failing STRING
+    first: the session refuses each with a ValueError before the valid value is recorded. The POLL is
+    clicked from the pump loop only after its step's read loop has read nil a few times, so the loop
+    ends on the click, not on the bound."""
+    record = records["inputs"]
+    run = record["run"]
+    assert run["result"] == "PASS", "every step read its input and passed"
+    assert run["end_reason"] == "COMPLETED"
+    assert run["doc_title"] == "Example Media Release - Step Inputs"
+    assert run["doc_id"] == "MR-EXAMPLE-INPUTS"
+
+    steps = [(node["step_number"], node["step_name"], node["result"]) for node in record["nodes"]]
+    assert steps == [
+        ("1.", "Pick one with RADIOBUT", "PASS"),
+        ("2.", "Tick several with CHECKBOX", "PASS"),
+        ("3.", "Press a button with PUSHBUT", "PASS"),
+        ("4.", "Whole number with a range", "PASS"),
+        ("5.", "Decimal with a range", "PASS"),
+        ("6.", "Text with a pattern", "PASS"),
+        ("7.", "Blocking PROMPT", "PASS"),
+        ("8.", "POLL read in a loop", "PASS"),
+    ]
+
+    # Every declaration is stored on its step's node row in schedule form: widget, options, range,
+    # pattern, prompt, tooltip and orient — the fields the Run screen's widgets are built from.
+    declared = [json.loads(node["inputs"]) for node in record["nodes"]]
+    assert [(d[0]["type"], d[0].get("input")) for d in declared] == [
+        ("ENUM", "RADIOBUT"), ("ENUM", "CHECKBOX"), ("ENUM", "PUSHBUT"),
+        ("INTEGER", None), ("FLOAT", None), ("STRING", None), ("PROMPT", None), ("POLL", None),
+    ]
+    assert [d[0]["enum"] for d in declared[:3]] == [["Green", "Red", "Off"], ["A", "B", "C"], ["RETEST", "SKIP"]]
+    assert declared[3][0]["range"] == {"min": 1, "max": 200}
+    assert declared[4][0]["range"] == {"min": 0.5, "max": 2.5}
+    assert declared[5][0]["pattern"] == "^[A-Z]{2}-[0-9]{4}$"
+    assert declared[6][0]["prompt"] == ["CONTINUE"]
+    assert declared[7][0]["prompt"] == ["KEEP GOING", "STOP"]
+    # tooltip and orient apply to every declared type (test-schedule-format.md), the INTEGER and
+    # FLOAT line edits included — they are kept through validation and stored on the node.
+    assert [d[0]["orient"] for d in declared] == [
+        "HORIZ", "VERT", "HORIZ", "VERT", "HORIZ", "VERT", "HORIZ", "HORIZ"
+    ]
+    assert [d[0]["tooltip"] for d in declared] == [
+        "Which LED the board lights", "Tick every channel to measure", "One press answers the step",
+        "Read the current clamp, not the supply", "Measured at the rail header",
+        "Two letters, a hyphen, four digits", "Press CONTINUE when the probe is clipped on",
+        "Click STOP at any time while this step runs",
+    ]
+
+    # The refused answers: the declaration's own range and pattern checks reject them (packet 10a),
+    # so nothing is recorded until the Operator answers with a valid value.
+    assert record["refused_inputs"] == [
+        "input 1: 500 refused: Must be 1 to 200",
+        "input 1: 9.0 refused: Must be 0.5 to 2.5",
+        "input 1: 'not a part number' refused: Must match ^[A-Z]{2}-[0-9]{4}$",
+    ]
+
+    # One recorded row per input, typed from its declaration: the label a RADIOBUT/PUSHBUT picked,
+    # the JSON array a CHECKBOX ticked, the numbers and text as Lua prints them, the POLL's click.
+    answers = [(value["node_seq"], value["input_index"], value["type"], value["value"])
+               for value in record["input_values"]]
+    assert answers == [
+        (0, 1, "ENUM", "Green"),
+        (1, 1, "ENUM", '["A", "B"]'),
+        (2, 1, "ENUM", "RETEST"),
+        (3, 1, "INTEGER", "42"),
+        (4, 1, "FLOAT", "1.25"),
+        (5, 1, "STRING", "AB-1234"),
+        (6, 1, "PROMPT", "CONTINUE"),
+        (7, 1, "POLL", "STOP"),
+    ]
+    assert record["poll_clicks"] == [(7, 1, "STOP")], "the POLL was clicked exactly once"
+
+    # Each step's Result comes from the value it read back; the POLL reports how many reads its
+    # loop needed, which is bounded by the loop itself and never by the run hanging.
+    by_seq = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
+    assert [by_seq[seq]["msg"] for seq in range(7)] == [
+        "led is Green",
+        "channels A, B",
+        "operator pressed RETEST",
+        "current 42 mA",
+        "rail 1.25 V",
+        "probe AB-1234",
+        "probe confirmed with CONTINUE",
+    ]
+    assert [(by_seq[seq]["actual"], by_seq[seq]["expected"]) for seq in range(7)] == [
+        ("Green", "Green"), ("A,B", "A,B"), ("RETEST", "RETEST"),
+        ("42", "42"), ("1.25", "1.25"), ("AB-1234", "AB-1234"), ("CONTINUE", "CONTINUE"),
+    ]
+    poll = by_seq[7]
+    assert (poll["pass_fail"], poll["actual"], poll["expected"]) == ("PASS", "STOP", "STOP")
+    reads = int(poll["msg"].split(" after ")[1].split(" reads")[0])
+    # The harness clicks only after POLL_CLICK_AFTER_SECONDS, and the loop reads every 0.1 s, so at
+    # least three nil reads happened before the click; the bound of 8 is never reached.
+    assert 3 <= reads <= 8, f"the POLL read loop reported {reads} reads: {poll['msg']!r}"
 
 
 def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]]) -> None:

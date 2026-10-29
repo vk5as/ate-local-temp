@@ -793,8 +793,9 @@ return ScheduleParams("All types schedule", "a step that declares every Step Inp
   :setSchedule({
     StepParams("mixed"):setStepNo("1.")
       :setInputs({
-        [1] = { desc = "voltage", type = "INTEGER" },
-        [2] = { desc = "current", type = "FLOAT" },
+        [1] = { desc = "voltage", type = "INTEGER", range = {min = 0, max = 100},
+                tooltip = "Supply voltage in volts", orient = "VERT" },
+        [2] = { desc = "current", type = "FLOAT", tooltip = "Ammeter reading in amps", orient = "HORIZ" },
         [3] = { desc = "serial port", type = "STRING" },
         [4] = { desc = "mode", type = "ENUM", input = "RADIOBUT", enum = {"Slow", "Fast"} },
         [5] = { desc = "channels", type = "ENUM", input = "CHECKBOX", enum = {"A", "B", "C"} },

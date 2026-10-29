@@ -1668,7 +1668,11 @@ xpcall = function(...) return reraise(raw_xpcall(...)) end
             widget = decl.widget
             if widget == "CHECKBOX":
                 labels = raw if isinstance(raw, (list, tuple)) else (raw,)
-                return tuple(str(label) for label in labels)
+                # Packet 29b review: the spec says CHECKBOX returns "an array of labels". A Python
+                # tuple would be spread by lupa (unpack_returned_tuples=True) into several return
+                # values, so `local v = ATE.input(1)` would bind only the first label. It must cross
+                # into Lua as one real table — an empty selection is an empty table.
+                return self._runtime.table_from([str(label) for label in labels])
             # RADIOBUT / PUSHBUT: the single selected option's label.
             return str(raw)
         raise InvalidStepInput(f"input {decl.index}: unknown type {t!r}")
