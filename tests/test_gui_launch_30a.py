@@ -67,6 +67,7 @@ def test_bare_launch_builds_a_main_window_with_the_run_screen(qapp, tmp_path):
     assert __version__ in window.windowTitle(), "the title carries the version"
     assert isinstance(window.run_screen, StagedRunScreen)
     assert isinstance(window.history_screen, HistoryScreen)
+    assert window.run_screen.run_view.debug_window is not None, "the Run view carries its debug pane"
     assert window.stack.currentWidget() is window.run_screen, "the Run screen is the default view"
     assert window.centralWidget() is window.stack
 
