@@ -1,6 +1,6 @@
 # Model evaluation — ATE v1 build
 
-Generated 2026-10-29 08:24 by `model_eval.py`, after 57 merged packets/tickets. Regenerated every 5 merged packets.
+Generated 2026-10-29 14:01 by `model_eval.py`, after 61 merged packets/tickets. Regenerated every 5 merged packets.
 
 ## Summary
 
@@ -68,7 +68,7 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 | Model | Role | Runs | Packets | Total time | Median run | Sec / step | Output tok / s | Compactions / 100 steps | Max peak context |
 |---|---|---|---|---|---|---|---|---|---|
 | Claude Haiku 💲 | haiku-reviewer | 21 | 12 | 50 min | 2 min | 10 | 150 | 0.0 | 102,221 |
-| Claude Haiku 💲 | side-job | 29 | 0 | 1.9 h | 3 min | 11 | 109 | 0.0 | 156,762 |
+| Claude Haiku 💲 | side-job | 30 | 0 | 2.1 h | 3 min | 12 | 104 | 0.0 | 156,762 |
 | Claude Opus 💲 | opus-helper | 1 | 1 | 4 min | 4 min | 11 | 63 | 0.0 | 64,758 |
 | Claude Opus 💲 | opus-implementer | 7 | 5 | 1.5 h | 8 min | 22 | 46 | 0.0 | 178,993 |
 | Ornith 1.5 9B (LM Studio) | explorer | 1 | 1 | 2 min | 2 min | 15 | 31 | 0.0 | 50,451 |
@@ -159,8 +159,8 @@ Wall time is session start to finish. *Sec / step* is wall time per agent step (
 
 | Model | Role | Input tokens | of which cache reads | Output tokens |
 |---|---|---|---|---|
-| Claude Opus | orchestrator | 479.4M | 467.8M | 1140k |
-| Claude Haiku | side-job | 36.4M | 34.1M | 748k |
+| Claude Opus | orchestrator | 488.4M | 476.7M | 1188k |
+| Claude Haiku | side-job | 38.3M | 35.9M | 785k |
 | Claude Opus | opus-implementer | 22.7M | 22.0M | 250k |
 | Claude Haiku | haiku-reviewer | 15.8M | 14.3M | 450k |
 | Claude Opus | opus-helper | 1.2M | 1.2M | 16k |
