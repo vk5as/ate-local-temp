@@ -136,7 +136,7 @@ def run_schedule(
     # (packet 11a: toggle_node is refused while a run is in progress, so this is the idle window).
     for name, on in (enable or {}).items():
         session.toggle_node(step_seq(schedule, name), on)
-    engine = session.start()
+    session.start()
 
     refused: list[str] = []
     bad_tried: set[int] = set()
