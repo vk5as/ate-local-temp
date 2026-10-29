@@ -179,7 +179,10 @@ class MainWindow(QMainWindow):
 
         Each layout holds its own widgets, so a switch that only changed the visible pane would show
         empty fields: the four setup edits, the filter, the On failure pair and the picked schedule
-        are copied across, and the target's steps preview is loaded for a run not yet started."""
+        are copied across, and the target's steps preview is loaded for a run not yet started. A View
+        switch is not an Operator action on the run, so nothing here writes to the session: the picker
+        is re-rendered with its ``_carrying_over`` flag up, which is what stops it from re-selecting
+        the schedule and moving a FINISHED session back to SELECTING (packet 30b review)."""
         for name in ("operator_edit", "project_edit", "uut_type_edit", "serial_edit"):
             src = getattr(source.fields, name, None)
             dst = getattr(target.fields, name, None)
@@ -190,10 +193,12 @@ class MainWindow(QMainWindow):
         # a switch is not the Operator picking a schedule: the target must not rebuild its step table
         # from that preview (packet 25b review).
         target._carrying_over = True
+        target.picker._carrying_over = True
         try:
             target.picker.render()
         finally:
             target._carrying_over = False
+            target.picker._carrying_over = False
         # A run that is up, or one this session just finished, already has its rows on both layouts:
         # reloading the schedule here would blank the Result/Attempts/Actual/Expected/Message cells and
         # the log the Operator switched to look at (packet 25b review). The target redraws from the
@@ -242,11 +247,17 @@ class MainWindow(QMainWindow):
     def _new_run_from_history(self, prefill: dict) -> None:
         """Switch to the Run screen prefilled from History's "New run for this UUT".
 
-        The Run screen reads its widgets at Start, so prefilling only the session would be
-        re-applied empty by the first Start (30a review item 8): UUT Type, serial and Project go
-        into the first-stage edits, and the Test Schedule picker is made current, which selects
-        it on the session through the screen's own wiring."""
+        This is the same New run as the run header's button (packet 30b review): after a run the
+        staged layout shows the finished run, not the setup stages, so filling the stage-1 edits
+        would land on hidden widgets. The layout is put back to its setup first and the session is
+        moved FINISHED → SELECTING by re-selecting the schedule; only then are the fields written,
+        so the Operator lands on the visible, prefilled stage 1 (or the three-pane setup pane) with
+        Start live. The Run screen reads its widgets at Start, so prefilling only the session would
+        be re-applied empty by the first Start (30a review item 8): UUT Type, serial and Project go
+        into the first-stage edits, and the Test Schedule picker is made current, which selects it on
+        the session through the screen's own wiring."""
         self.show_run()
+        self.run_screen.start_new_run()
         # Either layout carries the same fields; the staged one keeps them in its first stage.
         stage = getattr(self.run_screen, "uut_operator_stage", None) or self.run_screen.fields
         setters = {

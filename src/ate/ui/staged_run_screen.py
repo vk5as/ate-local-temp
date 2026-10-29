@@ -312,13 +312,22 @@ class TextPane(QPlainTextEdit):
     """A scrollable text pane with the ``text``/``setText`` shape the screens and tests use.
 
     Plain text scrolls, so the Log and Summary tabs keep a small fixed minimum (packet 30b); the
-    QLabel they replaced grew their minimumSizeHint with every line the run wrote."""
+    QLabel they replaced grew their minimumSizeHint with every line the run wrote. The Operator reads
+    them; the run writes them, so they are read-only (packet 30b review)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setReadOnly(True)
 
     def text(self) -> str:
         return self.toPlainText()
 
     def setText(self, value: str) -> None:
         self.setPlainText(value)
+
+    def clear(self) -> None:
+        """Empty the pane, so a new run's Log and Summary hold only their own lines (packet 30b)."""
+        self.setPlainText("")
 
 
 class RunView(QWidget):
@@ -380,6 +389,10 @@ class RunView(QWidget):
         summary_tab = TextPane()
         self.tabs.addTab(log_tab, "Log")
         self.tabs.addTab(summary_tab, "Summary")
+        #: The two panes of the Log/Summary tab: read-only, and emptied when a run starts, so the
+        # text on screen is always the run the Operator is looking at (packets 30b, 30b review).
+        self.log_tab = log_tab
+        self.summary_tab = summary_tab
 
         # Ticket 08's two log views: the Log pane shows INFO and above; the Debug window is a
         # separate pane showing every level. Both are filled from session.store.log_lines() in
@@ -390,12 +403,17 @@ class RunView(QWidget):
         # Packet 30b: the mockup's run view is dominated by the step list; the Log/Summary tabs and
         # the two log panes are the bottom band. Their default preferred sizes each ran close to
         # 200 px, so together they ate the whole view and the step list collapsed to 68 px. A floor
-        # for the list and ceilings for the band keep the steps readable at 1280x800 without the
-        # window having to grow (the minimum here stays well under 800 px tall).
+        # for the list keeps the steps readable at 1280x800 without the window having to grow.
+        # Packet 30b review: the band's absolute ceilings (tabs 220, log 150, debug 110) capped it at
+        # any window size, so a 1920x1200 window wasted the space below it. The panes now have a
+        # readable floor and share what is left by stretch: bigger window, bigger panes, same floor.
         self.step_list.setMinimumHeight(150)
-        self.tabs.setMaximumHeight(220)
-        self.log_pane.setMaximumHeight(150)
-        self.debug_window.setMaximumHeight(110)
+        self.tabs.setMinimumHeight(60)
+        self.log_pane.setMinimumHeight(60)
+        self.debug_window.setMinimumHeight(40)
+
+        # The band's share of the view: steps 3, Log/Summary 2, Log 2, Debug 1.
+        _STEPS_STRETCH, _TABS_STRETCH, _LOG_STRETCH, _DEBUG_STRETCH = 3, 2, 2, 1
 
         # Header row (mockup variant C): the state label grows, the buttons sit at its right —
         # Abort while the run is up, New run once it is finished (packet 30b).
@@ -405,14 +423,22 @@ class RunView(QWidget):
         header_row.addWidget(self.new_run_button)
         layout.addLayout(header_row)
         layout.addWidget(self.failure_bar)
-        layout.addWidget(self.step_list, stretch=1)
+        layout.addWidget(self.step_list, stretch=_STEPS_STRETCH)
         layout.addWidget(self.failure_prompt_bar)
-        layout.addWidget(self.tabs)
-        layout.addWidget(self.log_pane)
-        layout.addWidget(self.debug_window)
+        layout.addWidget(self.tabs, stretch=_TABS_STRETCH)
+        layout.addWidget(self.log_pane, stretch=_LOG_STRETCH)
+        layout.addWidget(self.debug_window, stretch=_DEBUG_STRETCH)
         # Packet 14d review: the mockup's statusBar() closes the run view, so the bar is the last
         # widget — under the step list and the Log/Summary tabs — not a header.
         layout.addWidget(self.status_bar)
+
+    def clear_run_text(self) -> None:
+        """Empty the Log and Summary panes: a run's view holds only its own lines (packet 30b review).
+
+        ``refresh`` appends every Attempt line to the Log pane, so a second run in the same window
+        would otherwise read as one long log."""
+        self.log_tab.clear()
+        self.summary_tab.clear()
 
     def load_run_steps(self, steps: Iterable[object]) -> None:
         """Build the run's step rows, with each step's declared Step Inputs under it.
@@ -711,7 +737,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # The Abort button asks the session to abort the current run; only meaningful while it is up.
         self.run_view.abort_button.clicked.connect(self._request_abort)
         # The New run button (packet 30b) goes back to the setup stages for the next run.
-        self.run_view.new_run_button.clicked.connect(self._start_new_run)
+        self.run_view.new_run_button.clicked.connect(self.start_new_run)
 
         # Populate the schedule list once at construction; rescan reloads it.
         self._refresh_schedule_list()
@@ -775,21 +801,26 @@ class StagedRunScreen(RunScreenMixin, QWidget):
 
         This screen is itself a top-level widget, so ``run_view.show()`` alone does not make
         it visible offscreen (a child only reports visible once its ancestor chain is too);
-        showing this widget as well cascades visibility down to every descendant."""
+        showing this widget as well cascades visibility down to every descendant — but only
+        when this layout is the page the window is showing (packet 30b review)."""
         self.steps_stack.hide()
         self.run_view.show()
-        self.show()
+        self._show_if_on_screen()
 
-    def _start_new_run(self) -> None:
+    def start_new_run(self) -> None:
         """The New run button (packet 30b): back to the first setup stage, clearing nothing.
 
         The spec's "New run clears nothing" is satisfied by construction: the stage widgets still
         hold Project, Operator, UUT Type, serial and the Stop-on-Fail choice, and the session keeps
-        the selected schedule; Start then captures them again (``begin_run`` never clears fields)."""
+        the selected schedule; Start then captures them again (``begin_run`` never clears fields).
+        The session is put back to SELECTING first (packet 30b review): a finished session leaves the
+        step boxes locked and the options shut, and re-selecting the same schedule is the Operator
+        action that unlocks them for the next run."""
+        self.new_run()
         self.steps_stack.setCurrentIndex(0)
         self.steps_stack.show()
         self.run_view.hide()
-        self.show()
+        self._show_if_on_screen()
 
 
     def _request_abort(self) -> None:
@@ -826,6 +857,9 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             # as the run starts, so every declared input is on screen, inert, before the worker asks.
             steps = self._load_schedule_steps(self.session.selected_schedule or "")
             self.run_view.load_run_steps(steps)
+            # Packet 30b review: the Log tab appends, so it must be emptied when a run starts or the
+            # second run's log reads as the first run's lines plus its own.
+            self.run_view.clear_run_text()
             # Status bar (packet 14d): the run clock starts here and the one-second timer restarts,
             # because a previous run stopped it at FINISHED. No Action or Step has begun yet, so the
             # current-item timer is blank; the Steps tally knows its total from the rows just built.

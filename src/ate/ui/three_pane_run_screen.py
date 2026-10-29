@@ -403,6 +403,11 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.start_button = QPushButton("Start")
         self.abort_button = QPushButton("Abort")
         self.abort_button.setEnabled(False)
+        # Packet 30b review: variant B's finished header offers "New run". The three-pane layout has
+        # no run header of its own — its Start and Abort sit in the setup pane — so the next run is
+        # offered there, with the same semantics as the staged button.
+        self.new_run_button = QPushButton("New run")
+        self.new_run_button.setEnabled(False)
         self.counts = ResultCounts()
         self.counts.hide()
 
@@ -420,6 +425,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         run_row = QHBoxLayout()
         run_row.addWidget(self.start_button, stretch=1)
         run_row.addWidget(self.abort_button)
+        run_row.addWidget(self.new_run_button)
         left_layout.addLayout(run_row)
         left_layout.addWidget(self.counts)
 
@@ -457,6 +463,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.picker.selection_changed.connect(self._on_selection)
         self.start_button.clicked.connect(self.begin_run)
         self.abort_button.clicked.connect(self._request_abort)
+        self.new_run_button.clicked.connect(self.start_new_run)
         self.table.prompt_choice.connect(self._on_prompt_choice)
 
         self.session.state_changed.connect(self._on_state_changed)
@@ -507,6 +514,24 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self.table.set_checkable(self.session.state in (SessionState.IDLE, SessionState.SELECTING))
             self._apply_stop_on_fail(self.session.selected_stop_on_fail)
         self._update_start_button()
+
+    def start_new_run(self) -> None:
+        """The three-pane "New run" (packet 30b review): unlock the session and show the setup.
+
+        The setup pane is always on screen here, so the layout change is the schedule's step list:
+        the centre pane goes back to the picked schedule's editable boxes instead of the finished
+        run's results, and the tallies and log start from nothing. Nothing the Operator typed is
+        cleared (spec 37)."""
+        schedule = self.new_run()
+        if not schedule:
+            return
+        self._steps = load_schedule_steps(self.session, schedule)
+        self.table.load_steps(self._steps)
+        self.table.set_checkable(True)
+        self.counts.set_counts({})
+        self.counts.hide()
+        self._show_log([])
+        self.table.banner.hide()
 
     def _apply_stop_on_fail(self, value: bool) -> None:
         """Set the "On failure" pair to the picked schedule's :setStopOnFail (packet 12d)."""
@@ -596,6 +621,8 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         # Step boxes: editable in setup, locked while a run is up (packet 11b).
         self.table.set_checkable(state in (SessionState.IDLE, SessionState.SELECTING))
         self.abort_button.setEnabled(state == SessionState.STARTED)
+        # Packet 30b review: the next run is offered once this one is over.
+        self.new_run_button.setEnabled(state == SessionState.FINISHED)
         self._update_start_button()
         self._update_header(state)
         if state == SessionState.FINISHED:
