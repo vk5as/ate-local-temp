@@ -497,3 +497,23 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - A layout switch after FINISHED re-picks the schedule via `_carry_over`, which moves the session to SELECTING. The view switch has a session side effect; results still display.
   - `StagedRunScreen._step_identity` has dead code after its return.
   - RunView's header/rollup code is duplicated between the paused and finished renderers.
+
+## 29b — Example: Step Inputs (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions): one schedule with all 8 input types/widgets, plus harness assertions on the recorded values. It flagged two engine deviations instead of fixing them.
+- Reviews: Haiku 3 must-fix, Strata 3 must-fix (the same 3). Both engine deviations were confirmed against `test-schedule-format.md`:
+  - **CHECKBOX returned multiple Lua values, not an array** (lupa `unpack_returned_tuples`), so `local v = ATE.input(1)` got only the first label;
+  - **`tooltip`/`orient` were dropped for INTEGER/FLOAT**;
+  - plus a false "FLOAT refused first" comment.
+  - A 10a widget test was vacuous for numeric tooltip/orient.
+- Rework (Strata, high, 0 compactions):
+  - `_map_input` returns `table_from(...)` (the shims keep tuple unpacking);
+  - tooltip/orient are kept for every type and shown on every control;
+  - the example now reads `local channels = ATE.input(1)`;
+  - added the FLOAT refusal;
+  - POLL click timing measured from `input_asked`;
+  - removed the duplicate `step_seq`;
+  - `test_total_time_advances` made deterministic (20/20).
+- Light review: 993 passed ×3 (~136 s); `pytest examples/` 5×. One test was renamed to a stronger version (`…returns_one_lua_table_not_a_tuple`); nothing lost.
+- Leftovers:
+  - `StepInputWidget._placeholder` shows the tooltip instead of the pattern when a STRING has both.
+  - The POLL click delay is 0.3 s of wall time (bounded loop of 8).
