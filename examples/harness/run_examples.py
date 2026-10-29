@@ -54,7 +54,7 @@ RELEASE_DIR = Path(__file__).resolve().parents[1] / "media-release"
 #                 question to answer.
 #   enable      - steps the Operator turns on or off before the run starts (packet 11a).
 #   polls       - Step Name -> (n, button text) for a POLL input, clicked once the step's read loop
-#                 has had POLL_CLICK_AFTER_TICKS pump iterations to read it as nil (packet 29b).
+#                 has had POLL_CLICK_AFTER_SECONDS to read it as nil (packet 29b).
 # `run_all` checks the schedules against the catalog, so a new example schedule has to be added
 # here or the harness fails.
 RUNS: list[dict[str, Any]] = [
@@ -71,17 +71,20 @@ RUNS: list[dict[str, Any]] = [
                  "Decimal with a range": 1.25,
                  "Text with a pattern": "AB-1234",
                  "Blocking PROMPT": "CONTINUE"},
-      "bad_inputs": {"Whole number with a range": 500, "Text with a pattern": "not a part number"},
+      "bad_inputs": {"Whole number with a range": 500, "Decimal with a range": 9.0,
+                     "Text with a pattern": "not a part number"},
       "polls": {"POLL read in a loop": (1, "STOP")}},
     # The same schedule again, with its disabled-by-default step enabled by the Operator.
     {"key": "basics_enabled", "schedule": "Example basics", "inputs": {"Operator input": 1.5},
      "enable": {"Optional check": True}},
 ]
 
-# A POLL is live for the whole Attempt (packet 10a), so the click is delivered from the pump loop
-# after this many event ticks: the read loop sleeps 0.1 s between reads, so by then it has read nil
-# a few times, and its own bound means it can never outlast the click.
-POLL_CLICK_AFTER_TICKS = 3
+# A POLL is live for the whole Attempt (packet 10a), so `input_asked` announces it when the Attempt
+# starts - before its step has read it once. The click is therefore timed rather than ticked: it is
+# delivered this many seconds after that announcement, long enough for the step's loop to have read
+# nil three times (it sleeps 0.1 s between reads) and short enough to land well before the loop's
+# bound of 8 reads.
+POLL_CLICK_AFTER_SECONDS = 0.3
 
 
 def visible_schedules() -> list[str]:
@@ -99,14 +102,6 @@ def step_seqs(schedule: str) -> dict[str, int]:
     path = resolve_schedule_path(definition, schedule)
     host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
     return {node.name: seq for seq, node in enumerate(host.tree) if not node.is_header}
-
-
-def step_seq(schedule: str, step_name: str) -> int:
-    """The runner seq of a step by name, from the same expanded tree the Steps stage previews."""
-    seqs = step_seqs(schedule)
-    if step_name not in seqs:
-        raise AssertionError(f"schedule {schedule!r} has no step named {step_name!r}")
-    return seqs[step_name]
 
 
 def write_config(tmp_dir: Path) -> Path:
@@ -159,6 +154,16 @@ def run_schedule(
     states: list[SessionState] = []
     session.state_changed.connect(states.append)  # the public signal; never read session._state
 
+    # Step Name -> the node_seq that step gets in this run, so the scripted answers can be keyed by
+    # the name a schedule writer would recognise rather than by a bare index. Built once: the old
+    # per-toggle step_seq() rebuilt a whole LuaHost every time (packet 29b review).
+    seqs = step_seqs(schedule)
+
+    def _seq(name: str) -> int:
+        if name not in seqs:
+            raise AssertionError(f"schedule {schedule!r} has no step named {name!r}")
+        return seqs[name]
+
     session.set_operator(operator)
     session.set_project(project)
     session.set_uut_type(uut_type)
@@ -167,19 +172,16 @@ def run_schedule(
     # A selection clears the pending toggles, so the Operator's step overrides go on after it
     # (packet 11a: toggle_node is refused while a run is in progress, so this is the idle window).
     for name, on in (enable or {}).items():
-        session.toggle_node(step_seq(schedule, name), on)
+        session.toggle_node(_seq(name), on)
     session.start()
 
-    # Step Name -> the node_seq that step gets in this run, so the scripted answers can be keyed by
-    # the name a schedule writer would recognise rather than by a bare index.
-    seqs = step_seqs(schedule)
-    values = {seqs[name]: value for name, value in (inputs or {}).items()}
-    bad = {seqs[name]: value for name, value in (bad_inputs or {}).items()}
-    poll_by_seq = {seqs[name]: (index, text) for name, (index, text) in (polls or {}).items()}
+    values = {_seq(name): value for name, value in (inputs or {}).items()}
+    bad = {_seq(name): value for name, value in (bad_inputs or {}).items()}
+    poll_by_seq = {_seq(name): (index, text) for name, (index, text) in (polls or {}).items()}
 
     refused: list[str] = []
     bad_tried: set[int] = set()
-    poll_pending: list[tuple[int, int, int, str]] = []  # (node_seq, attempt_no, index, button text)
+    poll_pending: list[tuple[int, int, int, str, float]] = []  # (node_seq, attempt_no, index, text, announced_at)
     poll_clicked: list[tuple[int, int, str]] = []
 
     def _supply(node_seq: int, attempt_no: int, index: int) -> None:
@@ -188,7 +190,7 @@ def run_schedule(
         # POLL is live for the whole Attempt (packet 29b). First try the out-of-range value: the
         # session must refuse it with a ValueError, and the step stays waiting for the real answer.
         if node_seq in poll_by_seq and poll_by_seq[node_seq][0] == index:
-            poll_pending.append((node_seq, attempt_no, index, poll_by_seq[node_seq][1]))
+            poll_pending.append((node_seq, attempt_no, index, poll_by_seq[node_seq][1], time.monotonic()))
             return
         if node_seq in bad and node_seq not in bad_tried:
             bad_tried.add(node_seq)
@@ -218,15 +220,16 @@ def run_schedule(
 
     app = QCoreApplication.instance() or QCoreApplication([])
 
-    def _click_polls(ticks: int) -> None:
-        # Deliver the scripted POLL click from the pump loop once the step's read loop has had
-        # POLL_CLICK_AFTER_TICKS iterations to read it as nil. click_poll raises if the step is no
-        # longer running, so a POLL clicked at the wrong moment fails rather than passing silently.
-        if poll_pending and ticks >= POLL_CLICK_AFTER_TICKS:
-            for node_seq, attempt_no, index, text in poll_pending:
-                session.click_poll(node_seq, attempt_no, index, text)
-                poll_clicked.append((node_seq, index, text))
-            poll_pending.clear()
+    def _click_polls(_ticks: int) -> None:
+        # Deliver the scripted POLL click once POLL_CLICK_AFTER_SECONDS have passed since the Attempt
+        # announced it (packet 29b review): the announcement comes at Attempt start, so by then the
+        # step's loop has read nil three times. click_poll raises if the step is no longer running,
+        # so a POLL clicked at the wrong moment fails rather than passing silently.
+        due = [p for p in poll_pending if time.monotonic() - p[4] >= POLL_CLICK_AFTER_SECONDS]
+        for node_seq, attempt_no, index, text, _announced_at in due:
+            session.click_poll(node_seq, attempt_no, index, text)
+            poll_clicked.append((node_seq, index, text))
+        poll_pending[:] = [p for p in poll_pending if p not in due]
 
     if not _pump(app, lambda: SessionState.FINISHED in states, on_tick=_click_polls):
         raise TimeoutError(f"schedule '{schedule}' never finished")

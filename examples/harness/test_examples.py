@@ -160,10 +160,10 @@ def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[st
 def test_step_inputs_record_every_type_and_widget(records: dict[str, dict[str, Any]]) -> None:
     """Packet 29b: one step per Step Input type and widget, each answered through the session.
 
-    The harness supplies an out-of-range INTEGER and a pattern-failing STRING first: the session
-    refuses both with a ValueError before the valid value is recorded. The POLL is clicked from the
-    pump loop while its step's read loop is iterating, so the loop ends on the click, not on the
-    bound."""
+    The harness supplies an out-of-range INTEGER, an out-of-range FLOAT and a pattern-failing STRING
+    first: the session refuses each with a ValueError before the valid value is recorded. The POLL is
+    clicked from the pump loop only after its step's read loop has read nil a few times, so the loop
+    ends on the click, not on the bound."""
     record = records["inputs"]
     run = record["run"]
     assert run["result"] == "PASS", "every step read its input and passed"
@@ -196,19 +196,23 @@ def test_step_inputs_record_every_type_and_widget(records: dict[str, dict[str, A
     assert declared[5][0]["pattern"] == "^[A-Z]{2}-[0-9]{4}$"
     assert declared[6][0]["prompt"] == ["CONTINUE"]
     assert declared[7][0]["prompt"] == ["KEEP GOING", "STOP"]
-    # tooltip and orient are kept for the declarations that have controls to lay out; the INTEGER
-    # and FLOAT line edits are declared with their range alone (packet 10a).
+    # tooltip and orient apply to every declared type (test-schedule-format.md), the INTEGER and
+    # FLOAT line edits included — they are kept through validation and stored on the node.
     assert [d[0]["orient"] for d in declared] == [
-        "HORIZ", "VERT", "HORIZ", None, None, "VERT", "HORIZ", "HORIZ"
+        "HORIZ", "VERT", "HORIZ", "VERT", "HORIZ", "VERT", "HORIZ", "HORIZ"
     ]
-    assert [bool(d[0]["tooltip"]) for d in declared] == [
-        True, True, True, False, False, True, True, True
+    assert [d[0]["tooltip"] for d in declared] == [
+        "Which LED the board lights", "Tick every channel to measure", "One press answers the step",
+        "Read the current clamp, not the supply", "Measured at the rail header",
+        "Two letters, a hyphen, four digits", "Press CONTINUE when the probe is clipped on",
+        "Click STOP at any time while this step runs",
     ]
 
     # The refused answers: the declaration's own range and pattern checks reject them (packet 10a),
     # so nothing is recorded until the Operator answers with a valid value.
     assert record["refused_inputs"] == [
         "input 1: 500 refused: Must be 1 to 200",
+        "input 1: 9.0 refused: Must be 0.5 to 2.5",
         "input 1: 'not a part number' refused: Must match ^[A-Z]{2}-[0-9]{4}$",
     ]
 
@@ -247,7 +251,9 @@ def test_step_inputs_record_every_type_and_widget(records: dict[str, dict[str, A
     poll = by_seq[7]
     assert (poll["pass_fail"], poll["actual"], poll["expected"]) == ("PASS", "STOP", "STOP")
     reads = int(poll["msg"].split(" after ")[1].split(" reads")[0])
-    assert 2 <= reads <= 5, f"the POLL read loop reported {reads} reads: {poll['msg']!r}"
+    # The harness clicks only after POLL_CLICK_AFTER_SECONDS, and the loop reads every 0.1 s, so at
+    # least three nil reads happened before the click; the bound of 8 is never reached.
+    assert 3 <= reads <= 8, f"the POLL read loop reported {reads} reads: {poll['msg']!r}"
 
 
 def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]]) -> None:

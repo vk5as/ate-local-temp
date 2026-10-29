@@ -1,15 +1,17 @@
 -- Example Media Release, schedule 4: every Step Input type and widget.
 --
 -- What it demonstrates:
---   * ENUM with each widget: RADIOBUT picks one option, CHECKBOX ticks several (one label per
---     return value, recorded as a JSON array), PUSHBUT answers by pressing one of its buttons.
+--   * ENUM with each widget: RADIOBUT picks one option, CHECKBOX ticks several (ATE.input returns
+--     one Lua table holding every label, recorded as a JSON array), PUSHBUT answers by pressing one
+--     of its buttons.
 --   * INTEGER and FLOAT with a range. The harness first answers each out of range and the session
 --     refuses it with a ValueError before the valid value is recorded (packet 10a).
 --   * STRING with a pattern, refused the same way.
 --   * PROMPT: blocking - the step waits for the Operator to press the button.
 --   * POLL: non-blocking - the step reads it in a bounded loop until it is clicked, sleeping between
 --     reads. It is sticky: once clicked it keeps returning that button's text.
---   * tooltip and orient on the declarations.
+--   * tooltip and orient on every declaration: the format gives both to all input types, the
+--     line-edit ones included.
 
 return ScheduleParams("Step inputs", "Every Step Input type and widget, answered by the harness")
   :setDocTitle("Example Media Release - Step Inputs")
@@ -27,15 +29,14 @@ return ScheduleParams("Step inputs", "Every Step Input type and widget, answered
         ATE.report(Result.PASS, "led is " .. colour, colour, "Green")
       end),
 
-    -- 2. ENUM as CHECKBOX: tick as many as apply. ATE.input gives an array of labels.
+    -- 2. ENUM as CHECKBOX: tick as many as apply. One call returns one table of labels; nothing
+    --    ticked returns an empty table, so #channels is the count either way.
     StepParams("Tick several with CHECKBOX"):setStepNo("2.")
       :setInputs({ [1] = { desc = "channels to measure", type = "ENUM", input = "CHECKBOX",
                           enum = { "A", "B", "C" }, orient = "VERT",
                           tooltip = "Tick every channel to measure" } })
       :setAction(function()
-        -- A CHECKBOX answer comes back as several values (one label per tick), so collect them
-        -- into a table; nothing ticked gives an empty one.
-        local channels = { ATE.input(1) }
+        local channels = ATE.input(1)
         ATE.report(Result.PASS, "channels " .. table.concat(channels, ", "),
                    table.concat(channels, ","), "A,B")
       end),
@@ -50,21 +51,22 @@ return ScheduleParams("Step inputs", "Every Step Input type and widget, answered
         ATE.report(Result.PASS, "operator pressed " .. choice, choice, "RETEST")
       end),
 
-    -- 4. INTEGER with a range: the harness answers 500 first, which the session refuses. Only
-    --    ENUM, STRING, PROMPT and POLL declarations carry tooltip/orient (packet 10a), so a
-    --    line-edit input is declared with its range alone.
+    -- 4. INTEGER with a range: the harness answers 500 first, which the session refuses. tooltip and
+    --    orient apply here too - they are the hover help and the widget's layout, not extra fields.
     StepParams("Whole number with a range"):setStepNo("4.")
       :setInputs({ [1] = { desc = "test current, mA", type = "INTEGER",
-                          range = { min = 1, max = 200 } } })
+                          range = { min = 1, max = 200 }, orient = "VERT",
+                          tooltip = "Read the current clamp, not the supply" } })
       :setAction(function()
         local current = ATE.input(1)
         ATE.report(Result.PASS, "current " .. current .. " mA", current, 42)
       end),
 
-    -- 5. FLOAT with a range, again refused out of range first.
+    -- 5. FLOAT with a range, also refused out of range first: the harness answers 9.0 before 1.25.
     StepParams("Decimal with a range"):setStepNo("5.")
       :setInputs({ [1] = { desc = "rail voltage, V", type = "FLOAT",
-                          range = { min = 0.5, max = 2.5 } } })
+                          range = { min = 0.5, max = 2.5 }, orient = "HORIZ",
+                          tooltip = "Measured at the rail header" } })
       :setAction(function()
         local volts = ATE.input(1)
         ATE.report(Result.PASS, "rail " .. volts .. " V", volts, 1.25)
@@ -91,14 +93,14 @@ return ScheduleParams("Step inputs", "Every Step Input type and widget, answered
       end),
 
     -- 8. POLL: non-blocking, so the step reads it in a loop and sleeps between reads. The harness
-    --    clicks STOP a few iterations in, so the loop ends with the click rather than the bound.
+    --    clicks STOP only after the loop has read nil a few times, so the loop ends on the click.
     StepParams("POLL read in a loop"):setStepNo("8.")
       :setInputs({ [1] = { desc = "stop this step?", type = "POLL",
                           prompt = { "KEEP GOING", "STOP" }, orient = "HORIZ",
                           tooltip = "Click STOP at any time while this step runs" } })
       :setAction(function()
         local clicked, reads = nil, 0
-        while reads < 5 do
+        while reads < 8 do
           reads = reads + 1
           clicked = ATE.input(1)     -- nil until the Operator clicks a POLL button
           if clicked then break end
