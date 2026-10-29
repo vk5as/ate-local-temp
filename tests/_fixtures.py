@@ -946,13 +946,16 @@ def add_logging_input_schedule(tmp_path: Path) -> str:
     """Add a schedule that logs at INFO and DEBUG, then blocks on one INTEGER input.
 
     The lines logged before `ATE.input` are in the store by the time the ask is announced, so a log
-    pane refreshed on the session's signals shows them while the step is still waiting."""
+    pane refreshed on the session's signals shows them while the step is still waiting. The step also
+    declares a POLL, whose widget stays live until the run ends: a step interrupted by an abort never
+    reaches `step_finished`, so closing inputs at FINISHED is the only thing that shuts it."""
     defs = tmp_path / "defs"
     source = (
         'return ScheduleParams("Logging input schedule", "logs, then blocks on an input")\n'
         "  :setSchedule({\n"
         '    StepParams("voltage"):setStepNo("1.")\n'
-        '      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })\n'
+        '      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" },\n'
+        '                   [2] = { desc = "operator confirm", type = "POLL", prompt = {"OK", "Bad"} } })\n'
         "      :setAction(function()\n"
         '        ATE.log(Log.INFO, "measuring before the Operator answers")\n'
         '        ATE.log(Log.DEBUG, "probe chatter before the ask")\n'

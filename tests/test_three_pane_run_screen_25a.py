@@ -751,12 +751,12 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
 def test_a_finished_run_closes_every_step_input(qapp, tmp_path):
     """Packet 25a review: FINISHED closes every Step Input, and a late answer is shown, not raised.
 
-    The run pauses on a failing step that declares a POLL. Aborting from the inline prompt ends the
-    run without that step ever finishing, so the POLL widget is still live against an engine the
-    session has released: it must be deactivated, and clicking it afterwards has to report the
-    session's refusal rather than escape the button handler as SessionError."""
+    The step blocks on an INTEGER input and declares a POLL; the Operator aborts while it waits. A
+    step interrupted mid-Action never reaches `step_finished`, so the only thing that shuts these
+    widgets is the FINISHED handler: without it they stay clickable against a released engine and
+    answering one raises SessionError straight out of the button."""
     env = write_ate_env(tmp_path)
-    name = add_failing_poll_schedule(tmp_path)
+    name = add_logging_input_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
     screen.show()
@@ -765,21 +765,30 @@ def test_a_finished_run_closes_every_step_input(qapp, tmp_path):
     screen.start_button.click()
 
     deadline = time.monotonic() + 10.0
+    widget = None
     while time.monotonic() < deadline:
         qapp.processEvents()
-        if screen.table.banner.isVisible():
+        widget = screen.table.input_widget(0, 1)
+        if widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled():
             break
         time.sleep(0.01)
-    widget = screen.table.input_widget(0, 1)
-    assert widget is not None, "the failing step's POLL was never built"
-    assert any(control.isEnabled() for control in widget.controls), "the POLL closed before its step ended"
+    assert widget is not None, "the blocking input never became live"
+    poll = screen.table.input_widget(0, 2)
+    assert poll is not None and any(c.isEnabled() for c in poll.controls), "the POLL never opened"
 
     screen.abort_button.click()
     assert _wait_finished(qapp, session)
-    assert all(not control.isEnabled() for control in widget.controls), "a finished run left a Step Input live"
+    assert all(
+        not control.isEnabled()
+        for widgets in screen.table.input_widgets.values()
+        for widget in widgets
+        for control in widget.controls
+    ), "a finished run left a Step Input live"
 
-    widget._click_poll("OK")
+    widget._submit("8")
     assert "no run is in progress" in widget.error_label.text(), widget.error_label.text()
+    poll._click_poll("OK")
+    assert "no run is in progress" in poll.error_label.text(), poll.error_label.text()
     _settle(qapp, session)
 
 
