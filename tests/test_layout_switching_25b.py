@@ -24,7 +24,7 @@ from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 
 from ._fixtures import WRITES_PDF, _append_file, add_logging_input_schedule, fake_pdf_helper, write_ate_env
 
-SHOTS = Path("/tmp/25b-shots")
+SHOTS = Path("/tmp/25b-r2-shots")
 FIELDS = ("operator", "project", "uut_type", "serial")
 
 
@@ -870,6 +870,60 @@ def test_a_retried_step_shows_its_attempts_on_both_layouts(qapp, tmp_path):
     qapp.processEvents()
     assert any("2 Attempts" in row for row in _staged_step_texts(staged)), "the count vanished on the way back"
     _finish(qapp, window)
+
+
+def test_the_two_review_shots_are_saved(qapp, tmp_path):
+    """The two states the reviewer asked to see, at 1280x800.
+
+    ``three-pane-after-finished-run.png``: a run finished in the staged layout, then switched to the
+    three-pane layout — the results, the log and the counts are still there.
+    ``staged-after-pause-answered-in-three-pane.png``: a Stop-on-Fail pause answered in the three-pane
+    layout, then switched back to staged — no prompt bar, no "Paused", nothing stale."""
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+
+    # Shot 1: finish in staged, switch to three-pane.
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    asked, prompts = _pick_and_start(qapp, window, schedule)
+    window.staged_screen.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked))
+    answer = window.staged_screen.input_widget(1, 1)
+    answer.line_edit.setText("7")
+    answer.ok_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    three = window.three_pane_screen
+    assert _three_step_results(three) == {0: ("FAIL", "1"), 1: ("PASS", "1")}
+    assert three.log_pane.rendered_lines() and three.debug_window.rendered_lines()
+    shot = _window_shot(window)
+    assert shot.save(str(SHOTS / "three-pane-after-finished-run.png")), "shot 1 did not save"
+    _finish(qapp, window)
+
+    # Shot 2: answer the pause in three-pane, switch back to staged.
+    outcome2, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
+    window2 = outcome2.window
+    window2.show()
+    qapp.processEvents()
+    _pick_and_start(qapp, window2, schedule)
+    window2.three_pane_screen.table._prompt_bars[0].continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: not window2.session.pause_pending())
+    window2.staged_layout_action.trigger()
+    qapp.processEvents()
+    staged2 = window2.staged_screen
+    assert staged2.run_view.failure_prompt_bar.isVisible() is False
+    assert staged2.run_view.status_bar.status_label.text() != "Paused"
+    shot2 = _window_shot(window2)
+    assert shot2.save(str(SHOTS / "staged-after-pause-answered-in-three-pane.png")), "shot 2 did not save"
+    _finish(qapp, window2)
 
 
 def test_the_three_screenshot_states_are_saved_for_review(qapp, tmp_path, fake_pdf):
