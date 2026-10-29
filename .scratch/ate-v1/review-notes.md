@@ -431,3 +431,33 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Each fix is mutation-proven.
 - Light review: 893 passed ×3 (~100 s); collection 878 → 893, none lost; `python -m examples.harness.run_examples` ran 5 runs and exited 0.
 - Leftovers: the harness imports `tests._fixtures` (fine from a source checkout). The suite has grown to ~100 s.
+
+## 30a — GUI launch (merged 2026-10-29)
+- New packet, created after the 28a review found that nothing launches the GUI.
+- Implementer (Strata, high): 0 compactions, 909 passed.
+- Reviews: Haiku 3 must-fix, Strata 2 must-fix, 5 distinct in all:
+  - `QMessageBox(app)` crashed the real missing-config dialog;
+  - the QApplication was a local, so the window died with `exec_=False` (pytest-qt masked it);
+  - the config was read twice;
+  - one launch could write two app logs;
+  - existing subcommands rejected stray args after the argparse rewrite.
+- Rework 1 (Strata, high, 0 compactions) fixed those 5 plus 10 SHOULD items:
+  - `db migrate --yes` with no path;
+  - the refusal is logged and tested;
+  - History "New run" now prefills the Run screen;
+  - `history_screen.set_run_in_progress`;
+  - close-during-run asks "Abort it and quit?" and releases the session, store and log;
+  - `_pdf` is hidden from help;
+  - one clear Abort message;
+  - the docstring;
+  - **the first-stage fields are labelled** (the pre-existing packet 03 gap, seen in screenshots);
+  - run teardown in the tests.
+- Rework 2 (Strata): the new labels showed the Project field prefilled with the **Station name**, a pre-existing bug.
+  - Project now comes from `defaultProject`.
+  - An empty Project blocks Start (UI and `session.start()`).
+  - History "New run" uses the run's recorded project.
+  - Fixture configs gained `defaultProject`.
+- Light review: 931 passed ×3 (~103 s). Collection 893 → 931; one test was renamed (station_name → default_project), nothing lost. Screenshots /tmp/30a-r2-shots and /tmp/30a-r3-shots OK.
+- Leftovers:
+  - The first-stage form is compact but the window below it is empty. The mockup's setup layout is fuller; revisit in 25a/25b if wanted.
+  - A fresh `ate setup` config has `defaultProject: ""`, so Operators must type a Project (per spec).
