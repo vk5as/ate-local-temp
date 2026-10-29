@@ -698,31 +698,35 @@ def test_a_step_box_on_the_hidden_layout_does_not_change_the_run(qapp, tmp_path)
     assert staged.steps_options_stage.step_list.item(0).checkState() == Qt.CheckState.Checked
 
 
-def test_a_hidden_layouts_prompt_bar_answers_nothing(qapp, tmp_path):
-    """The prompt of the layout that is not showing mirrors the pause but cannot answer it."""
+def test_a_hidden_layouts_prompt_bar_and_abort_answer_nothing(qapp, tmp_path):
+    """The layout that is not showing mirrors the pause but cannot answer it: neither its prompt bar
+    nor its Abort reaches the session."""
     env = write_ate_env(tmp_path)
     RunStore(env["db"])
     schedule = _add_pause_and_block_schedule(tmp_path)
-    outcome, _ = _launch(env, tmp_path)
+    outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
     window = outcome.window
     window.show()
     qapp.processEvents()
-    _pick_and_start(qapp, window, schedule)
-    staged, three = window.staged_screen, window.three_pane_screen
-    assert staged.is_active() and not three.is_active()
-    assert staged.run_view.failure_prompt_bar.isVisible(), "the visible layout shows the pause"
+    three, staged = window.three_pane_screen, window.staged_screen
+    assert three.is_active() and not staged.is_active()
 
-    hidden_bar = three.table._prompt_bars.get(0)
-    if hidden_bar is not None:
-        hidden_bar.continue_button.click()
-        qapp.processEvents()
+    _pick_and_start(qapp, window, schedule)
+    assert window.session.pause_pending(), "the run is paused on the failure"
+    assert three.table.banner.isVisible(), "the visible layout shows the pause"
+    assert staged.run_view.failure_prompt_bar.isVisible(), "the hidden layout mirrors the pause"
+
+    staged.run_view.failure_prompt_bar.continue_button.click()
+    staged.run_view.abort_button.click()
+    qapp.processEvents()
     assert window.session.pause_pending(), "the hidden layout answered the pause"
+    assert window.session.state == SessionState.STARTED, "the hidden layout ended the run"
     attempts = window.session.store.attempts(window.session.run_uuid)
     assert all(row.get("prompt_choice") is None for row in attempts), attempts
 
-    staged.run_view.failure_prompt_bar.continue_button.click()
+    three.table._prompt_bars[0].continue_button.click()
     qapp.processEvents()
-    assert _wait(qapp, lambda: not window.session.pause_pending())
+    assert _wait(qapp, lambda: not window.session.pause_pending()), "the visible layout did not resume the run"
     _finish(qapp, window)
 
 
