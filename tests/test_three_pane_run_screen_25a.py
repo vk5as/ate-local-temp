@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QCheckBox,
     QLabel,
@@ -105,6 +106,19 @@ def _rect(widget):
     return rect
 
 
+def _painter_of(widget, pane):
+    """The container that paints ``widget``: the pane itself, or the scroll viewport it sits in.
+
+    Widgets in different containers are placed by the layout and clipped by the view that holds
+    them, so only widgets sharing a container can end up drawn on top of one another."""
+    node = widget
+    while node is not None and node is not pane:
+        if node.objectName() == "qt_scrollarea_viewport":
+            return node
+        node = node.parent()
+    return pane
+
+
 def _flag_a_mismatch(tmp_path) -> str:
     """Write a wrong checksum for one schedule's own file into the demo Test Definition."""
     defs = tmp_path / "defs"
@@ -189,6 +203,10 @@ def test_three_panes_are_built_and_split_25_50_25(qapp, tmp_path):
     assert viewport.width() - 1 <= table_width <= viewport.width() + 1, (
         f"the step table is {table_width} px wide in a {viewport.width()} px viewport"
     )
+    # Every header word fits in its own column: no column is so narrow that its name is clipped.
+    metrics = QFontMetrics(screen.table.table.font())
+    for index, name in enumerate(COLUMNS):
+        assert header.sectionSize(index) >= metrics.horizontalAdvance(name), f"the {name!r} header is clipped"
 
 
 def test_left_pane_shows_fields_counts_and_a_filterable_list(qapp, tmp_path):
@@ -207,6 +225,13 @@ def test_left_pane_shows_fields_counts_and_a_filterable_list(qapp, tmp_path):
     screen.picker.filter_edit.setText("Blocking")
     assert 0 < list_widget.count() < before
     screen.picker.filter_edit.setText("")
+
+    # Every row names its schedule and the Media Release it came from (spec: name and Media Release).
+    for i in range(list_widget.count()):
+        widget = list_widget.itemWidget(list_widget.item(i))
+        assert widget is not None, f"row {i} is not a schedule row"
+        texts = [label.text() for label in widget.findChildren(QLabel)]
+        assert texts[0] and "REL-A" in texts[1], texts
 
     # An empty Project blocks Start, exactly as on the staged screen.
     _pick(screen, "Passing schedule")
@@ -359,6 +384,11 @@ def test_the_table_reports_result_attempts_actual_expected_message(qapp, tmp_pat
     headers = [screen2.table.table.horizontalHeaderItem(i).text() for i in range(screen2.table.table.columnCount())]
     assert headers == list(COLUMNS)
     assert COLUMNS[1:] == ("Step", "Result", "Attempts", "Actual", "Expected", "Message")
+    # A finished run leaves its rows plain: clearing a tint must not leave the row black.
+    for column in range(len(COLUMNS)):
+        item = screen2.table.table.item(row, column)
+        if item is not None:
+            assert item.background().color().name().lower() == "#ffffff", f"column {COLUMNS[column]} is tinted"
     _settle(qapp, session2)
 
 
@@ -458,6 +488,8 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     assert bar.step_label.text() == "Step 1. FAIL"
     assert screen.table.table.item(row, COLUMNS.index("Result")).text() == "FAIL"
     assert screen.table.table.item(row, COLUMNS.index("Result")).background().color().name().lower().startswith("#fff0f0")
+    other_row = screen.table._step_rows[1]
+    assert screen.table.table.item(other_row, COLUMNS.index("Result")).background().color().name().lower() == "#ffffff", "a step not paused is tinted"
     assert screen.status_bar.status_label.text() == "Paused"
 
     bar.continue_button.click()
@@ -544,11 +576,21 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
 
     panes = [screen.left_pane, screen.centre_pane, screen.right_pane]
     for pane in panes:
-        drawn = [w for w in pane.findChildren((QLabel, QPushButton, QCheckBox, QLineEdit)) if w.isVisible()]
-        for index, first in enumerate(drawn):
-            for other in drawn[index + 1:]:
-                if _rect(first).intersected(_rect(other)).width() > 0:
-                    raise AssertionError(f"{first.text() or first.objectName()} overlaps {other.text() or other.objectName()}")
+        groups: dict = {}
+        for widget in pane.findChildren((QLabel, QPushButton, QCheckBox, QLineEdit)):
+            if not widget.isVisible():
+                continue
+            groups.setdefault(_painter_of(widget, pane), []).append(widget)
+        assert any(groups.values()), f"nothing is drawn in {pane}"
+        for painter, widgets in groups.items():
+            if painter is not pane:
+                assert _rect(pane).contains(_rect(painter)), f"{painter} spills out of its pane"
+            for index, first in enumerate(widgets):
+                for other in widgets[index + 1:]:
+                    if _rect(first).intersected(_rect(other)).width() > 0:
+                        raise AssertionError(
+                            f"{first.text() or first.objectName()} overlaps {other.text() or other.objectName()}"
+                        )
     for pane in panes:
         assert _rect(pane).width() > 0 and _rect(pane).height() > 0
     # The step table fills the centre pane's width, so no cell can spill out of it.

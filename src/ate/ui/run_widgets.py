@@ -182,6 +182,10 @@ _STICKY_STYLE = "background: #c62828; color: white; padding: 5px 10px; font-weig
 #: A paused step's row, the mockup's `.row.failed-hl` / `.b-row.failed-hl`.
 _FAILED_BG = "#fff0f0"
 
+#: The ordinary table row. A cell's background must be set explicitly to clear a tint: an unset
+#: QColor paints it black.
+_ROW_BG = "#ffffff"
+
 #: The mockup's `.b-inline-prompt`: a red-outlined box hugging the failed step.
 _INLINE_PROMPT_STYLE = (
     "FailurePromptBar { background: white; border: 2px solid #c62828; padding: 8px; }"
@@ -300,25 +304,32 @@ def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
     return widget
 
 
-def _mismatch_row_widget(name: str, release: str, files: list[str]) -> QWidget:
-    """A picker row for a schedule whose files mismatch: name, release, then the amber ⚠ line.
+def _schedule_row_widget(name: str, release: str, files: list[str]) -> QWidget:
+    """A usable picker row in the three-pane list: name, Media Release, then the amber ⚠ line.
 
     The three-pane layout puts the mismatch note *in* the row (spec: "errors and mismatches shown
-    inline"), which a single-colour list item cannot do, so the row is three labels on aQWidget
-    styled like the mockup's `.flag`."""
+    inline"), which a single-colour list item cannot do, so the row is labels on a QWidget styled like
+    the mockup's `.it` / `.flag`. A row with nothing to flag is the same widget without the amber line
+    and without the tint: the pane is only 320 px wide, so a plain item's wrapped text would sit in a
+    one-line-tall row and run over the rows below it."""
     widget = QWidget()
-    widget.setStyleSheet(f"background: #fff8e6;")
+    if files:
+        widget.setStyleSheet("background: #fff8e6;")
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(_ROW_MARGIN_X, _ROW_MARGIN_Y, _ROW_MARGIN_X, _ROW_MARGIN_Y)
-    title = QLabel(f"⚠ {name}")
+    title = QLabel(f"⚠ {name}" if files else name)
+    title.setWordWrap(True)
     subtitle = QLabel(release)
+    subtitle.setWordWrap(True)
     subtitle.setStyleSheet(_MUTED_STYLE)
-    note = QLabel("⚠ checksum mismatch: " + ", ".join(files))
-    note.setObjectName("schedule_mismatch")
-    note.setWordWrap(True)
-    note.setStyleSheet("color: #8a5a00; font-size: 12px;")
-    for label in (title, subtitle, note):
-        layout.addWidget(label)
+    layout.addWidget(title)
+    layout.addWidget(subtitle)
+    if files:
+        note = QLabel("⚠ checksum mismatch: " + ", ".join(files))
+        note.setObjectName("schedule_mismatch")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #8a5a00; font-size: 12px;")
+        layout.addWidget(note)
     return widget
 
 
@@ -731,12 +742,13 @@ class SchedulePicker(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, row.name)
             item.setToolTip(row.media_number or "")
             list_widget.addItem(item)
-            if self.inline_mismatches and row.name in self._mismatch_flags:
-                # The three-pane picker names the mismatched files inside the row itself.
-                widget = _mismatch_row_widget(
+            if self.inline_mismatches:
+                # In the three-pane list every usable row is a widget: its name and Media Release
+                # wrap inside the 320 px pane, and a mismatched schedule names its files in the row.
+                widget = _schedule_row_widget(
                     row.name,
                     self._release_labels.get(row.media_number, row.media_number or ""),
-                    [rel_path for rel_path, _e, _c, _m in self._mismatch_flags[row.name]],
+                    [rel_path for rel_path, _e, _c, _m in self._mismatch_flags.get(row.name, ())],
                 )
                 item.setText("")
                 item.setSizeHint(_broken_row_size_hint(widget, list_widget.viewport().width()))

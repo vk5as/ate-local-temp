@@ -49,9 +49,10 @@ from .run_widgets import (
     StepEnabler,
     StepInputWidget,
     _BROKEN_ERR,
-    _HEADER_BG,
     _FAILED_BG,
+    _HEADER_BG,
     _INLINE_PROMPT_STYLE,
+    _ROW_BG,
     _STICKY_STYLE,
     _rollup_text as rollup_text,
     _row_label as row_label,
@@ -61,8 +62,9 @@ from .run_widgets import (
 #: The centre pane's columns. `Enable` carries the step's box (packet 15d); the rest are the mockup's
 #: `.b-thead` cells (prototype line 100).
 COLUMNS = ("Enable", "Step", "Result", "Attempts", "Actual", "Expected", "Message")
-#: Widths that fit the 640 px centre pane of a 1280x800 window without clipping a Result or an Attempt.
-_COLUMN_WIDTHS = (44, 180, 62, 30, 80, 80, 140)
+#: Widths that fit the 640 px centre pane of a 1280x800 window: every header word fits, and the
+#: Message column takes whatever is left.
+_COLUMN_WIDTHS = (46, 165, 62, 60, 80, 80, 130)
 
 
 class StepTable(QWidget):
@@ -262,12 +264,15 @@ class StepTable(QWidget):
             item.setText(text)
 
     def _highlight(self, row: int, paused: bool) -> None:
-        """Give a paused step's row the mockup's `.b-row.failed-hl` tint; clear it otherwise."""
+        """Give a paused step's row the mockup's `.b-row.failed-hl` tint; clear it otherwise.
+
+        An unset `QColor` paints the cell black rather than leaving it alone, so clearing means
+        putting the plain row colour back."""
         for column in range(self.table.columnCount()):
             item = self.table.item(row, column)
             if item is None:
                 continue
-            item.setBackground(QColor(_FAILED_BG) if paused else QColor())
+            item.setBackground(QColor(_FAILED_BG) if paused else QColor(_ROW_BG))
 
     def _paint_prompt(self, seq: Optional[int], result: str, message: str) -> None:
         """Show the inline prompt under the paused step, and the sticky banner above the table."""
