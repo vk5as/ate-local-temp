@@ -3,7 +3,15 @@
 `media-release/` is a Test Definition (`example.atedef`) whose Test Schedules demonstrate Test
 Schedule features: schedule metadata, Step Numbers and `setEnable` defaults, every `Result` value,
 `NOREPORT`, a Lua `ERROR`, `ATE.log` at every level, `print`, `ATE.sleep`, `ATE.addEquipment` and
-reading `ATE.run`. Later packets add Step Inputs in depth, Sub-schedules, Devices and flow control.
+reading `ATE.run`, and every Step Input type and widget. Later packets add Sub-schedules, Devices
+and flow control.
+
+| Schedule | Test Schedule name | What it demonstrates |
+| --- | --- | --- |
+| `schedule_basics.tslua` | Example basics | metadata, Step Numbers, `setEnable`, logging, `ATE.sleep`, `ATE.addEquipment`, `ATE.run`, one blocking `FLOAT` input |
+| `report_results.tslua` | Report every Result | every `Result` value, `NOREPORT`, a Lua `ERROR` |
+| `stop_on_fail.tslua` | Stop on fail | the Stop-on-Fail pause and the Operator's Continue/Abort choice |
+| `step_inputs.tslua` | Step inputs | `ENUM` as `RADIOBUT`, `CHECKBOX` and `PUSHBUT`, `INTEGER` and `FLOAT` with a range, `STRING` with a pattern, a blocking `PROMPT`, a `POLL` read in a loop, and `tooltip`/`orient` |
 
 The checksums in `example.atedef` are written by the real CLI, never by hand:
 
