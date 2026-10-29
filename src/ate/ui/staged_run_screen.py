@@ -39,8 +39,6 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..catalog import include_map, module_map, resolve_schedule_definition, resolve_schedule_path
-from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .run_widgets import (
     FailurePromptBar,
@@ -51,6 +49,7 @@ from .run_widgets import (
     StatusBar,
     StepEnabler,
     StepInputWidget,
+    load_schedule_steps,
     _BROKEN_BG,
     _BROKEN_ERR,
     _FORBIDDEN_CURSOR,
@@ -675,18 +674,7 @@ class StagedRunScreen(QWidget):
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
-        config = self.session.config
-        if config is None:
-            return []
-        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule_name)
-        if definition is None:
-            return []
-        modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the preview host
-        path = resolve_schedule_path(definition, schedule_name)
-        if path is None:
-            return []
-        host = LuaHost(path, modules=modules, includes=include_map(definition))  # packet 15b: the Sub-schedule map
-        return list(host.tree)  # the expanded tree in node order: headers followed by their children
+        return load_schedule_steps(self.session, schedule_name)
 
     # -- running ------------------------------------------------------------
 

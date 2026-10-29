@@ -41,7 +41,8 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.step_inputs import StepInput, value_error
 
-from ..catalog import find_definitions, list_schedule_mismatches, list_schedule_rows
+from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
+from ..engine.lua_host import LuaHost
 from ..run_session.headless import HeadlessRunSession, SessionState
 
 
@@ -362,6 +363,26 @@ def _node_depths(nodes: list[dict]) -> dict[object, int]:
         parent = node.get("parent_node_seq")
         depths[node.get("node_seq")] = 0 if parent is None else depths.get(parent, 0) + 1
     return depths
+
+
+def load_schedule_steps(session: HeadlessRunSession, schedule_name: str) -> list[object]:
+    """The selected schedule's expanded step tree, read without running it (packets 15b, 15d).
+
+    Both layouts preview the same tree: the header rows and the Test Steps beneath them, in runner
+    seq order, each carrying its own Step Number, name, depth and validated Step Input
+    declarations. No schedule is executed here — the LuaHost only loads the file."""
+    config = session.config
+    if config is None or not schedule_name:
+        return []
+    definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule_name)
+    if definition is None:
+        return []
+    modules = module_map(definition)  # packet 06a: forward the release's require'd module map
+    path = resolve_schedule_path(definition, schedule_name)
+    if path is None:
+        return []
+    host = LuaHost(path, modules=modules, includes=include_map(definition))
+    return list(host.tree)
 
 
 def _short_sha(value: Optional[str]) -> str:
