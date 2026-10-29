@@ -843,6 +843,35 @@ def _dark_pixel_count(image: QImage) -> int:
     )
 
 
+def test_a_retried_step_shows_its_attempts_on_both_layouts(qapp, tmp_path):
+    """A step retried after a pause shows its attempt count in the staged list and the centre table."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    staged, three = window.staged_screen, window.three_pane_screen
+
+    _pick_and_start(qapp, window, "Passes on retry schedule")
+    staged.run_view.failure_prompt_bar.retry_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+
+    rows = _staged_step_texts(staged)
+    assert any("2 Attempts" in row for row in rows), rows
+    assert any("PASS" in row for row in rows), rows
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    assert _three_step_results(three).get(0) == ("PASS", "2"), _three_step_results(three)
+
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    assert any("2 Attempts" in row for row in _staged_step_texts(staged)), "the count vanished on the way back"
+    _finish(qapp, window)
+
+
 def test_the_three_screenshot_states_are_saved_for_review(qapp, tmp_path, fake_pdf):
     """The View menu with the Layout choice, a mid-run three-pane switch, and the switch back."""
     SHOTS.mkdir(parents=True, exist_ok=True)
