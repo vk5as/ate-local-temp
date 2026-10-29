@@ -6,10 +6,10 @@
 
 **Blocked by:** 30a (GUI launch), 25b (Layout switching)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] After FINISHED, the staged layout keeps the window at its size. At 1280x800 the step list, the log/summary tabs and the status bar stay visible, and the step list is at least as tall as it was during the run. Follow the mockup (`prototype/run-screen`, variant C, "New run" in the finished state) for how the next run is offered.
-- [ ] The three-pane layout is checked for the same problem and keeps its size too.
-- [ ] pytest-qt tests: after a 20-step run finishes in a shown 1280x800 main window, the window size is unchanged, the status bar is inside the window, and the step list viewport is at least its running height.
+- [x] After FINISHED, the staged layout keeps the window at its size. At 1280x800 the step list, the log/summary tabs and the status bar stay visible, and the step list is at least as tall as it was during the run. Follow the mockup (`prototype/run-screen`, variant C, "New run" in the finished state) for how the next run is offered.
+- [x] The three-pane layout is checked for the same problem and keeps its size too.
+- [x] pytest-qt tests: after a 20-step run finishes in a shown 1280x800 main window, the window size is unchanged, the status bar is inside the window, and the step list viewport is at least its running height.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/` (`run-screen.md`); the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes.
