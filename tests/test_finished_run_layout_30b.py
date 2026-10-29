@@ -474,9 +474,10 @@ def test_30b_review_screenshots(qapp, tmp_path, fake_pdf):
 
     Every other test in this file writes its shots under ``tmp_path``; this one is opt-in so the suite
     stays hermetic without it."""
-    shots = Path(os.environ.get("ATE_30B_SHOTS", ""))
-    if not shots:
+    shots_env = os.environ.get("ATE_30B_SHOTS", "")
+    if not shots_env:
         pytest.skip("review screenshots are opt-in: set ATE_30B_SHOTS to a directory")
+    shots = Path(shots_env)
     shots.mkdir(parents=True, exist_ok=True)
 
     def shot(window, name) -> None:
