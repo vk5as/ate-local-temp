@@ -362,13 +362,10 @@ def test_installed_wheel_runs_ate_version(wheel_build) -> None:
 
 
 def test_the_source_docs_describe_a_cli_that_exists() -> None:
-    """The docs must not promise a GUI: `ate` with no subcommand is not a launcher yet.
-
-    The application shell that makes bare `ate` open the GUI is packet 30a.
-    """
+    """The docs describe the CLI that exists, including bare `ate` opening the GUI (packet 30a)."""
     text = DOCS.read_text(encoding="utf-8")
     assert "ate --version" in text, "the docs must show how to check the install"
-    assert "opens the GUI" not in text, "there is no GUI launcher yet (packet 30a adds it)"
+    assert "opens the GUI" in text, "bare `ate` opens the GUI (packet 30a)"
     assert "not slow" in text and "Skip both" not in text, "only the install test is marked slow"
     assert "must be run as root" not in text, "setup runs unprivileged; it just skips group and ownership"
     assert "python -m build" in text, "the docs still describe the wheel build"
