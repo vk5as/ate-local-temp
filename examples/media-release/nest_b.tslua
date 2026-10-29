@@ -1,9 +1,9 @@
 -- Example Media Release: the middle of the nested chain. It is itself a Sub-schedule and includes
--- another one, so its steps carry "4.2." (flow.tslua's prefix plus its own) and nest_c's carry
--- "4.2.2.".
+-- another one, so its steps carry "4.2." (flow.tslua's prefix plus its own) while nest_c's prefix
+-- stacks to "4.2.2." and its one step is numbered "4.2.2.1.".
 
 return ScheduleParams("Nested B", "the middle Sub-schedule, which includes another")
-  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pre-test of nest B") end)
+  :setPreTestAction(function() ATE.log(Log.INFO, "pre-test of nest B") end)
   :setPostTestAction(function(passFail) ATE.log(Log.INFO, "post-test of nest B") end)
   :setSchedule({
     -- 1. Its own step, under the prefix the including header set.

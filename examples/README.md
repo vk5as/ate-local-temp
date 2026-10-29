@@ -20,20 +20,20 @@ The Sub-schedules it includes are `hidden`, so the Operator never picks them as 
 
 | File | Included from | What it demonstrates |
 | --- | --- | --- |
-| `sub_channel.tslua` | `flow.tslua`, twice and one more time under a disabled header | `keyvals` per include instance, `setPrefix`, Pre/Post-test Actions on an included schedule |
+| `sub_channel.tslua` | `flow.tslua`, four times: three enabled, one under a disabled header | `keyvals` per include instance, `setPrefix`, Pre/Post-test Actions on an included schedule |
 | `nest_a.tslua` | `flow.tslua` | a nested include, and sharing one required module across the tree |
 | `nest_b.tslua` | `nest_a.tslua` | prefixes stacking through nesting |
-| `nest_c.tslua` | `nest_b.tslua` | the deepest level, whose Actions run first in the Post-test phase |
+| `nest_c.tslua` | `nest_b.tslua` | the deepest level, whose Actions run before the rest of the chain's in the Post-test phase |
 
 Helper modules, loaded with the standard `require`:
 
-| File | Module name | How the name is decided |
-| --- | --- | --- |
-| `lib/attempts.lua` | `lib.attempts` | derived from the path |
-| `modules/helper.lua` | `example_helper` | the `module` field in `example.atedef` |
+| File | Module name | How the name is decided | Required by |
+| --- | --- | --- | --- |
+| `lib/attempts.lua` | `lib.attempts` | derived from the path | `flow.tslua`, `sub_channel.tslua`, `nest_a.tslua` |
+| `modules/helper.lua` | `example_helper` | the `module` field in `example.atedef` | `flow.tslua`, `sub_channel.tslua` |
 
 Both are required by more than one schedule in the tree, and `require` is cached for the Test Run,
-so all of them see one shared counter - which is what the harness asserts.
+so every schedule that loads one sees the same table - the run-wide use counts the harness asserts.
 
 The checksums in `example.atedef` are written by the real CLI, never by hand:
 

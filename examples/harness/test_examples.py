@@ -8,8 +8,9 @@ step that raises records ERROR, the log levels and Equipment are recorded, the s
 default stays NOTRUN until the Operator enables it, Stop on Fail ends both ways, every Step Input
 type and widget is declared, answered and recorded, and every run writes its report. Packet 29c
 adds the flow schedule: a step that fails on Attempt 1 and passes on a scripted Retry, Pre-test and
-Post-test Actions across a Sub-schedule tree, a hidden Sub-schedule included twice with different
-keyvals and prefixes, a nested include, a disabled header, and modules shared between the includes.
+Post-test Actions across a Sub-schedule tree, a hidden Sub-schedule included more than once with
+different keyvals and prefixes, a nested include, a disabled header, and modules shared between the
+includes.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -411,33 +412,52 @@ def test_flow_with_continue_on_fail_never_prompts(records: dict[str, dict[str, A
 
 def test_pre_and_post_actions_run_depth_first_across_the_tree(records: dict[str, dict[str, Any]]) -> None:
     """Every Pre-test Action runs before the first step, depth first with parents first, and the
-    Post-test Actions run afterwards in exactly the reverse order (test-schedule-format.md)."""
+    Post-test Actions run afterwards in exactly the reverse order (test-schedule-format.md).
+
+    The order is only provable because flow.tslua has an enabled include (step 6) AFTER the nested
+    chain: depth first walks nest A -> B -> C before channel 4's Actions, while a walk that takes
+    every sibling include before going down - breadth first - runs channel 4 before nest B and C.
+    Asserted by schedule name and keyvals, not by the instance numbering that happens to match DFS."""
     for key in ("flow_retry", "flow_continue"):
         record = records[key]
         actions = record["actions"]
         pre = [a for a in actions if a["phase"] == "pre"]
         post = [a for a in actions if a["phase"] == "post"]
         assert all(a["outcome"] == "ok" for a in actions)
-        assert len(pre) == len(post) == 6, "the top level plus five Sub-schedule instances"
-        assert [a["run_order"] for a in pre] == [0, 1, 2, 3, 4, 5]
-        assert [a["run_order"] for a in post] == [0, 1, 2, 3, 4, 5]
-        # 0 top level, 1 and 2 the two Channel includes, 3/4/5 the nested chain, each before its own
-        # includes, in step order.
-        assert [a["instance_seq"] for a in pre] == [0, 1, 2, 3, 4, 5]
-        assert [a["instance_seq"] for a in post] == [5, 4, 3, 2, 1, 0]
+        assert len(pre) == len(post) == 7, "the top level plus six Sub-schedule instances that run steps"
+        assert [a["run_order"] for a in pre] == list(range(7))
+        assert [a["run_order"] for a in post] == list(range(7))
+
+        by_instance = {i["instance_seq"]: (i["schedule_name"], json.loads(i["keyvals"]).get("channel"))
+                       for i in record["schedule_instances"]}
+        depth_first = [
+            ("Flow and retry", None),   # the parent, before any of its includes
+            ("Channel check", 1),       # step 2, then step 3: includes in step order
+            ("Channel check", 2),
+            ("Nested A", None),         # step 4 ...
+            ("Nested B", None),         # ... walked all the way down ...
+            ("Nested C", None),         # ... before the include that comes after it
+            ("Channel check", 4),       # step 6
+        ]
+        assert [by_instance[a["instance_seq"]] for a in pre] == depth_first
+        assert [by_instance[a["instance_seq"]] for a in post] == list(reversed(depth_first))
 
         # The Sub-schedule under the disabled header runs no step at all, so both of its Actions are
         # skipped even though its instance is recorded.
-        assert {i["instance_seq"] for i in record["schedule_instances"]} == {0, 1, 2, 3, 4, 5, 6}
+        assert {i["instance_seq"] for i in record["schedule_instances"]} == set(range(8))
         assert all(a["instance_seq"] != 6 for a in actions), "instance 6 is disabled end to end"
 
         logs = record["logs"]
         phase_lines = [line for line in logs if line["action_seq"] is not None]
-        assert [line["text"] for line in phase_lines[:6]] == [
-            "top-level pre-test sees PASS", "pre-test for channel 1 (PASS)", "pre-test for channel 2 (PASS)",
-            "pre-test of nest A", "pre-test of nest B", "pre-test of nest C",
+        assert [line["text"] for line in phase_lines[:7]] == [
+            "top-level pre-test: calibration ready", "pre-test for channel 1", "pre-test for channel 2",
+            "pre-test of nest A", "pre-test of nest B", "pre-test of nest C", "pre-test for channel 4",
         ]
-        assert [line["text"] for line in phase_lines[6:]] == [
+        assert all("(" not in line["text"] for line in phase_lines[:7]), (
+            "a Pre-test Action takes no argument: nothing has run yet, so there is no result to pass"
+        )
+        assert [line["text"] for line in phase_lines[7:]] == [
+            f"post-test for channel 4 ({record['run']['result']})",
             "post-test of nest C", "post-test of nest B", "post-test of nest A",
             f"post-test for channel 2 ({record['run']['result']})",
             f"post-test for channel 1 ({record['run']['result']})",
@@ -454,7 +474,7 @@ def test_pre_and_post_actions_run_depth_first_across_the_tree(records: dict[str,
         )
 
 
-def test_a_hidden_sub_schedule_included_twice_gets_its_own_keyvals_and_prefix(records: dict[str, dict[str, Any]]) -> None:
+def test_a_hidden_sub_schedule_included_more_than_once_gets_its_own_keyvals_and_prefix(records: dict[str, dict[str, Any]]) -> None:
     """The expanded tree, its headers, and the per-instance keyvals and prefixes of one hidden file."""
     record = records["flow_retry"]
     tree = [(node["step_number"], node["kind"], node["step_name"], node["result"]) for node in record["nodes"]]
@@ -475,7 +495,10 @@ def test_a_hidden_sub_schedule_included_twice_gets_its_own_keyvals_and_prefix(re
         ("5.", "header", "Channel not fitted", None),
         ("5.1.", "step", "Shared state 3", "NOTRUN"),
         ("5.2.", "step", "Output off 3", "NOTRUN"),
-        ("6.", "step", "Device params, not opened", "PASS"),
+        ("6.", "header", "Channel 4", None),
+        ("6.1.", "step", "Shared state 4", "PASS"),
+        ("6.2.", "step", "Output off 4", "PASS"),
+        ("7.", "step", "Device params, not opened", "PASS"),
     ]
     # A header is not a Test Step: no Result, no Attempt, and its number comes from the parent's
     # numbering, not its own setPrefix.
@@ -486,14 +509,16 @@ def test_a_hidden_sub_schedule_included_twice_gets_its_own_keyvals_and_prefix(re
         ("2.", {"channel": 1, "label": "left rail"}),
         ("3.", {"channel": 2, "label": "right rail"}),
         ("5.", {"channel": 3, "label": "not fitted"}),
+        ("6.", {"channel": 4, "label": "rear rail"}),
     ]
 
     # The keyvals show up in the step's own recorded Message, and the prefixes in its Step Number.
     by_node = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
     assert by_node[2]["msg"] == "left rail channel 1 is shared call 1"
     assert by_node[5]["msg"] == "right rail channel 2 is shared call 2"
+    assert by_node[17]["msg"] == "rear rail channel 4 is shared call 3"
     assert [(node["step_number"], node["instance_seq"]) for node in record["nodes"]
-            if node["step_name"].startswith("Shared state")] == [("2.1.", 1), ("3.1.", 2), ("5.1.", 6)]
+            if node["step_name"].startswith("Shared state")] == [("2.1.", 1), ("3.1.", 2), ("5.1.", 6), ("6.1.", 7)]
 
 
 def test_a_nested_include_expands_and_a_disabled_header_runs_nothing(records: dict[str, dict[str, Any]]) -> None:
@@ -520,12 +545,14 @@ def test_a_nested_include_expands_and_a_disabled_header_runs_nothing(records: di
 
 
 def test_required_modules_share_one_state_across_the_includes(records: dict[str, dict[str, Any]]) -> None:
-    """require is cached for the Test Run, so flow.tslua, sub_channel.tslua (twice) and nest_a.tslua
-    all see the same lib.attempts table: one counter, one set of include calls."""
+    """require is cached for the Test Run, so flow.tslua, sub_channel.tslua and nest_a.tslua see one
+    lib.attempts table, and flow.tslua plus every live channel include see one example_helper."""
     record = records["flow_retry"]
     by_node = {attempt["node_seq"]: attempt for attempt in record["attempts"]}
-    assert (by_node[2]["actual"], by_node[5]["actual"]) == ("1", "2"), "one counter, two includes"
-    assert (by_node[2]["expected"], by_node[5]["expected"]) == ("1", "2")
+    assert (by_node[2]["actual"], by_node[5]["actual"], by_node[17]["actual"]) == ("1", "2", "3"), (
+        "one counter across the three includes that ran"
+    )
+    assert (by_node[2]["expected"], by_node[5]["expected"], by_node[17]["expected"]) == ("1", "2", "4")
     # nest_a.tslua reads the same table the top-level step incremented twice through its Retry.
     assert (by_node[8]["actual"], by_node[8]["expected"]) == ("2", "2")
 
@@ -533,9 +560,17 @@ def test_required_modules_share_one_state_across_the_includes(records: dict[str,
     other = {attempt["node_seq"]: attempt for attempt in records["flow_continue"]["attempts"]}
     assert other[8]["actual"] == "1"
 
-    # The module listed with an explicit module name is the one the step required: its describe()
-    # built the line from params the ate.devices builder made.
-    assert any(line["text"] == "SCPI instrument at 127.0.0.1:5025" for line in record["logs"])
+    # example_helper is required by two schedules, and its use count runs across the whole run: each
+    # channel include that ran used the same table, and flow.tslua's own step is use 4. The include
+    # under the disabled header ran no step, so it never counted.
+    helper_lines = [line["text"] for line in record["logs"] if " probe at 127.0.0.1:" in line["text"]]
+    assert helper_lines == [
+        "channel 1 probe at 127.0.0.1:5021 (helper 1.0, use 1)",
+        "channel 2 probe at 127.0.0.1:5022 (helper 1.0, use 2)",
+        "channel 4 probe at 127.0.0.1:5024 (helper 1.0, use 3)",
+    ]
+    assert any(line["text"] == "SCPI instrument at 127.0.0.1:5025 (helper 1.0, use 4)"
+              for line in record["logs"]), "the same helper table, counted once for the whole run"
 
     used = {file["path"]: file for file in record["run_files"]}
     assert {"flow.tslua", "sub_channel.tslua", "nest_a.tslua", "nest_b.tslua", "nest_c.tslua",

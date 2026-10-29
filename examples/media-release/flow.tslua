@@ -5,10 +5,13 @@
 --     kept in a required module (ATE gives a step no way to read its own Attempt number).
 --   * Pre-test and Post-test Actions on the top-level schedule and on every included Sub-schedule:
 --     all Pre-test Actions run before the first step, depth first, parent first; all Post-test
---     Actions run afterwards in the reverse order (test-schedule-format.md, "Flow control").
---   * Sub-schedules: one hidden .tslua included twice with different keyvals and setPrefix, a
---     nested include (nest_a -> nest_b -> nest_c), and a header whose setEnable(false) disables
---     everything beneath it - which also skips that Sub-schedule's Actions.
+--     Actions run afterwards in the reverse order (test-schedule-format.md, "Flow control"). A
+--     Pre-test Action takes no argument; only the Post-test one gets the run's overall result.
+--   * Sub-schedules: one hidden .tslua included more than once with different keyvals and
+--     setPrefix, a nested include (nest_a -> nest_b -> nest_c), and a header whose setEnable(false)
+--     disables everything beneath it - which also skips that Sub-schedule's Actions.
+--   * The ordering is testable because step 6 is an enabled include AFTER the nested chain: depth
+--     first runs nest B and nest C's Actions before channel 4's, a level-by-level walk would not.
 --   * Modules: require with the derived module name (lib/attempts.lua -> "lib.attempts"), require
 --     with an explicit module name in the Test Definition (modules/helper.lua -> "example_helper"),
 --     and the bundled require("ate.devices") builders used without opening anything.
@@ -25,8 +28,8 @@ return ScheduleParams("Flow and retry", "Retry, Pre/Post-test Actions, Sub-sched
   :setDocId("MR-EXAMPLE-FLOW")
   :setDocRev("1.0")
   :setStopOnFail(true)
-  -- Runs before any step, and again after the last one with the run's overall result.
-  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "top-level pre-test sees " .. passFail) end)
+  -- The Pre-test Action takes no argument; the Post-test one gets the run's overall result.
+  :setPreTestAction(function() ATE.log(Log.INFO, "top-level pre-test: calibration ready") end)
   :setPostTestAction(function(passFail) ATE.log(Log.INFO, "top-level post-test sees " .. passFail) end)
   :setSchedule({
     -- 1. Attempt 1 fails, so the run pauses; the Operator's Retry runs the action again and it passes.
@@ -56,9 +59,15 @@ return ScheduleParams("Flow and retry", "Retry, Pre/Post-test Actions, Sub-sched
       :setEnable(false)
       :setInclude("sub_channel.tslua", { channel = 3, label = "not fitted" }):setPrefix("5."),
 
-    -- 6. the ate.devices builders build a params table only; nothing is opened, so no Device I/O is
+    -- 6. another enabled include, deliberately AFTER the nested chain: depth first walks all the way
+    --    down nest A -> B -> C before this one's Actions, while a level-by-level walk would run this
+    --    channel before nest B and nest C. That is what makes the Pre/Post-test order assertable.
+    StepParams("Channel 4"):setStepNo("6.")
+      :setInclude("sub_channel.tslua", { channel = 4, label = "rear rail" }):setPrefix("6."),
+
+    -- 7. the ate.devices builders build a params table only; nothing is opened, so no Device I/O is
     --    involved (opening Devices is packet 29d).
-    StepParams("Device params, not opened"):setStepNo("6.")
+    StepParams("Device params, not opened"):setStepNo("7.")
       :setAction(function()
         local params = devices.Tcp("127.0.0.1", 5025):setTimeout(2.5)
         ATE.log(Log.INFO, helper.describe("SCPI instrument", params.host, params.port))

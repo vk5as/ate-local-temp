@@ -6,6 +6,8 @@
 -- what the harness asserts about state shared across includes.
 local state = { attempts = 0, includes = 0 }
 
+-- Run-global: nextAttempt counts its own calls across the whole Test Run, not the Attempt number of
+-- whichever step calls it - the spec gives a step no way to read its own Attempt number.
 local function nextAttempt()
   state.attempts = state.attempts + 1
   return state.attempts
