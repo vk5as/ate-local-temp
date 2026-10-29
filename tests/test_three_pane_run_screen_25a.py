@@ -490,6 +490,36 @@ def test_a_retry_shows_the_attempt_count_in_the_table(qapp, tmp_path):
     _settle(qapp, session)
 
 
+def test_unrun_steps_have_a_blank_attempts_cell(qapp, tmp_path):
+    """Packet 25a review: the Attempts column says nothing about a step that has never run.
+
+    A plain "0" reads like a recorded zero-attempt Attempt; a blank cell reads like "not yet",
+    which is what the column means before the worker reaches the step."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, "Fail then pass schedule")
+    screen.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if screen.table.banner.isVisible():
+            break
+        time.sleep(0.01)
+    assert screen.table.banner.isVisible(), "the run never paused on its failing step"
+    attempts = COLUMNS.index("Attempts")
+    _, failed = _row_of(screen, "1.")
+    _, next_step = _row_of(screen, "2.")
+    assert screen.table.cell(failed, attempts) == "1", "the run step's Attempt is not counted"
+    assert screen.table.cell(next_step, attempts) == "", f"the unrun step claims {screen.table.cell(next_step, attempts)!r} attempts"
+    screen.table._prompt_bars[0].continue_button.click()
+    assert _wait_finished(qapp, session)
+    assert screen.table.cell(next_step, attempts) == "1"
+    _settle(qapp, session)
+
+
 def test_counts_are_live_and_the_log_shows_info_and_above(qapp, tmp_path):
     """The left pane tallies Results as the run goes, and the log pane keeps DEBUG out."""
     env = write_ate_env(tmp_path)

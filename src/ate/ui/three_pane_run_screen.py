@@ -251,7 +251,8 @@ class StepTable(QWidget):
             result = paused_result if seq == paused_seq else (node.get("result") if node else "")
             attempts_count = (node.get("attempt_count") if node else 0) or len(tried)
             self._set_cell(row, 2, str(result or ""))
-            self._set_cell(row, 3, str(attempts_count))
+            # An unrun step has no Attempt to count: its cell stays blank rather than "0".
+            self._set_cell(row, 3, str(attempts_count) if attempts_count else "")
             self._set_cell(row, 4, str(last.get("actual") or "") if last else "")
             self._set_cell(row, 5, str(last.get("expected") or "") if last else "")
             self._set_cell(row, 6, str(last.get("msg") or "") if last else "")
