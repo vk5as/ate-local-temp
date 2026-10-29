@@ -39,12 +39,13 @@ from PyQt6.QtWidgets import (
 
 from ate.engine.run_engine import RunEngine
 
-from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
+from ..run_session.headless import HeadlessRunSession, SessionState
 from .run_widgets import (
     FailurePromptBar,
     LogPane,
     MismatchConfirmation,
     RunFieldsForm,
+    RunScreenMixin,
     SchedulePicker,
     StatusBar,
     StepEnabler,
@@ -73,10 +74,6 @@ from .run_widgets import (
     _short_sha,
     _wrapped_height,
 )
-
-#: The staged screen's log pane is the shared :class:`~ate.ui.run_widgets.LogPane` (packet 25a).
-_LogPane = LogPane
-
 
 def _append_input_rows(list_widget: QListWidget, widgets: list["StepInputWidget"], depth: int) -> list[QListWidgetItem]:
     """Add one row per Step Input widget, indented under the step that declared it.
@@ -357,8 +354,8 @@ class RunView(QWidget):
         # Ticket 08's two log views: the Log pane shows INFO and above; the Debug window is a
         # separate pane showing every level. Both are filled from session.store.log_lines() in
         # refresh(), never computed here.
-        self.log_pane = _LogPane("Log — INFO and above")
-        self.debug_window = _LogPane("Debug — every level")
+        self.log_pane = LogPane("Log — INFO and above")
+        self.debug_window = LogPane("Debug — every level")
 
         layout.addWidget(self.state_header)
         layout.addWidget(self.abort_button)
@@ -539,13 +536,15 @@ class RunView(QWidget):
 _FLAG_STYLE = "background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px;"
 
 
-class StagedRunScreen(QWidget):
+class StagedRunScreen(RunScreenMixin, QWidget):
     """A staged Run screen bound to one :class:`HeadlessRunSession`.
 
     Three setup stages (UUT & Operator, Test Schedule, Steps & options) live in a
     :class:`QStackedWidget`; the Run view sits below it and is shown once a run starts.
-    The session's ``state_changed`` signal drives every update, so starting a run never
+    The session's `state_changed` signal drives every update, so starting a run never
     blocks this thread — the worker reports progress through queued signals that land here.
+    The run-side handlers are the shared :class:`~ate.ui.run_widgets.RunScreenMixin`; this
+    class only arranges the stages (packet 25a review).
     """
 
     def __init__(self, session: HeadlessRunSession, confirm_choice: Optional[Callable[[MismatchConfirmation], None]] = None, clock: Optional[Callable[[], datetime]] = None) -> None:
@@ -589,6 +588,17 @@ class StagedRunScreen(QWidget):
         self.test_schedule_stage = TestScheduleStage(session)
         self.steps_options_stage = StepsOptionsStage(self.session)
         self.run_view = RunView(self.session)
+        # The shared run handlers (packet 25a) read these names on either layout: the Operator's
+        # form, the picker, the stop-on-fail pair, the line a refused Start writes on, the Start
+        # button and the two log panes. They are the stage widgets themselves, not copies.
+        self.fields = self.uut_operator_stage
+        self.picker = self.test_schedule_stage
+        self.stop_on_fail_radio = self.steps_options_stage.stop_on_fail_radio
+        self.continue_all_radio = self.steps_options_stage.continue_all_radio
+        self.error_label = self.steps_options_stage.error_label
+        self.start_button = self.steps_options_stage.run_button
+        self.log_pane = self.run_view.log_pane
+        self.debug_window = self.run_view.debug_window
         # Disabled until a run starts; _on_state_changed enables it only while STARTED. The session's
         # initial IDLE emit precedes this connection, so set the default here explicitly.
         self.run_view.abort_button.setEnabled(False)
@@ -688,78 +698,6 @@ class StagedRunScreen(QWidget):
         self.run_view.show()
         self.show()
 
-    def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
-        """Ask the Operator what to do with mismatched files before the run starts.
-
-        No mismatch means no confirmation at all (spec: the run-start confirmation only appears on a
-        mismatch), so this returns ``None`` and Start runs straight through. Otherwise the dialog lists
-        every file as `expected …, found …` and, with `database.storeMismatchedFiles` = `ask`, offers
-        the "Store mismatched files with this Test Run" checkbox ticked by default; `always`/`never`
-        have no checkbox, only what will happen. Returns the store decision, or ``None`` if the
-        Operator cancelled — in which case no run starts. ``self.confirm_choice`` lets a test click
-        OK/Cancel itself instead of a human, so no test ever blocks on ``exec()``."""
-        if not mismatches:
-            return None
-        labels = self.test_schedule_stage.release_labels
-        release = labels.get(mismatches[0][3], mismatches[0][3] or "")
-        setting = self.session.config.store_mismatched_files if self.session.config is not None else "ask"
-        stage = self.uut_operator_stage
-        details = ", ".join(part for part in (
-            f"UUT {stage.serial_edit.text().strip()}" if stage.serial_edit.text().strip() else "",
-            f"Project {stage.project_edit.text().strip()}" if stage.project_edit.text().strip() else "",
-            f"Operator {stage.operator_edit.text().strip()}" if stage.operator_edit.text().strip() else "",
-        ) if part)
-        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting, details)
-        self._confirm_dialog = dialog
-        if self.confirm_choice is not None:
-            self.confirm_choice(dialog)
-        else:
-            dialog.exec()
-        return dialog.store_choice()
-
-    def begin_run(self) -> None:
-        """Capture the Operator's fields and start a run. Clears nothing on purpose.
-
-        Operator, UUT Type and serial are only pushed when a widget is non-empty, so a new run keeps
-        every field it did not change; Project is pushed as typed, because a blank Project must
-        refuse the run rather than carry an earlier one (spec 08). The run then starts through
-        ``session.start()`` and the Run view is shown. This never blocks: ``start()`` queues its
-        signals and returns immediately.
-        """
-        operator = self.uut_operator_stage.operator_edit.text().strip()
-        project = self.uut_operator_stage.project_edit.text().strip()
-        uut_type = self.uut_operator_stage.uut_type_edit.text().strip()
-        serial = self.uut_operator_stage.serial_edit.text().strip()
-        # The stop-on-fail choice is a boolean toggle, so it always applies (default True).
-        self.session.set_stop_on_fail(self.steps_options_stage.stop_on_fail_radio.isChecked())
-
-        if operator:
-            self.session.set_operator(operator)
-        # Project is pushed even when blank: a Test Run cannot start without one (spec 08), so the
-        # field's content is exactly what the run records rather than whatever an earlier run left.
-        self.session.set_project(project)
-        if uut_type:
-            self.session.set_uut_type(uut_type)
-        if serial:
-            self.session.set_uut_serial(serial)
-
-        mismatches = self.session.pending_mismatches()
-        store = self._confirm_store_choice(mismatches)
-        if mismatches and store is None:
-            return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
-        try:
-            engine = self.session.start(store_mismatched=store)
-        except SessionError as exc:
-            # The schedule picked before this stage broke in the meantime (packet 05b review): name
-            # the reason on the stage the Operator is looking at rather than raising out of the
-            # button handler, and take Start away so it cannot be clicked again.
-            self.steps_options_stage.error_label.setText(f"⛔ {exc}")
-            self.steps_options_stage.run_button.setEnabled(False)
-            return
-        self._engine = engine
-        self._started_at = self._clock()
-        # Switch to the Run view and hide the setup stages for the duration of the run.
-        self._reveal_run_view()
 
     def _request_abort(self) -> None:
         """The Abort button ends the current run — answering a pending prompt or stopping between steps.
@@ -882,38 +820,8 @@ class StagedRunScreen(QWidget):
         else:
             view.status_current.setText(f"Current {_format_elapsed(now - self._item_started_at)}")
 
-    def _on_action_started(self, phase: str, done: int, total: int) -> None:
-        """A Pre-/Post-test Action has begun: move its tally and restart the current-item timer."""
-        now = self._clock()
-        if phase == "pre":
-            self._pre_counts = (done, total)
-        else:
-            self._post_counts = (done, total)
-        self._item_started_at = now
-        self._update_header(now=now)
 
-    def _on_step_started(self, node_seq: int) -> None:
-        """A Test Step Attempt — or a Retry of one — has begun.
 
-        ``node_seq`` is the step that started: the Steps tally counts each distinct step once, so a
-        Retry restarts the current-item timer without counting the step twice (packet 14d)."""
-        now = self._clock()
-        self._started_steps.add(node_seq)
-        self._item_started_at = now
-        self._update_header(now=now)
-
-    def _enabled_step_count(self, steps: list[object]) -> int:
-        """How many expanded rows are Test Steps this run will execute (the Steps tally's total).
-
-        Header rows are not steps, and an Operator toggle (packet 11a) beats the row's :setEnable()
-        default exactly as :meth:`RunEngine._enabled` decides."""
-        overrides = self.session.node_enables or {}
-        return sum(
-            1
-            for seq, step in enumerate(steps)
-            if not getattr(step, "is_header", False)
-            and overrides.get(seq, bool(getattr(step, "default_enabled", getattr(step, "enabled", True))))
-        )
 
     # -- Stop-on-Fail prompt (packet 12d) -------------------------------------
 
@@ -938,11 +846,6 @@ class StagedRunScreen(QWidget):
             return steps[node_seq]
         return None
 
-    def _attempt_row(self, node_seq: int, attempt_no: int) -> Optional[dict]:
-        """The Attempt row a pause was raised on — its result and message, read from the store."""
-        run_uuid = self.session.run_uuid
-        if run_uuid is None:
-            return None
         for row in self.session.store.attempts(run_uuid):
             if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
                 return row
@@ -1019,6 +922,10 @@ class StagedRunScreen(QWidget):
 
     # -- Step Inputs (ticket 10a) ---------------------------------------------
 
+    def step_input_widgets(self) -> dict[int, list[StepInputWidget]]:
+        """The Run view's Step Input widgets, keyed by the seq of the step that declared each one."""
+        return self.run_view.input_widgets
+
     def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
         """The worker is waiting on this step's n-th input, so its widget becomes live.
 
@@ -1027,7 +934,7 @@ class StagedRunScreen(QWidget):
         puts the cursor in the input that is currently asking, which `activate` does. Nothing here
         decides whether the input is answerable — the session announced it, so the layout renders it.
         """
-        widget = self.run_view.input_widget(node_seq, index)
+        widget = self.input_widget(node_seq, index)
         if widget is None:
             return
         widget.activate(attempt_no)
@@ -1041,11 +948,6 @@ class StagedRunScreen(QWidget):
             if widget.declaration.type == "POLL":
                 widget.deactivate()
 
-    def _on_input_answered(self, node_seq: int, attempt_no: int, index: int, value: object) -> None:
-        """An answer arrived through the session: show it on the widget and close it."""
-        widget = self.run_view.input_widget(node_seq, index)
-        if widget is not None:
-            widget.answer(value)
 
     # -- schedule list ------------------------------------------------------
 

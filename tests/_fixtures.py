@@ -907,24 +907,35 @@ def add_long_schedule(tmp_path: Path, steps: int = 60, fail_at: int = 30) -> str
 
 
 def add_header_schedule(tmp_path: Path) -> str:
-    """Add a schedule with two Sub-schedule headers, each holding one Test Step.
+    """Add a schedule with two Sub-schedule headers: one over two Test Steps, one over one.
 
-    The headers are `setInclude` rows (packet 15b) over a child file in the same Media Release, so
-    the step table has a header box whose state is derived from the steps below it."""
+    The headers are `setInclude` rows (packet 15b) over child files in the same Media Release, so the
+    step table has boxes derived from the rows beneath them, and the header with two children can
+    read part-ticked."""
     defs = tmp_path / "defs"
+    pair = (
+        'return ScheduleParams("Pair sub-schedule", "two steps under one header")\n'
+        "  :setSchedule({\n"
+        '    StepParams("measure a"):setStepNo("1.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "a ok") end),\n'
+        '    StepParams("measure b"):setStepNo("2.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "b ok") end),\n'
+        "  })\n"
+    )
     child = (
         'return ScheduleParams("Channel sub-schedule", "one step per channel")\n'
         "  :setSchedule({\n"
         '    StepParams("measure"):setStepNo("1.")\n'
-        '      :setAction(function() ATE.report(Result.PASS, "channel " .. (kv.channel or 0)) end),\n'
+        '      :setAction(function() ATE.report(Result.PASS, "channel ok") end),\n'
         "  })\n"
     )
+    _append_file(defs, "pair.tslua", pair)
     _append_file(defs, "channel.tslua", child)
     parent = (
-        'return ScheduleParams("Sub-schedule header schedule", "two headers, one step each")\n'
+        'return ScheduleParams("Sub-schedule header schedule", "two headers over three steps")\n'
         "  :setSchedule({\n"
-        '    StepParams("channel 1"):setStepNo("2."):setPrefix("2."):setInclude("channel.tslua", { channel = 1 }),\n'
-        '    StepParams("channel 2"):setStepNo("3."):setPrefix("3."):setInclude("channel.tslua", { channel = 2 }),\n'
+        '    StepParams("pair header"):setStepNo("2."):setPrefix("2."):setInclude("pair.tslua"),\n'
+        '    StepParams("channel 1"):setStepNo("3."):setPrefix("3."):setInclude("channel.tslua", { channel = 1 }),\n'
         "  })\n"
     )
     _append_file(defs, "headers.tslua", parent)
@@ -952,6 +963,27 @@ def add_logging_input_schedule(tmp_path: Path) -> str:
     )
     _append_file(defs, "logging_input.tslua", source)
     return "Logging input schedule"
+
+
+def add_failing_poll_schedule(tmp_path: Path) -> str:
+    """Add a Stop-on-Fail schedule whose failing step also declares a POLL Step Input.
+
+    The POLL is announced before the Action runs, so its widget is live while the step is running and
+    stays live through the pause: a run the Operator aborts ends with an input that must be closed."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Failing poll schedule", "a failing step with a POLL input")\n'
+        "  :setStopOnFail(true)\n"
+        "  :setSchedule({\n"
+        '    StepParams("first"):setStepNo("1.")\n'
+        '      :setInputs({ [1] = { desc = "operator decision", type = "POLL", prompt = {"OK", "Bad"} } })\n'
+        '      :setAction(function() ATE.report(Result.FAIL, "the UUT is bad") end),\n'
+        '    StepParams("second"):setStepNo("2.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "ok") end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "failing_poll.tslua", source)
+    return "Failing poll schedule"
 
 
 def fake_pdf_helper(script: str):

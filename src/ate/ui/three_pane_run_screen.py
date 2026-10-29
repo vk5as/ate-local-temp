@@ -44,6 +44,7 @@ from .run_widgets import (
     MismatchConfirmation,
     ResultCounts,
     RunFieldsForm,
+    RunScreenMixin,
     SchedulePicker,
     StatusBar,
     StepEnabler,
@@ -103,6 +104,9 @@ class StepTable(QWidget):
         # The Message column takes whatever the pane leaves, so the table never has to scroll
         # sideways and a spanned row (an input, a prompt) always has the full width.
         self.table.horizontalHeader().setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
+        # Rows are named by their Step cell, not by a row number: a visible vertical header would
+        # print a number beside every step, input and prompt row (packet 25a review).
+        self.table.verticalHeader().setVisible(False)
         # Text is clipped by its own cell rather than running into the neighbour (`.cell { ellipsis }`).
         self.table.setWordWrap(False)
 
@@ -305,14 +309,24 @@ class StepTable(QWidget):
         for row in self._step_rows.values():
             self._highlight(row, False)
 
-    def _toggle_step(self, node_seq: int, state: Qt.CheckState) -> None:
+    def close_inputs(self) -> None:
+        """Close every Step Input: nothing is being asked for, so nothing can be answered."""
+        for widgets in self.input_widgets.values():
+            for widget in widgets:
+                widget.deactivate()
+
+    def _toggle_step(self, node_seq: int, state: bool) -> None:
         """One box was ticked: the enabler applies it (packet 15d) and the derived boxes follow.
+
+        `QCheckBox.toggled` reports a plain bool, not a `Qt.CheckState`: comparing it against
+        `CheckState.Checked` is always False, so every click read as un-ticking and a box could
+        never be turned back on (packet 25a review).
 
         Re-syncing the headers around a toggle repaints their boxes, and a repaint must not read as
         another Operator toggle, so the enabler's recorded state is compared first."""
         if self.enabler is None or not self.checks[node_seq].isEnabled():
             return
-        checked = state == Qt.CheckState.Checked
+        checked = bool(state)
         if self.enabler.states.get(node_seq) == checked:
             return
         self.enabler.states[node_seq] = checked
@@ -327,12 +341,13 @@ class StepTable(QWidget):
             box.setEnabled(checkable)
 
 
-class ThreePaneRunScreen(QWidget):
+class ThreePaneRunScreen(RunScreenMixin, QWidget):
     """A three-pane Run screen bound to one :class:`HeadlessRunSession`.
 
     The same session, the same actions: Start and Abort live in the left pane, a Stop-on-Fail pause
     is answered by the inline prompt in the centre pane, and the status bar at the bottom carries the
-    run's state, its tallies and its timers.
+    run's state, its tallies and its timers. The run-side handlers themselves are the shared
+    :class:`~ate.ui.run_widgets.RunScreenMixin` (packet 25a review); this class only arranges panes.
     """
 
     def __init__(
@@ -386,6 +401,10 @@ class ThreePaneRunScreen(QWidget):
         self.counts.hide()
 
         left = QWidget()
+        # A low floor, not a demand: at 1280x800 the pane gets 320 px, and a bigger minimum would
+        # make the splitter take width from the step table, which then needs a sideways scrollbar
+        # (packet 25a review).
+        left.setMinimumWidth(240)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.addWidget(self.picker, stretch=1)
@@ -453,7 +472,14 @@ class ThreePaneRunScreen(QWidget):
     # -- setup ------------------------------------------------------------
 
     def _on_selection(self, name: str) -> None:
-        """The picker picked a schedule: show its steps in the centre pane, boxes still editable."""
+        """The picker picked a schedule: show its steps in the centre pane, boxes still editable.
+
+        While a run is up the centre pane belongs to the schedule that started it: rebuilding it here
+        would throw away the rows the worker is writing and the Step Input widgets sitting on them
+        (packet 25a review). A pick made mid-run is recorded on the session for the next run and
+        ignored by this layout."""
+        if self.state == SessionState.STARTED:
+            return
         if not name:
             self.table.load_steps([])
             self._steps = []
@@ -484,65 +510,17 @@ class ThreePaneRunScreen(QWidget):
         else:
             self.error_label.setText("")
 
-    def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
-        """Ask the Operator what to do with mismatched files before the run starts (ticket 06c)."""
-        if not mismatches:
-            return None
-        labels = self.picker.release_labels
-        release = labels.get(mismatches[0][3], mismatches[0][3] or "")
-        setting = self.session.config.store_mismatched_files if self.session.config is not None else "ask"
-        details = ", ".join(part for part in (
-            f"UUT {self.fields.serial_edit.text().strip()}" if self.fields.serial_edit.text().strip() else "",
-            f"Project {self.fields.project_edit.text().strip()}" if self.fields.project_edit.text().strip() else "",
-            f"Operator {self.fields.operator_edit.text().strip()}" if self.fields.operator_edit.text().strip() else "",
-        ) if part)
-        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting, details)
-        self._confirm_dialog = dialog
-        if self.confirm_choice is not None:
-            self.confirm_choice(dialog)
-        else:
-            dialog.exec()
-        return dialog.store_choice()
-
-    def begin_run(self) -> None:
-        """Capture the Operator's fields and start a run. Clears nothing on purpose."""
-        operator = self.fields.operator_edit.text().strip()
-        project = self.fields.project_edit.text().strip()
-        uut_type = self.fields.uut_type_edit.text().strip()
-        serial = self.fields.serial_edit.text().strip()
-        self.session.set_stop_on_fail(self.stop_on_fail_radio.isChecked())
-        if operator:
-            self.session.set_operator(operator)
-        # Project is pushed even when blank: a Test Run cannot start without one (spec 08).
-        self.session.set_project(project)
-        if uut_type:
-            self.session.set_uut_type(uut_type)
-        if serial:
-            self.session.set_uut_serial(serial)
-
-        mismatches = self.session.pending_mismatches()
-        store = self._confirm_store_choice(mismatches)
-        if mismatches and store is None:
-            return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
-        try:
-            engine = self.session.start(store_mismatched=store)
-        except SessionError as exc:
-            self.error_label.setText(f"⛔ {exc}")
-            self.start_button.setEnabled(False)
-            return
-        self._engine = engine
-
-    @property
-    def engine(self) -> Optional[RunEngine]:
-        """The RunEngine worker for the current run, or ``None`` before it starts / after FINISHED."""
-        return self._engine
-
     def _request_abort(self) -> None:
         """Abort the run: answer a pending prompt, or stop at the next step boundary."""
         if self._paused_seq is not None:
             self._on_prompt_choice("ABORT")
             return
         self.session.request_abort()
+
+    @property
+    def engine(self) -> Optional[RunEngine]:
+        """The RunEngine worker for the current run, or ``None`` before it starts / after FINISHED."""
+        return self._engine
 
     # -- state ------------------------------------------------------------
 
@@ -562,6 +540,10 @@ class ThreePaneRunScreen(QWidget):
             self._started_steps = set()
             self._step_total = self._enabled_step_count(steps)
             self._timer.start(1000)
+            # A new run tallies from nothing: the previous run's numbers stay on the grid otherwise
+            # (packet 25a review), and the log panes start empty too.
+            self.counts.set_counts({})
+            self._show_log([])
             self.counts.show()
         elif state == SessionState.FINISHED:
             self._engine = None
@@ -569,6 +551,9 @@ class ThreePaneRunScreen(QWidget):
             self._paused_result = ""
             self._paused_message = ""
             self.table.clear_pause()
+            # Nothing can be asked for any more, so every Step Input closes: a widget left live
+            # after FINISHED answers against a released engine (packet 25a review).
+            self.table.close_inputs()
             run_uuid = self.session.run_uuid
             nodes = self.session.store.nodes(run_uuid) if run_uuid else []
             attempts = self.session.store.attempts(run_uuid) if run_uuid else []
@@ -604,33 +589,6 @@ class ThreePaneRunScreen(QWidget):
             now,
         )
 
-    def _on_action_started(self, phase: str, done: int, total: int) -> None:
-        """A Pre-/Post-test Action has begun: move its tally and restart the current-item timer."""
-        now = self._clock()
-        if phase == "pre":
-            self._pre_counts = (done, total)
-        else:
-            self._post_counts = (done, total)
-        self._item_started_at = now
-        self._update_header(now=now)
-
-    def _on_step_started(self, node_seq: int) -> None:
-        """A Test Step Attempt — or a Retry of one — has begun."""
-        now = self._clock()
-        self._started_steps.add(node_seq)
-        self._item_started_at = now
-        self._update_header(now=now)
-
-    def _enabled_step_count(self, steps: list[object]) -> int:
-        """How many expanded rows are Test Steps this run will execute (the Steps tally's total)."""
-        overrides = self.session.node_enables or {}
-        return sum(
-            1
-            for seq, step in enumerate(steps)
-            if not getattr(step, "is_header", False)
-            and overrides.get(seq, bool(getattr(step, "default_enabled", getattr(step, "enabled", True))))
-        )
-
     def _sync_from_store(self) -> None:
         """Redraw the table, the counts and the log from whatever the store has recorded so far."""
         run_uuid = self.session.run_uuid
@@ -656,19 +614,10 @@ class ThreePaneRunScreen(QWidget):
             tallies[self._paused_result] += 1
         self.counts.set_counts(dict(tallies))
 
-    def _show_log(self, log_lines: list[dict]) -> None:
-        """The log pane shows INFO and above; the debug window keeps every level (ticket 08)."""
-        info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
-        self.log_pane.clear()
-        self.log_pane.add_lines(info_and_above)
-        self.debug_window.clear()
-        self.debug_window.add_lines(log_lines)
-
     # -- Stop-on-Fail prompt (packet 12d) ---------------------------------
 
     def _on_failure_prompt(self, node_seq: int, attempt_no: int) -> None:
         """A failure is awaiting the Operator's choice: put the prompt under the step it failed on."""
-        step = self._steps[node_seq] if 0 <= node_seq < len(self._steps) else None
         attempt = self._attempt_row(node_seq, attempt_no)
         result = str(attempt.get("pass_fail") or "FAIL") if attempt else "FAIL"
         message = str(attempt.get("msg") or "") if attempt else ""
@@ -677,16 +626,6 @@ class ThreePaneRunScreen(QWidget):
         self._paused_message = message
         self._sync_from_store()
         self._update_header()
-
-    def _attempt_row(self, node_seq: int, attempt_no: int) -> Optional[dict]:
-        """The Attempt row a pause was raised on — its result and message, read from the store."""
-        run_uuid = self.session.run_uuid
-        if run_uuid is None:
-            return None
-        for row in self.session.store.attempts(run_uuid):
-            if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
-                return row
-        return None
 
     def _on_prompt_choice(self, choice: str) -> None:
         """A prompt was answered: clear the pause's display, then tell the session."""
@@ -701,17 +640,20 @@ class ThreePaneRunScreen(QWidget):
 
     # -- Step Inputs (ticket 10a) ------------------------------------------
 
+    def step_input_widgets(self) -> dict[int, list[StepInputWidget]]:
+        """The centre pane's Step Input widgets, keyed by the seq of the step that declared them."""
+        return self.table.input_widgets
+
     def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
-        """The worker is waiting on this step's n-th input, so its widget becomes live."""
-        widget = self.table.input_widget(node_seq, index)
+        """The worker is waiting on this step's n-th input, so its widget becomes live.
+
+        The ask is also when the log pane is most worth reading: whatever the step logged before it
+        blocked is already in the store, and the Operator needs it to decide what to type
+        (packet 25a review)."""
+        self._refresh_log()
+        widget = self.input_widget(node_seq, index)
         if widget is not None:
             widget.activate(attempt_no)
-
-    def _on_input_answered(self, node_seq: int, attempt_no: int, index: int, value: object) -> None:
-        """An answer arrived through the session: show it on the widget and close it."""
-        widget = self.table.input_widget(node_seq, index)
-        if widget is not None:
-            widget.answer(value)
 
     def _on_step_finished(self, node_seq: int) -> None:
         """One step's Attempts are done: close its POLL widgets and redraw the run so far."""

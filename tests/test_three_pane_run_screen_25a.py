@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
 )
@@ -32,7 +33,13 @@ from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import COLUMNS, ThreePaneRunScreen
 
-from ._fixtures import add_header_schedule, add_logging_input_schedule, add_long_schedule, write_ate_env
+from ._fixtures import (
+    add_failing_poll_schedule,
+    add_header_schedule,
+    add_logging_input_schedule,
+    add_long_schedule,
+    write_ate_env,
+)
 
 SHOTS = Path("/tmp/25a-shots")
 R2_SHOTS = Path("/tmp/25a-r2-shots")
@@ -53,7 +60,11 @@ def _settle(qapp, session, timeout=5.0):
     """Let the run's report helper finish before the session goes out of scope.
 
     Every finished run starts a PDF helper process (packet 22a); if the session is destroyed while
-    it is still running, Qt aborts the test process at teardown."""
+    it is still running, Qt aborts the test process at teardown. A session that never ran has no
+    helper to wait for."""
+    if session.run_uuid is None:
+        session.close()
+        return
     finished = {"done": False}
     session.report_written.connect(lambda *_seen: finished.__setitem__("done", True))
     deadline = time.monotonic() + timeout
@@ -594,25 +605,67 @@ def test_abort_answers_a_pending_prompt_from_the_left_pane(qapp, tmp_path):
     _settle(qapp, session)
 
 
-def test_steps_are_enablable_before_the_run_under_a_header(qapp, tmp_path):
-    """The centre pane's boxes toggle steps before a run starts, headers included (packet 15d)."""
+def test_boxes_toggle_steps_and_headers_before_a_run_and_lock_during_one(qapp, tmp_path):
+    """The centre pane's boxes work in setup — headers included — and are locked while a run is up.
+
+    Packet 25a review: the old version of this test said "headers included" but picked a schedule
+    with no headers at all, so it never touched a derived box. `add_header_schedule` gives two
+    Sub-schedule headers, each over one Test Step.
+    """
     env = write_ate_env(tmp_path)
+    name = add_header_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
     screen.show()
     qapp.processEvents()
-    _pick(screen, "Enable/disable schedule")
+    _pick(screen, name)
+
     boxes = screen.table.checks
     assert boxes, "the step table has no enable boxes"
     for box in boxes.values():
         assert box.isEnabled()
-    step_seq = min(boxes)
-    boxes[step_seq].setChecked(False)
+    enabler = screen.table.enabler
+    headers = [seq for seq in boxes if enabler.is_header(seq)]
+    steps = [seq for seq in boxes if not enabler.is_header(seq)]
+    assert len(headers) == 2 and len(steps) == 3, f"the header schedule expanded to {len(boxes)} rows"
+    for header in headers:
+        assert boxes[header].checkState() == Qt.CheckState.Checked, "a header with every step on reads unchecked"
+
+    step = steps[0]
+    boxes[step].setChecked(False)
     qapp.processEvents()
-    assert session.node_enables.get(step_seq) is False
-    _pick(screen, "Passing schedule")
+    assert session.node_enables[step] is False
+    assert boxes[headers[0]].checkState() == Qt.CheckState.PartiallyChecked, "the header did not follow its step"
+    boxes[step].setChecked(True)
+    qapp.processEvents()
+    assert session.node_enables[step] is True, "ticking a box back on did not reach the session"
+    assert boxes[headers[0]].checkState() == Qt.CheckState.Checked
+
+    # A header click sets every step beneath it, and its own box reads back from them (packet 15d).
+    boxes[headers[0]].setChecked(False)
+    qapp.processEvents()
+    beneath = [seq for seq in enabler.subtree(headers[0]) if not enabler.is_header(seq)]
+    assert all(session.node_enables.get(seq) is False for seq in beneath), "the header click missed a step"
+    assert boxes[headers[0]].checkState() == Qt.CheckState.Unchecked
+    boxes[headers[0]].setChecked(True)
+    qapp.processEvents()
+    assert boxes[headers[0]].checkState() == Qt.CheckState.Checked
+    assert all(session.node_enables.get(seq) is True for seq in beneath)
+
     screen.start_button.click()
+    qapp.processEvents()
+    boxes = screen.table.checks  # the run rebuilds the pane, so read the boxes the run owns
+    for box in boxes.values():
+        assert box.isEnabled() is False, "a step box is still editable while a run is up"
+    boxes[step].setChecked(False)
+    qapp.processEvents()
+    assert session.node_enables[step] is True, "a locked box still changed the run"
+
     assert _wait_finished(qapp, session)
+    for header in headers:
+        beneath = [seq for seq in enabler.subtree(header) if not enabler.is_header(seq)]
+        rollup = screen.table.cell(screen.table.step_row(header), COLUMNS.index("Result"))
+        assert rollup == f"{len(beneath)}/{len(beneath)} done", f"header rollup reads {rollup!r}"
     _settle(qapp, session)
 
 
@@ -663,6 +716,374 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
     assert _rect(screen.centre_pane).contains(table_rect)
     assert screen.table.table.rowCount() > 0
     _settle(qapp, session)
+
+
+def test_a_finished_run_closes_every_step_input(qapp, tmp_path):
+    """Packet 25a review: FINISHED closes every Step Input, and a late answer is shown, not raised.
+
+    The run pauses on a failing step that declares a POLL. Aborting from the inline prompt ends the
+    run without that step ever finishing, so the POLL widget is still live against an engine the
+    session has released: it must be deactivated, and clicking it afterwards has to report the
+    session's refusal rather than escape the button handler as SessionError."""
+    env = write_ate_env(tmp_path)
+    name = add_failing_poll_schedule(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, name)
+    screen.start_button.click()
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if screen.table.banner.isVisible():
+            break
+        time.sleep(0.01)
+    widget = screen.table.input_widget(0, 1)
+    assert widget is not None, "the failing step's POLL was never built"
+    assert any(control.isEnabled() for control in widget.controls), "the POLL closed before its step ended"
+
+    screen.abort_button.click()
+    assert _wait_finished(qapp, session)
+    assert all(not control.isEnabled() for control in widget.controls), "a finished run left a Step Input live"
+
+    widget._click_poll("OK")
+    assert "no run is in progress" in widget.error_label.text(), widget.error_label.text()
+    _settle(qapp, session)
+
+
+def test_supplying_an_input_after_a_run_is_refused_not_raised(qapp, tmp_path):
+    """A blocking input answered once the run is gone reports on the widget instead of crashing."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, "Blocking input schedule")
+    screen.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        widget = screen.table.input_widget(0, 1)
+        if widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled():
+            break
+        time.sleep(0.01)
+    widget.line_edit.setText("7")
+    widget.ok_button.click()
+    assert _wait_finished(qapp, session)
+    _settle(qapp, session)
+
+    widget._submit("8")
+    assert "no run is in progress" in widget.error_label.text(), widget.error_label.text()
+    assert screen.session.state == SessionState.FINISHED
+
+
+def test_picking_another_schedule_mid_run_leaves_the_running_table_alone(qapp, tmp_path):
+    """Packet 25a review: the centre pane belongs to the schedule a run started from.
+
+    Rebuilding it on a picker click while the worker is writing would delete the rows in progress
+    and the Step Input widgets sitting on them. The pick is still recorded on the session for the
+    next run; only this layout's table is left as it was."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, "Fail then pass schedule")
+    screen.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if screen.table.banner.isVisible():
+            break
+        time.sleep(0.01)
+    assert screen.state == SessionState.STARTED
+
+    rows_before = screen.table.table.rowCount()
+    step_rows_before = dict(screen.table._step_rows)
+    _pick(screen, "Blocking input schedule")
+    qapp.processEvents()
+    assert screen.table.table.rowCount() == rows_before, "the running table was rebuilt mid-run"
+    assert screen.table._step_rows == step_rows_before, "the running schedule's rows moved"
+    assert session.selected_schedule == "Blocking input schedule", "the pick was not recorded for the next run"
+
+    screen.table._prompt_bars[0].continue_button.click()
+    assert _wait_finished(qapp, session)
+    _, row = _row_of(screen, "1.")
+    assert screen.table.cell(row, COLUMNS.index("Result")) == "FAIL"
+    _settle(qapp, session)
+
+
+def test_the_log_panes_are_live_while_a_step_waits_on_an_input(qapp, tmp_path):
+    """Packet 25a review: the log panes show the run as it happens, not only after it ends.
+
+    The step logs at INFO and DEBUG and then blocks on an INTEGER input. By the moment the ask is
+    announced — before any answer is supplied — both lines are already in the store, so the panes
+    must have them."""
+    env = write_ate_env(tmp_path)
+    name = add_logging_input_schedule(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, name)
+    screen.start_button.click()
+
+    deadline = time.monotonic() + 10.0
+    widget = None
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        widget = screen.table.input_widget(0, 1)
+        if widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled():
+            break
+        time.sleep(0.01)
+    assert widget is not None, "the input never became live"
+
+    info = screen.log_pane.rendered_lines()
+    debug = screen.debug_window.rendered_lines()
+    assert any("measuring before the Operator answers" in line for line in info), info
+    assert any("probe chatter" in line for line in debug), debug
+    assert not any("probe chatter" in line for line in info), "the log pane rendered a DEBUG line"
+
+    widget.line_edit.setText("7")
+    widget.ok_button.click()
+    assert _wait_finished(qapp, session)
+    assert any("voltage 7" in row["msg"] for row in session.store.attempts(session.run_uuid)), "the answer never reached the attempt"
+    _settle(qapp, session)
+
+
+def test_a_second_run_starts_with_the_counts_zeroed(qapp, tmp_path):
+    """Packet 25a review: the Result tallies are per run — a new run does not carry the last one's."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
+
+    _pick(screen, "Fail then pass schedule")
+    screen.start_button.click()
+    assert _wait_finished(qapp, session)
+    assert screen.counts.counts()["FAIL"] == 1 and screen.counts.counts()["PASS"] == 1
+    _settle(qapp, session)
+
+    _pick(screen, "Passing schedule")
+    screen.start_button.click()
+    assert screen.state == SessionState.STARTED
+    assert screen.counts.counts()["FAIL"] == 0, "the previous run's FAIL is still tallied"
+    assert screen.counts.counts()["PASS"] == 0, "the previous run's PASS is still tallied"
+    assert screen.counts.isVisible()
+    assert _wait_finished(qapp, session)
+    counts = screen.counts.counts()
+    assert counts["PASS"] == 1 and counts["FAIL"] == 0, counts
+    _settle(qapp, session)
+
+
+def test_the_step_table_has_no_row_numbers(qapp, tmp_path):
+    """Packet 25a review: the table's rows are named by their Step cell, so Qt's row numbers are noise.
+
+    Every row is a step, its Step Inputs, or a hidden prompt row — numbering them draws a column of
+    digits beside rows that mean nothing until the run writes into them."""
+    env = write_ate_env(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, "Enable/disable schedule")
+    table = screen.table.table
+    assert table.verticalHeader().isVisible() is False, "the vertical header still paints row numbers"
+    assert table.rowCount() == 6, "three steps plus their hidden prompt rows: expected 6 rows"
+    for seq, row in screen.table._step_rows.items():
+        assert row == 2 * seq, f"step {seq} is in row {row}, not the row its step number implies"
+        assert screen.table.cell(row, COLUMNS.index("Step")).strip().startswith(f"{seq + 1}.")
+        assert table.cellWidget(row, 0) is screen.table.checks[seq]
+    _pick(screen, "Blocking input schedule")
+    table = screen.table.table
+    assert table.rowCount() == 3, "one step row, its Step Input row, and its hidden prompt row"
+    assert table.cellWidget(0, 0) is screen.table.checks[0]
+    assert _widget_row(screen, screen.table.input_widget(0, 1)) == 1
+
+
+def test_a_mismatch_is_flagged_once_and_the_left_pane_never_scrolls_sideways(qapp, tmp_path):
+    """Packet 25a review: the inline note replaces the flag line, and the setup pane fits its pane.
+
+    A schedule whose files do not match their Test Definition checksums says so inside its own row;
+    repeating the same files under the list draws the warning twice. Nothing in the left pane may
+    force it wider than its quarter of a 1280x800 window, and nothing in it needs a horizontal
+    scrollbar."""
+    env = write_ate_env(tmp_path)
+    bad_file = _flag_a_mismatch(tmp_path)
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.resize(1280, 800)
+    screen.show()
+    qapp.processEvents()
+
+    assert screen.left_pane.minimumWidth() <= 340, screen.left_pane.minimumWidth()
+    _pick(screen, "Passing schedule")
+    qapp.processEvents()
+
+    row_note = None
+    for index in range(screen.picker.schedule_list.count()):
+        widget = screen.picker.schedule_list.itemWidget(screen.picker.schedule_list.item(index))
+        if widget is None:
+            continue
+        note = widget.findChild(QLabel, "schedule_mismatch")
+        if note is not None and bad_file in note.text():
+            row_note = note
+            break
+    assert row_note is not None, "the mismatched schedule has no inline note"
+    assert row_note.wordWrap()
+    assert screen.picker.mismatch_label.text() == "", "the flag line repeats the inline note"
+    assert screen.picker.mismatch_label.isVisible() is False
+    assert screen.picker.notes_label.isVisible(), "the notes label paints an empty line"
+
+    left_texts = [label.text() for label in screen.left_pane.findChildren(QLabel) if label.isVisible()]
+    flagged = [text for text in left_texts if bad_file in text]
+    assert len(flagged) == 1, f"{bad_file} is named {len(flagged)} times in the setup pane"
+
+    for widget in (
+        screen.picker.schedule_list,
+        screen.table.table,
+        screen.log_pane.findChild(QScrollArea),
+        screen.debug_window.findChild(QScrollArea),
+    ):
+        bar = widget.horizontalScrollBar()
+        assert bar.maximum() == 0 or not bar.isVisible(), f"{widget} needs a horizontal scrollbar"
+    table_width = sum(
+        screen.table.table.horizontalHeader().sectionSize(i)
+        for i in range(screen.table.table.columnCount())
+    )
+    viewport = screen.table.table.viewport().width()
+    assert table_width <= viewport + 1, f"the step table is {table_width} px wide in a {viewport} px viewport"
+    _settle(qapp, session)
+
+
+def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
+    """1280x800 captures of the states a reviewer asked to see: picked-with-mismatch, an input
+    waiting with its log, a run aborted with its inputs closed, a header with a step re-ticked, and
+    a second run whose counts are zeroed."""
+    R2_SHOTS.mkdir(parents=True, exist_ok=True)
+
+    def shot(name, screen):
+        image = screen.grab()
+        assert image.width() == 1280 and image.height() == 800, f"{name} is {image.width()}x{image.height()}"
+        image.save(str(R2_SHOTS / name))
+
+    env = write_ate_env(tmp_path)
+    bad_file = _flag_a_mismatch(tmp_path)
+    add_header_schedule(tmp_path)
+    add_logging_input_schedule(tmp_path)
+    add_failing_poll_schedule(tmp_path)
+
+    session = HeadlessRunSession(env["config"])
+    screen = ThreePaneRunScreen(session)
+    screen.resize(1280, 800)
+    screen.show()
+    qapp.processEvents()
+    _pick(screen, "Passing schedule")
+    qapp.processEvents()
+    assert any(
+        bad_file in label.text()
+        for label in screen.left_pane.findChildren(QLabel)
+        if label.isVisible()
+    ), "the screenshot shows no inline mismatch"
+    shot("picked-mismatched-schedule.png", screen)
+
+    _pick(screen, "Logging input schedule")
+    screen.fields.operator_edit.setText("Ada")
+    screen.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        widget = screen.table.input_widget(0, 1)
+        if widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled():
+            break
+        time.sleep(0.01)
+    assert any("measuring before the Operator answers" in line for line in screen.log_pane.rendered_lines())
+    shot("input-waiting-with-log.png", screen)
+    widget.line_edit.setText("7")
+    widget.ok_button.click()
+    assert _wait_finished(qapp, session)
+    _settle(qapp, session)
+
+    session2 = HeadlessRunSession(env["config"])
+    screen2 = ThreePaneRunScreen(session2)
+    screen2.resize(1280, 800)
+    screen2.show()
+    qapp.processEvents()
+    _pick(screen2, "Failing poll schedule")
+    screen2.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if screen2.table.banner.isVisible():
+            break
+        time.sleep(0.01)
+    screen2.abort_button.click()
+    assert _wait_finished(qapp, session2)
+    assert all(
+        not control.isEnabled()
+        for widgets in screen2.table.input_widgets.values()
+        for widget in widgets
+        for control in widget.controls
+    ), "an aborted run still has a live Step Input"
+    shot("aborted-inputs-disabled.png", screen2)
+    _settle(qapp, session2)
+
+    session3 = HeadlessRunSession(env["config"])
+    screen3 = ThreePaneRunScreen(session3)
+    screen3.resize(1280, 800)
+    screen3.show()
+    qapp.processEvents()
+    _pick(screen3, "Sub-schedule header schedule")
+    boxes = screen3.table.checks
+    enabler = screen3.table.enabler
+    header = next(seq for seq in boxes if enabler.is_header(seq))
+    step = next(seq for seq in boxes if not enabler.is_header(seq))
+    boxes[step].setChecked(False)
+    qapp.processEvents()
+    boxes[step].setChecked(True)
+    qapp.processEvents()
+    assert boxes[step].isChecked()
+    shot("header-schedule-step-reticked.png", screen3)
+    _settle(qapp, session3)
+
+    session4 = HeadlessRunSession(env["config"])
+    screen4 = ThreePaneRunScreen(session4)
+    screen4.resize(1280, 800)
+    screen4.show()
+    qapp.processEvents()
+    session4.failure_prompt.connect(lambda *_seen: session4.choose("CONTINUE"))
+    # "Passing schedule" is the mismatched one: click OK on the run-start confirmation so the
+    # offscreen test never blocks on the modal's exec().
+    screen4.confirm_choice = lambda dialog: dialog.ok_button.click()
+    _pick(screen4, "Fail then pass schedule")
+    screen4.start_button.click()
+    assert _wait_finished(qapp, session4)
+    _settle(qapp, session4)
+    _pick(screen4, "Passing schedule")
+    screen4.start_button.click()
+    qapp.processEvents()
+    assert screen4.counts.counts()["FAIL"] == 0 and screen4.counts.counts()["PASS"] == 0
+    shot("second-run-zeroed-counts.png", screen4)
+    assert _wait_finished(qapp, session4)
+    _settle(qapp, session4)
+
+    for name in (
+        "picked-mismatched-schedule.png",
+        "input-waiting-with-log.png",
+        "aborted-inputs-disabled.png",
+        "header-schedule-step-reticked.png",
+        "second-run-zeroed-counts.png",
+    ):
+        path = R2_SHOTS / name
+        assert path.exists(), name
+        from PyQt6.QtGui import QImage
+
+        image = QImage(str(path))
+        assert image.width() == 1280 and image.height() == 800, name
 
 
 def test_the_four_states_are_captured_as_screenshots(qapp, tmp_path):

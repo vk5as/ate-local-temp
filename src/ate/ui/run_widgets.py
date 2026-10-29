@@ -43,7 +43,7 @@ from ate.engine.step_inputs import StepInput, value_error
 
 from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
 from ..engine.lua_host import LuaHost
-from ..run_session.headless import HeadlessRunSession, SessionState
+from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 
 
 def _format_elapsed(delta: datetime) -> str:
@@ -626,9 +626,13 @@ class SchedulePicker(QWidget):
         self.schedule_list = QListWidget()
         self.schedule_list.viewport().installEventFilter(_ResizeBrokenRows(self.schedule_list))
         self.notes_label = QLabel()
+        self.notes_label.setWordWrap(True)
         # The ⚠ line naming the mismatched files of the selected schedule (ticket 06c); empty when
-        # the schedule's checksums all match.
+        # the schedule's checksums all match. The three-pane picker puts the note *in* the row, so
+        # this label stays blank there instead of naming the same files twice (packet 25a review);
+        # the staged picker has no inline note and uses it.
         self.mismatch_label = QLabel("")
+        self.mismatch_label.setWordWrap(True)
 
         layout.addLayout(filter_row)
         layout.addWidget(self.schedule_list)
@@ -740,6 +744,9 @@ class SchedulePicker(QWidget):
             item = QListWidgetItem(f"{flag}{row.name} — {row.description}")
             # Carry the exact selected name so a later selection can hand it to the session.
             item.setData(Qt.ItemDataRole.UserRole, row.name)
+            # In an inline-mismatch list the item text is empty (the row is a widget), so the notes
+            # line reads the description from here rather than from the item.
+            item.setData(Qt.ItemDataRole.UserRole + 2, row.description or "")
             item.setToolTip(row.media_number or "")
             list_widget.addItem(item)
             if self.inline_mismatches:
@@ -785,15 +792,27 @@ class SchedulePicker(QWidget):
         name = (item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
         if name:
             self.session.select_schedule(name)
-            self.notes_label.setText(item.text())
-            # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c).
+            self._set_notes(item.text() or (item.data(Qt.ItemDataRole.UserRole + 2) or ""))
+            # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c) —
+            # unless the list already draws it inside the row, in which case naming it again below
+            # would show the same files twice (packet 25a review).
             flagged = self._mismatch_flags.get(name, [])
-            label = self.mismatch_label
-            label.setText(_mismatch_flag_text(flagged, self._release_labels.get(flagged[0][3], "") if flagged else ""))
-            label.setStyleSheet(_FLAG_STYLE if flagged else "")
+            release = self._release_labels.get(flagged[0][3], "") if flagged else ""
+            self._set_mismatch("" if self.inline_mismatches else _mismatch_flag_text(flagged, release))
         else:
             self._clear_selection()
         self.selection_changed.emit(name)
+
+    def _set_notes(self, text: str) -> None:
+        """Show the selected row's description, or nothing at all when there is nothing to show."""
+        self.notes_label.setText(text)
+        self.notes_label.setVisible(bool(text))
+
+    def _set_mismatch(self, text: str) -> None:
+        """Show the mismatch flag line, or empty it and hide the label rather than leaving a bare box."""
+        self.mismatch_label.setText(text)
+        self.mismatch_label.setStyleSheet(_FLAG_STYLE if text else "")
+        self.mismatch_label.setVisible(bool(text))
 
     def _clear_selection(self) -> None:
         """Nothing runnable is current — a broken row, or the picked row filtered away — so show nothing.
@@ -801,9 +820,8 @@ class SchedulePicker(QWidget):
         The notes and the mismatch line describe the schedule that *was* picked; leaving them filled
         reads as if it were still the selection, and the session would still start a run from it
         (packet 05b review). A run already in progress keeps its own selection."""
-        self.notes_label.setText("")
-        self.mismatch_label.setText("")
-        self.mismatch_label.setStyleSheet("")
+        self._set_notes("")
+        self._set_mismatch("")
         if self.session.selected_schedule and self.session.state != SessionState.STARTED:
             self.session.clear_selection()
 
@@ -1090,17 +1108,171 @@ class StepInputWidget(QWidget):
             return
         try:
             self.session.supply_input(self.node_seq, self.attempt_no, self.index, value)
-        except ValueError as exc:
+        except (ValueError, SessionError) as exc:
             # The session says this input is not waiting (or the value is not acceptable): show it
-            # rather than crashing the click, and the widget stays as it is (10a review).
+            # rather than crashing the click, and the widget stays as it is (10a review). A run that
+            # has already ended raises SessionError, not ValueError (25a review).
             self.error_label.setText(str(exc))
 
     def _click_poll(self, text: str) -> None:
         """Record a POLL click through the session; the sticky value is the button's text."""
         try:
             self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
-        except ValueError as exc:
+        except (ValueError, SessionError) as exc:
             self.error_label.setText(str(exc))
+
+
+class RunScreenMixin:
+    """The run-side behaviour both layouts repeat, in one place (packet 25a review).
+
+    The staged and the three-pane screens bind the same session signals and read the same store
+    rows; only where the widgets sit differs. A layout supplies the parts these methods use —
+    `session`, `fields`, `picker`, `stop_on_fail_radio`, `error_label`, `start_button`, `log_pane`,
+    `debug_window` and `step_input_widgets()` — and decides nothing about a run itself: every call
+    here goes to the session or to the store.
+    """
+
+    def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
+        """Ask the Operator what to do with mismatched files before the run starts (ticket 06c).
+
+        No mismatch means no confirmation at all, so this returns ``None`` and Start runs straight
+        through. Otherwise the dialog lists every file as `expected …, found …` and, with
+        `database.storeMismatchedFiles` = `ask`, offers the "Store mismatched files with this Test
+        Run" checkbox ticked by default; `always`/`never` have no checkbox, only what will happen.
+        Returns the store decision, or ``None`` if the Operator cancelled — in which case no run
+        starts. `self.confirm_choice` lets a test click OK/Cancel itself, so none blocks on `exec()`."""
+        if not mismatches:
+            return None
+        labels = self.picker.release_labels
+        release = labels.get(mismatches[0][3], mismatches[0][3] or "")
+        setting = self.session.config.store_mismatched_files if self.session.config is not None else "ask"
+        details = ", ".join(part for part in (
+            f"UUT {self.fields.serial_edit.text().strip()}" if self.fields.serial_edit.text().strip() else "",
+            f"Project {self.fields.project_edit.text().strip()}" if self.fields.project_edit.text().strip() else "",
+            f"Operator {self.fields.operator_edit.text().strip()}" if self.fields.operator_edit.text().strip() else "",
+        ) if part)
+        dialog = MismatchConfirmation(self.session.selected_schedule or "", release, mismatches, setting, details)
+        self._confirm_dialog = dialog
+        if self.confirm_choice is not None:
+            self.confirm_choice(dialog)
+        else:
+            dialog.exec()
+        return dialog.store_choice()
+
+    def begin_run(self) -> None:
+        """Capture the Operator's fields and start a run. Clears nothing on purpose.
+
+        Operator, UUT Type and Serial are only pushed when the field is non-empty, so a new run keeps
+        every field it did not change; Project is pushed as typed, because a blank Project must
+        refuse the run rather than carry an earlier one (spec 08). The run then starts through
+        `session.start()`, which queues its signals and returns immediately."""
+        operator = self.fields.operator_edit.text().strip()
+        project = self.fields.project_edit.text().strip()
+        uut_type = self.fields.uut_type_edit.text().strip()
+        serial = self.fields.serial_edit.text().strip()
+        # The stop-on-fail choice is a boolean toggle, so it always applies (default True).
+        self.session.set_stop_on_fail(self.stop_on_fail_radio.isChecked())
+        if operator:
+            self.session.set_operator(operator)
+        # Project is pushed even when blank: a Test Run cannot start without one (spec 08).
+        self.session.set_project(project)
+        if uut_type:
+            self.session.set_uut_type(uut_type)
+        if serial:
+            self.session.set_uut_serial(serial)
+
+        mismatches = self.session.pending_mismatches()
+        store = self._confirm_store_choice(mismatches)
+        if mismatches and store is None:
+            return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
+        try:
+            self._engine = self.session.start(store_mismatched=store)
+        except SessionError as exc:
+            # The schedule picked before this Start broke in the meantime (packet 05b review): name
+            # the reason on the pane the Operator is looking at rather than raising out of the
+            # button handler, and take Start away so it cannot be clicked again.
+            self.error_label.setText(f"⛔ {exc}")
+            self.start_button.setEnabled(False)
+
+    def _on_action_started(self, phase: str, done: int, total: int) -> None:
+        """A Pre-/Post-test Action has begun: move its tally, restart the current-item timer, and
+        pick up the lines the worker has logged so far (packet 25a: the log pane is live)."""
+        now = self._clock()
+        if phase == "pre":
+            self._pre_counts = (done, total)
+        else:
+            self._post_counts = (done, total)
+        self._item_started_at = now
+        self._refresh_log()
+        self._update_header(now=now)
+
+    def _on_step_started(self, node_seq: int) -> None:
+        """A Test Step Attempt — or a Retry of one — has begun.
+
+        `node_seq` is the step that started: the Steps tally counts each distinct step once, so a
+        Retry restarts the current-item timer without counting the step twice (packet 14d)."""
+        now = self._clock()
+        self._started_steps.add(node_seq)
+        self._item_started_at = now
+        self._refresh_log()
+        self._update_header(now=now)
+
+    def _enabled_step_count(self, steps: list[object]) -> int:
+        """How many expanded rows are Test Steps this run will execute (the Steps tally's total).
+
+        Header rows are not steps, and an Operator toggle (packet 11a) beats the row's :setEnable()
+        default exactly as :meth:`RunEngine._enabled` decides."""
+        overrides = self.session.node_enables or {}
+        return sum(
+            1
+            for seq, step in enumerate(steps)
+            if not getattr(step, "is_header", False)
+            and overrides.get(seq, bool(getattr(step, "default_enabled", getattr(step, "enabled", True))))
+        )
+
+    def _attempt_row(self, node_seq: int, attempt_no: int) -> Optional[dict]:
+        """The Attempt row a pause was raised on — its result and message, read from the store."""
+        run_uuid = self.session.run_uuid
+        if run_uuid is None:
+            return None
+        for row in self.session.store.attempts(run_uuid):
+            if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
+                return row
+        return None
+
+    def step_input_widgets(self) -> dict[int, list[StepInputWidget]]:
+        """The layout's Step Input widgets, keyed by the seq of the step that declared each one."""
+        raise NotImplementedError
+
+    def input_widget(self, node_seq: int, index: int) -> Optional[StepInputWidget]:
+        """The widget for the n-th (1-based) Step Input of the step at ``node_seq``, if any."""
+        for widget in self.step_input_widgets().get(node_seq, ()):
+            if widget.index == index:
+                return widget
+        return None
+
+    def _on_input_answered(self, node_seq: int, attempt_no: int, index: int, value: object) -> None:
+        """An answer arrived through the session: show it on the widget and close it."""
+        widget = self.input_widget(node_seq, index)
+        if widget is not None:
+            widget.answer(value)
+
+    def _show_log(self, log_lines: list[dict]) -> None:
+        """The log pane shows INFO and above; the debug window keeps every level (ticket 08)."""
+        info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
+        self.log_pane.clear()
+        self.log_pane.add_lines(info_and_above)
+        self.debug_window.clear()
+        self.debug_window.add_lines(log_lines)
+
+    def _refresh_log(self) -> None:
+        """Render whatever the store has recorded so far (packet 25a: the log panes are live).
+
+        The worker flushes every ATE log call into the store as it happens, so a line logged before
+        a step blocks on an input is already readable when the ask is announced. The panes hold no
+        buffer of their own: they show only these rows."""
+        run_uuid = self.session.run_uuid
+        self._show_log(self.session.store.log_lines(run_uuid) if run_uuid else [])
 
 
 class MismatchConfirmation(QDialog):
