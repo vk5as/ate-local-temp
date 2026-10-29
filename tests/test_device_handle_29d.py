@@ -9,6 +9,7 @@ on it must fail as a Device failure does — through ``onError``, or as a raised
 
 import re
 
+import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from ._fixtures import LoopbackPeer
@@ -133,3 +134,37 @@ def test_open_recovered_by_a_string_on_error_is_still_not_a_device(app: QCoreApp
     _no_traceback(store, ru)
     msg = _error_message(store, ru)
     assert re.fullmatch(r"schedule\.tslua:\d+: ATE\.read: a string: not a Device", msg), msg
+
+
+@pytest.mark.parametrize("handle", ('""', "nil", "12"))
+def test_every_device_call_on_a_bad_handle_reaches_its_handler(app: QCoreApplication, handle: str) -> None:
+    """read, write, flush and close all validate the handle before touching the registry, so
+    `onError` gets the failure for a string, a number and nil alike, and its return is the result."""
+    store, ru = _run(app, f"""
+        local dev = {handle}
+        local r = ATE.read(dev, {{timeout = 0.1}}, function(res, args) calls[#calls + 1] = res.err; return "r" end)
+        local w = ATE.write(dev, {{data = "x"}}, function(res, args) calls[#calls + 1] = res.err; return "w" end)
+        local f = ATE.flush(dev, function(res, args) calls[#calls + 1] = res.err; return "f" end)
+        local c = ATE.close(dev, function(res, args) calls[#calls + 1] = res.err; return "c" end)
+        ATE.report(Result.PASS, r .. w .. f .. c .. " " .. table.concat(calls, ","))""")
+    _no_traceback(store, ru)
+    assert _step_message(store, ru) == "rwfc " + ",".join(["not a Device"] * 4)
+
+
+@pytest.mark.parametrize("handle", ('""', "nil", "12"))
+def test_every_device_call_on_a_bad_handle_raises_without_a_handler(app: QCoreApplication, handle: str) -> None:
+    """Caught with pcall, each of the four calls raises ``ATE.<fn>: <value>: not a Device`` - the
+    same shape as any other Device failure - and none of them is a Python ``AttributeError``."""
+    store, ru = _run(app, f"""
+        local dev = {handle}
+        local ok1, e1 = pcall(ATE.read, dev)
+        local ok2, e2 = pcall(ATE.write, dev, {{data = "x"}})
+        local ok3, e3 = pcall(ATE.flush, dev)
+        local ok4, e4 = pcall(ATE.close, dev)
+        ATE.report(Result.PASS, tostring(ok1) .. tostring(ok2) .. tostring(ok3) .. tostring(ok4)
+          .. " " .. e1 .. " " .. e2 .. " " .. e3 .. " " .. e4)""")
+    _no_traceback(store, ru)
+    msg = _step_message(store, ru)
+    assert msg.startswith("falsefalsefalsefalse"), msg
+    for name in ("read", "write", "flush", "close"):
+        assert re.search(rf"ATE\.{name}: (nil|a string|a number): not a Device", msg), msg
