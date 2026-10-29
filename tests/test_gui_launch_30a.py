@@ -251,6 +251,22 @@ def test_launch_refuses_a_newer_database(tmp_path):
     assert _db_bytes(db) == before, "the GUI never downgrades the schema"
 
 
+def test_bare_ate_dispatches_to_the_gui_launcher(monkeypatch, capsys):
+    """No subcommand, with or without --config, goes to the GUI launcher."""
+    import ate.app
+
+    seen = []
+    monkeypatch.setattr(
+        ate.app,
+        "launch",
+        lambda argv, **kwargs: seen.append(argv) or ate.app.LaunchOutcome(0),
+    )
+    assert main([]) == 0
+    assert main(["--config", "some/config.json"]) == 0
+    assert seen == [[], ["--config", "some/config.json"]]
+    assert seen[-1] == ["--config", "some/config.json"], "the --config flag reaches the launcher"
+
+
 def test_version_flag_prints_the_version_and_exits_zero(capsys):
     assert main(["--version"]) == 0
     assert capsys.readouterr().out.strip() == __version__
