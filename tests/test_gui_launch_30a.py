@@ -9,8 +9,13 @@ are the real :class:`StagedRunScreen` and :class:`HistoryScreen` bound to a real
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from PyQt6.QtWidgets import QMainWindow, QMessageBox
@@ -249,6 +254,98 @@ def test_launch_refuses_a_newer_database(tmp_path):
     assert outcome.code == 1 and outcome.window is None
     assert "this ATE is too old" in alerts[0], alerts
     assert _db_bytes(db) == before, "the GUI never downgrades the schema"
+
+
+def test_launch_keeps_its_qapplication_alive_without_pytest_qt(tmp_path):
+    """In a plain subprocess (no pytest-qt) the QApplication created by launch() must outlive
+    launch itself: the window, its widgets and the session stay usable after launch returns."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    root = Path(__file__).resolve().parent.parent
+    script = (
+        "from PyQt6.QtWidgets import QApplication\n"
+        "from ate.app import launch\n"
+        f"out = launch(['--config', {str(env['config'])!r}], exec_=False)\n"
+        "assert out.code == 0, out.code\n"
+        "assert out.app is not None and out.app is QApplication.instance(), 'launch lost its QApplication'\n"
+        "window = out.window\n"
+        "assert window is not None and window.findChild(object) is not None, 'window was destroyed'\n"
+        "assert window.session.store is not None and window.session.config is not None\n"
+        "print('ALIVE')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(root),
+        env={**os.environ, "PYTHONPATH": "src", "QT_QPA_PLATFORM": "offscreen"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "ALIVE" in proc.stdout, proc.stderr
+
+
+def test_launch_reads_the_config_exactly_once(qapp, tmp_path, monkeypatch):
+    """Spec: the config is 'read once at launch' — the session must not re-read the file (30a review)."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    import ate.app as app_module
+    import ate.run_session.headless as headless_module
+    from ate.config import read_config
+
+    reads = []
+
+    def counting(path, **kwargs):
+        reads.append(str(path))
+        return read_config(path, **kwargs)
+
+    monkeypatch.setattr(app_module, "read_config", counting)
+    monkeypatch.setattr(headless_module, "read_config", counting)
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    assert outcome.code == 0, alerts
+    assert len(reads) == 1, f"read_config called {len(reads)} times: {reads}"
+
+
+class _TickingClock:
+    """A datetime stand-in whose now() steps forward a minute per call, so two separate
+    open_app_log calls would name two different files (30a review item 4)."""
+
+    def __init__(self) -> None:
+        self._i = 0
+
+    def now(self) -> datetime:
+        self._i += 1
+        return datetime(2026, 10, 29, 12, 0, 0) + timedelta(minutes=self._i)
+
+
+def test_one_application_log_per_launch_carries_launch_and_session_lines(qapp, tmp_path, monkeypatch):
+    """The launch's AppLog is handed to the session: one file, both the launch line and the
+    interrupted-run line the session logs through it."""
+    from datetime import timedelta
+
+    env = write_ate_env(tmp_path)
+    store = RunStore(env["db"])
+    store.insert_test_run({"uut_type": "PowerSupply", "uut_serial": "PS-1", "station_name": "BENCH-03"})
+    import ate.log as log_module
+
+    monkeypatch.setattr(log_module, "datetime", _TickingClock())
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    assert outcome.code == 0, alerts
+    logs = sorted((tmp_path / "<data>" / "logs").glob("ate-app-*.log"))
+    assert len(logs) == 1, f"expected one application log, found {[p.name for p in logs]}"
+    text = logs[0].read_text()
+    assert "launched with config" in text, "the launch line is missing"
+    assert "interrupted run" in text, "the session's interrupted-run line did not reach the launch log"
+
+
+def test_schema_refusal_is_logged_to_the_application_log(tmp_path):
+    """A refused launch (missing database) writes its reason to the application log (30a review)."""
+    env = write_ate_env(tmp_path)
+    outcome, alerts = _launch(env, tmp_path=tmp_path)
+    assert outcome.code == 1 and outcome.window is None
+    logs = list((tmp_path / "<data>" / "logs").glob("ate-app-*.log"))
+    assert logs, "the launch opened no application log"
+    text = logs[0].read_text()
+    assert "launch refused" in text and "ate db migrate" in text, text
 
 
 def test_bare_ate_dispatches_to_the_gui_launcher(monkeypatch, capsys):

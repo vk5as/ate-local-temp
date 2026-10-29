@@ -41,10 +41,12 @@ from .ui.staged_run_screen import StagedRunScreen
 
 @dataclass
 class LaunchOutcome:
-    """What a launch produced: the exit code, and the main window when it got that far."""
+    """What a launch produced: the exit code, the main window when it got that far, and the
+    QApplication that owns them (kept referenced so a non-looping launch cannot destroy it)."""
 
     code: int
     window: Optional[QMainWindow] = None
+    app: Optional[QApplication] = None
 
 
 class MainWindow(QMainWindow):
@@ -188,13 +190,15 @@ def launch(
         alert(refusal.message)
         return LaunchOutcome(1)
 
-    # The session reads the same config file and opens its own handle on this launch's log file.
-    session = HeadlessRunSession(config.path)
+    # The session reuses this launch's config and application log: one read, one log (30a review).
+    session = HeadlessRunSession(config, app_log=app_log)
     session.store.close_interrupted_runs(on_log=session.on_log)  # spec 98, logged by the store itself
 
-    app = QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])  # reused when a test already has one
     window = MainWindow(session, config, app_log=app_log)
     if not exec_:
-        return LaunchOutcome(0, window)
+        # Keep the application referenced: a local QApplication dying here would take the
+        # window (and the session's store) with it (30a review item 2).
+        return LaunchOutcome(0, window, app)
     window.show()
-    return LaunchOutcome(app.exec(), window)
+    return LaunchOutcome(app.exec(), window, app)
