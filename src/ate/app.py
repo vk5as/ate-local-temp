@@ -154,8 +154,8 @@ def launch(
     """Open the application from ``ate``'s arguments. Returns the exit code and the window.
 
     ``prompt`` answers the missing-config dialog (True creates the defaults), ``alert`` reports a
-    refusal. With ``exec_=False`` the window is built and shown but the event loop is not entered,
-    which is what the tests use.
+    refusal. With ``exec_=False`` the window is built but neither shown nor looped — the tests use
+    that; the real launch shows it and enters the event loop.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="ate", description="Open the ATE application")

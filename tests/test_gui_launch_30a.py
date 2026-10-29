@@ -397,6 +397,44 @@ def test_db_help_and_config_flag_parse(capsys, tmp_path):
     assert "usage: ate db" in capsys.readouterr().out
 
 
+def test_subcommands_still_tolerate_extra_arguments(capsys, tmp_path):
+    """The base CLI used parse_known_args: stray tokens after db/setup were ignored (30a review)."""
+    db = tmp_path / "ate.db"
+    code = main(["db", "status", str(db), "extra", "--junk"])
+    err = capsys.readouterr().err
+    assert code == 1 and "unrecognized" not in err, f"argparse rejected stray args: {code} {err!r}"
+    code = main(["db", "migrate", str(db), "--yes", "stray"])
+    assert code == 0, capsys.readouterr().err
+    code = main(["setup", "--root", str(tmp_path / "station"), "--bogus"])
+    assert code == 0, capsys.readouterr().err
+
+
+def test_unknown_command_exits_one_with_the_old_hint(capsys):
+    """``ate bogus`` is exit 1 with the 'no command given / try …' hint, not argparse usage (exit 2)."""
+    assert main(["bogus"]) == 1
+    err = capsys.readouterr().err
+    assert "no command given" in err and "try 'ate" in err, err
+    assert "unrecognized" not in err
+
+
+def test_db_migrate_yes_without_path_does_not_take_yes_as_the_path(capsys, tmp_path, monkeypatch):
+    """``ate db migrate --yes`` (no path) migrates ate.db; --yes may appear anywhere in the db args."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["db", "migrate", "--yes"]) == 0
+    assert (tmp_path / "ate.db").exists(), capsys.readouterr().err
+    assert not (tmp_path / "--yes").exists(), "the --yes flag was parsed as the database path"
+    assert "created or upgraded database at ate.db" in capsys.readouterr().out
+
+
+def test_help_does_not_advertise_the_hidden_pdf_helper(capsys):
+    """``ate --help`` usage must not list the hidden `_pdf` helper (30a review item 12)."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "_pdf" not in out, f"hidden helper leaked into help: {out!r}"
+    assert "db" in out and "setup" in out
+
+
 # -- the real default dialogs (30a review item 1) --------------------------------------
 
 
