@@ -321,7 +321,12 @@ def test_pause_keeps_both_timers_running(qapp, tmp_path):
 
 
 def test_total_time_advances(qapp, tmp_path):
-    """The total run time ticks forward with the one-second timer while the run is up."""
+    """The total run time ticks forward with the one-second timer while the run is up.
+
+    Packet 14d review: the bar's first reading used to be waited for on the real QTimer's 1 s
+    interval, which timed out under suite load. The clock is injected and every tick is emitted by
+    hand, so nothing in this test depends on wall-clock seconds, and the wait that remains fails
+    loudly with a reason rather than as a bare `assert False`."""
     env = write_ate_env(tmp_path)
     _add_schedule(env, "pre_post_blocking.tslua", PRE_POST_BLOCKING)
     clock = SteppingClock()
@@ -330,10 +335,17 @@ def test_total_time_advances(qapp, tmp_path):
     screen._refresh_schedule_list()
 
     _start(qapp, screen, "Pre post blocking")
-    session.input_asked.connect(
-        lambda node_seq, attempt_no, index: screen.engine.operator_input.supply_input(index - 1, 7)
-    )
-    assert _pump_until(qapp, lambda: "Run " in screen.run_view.status_total.text())
+
+    # The step blocks on its input and nothing answers it yet, so the run stays up while the bar is
+    # ticked by hand: no part of this test waits on a real second.
+    assert _pump_until(
+        qapp,
+        lambda: screen._started_at is not None and screen._timer.isActive(),
+        timeout=30.0,
+    ), "the run never reached STARTED, so the status bar's clock never started"
+
+    screen._timer.timeout.emit()  # one tick puts a reading on the bar
+    qapp.processEvents()
 
     _, _, _, _, total, _ = _status_labels(screen)
     before = _secs(total.text())
@@ -341,10 +353,12 @@ def test_total_time_advances(qapp, tmp_path):
         screen._timer.timeout.emit()  # a QTimer tick, delivered without waiting for real seconds
         qapp.processEvents()
     after = _secs(total.text())
-    assert after > before
-    assert screen._timer.isActive()
+    assert after > before, f"the Run timer read {before}s then {after}s after three ticks"
+    assert screen._timer.isActive(), "the run clock stopped while the run was still up"
 
-    assert _wait_finished(qapp, session)
+    # Answer the waiting step so the run can end.
+    screen.engine.operator_input.supply_input(0, 7)
+    assert _wait_finished(qapp, session), "the run never finished once its input was answered"
 
 
 def test_live_qtimer_advances_the_run_label_without_any_manual_emit(qapp, qtbot, tmp_path):
