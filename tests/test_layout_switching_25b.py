@@ -763,6 +763,49 @@ def test_a_hidden_three_pane_layouts_prompt_and_abort_answer_nothing(qapp, tmp_p
     _finish(qapp, window)
 
 
+def test_abort_on_the_visible_layout_answers_a_pending_pause_with_abort(qapp, tmp_path):
+    """While the run is paused, the layout on screen aborts the run through the pause, not around it."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    _pick_and_start(qapp, window, schedule)
+    assert window.session.pause_pending()
+
+    window.staged_screen.run_view.abort_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "Abort did not end the run"
+    uuid = window.session.run_uuid
+    row = window.session.store.get_test_run(uuid)
+    # An ABORT at a Stop-on-Fail pause stops the run from that pause (packet 12b), which the store
+    # records as End Reason STOPPED_ON_FAIL with the choice stamped on the failed Attempt.
+    assert row["end_reason"] == "STOPPED_ON_FAIL", row
+    attempts = window.session.store.attempts(uuid)
+    assert attempts[0]["prompt_choice"] == "ABORT", attempts
+    _finish(qapp, window)
+
+    # The same from the other layout: switch mid-pause and the new layout's Abort answers it.
+    outcome2, _ = _launch(env, tmp_path)
+    window2 = outcome2.window
+    window2.show()
+    qapp.processEvents()
+    _pick_and_start(qapp, window2, schedule)
+    assert window2.session.pause_pending()
+    window2.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    assert window2.three_pane_screen.table.banner.isVisible(), "the pause did not follow the switch"
+    window2.three_pane_screen.abort_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: window2.session.state == SessionState.FINISHED), "Abort did not end the run"
+    uuid2 = window2.session.run_uuid
+    assert window2.session.store.get_test_run(uuid2)["end_reason"] == "STOPPED_ON_FAIL"
+    assert window2.session.store.attempts(uuid2)[0]["prompt_choice"] == "ABORT"
+    _finish(qapp, window2)
+
+
 def test_a_hidden_layout_defers_its_store_reads_until_it_is_showing(qapp, tmp_path):
     """The layout that is not showing reads the store once, when it comes to the front."""
     env = write_ate_env(tmp_path)
