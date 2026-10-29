@@ -15,6 +15,10 @@
     {
       "path": "stop_on_fail.tslua",
       "sha256": "97b360eb15b1af4b81dd3819b537fbf840b339a89cade56c32f83b60ea98cb98"
+    },
+    {
+      "path": "step_inputs.tslua",
+      "sha256": "397de8e635d73418bd4b3701decc4f21391ec0c561fac43e45a52bc76d078204"
     }
   ]
 }
