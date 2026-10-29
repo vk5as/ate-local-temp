@@ -301,6 +301,39 @@ return ScheduleParams("trace") :setSchedule({
     assert _ms(texts[0]) >= 0.0
 
 
+def test_a_traced_open_that_connects_keeps_its_on_error(app: QCoreApplication) -> None:
+    """An `open` that succeeds under `deviceTrace.enabled` still remembers its onError.
+
+    The host keys each open Device's onError in a WeakKeyDictionary of handles, so the handle must be
+    weak-referenceable: with tracing on the handle is a `TracedDevice`, and a `__slots__` wrapper
+    without `__weakref__` cannot be a weak key - the `ATE.open` call itself raises a TypeError before
+    the Device is ever used (packet 29d). The handler given to `open` is the fallback for the Device's
+    later calls, so the read that times out here answers with the value it returns."""
+    peer = LoopbackPeer()  # accepts, sends nothing
+    peer.start()
+    source = r"""
+return ScheduleParams("trace") :setSchedule({
+  StepParams("io"):setStepNo("1.")
+    :setAction(function()
+      local dev = ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="\n", writeTerm=""},
+        function(result, args) return "handled: " .. result.err end)
+      local r = ATE.read(dev, {timeout=0.2})
+      ATE.close(dev)
+      ATE.report("PASS", "open onError carried the read: " .. r)
+    end),
+})
+"""
+    try:
+        store, ru = _run(app, source, peer.port, trace=True)
+    finally:
+        peer.stop()
+
+    texts = [ln["text"] for ln in _trace(store, ru)]
+    assert any(t.startswith(f"open TCP 127.0.0.1:{peer.port} ok") for t in texts), texts
+    assert not [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR"], "the open did not raise"
+    assert store.attempts(ru)[0]["msg"] == "open onError carried the read: handled: timeout"
+
+
 def test_a_read_timeout_is_traced_with_its_error_and_the_wait(app: QCoreApplication) -> None:
     """A read that waits out its timeout on a peer that sends nothing traces 0 bytes with
     `err "timeout"`, and its timing is the wait it actually made."""

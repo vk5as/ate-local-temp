@@ -153,9 +153,14 @@ class TracedDevice:
 
     Only ``read`` and ``write`` are wrapped — the registry times ``open`` and ``close`` — and every
     other attribute (``driver``, ``describe``, ``take_warnings``, …) is looked up on the wrapped
-    handle, so the host's device plumbing sees the contract it always did."""
+    handle, so the host's device plumbing sees the contract it always did.
 
-    __slots__ = ("_device", "_tracer", "_label")
+    ``__weakref__`` is part of the slots on purpose: the host remembers the ``onError`` an `open` was
+    given in a WeakKeyDictionary keyed by the handle, so a wrapped handle has to be
+    weak-referenceable or an `ATE.open` with an ``onError`` raises under ``deviceTrace.enabled``.
+    """
+
+    __slots__ = ("_device", "_tracer", "_label", "__weakref__")
 
     def __init__(self, device: Any, tracer: DeviceTracer, label: str) -> None:
         self._device = device
