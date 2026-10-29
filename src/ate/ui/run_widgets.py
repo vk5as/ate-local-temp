@@ -1157,6 +1157,10 @@ class RunScreenMixin:
     #: re-rendered as part of that, which is not the Operator choosing a schedule (packet 25b).
     _carrying_over = False
 
+    #: A finished run whose rows this layout did not read while it was hidden, drawn the moment it
+    #: is showing again (packet 25b review).
+    _deferred_run_uuid: Optional[str] = None
+
     def set_active(self, active: bool) -> None:
         """Make this the layout that acts, or the one that only mirrors the session.
 
@@ -1176,11 +1180,20 @@ class RunScreenMixin:
         """Something the hidden layout did not read needs reading when it is showing again."""
         self._store_dirty = True
 
+    def defer_finished_run(self, run_uuid: Optional[str]) -> None:
+        """Remember a finished run this layout will draw when the Operator switches to it.
+
+        The rows come from the store when the layout comes back, never from a read while it is
+        hidden: a hidden layout has nothing on screen to draw them into (packet 25b review)."""
+        self._deferred_run_uuid = run_uuid or None
+        self.mark_store_dirty()
+
     def _sync_from_store(self) -> None:
         """Redraw this layout from the store it mirrors.
 
         The staged layout only needs the log lines its Run view shows; the three-pane centre pane
         overrides this with its table, tallies and log."""
+        self._deferred_run_uuid = None
         self._refresh_log()
 
     def focus_waiting(self) -> bool:

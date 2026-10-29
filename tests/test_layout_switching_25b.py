@@ -550,6 +550,44 @@ def test_a_finished_run_keeps_its_results_across_both_switches(qapp, tmp_path):
     assert "wrong colour" in three.table.cell(first_row, 6)
 
 
+def test_a_finished_run_is_drawn_only_when_the_hidden_layout_comes_back(qapp, tmp_path):
+    """The layout that is not showing does not read the finished run; it draws it when switched to."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    staged, three = window.staged_screen, window.three_pane_screen
+
+    asked, _ = _pick_and_start(qapp, window, schedule)
+    three.table._prompt_bars[0].continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked)), "step 2 never asked for its input"
+    answer = three.input_widget(1, 1)
+    answer.line_edit.setText("7")
+    answer.ok_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+
+    # The visible layout has the results; the hidden one has not read them yet.
+    assert any(result == "PASS" for result, _ in _three_step_results(three).values()), (
+        "the visible layout lost the run"
+    )
+    hidden_rows = _staged_step_texts(staged)
+    assert not any("PASS" in row for row in hidden_rows), (
+        f"the hidden staged layout read the finished run while it was not showing: {hidden_rows}"
+    )
+
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    rows = _staged_step_texts(staged)
+    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    assert any("the first step is failing" in line for line in staged.log_pane.rendered_lines())
+    _finish(qapp, window)
+
+
 def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_path):
     """Answer a Stop-on-Fail pause in one layout: the other shows no prompt, and its Abort aborts
     the run on the first click rather than answering a prompt that is no longer there."""

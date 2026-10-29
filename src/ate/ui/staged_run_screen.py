@@ -686,6 +686,23 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # layouts acts when it builds both for one session (packet 25b).
         self.set_active(True)
 
+    def _sync_from_store(self) -> None:
+        """Draw what this layout skipped while it was hidden (packet 25b).
+
+        A finished run whose read was deferred is drawn here from the store, rows and log together;
+        a run still in progress needs only the log lines it did not read, since its step rows were
+        built when it started and its pause is painted by the prompt handler."""
+        run_uuid = self._deferred_run_uuid
+        self._deferred_run_uuid = None
+        if run_uuid:
+            self.run_view.refresh(
+                self.session.store.nodes(run_uuid),
+                self.session.store.attempts(run_uuid),
+                self.session.store.log_lines(run_uuid),
+            )
+        else:
+            self._refresh_log()
+
     # -- navigation ---------------------------------------------------------
 
     def _advance(self, index: int) -> None:
@@ -780,10 +797,20 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             self._failed_row = None
             # Read results from the store (never compute them here) and refresh the view.
             run_uuid = self.session.run_uuid
-            nodes = self.session.store.nodes(run_uuid) if run_uuid else []
-            attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-            log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
-            self.run_view.refresh(nodes, attempts, log_lines)
+            if self.is_active():
+                # Read results from the store (never compute them here) and refresh the view.
+                nodes = self.session.store.nodes(run_uuid) if run_uuid else []
+                attempts = self.session.store.attempts(run_uuid) if run_uuid else []
+                log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
+                self.run_view.refresh(nodes, attempts, log_lines)
+            else:
+                # The layout that is not showing defers the read and draws it when it comes back
+                # (packet 25b review); meanwhile every input it holds is closed, since nothing can
+                # be answered on a run that is over.
+                for widgets in self.run_view.input_widgets.values():
+                    for widget in widgets:
+                        widget.deactivate()
+                self.defer_finished_run(run_uuid)
             # The run is over: the status bar keeps these final timings (packet 14d).
             self._phase_text = "Finished"
             # Return to the first setup stage so a new run can be started.

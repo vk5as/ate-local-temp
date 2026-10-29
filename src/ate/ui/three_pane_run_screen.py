@@ -577,12 +577,17 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             # after FINISHED answers against a released engine (packet 25a review).
             self.table.close_inputs()
             run_uuid = self.session.run_uuid
-            nodes = self.session.store.nodes(run_uuid) if run_uuid else []
-            attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-            log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
-            self.table.show_state(nodes, attempts)
-            self._show_log(log_lines)
-            self._update_counts(nodes)
+            if self.is_active():
+                nodes = self.session.store.nodes(run_uuid) if run_uuid else []
+                attempts = self.session.store.attempts(run_uuid) if run_uuid else []
+                log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
+                self.table.show_state(nodes, attempts)
+                self._show_log(log_lines)
+                self._update_counts(nodes)
+            else:
+                # The layout that is not showing defers the read and draws it when it comes back
+                # (packet 25b review); its inputs are already closed above, so it answers nothing.
+                self.defer_finished_run(run_uuid)
             self._phase_text = "Finished"
         elif state in (SessionState.IDLE, SessionState.SELECTING):
             self.table.clear_pause()
@@ -613,6 +618,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
 
     def _sync_from_store(self) -> None:
         """Redraw the table, the counts and the log from whatever the store has recorded so far."""
+        self._deferred_run_uuid = None
         run_uuid = self.session.run_uuid
         if not run_uuid:
             return
