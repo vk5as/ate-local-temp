@@ -17,7 +17,6 @@ import json
 import sqlite3
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -52,14 +51,27 @@ def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, 
 
     Returns ``(asked, run_uuid)`` where ``asked`` is the list of ``(seq, attempt_no, index)`` tuples
     every step announced while asking for its inputs — so a test can assert the per-step announcement
-    contract from the one connection that also supplies/clicks (a second handler would double-supply)."""
+    contract from the one connection that also supplies/clicks (a second handler would double-supply).
+
+    A POLL is clicked the instant its ask is announced. A blocking ask in the same step is answered
+    only after every POLL that step announced has been clicked: a POLL click never blocks the worker,
+    so answering the blocking ask first would let the worker close the Attempt's input window while
+    the click is still in flight (packet 29c review: that race made the POLL test flaky under load).
+    The pump is bounded in ticks, not sleeps, and the bound names what never arrived."""
     asked: list[tuple[int, int, int]] = []
     sink: dict[str, Any] = {}
+    polls: list[tuple[int, int, int]] = []  # (node_seq, attempt_no, 0-based key) of every POLL asked
+    held: list[tuple[int, Any]] = []  # blocking asks waiting for the POLL clicks to land
+    MAX_TICKS = 50_000  # a run that never finishes fails loudly here instead of hanging
 
     def _on_input_asked(seq, attempt_no, index):
         key = index - 1  # 0-based position into this step's declarations
-        if strategy == INPUTS_POLL:
+        if strategy == INPUTS_POLL and not op.is_waiting(key):
             op.click_poll(node_seq=seq, attempt_no=attempt_no, index=key, text="clicked")
+            polls.append((seq, attempt_no, key))
+        elif strategy == INPUTS_POLL:
+            # op.is_waiting: this ask is a blocking one the worker is blocked in get_raw on right now.
+            held.append((key, values_by_index[key] if values_by_index is not None else _default_input_value(key)))
         else:
             value = values_by_index[key] if values_by_index is not None else _default_input_value(key)
             op.supply_input(key, value)
@@ -70,11 +82,20 @@ def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, 
     finished = threading.Event()
     engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
     engine.start()
-    deadline = time.time() + 10.0
+    ticks = 0
     while not finished.is_set():
         app.processEvents()
-        if time.time() > deadline:
-            raise TimeoutError("run did not reach FINISHED within 10 s")
+        ticks += 1
+        if held and all(op.poll_value(seq, attempt, key) is not None for seq, attempt, key in polls):
+            for key, value in held:
+                op.supply_input(key, value)
+            held.clear()
+        if ticks > MAX_TICKS:
+            unclicked = [p for p in polls if op.poll_value(*p) is None]
+            raise TimeoutError(
+                f"run did not reach FINISHED in {ticks} pump ticks: "
+                f"POLL clicks never delivered {unclicked}, blocking asks never answered {[k for k, _ in held]}"
+            )
     return asked, sink["u"]
 
 
@@ -93,13 +114,21 @@ def _write_and_run(app, op, schedule_text, strategy=INPUTS_BLOCKING, values_by_i
 
 
 def test_poll_recorded_when_clicked(app):
-    """A POLL input returns nil until its button is clicked, then that text — recorded as a row."""
+    """A POLL input returns nil until its button is clicked, then that text — recorded as a row.
+
+    The click is gated, not timed: the step also asks a blocking input, and this thread answers it
+    only once the POLL click is in the OperatorInput's state, so the worker is provably still inside
+    the Attempt's recording window when the click lands (packet 29c review: with nothing blocking in
+    the step this test raced and dropped the row under CPU load)."""
     op = OperatorInput()
     store, run_uuid = _write_and_run(
-        app, op, POLL_INPUT, strategy=INPUTS_POLL  # clicks the single POLL button "clicked"
+        app, op, POLL_INPUT, strategy=INPUTS_POLL,  # clicks the POLL button "clicked"
+        values_by_index={1: "go"},                  # the step's blocking PROMPT, answered after the click
     )
     rows = {idx: (typ, val) for idx, (typ, val) in _rows(store._conn, run_uuid).items()}
-    assert rows == {1: ("POLL", "clicked")}
+    assert rows == {1: ("POLL", "clicked"), 2: ("PROMPT", "go")}
+    # The worker read the POLL after the click landed, so the step's own Message carries the text.
+    assert [a["msg"] for a in store.attempts(run_uuid)] == ["status clicked"]
 
 
 # --- d: per-step announcement + blocking value recorded ------------------------
