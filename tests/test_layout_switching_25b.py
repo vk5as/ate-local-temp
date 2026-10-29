@@ -110,6 +110,15 @@ def _finish(qapp, window) -> None:
     stop_pdf_jobs()
 
 
+def test_a_wait_that_never_lands_is_a_failure(qapp) -> None:
+    """The helpers' wait raises rather than returning quietly, so no timeout can pass as a pass.
+
+    Packet 25b review: a swallowed timeout made a run that never reached the waited-for state look
+    like a passing test while costing the suite the whole 10 s."""
+    with pytest.raises(AssertionError, match="within 0.2 s"):
+        _wait(qapp, lambda: False, timeout=0.2)
+
+
 def _select_schedule(screen, name) -> bool:
     """Make the picker's row for ``name`` current, as the Operator's click would."""
     list_widget = screen.picker.schedule_list
