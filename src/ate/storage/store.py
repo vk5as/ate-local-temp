@@ -203,9 +203,18 @@ class RunStore:
         self._ensure_schema()
 
     def _run(self, stmt) -> Any:
-        """Execute a Core statement on the Engine's connection and return its result."""
+        """Execute a Core statement on the Engine's connection, with every row read inside the context.
+
+        Packet 25a review: returning the open ``Result`` left the connection's read statement
+        alive after the context closed — the GUI thread fetched it later. QueuePool then handed
+        that same sqlite3 connection (cursor still open) to the run worker, and a worker INSERT
+        colliding with the unfinalised read on the shared connection aborts the run with
+        "database is locked" on long schedules. Materialising the rows here closes the statement
+        before the connection goes back to the pool, so reads never outlive their context.
+        """
         with self._engine.connect() as conn:
-            return conn.execute(stmt)
+            result = conn.execute(stmt)
+            return result.fetchall() if result.returns_rows else result
 
     def _ensure_schema(self) -> None:
         # Idempotent table creation via a throwaway engine (reflects existence, so
@@ -286,7 +295,7 @@ class RunStore:
             stmt = stmt.order_by(col.desc(), test_run.c.run_uuid.asc())
         else:
             stmt = stmt.order_by(col.asc(), test_run.c.run_uuid.asc())
-        rows = self._run(stmt.limit(limit).offset(offset)).fetchall()
+        rows = self._run(stmt.limit(limit).offset(offset))
         return [ {name: row[i] for i, name in enumerate(names)} for row in rows ]
 
     def _filter_runs(self, stmt, filters):
@@ -404,7 +413,7 @@ class RunStore:
     def actions(self, run_uuid: str) -> list[dict]:
         """Return this run's Action rows as dicts (empty when the run is unknown)."""
         stmt = action.select().where(action.c.run_uuid == run_uuid)
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(action.columns, row)} for row in rows
         ]
@@ -583,7 +592,7 @@ class RunStore:
             .where(media_release.c.run_uuid == run_uuid)
             .order_by(media_release.c.seq)
         )
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(media_release.columns, row)} for row in rows
         ]
@@ -595,7 +604,7 @@ class RunStore:
             .where(run_file.c.run_uuid == run_uuid)
             .order_by(run_file.c.seq)
         )
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
         ]
@@ -610,7 +619,7 @@ class RunStore:
             .where(schedule_instance.c.run_uuid == run_uuid)
             .order_by(schedule_instance.c.instance_seq)
         )
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(schedule_instance.columns, row)} for row in rows
         ]
@@ -621,7 +630,7 @@ class RunStore:
         `seq` is the order the `ATE.addEquipment` calls happened, so reading by it gives the
         Equipment exactly as the schedule declared it. Empty when the run is unknown."""
         stmt = equipment.select().where(equipment.c.run_uuid == run_uuid).order_by(equipment.c.seq)
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(equipment.columns, row)} for row in rows
         ]
@@ -674,7 +683,7 @@ class RunStore:
     def log_lines(self, run_uuid: str) -> list[dict]:
         """Return this run's recorded log lines as dicts (empty when the run is unknown)."""
         stmt = log_line.select().where(log_line.c.run_uuid == run_uuid).order_by(log_line.c.seq)  # recorded order
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
         ]
@@ -684,14 +693,14 @@ class RunStore:
     def get_test_run(self, run_uuid: str) -> Optional[dict]:
         """Return the run row as a dict, or ``None`` if it was never recorded."""
         stmt = test_run.select().where(test_run.c.run_uuid == run_uuid)
-        row = self._run(stmt).first()
+        rows = self._run(stmt)
         # This build's native Row iterates values-only (no .keys(), no dict()), so
         # rebuild the mapping from the selected columns in declaration order.
-        return {str(c.name): value for c, value in zip(test_run.columns, row)} if row else None
+        return {str(c.name): value for c, value in zip(test_run.columns, rows[0])} if rows else None
 
     def open_runs(self) -> list[str]:
         """Run UUIDs with no end time — runs left unfinished by a crash or abort."""
-        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None))).fetchall()
+        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None)))
         return [row[0] for row in rows]
 
     def nodes(self, run_uuid: str) -> list[dict]:
@@ -701,7 +710,7 @@ class RunStore:
         rebuilt from the selected columns in declaration order because this build's native
         Row iterates values without ``.keys()`` or ``dict()``."""
         stmt = node.select().where(node.c.run_uuid == run_uuid)
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(node.columns, row)} for row in rows
         ]
@@ -709,7 +718,7 @@ class RunStore:
     def attempts(self, run_uuid: str) -> list[dict]:
         """Return this run's Attempt rows as dicts (empty when the run is unknown)."""
         stmt = attempt.select().where(attempt.c.run_uuid == run_uuid)
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(attempt.columns, row)} for row in rows
         ]
@@ -720,7 +729,7 @@ class RunStore:
         The report needs them to print each Step Input under the step that asked for it, so the
         read mirrors :meth:`nodes`/:meth:`attempts` rather than reaching into SQLite directly."""
         stmt = input_value.select().where(input_value.c.run_uuid == run_uuid).order_by(input_value.c.seq)  # recorded order
-        rows = self._run(stmt).fetchall()
+        rows = self._run(stmt)
         return [
             {str(c.name): value for c, value in zip(input_value.columns, row)} for row in rows
         ]
@@ -744,7 +753,7 @@ class RunStore:
         interrupted run (spec rule 98). Without one, only the row is updated — used
         by tests and by CLI paths that don't hold a logger yet.
         """
-        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None))).fetchall()
+        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None)))
         closed: list[str] = []
         for row in rows:
             run_uuid = row[0]
