@@ -461,3 +461,22 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Leftovers:
   - The first-stage form is compact but the window below it is empty. The mockup's setup layout is fuller; revisit in 25a/25b if wanted.
   - A fresh `ate setup` config has `defaultProject: ""`, so Operators must type a Project (per spec).
+
+## 25a — Three-pane Run screen (merged 2026-10-29)
+- Implementer (Strata, high), 1 compaction. Extracted shared widgets into `src/ate/ui/run_widgets.py` and added `three_pane_run_screen.py`.
+- Reviews: Haiku 6 must-fix, Strata 4 must-fix (union 8).
+  - **`database is locked` crash on long GUI runs** (Haiku, 5 of 6 runs).
+  - Inputs stay live after Abort; OK then raised an uncaught SessionError → SIGABRT.
+  - Ticking a step ON was a no-op (bool vs CheckState).
+  - Re-picking a schedule mid-run reloaded the table and wedged the run.
+  - Log pane not live.
+  - Counts stale on a second run.
+  - Vertical header numbered input/prompt rows.
+  - A mismatch note without word wrap squeezed the centre pane.
+- **Root cause of the lock, a latent app-wide bug:** `RunStore._run` returned an open SQLAlchemy `Result` after its connection went back to the pool. The unfinalised read then collided with the worker's INSERT on the same pooled sqlite connection, giving an immediate BUSY that `busy_timeout` can't clear. The staged screen was affected identically. Fixed by materialising rows inside the context; a 60-step run through both layouts is the regression test.
+- Rework (Strata, high). Its first turn ended mid-work with uncommitted edits; I resumed it with `t3_thread_send`.
+  - Fixed all 8, plus: blank Attempts for unrun steps; `RunScreenMixin` de-duplicates the two layouts; the staged-screen teardown abort is fixed (wait for `report_written`).
+- Light review: 954 passed ×3 (~115 s); collection 931 → 954, none lost; screenshots /tmp/25a-r2-shots OK.
+- Leftovers:
+  - The suite is now ~115 s (it was ~80 s at 10a). Consider a speed pass.
+  - The step table's columns overflow below ~1000 px window width.
