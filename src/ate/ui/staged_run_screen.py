@@ -131,9 +131,12 @@ class StepsOptionsStage(QWidget):
     starts the run through the screen.
     """
 
-    def __init__(self, session: Optional["HeadlessRunSession"] = None) -> None:
+    def __init__(self, session: Optional["HeadlessRunSession"] = None, screen: Optional["StagedRunScreen"] = None) -> None:
         super().__init__()
         self.session = session
+        # The layout this stage sits in (packet 25b): its Step Inputs answer only when the layout
+        # is the one showing.
+        self.screen = screen
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -218,7 +221,7 @@ class StepsOptionsStage(QWidget):
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
                 self.input_widgets[seq] = [
-                    StepInputWidget(decl, self.session, seq) for decl in declarations
+                    StepInputWidget(decl, self.session, seq, owner=self.screen) for decl in declarations
                 ]
                 _append_input_rows(
                     self.step_list, self.input_widgets[seq], int(getattr(step, "depth", 0)) + 1
@@ -315,9 +318,12 @@ class RunView(QWidget):
     store by :meth:`refresh`, never computed here.
     """
 
-    def __init__(self, session: Optional[HeadlessRunSession] = None) -> None:
+    def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["StagedRunScreen"] = None) -> None:
         super().__init__()
         self.session = session
+        # The layout this view belongs to (packet 25b): a Step Input here answers only while this
+        # layout is the one the Operator is looking at.
+        self.screen = screen
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -396,7 +402,9 @@ class RunView(QWidget):
             ))
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
-                self.input_widgets[seq] = [StepInputWidget(decl, self.session, seq) for decl in declarations]
+                self.input_widgets[seq] = [
+                    StepInputWidget(decl, self.session, seq, owner=self.screen) for decl in declarations
+                ]
                 for widget in self.input_widgets[seq]:
                     rows.append(("", widget, False, None, 0))
         self._render_rows(rows)
@@ -586,8 +594,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage(session)
-        self.steps_options_stage = StepsOptionsStage(self.session)
-        self.run_view = RunView(self.session)
+        self.steps_options_stage = StepsOptionsStage(self.session, screen=self)
+        self.run_view = RunView(self.session, screen=self)
         # The shared run handlers (packet 25a) read these names on either layout: the Operator's
         # form, the picker, the stop-on-fail pair, the line a refused Start writes on, the Start
         # button and the two log panes. They are the stage widgets themselves, not copies.
@@ -707,6 +715,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         the pending prompt with ABORT instead (the bar's own Abort path). Otherwise the worker is
         free to stop at its next step boundary (records ERROR / NOTRUN / ABORTED); ``request_abort``
         raises if there is no run in progress (the button is disabled whenever one is not)."""
+        if not self.is_active():
+            return  # the layout that is not showing cannot abort the run (packet 25b)
         if self.run_view.failure_prompt_bar.isVisible():
             self._on_prompt_choice("ABORT")
             return
@@ -907,6 +917,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         still held on an item refresh() would delete; the session's worker unblocks on choose().
         The bar hides itself in _on_choice, but the header-Abort path answers without the bar, so
         hide it here too (a no-op when the bar already hid itself)."""
+        if not self.is_active():
+            return  # the hidden layout's prompt bar never answers the pause (packet 25b)
         self.run_view.failure_prompt_bar.hide()
         self._clear_paused_display()
         self.session.choose(choice)

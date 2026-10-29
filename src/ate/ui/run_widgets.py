@@ -923,11 +923,16 @@ class StepInputWidget(QWidget):
     its value: the mockup's `chose:`/`clicked:` note for the button types, and for the others the
     state the controls already carry (a ticked box, typed text)."""
 
-    def __init__(self, declaration: StepInput, session: HeadlessRunSession, node_seq: int) -> None:
+    def __init__(
+        self, declaration: StepInput, session: HeadlessRunSession, node_seq: int, owner: Optional[object] = None
+    ) -> None:
         super().__init__()
         self.declaration = declaration
         self.session = session
         self.node_seq = node_seq
+        #: The layout this widget belongs to (packet 25b): a click on the hidden layout's input is
+        # not the Operator's answer, so the widget asks its owner before it reaches the session.
+        self.owner = owner
         self.index = declaration.index  # the 1-based n in ATE.input(n)
         self.blocking = declaration.type != "POLL"
         #: The Attempt this input was last asked for; a Retry re-asks the same index (packet 12c).
@@ -1060,11 +1065,13 @@ class StepInputWidget(QWidget):
             control.setEnabled(True)
         self.setStyleSheet(_INPUT_ACTIVE_STYLE)
         # The mockup's `focusActive`: the waiting line edit takes the cursor, so Enter submits;
-        # a widget without one focuses its first control.
-        if self.line_edit is not None:
-            self.line_edit.setFocus()
-        elif self.controls:
-            self.controls[0].setFocus()
+        # a widget without one focuses its first control. Only the layout that is showing takes
+        # the focus, so the hidden one cannot steal it (packet 25b).
+        if self.owner is None or self.owner.is_active():
+            if self.line_edit is not None:
+                self.line_edit.setFocus()
+            elif self.controls:
+                self.controls[0].setFocus()
 
     def deactivate(self) -> None:
         """Not being asked for: every control is disabled and the row has no active styling."""
@@ -1102,6 +1109,8 @@ class StepInputWidget(QWidget):
 
         A value that fails the declaration's own range/pattern is shown as the mockup's inline error
         and never reaches the session, so the step keeps waiting."""
+        if self.owner is not None and not self.owner.is_active():
+            return  # this layout is not the one showing (packet 25b): its input stays inert
         error = value_error(self.declaration, value)
         if error:
             self.error_label.setText(error)
@@ -1116,6 +1125,8 @@ class StepInputWidget(QWidget):
 
     def _click_poll(self, text: str) -> None:
         """Record a POLL click through the session; the sticky value is the button's text."""
+        if self.owner is not None and not self.owner.is_active():
+            return  # the hidden layout never clicks on the run's behalf (packet 25b)
         try:
             self.session.click_poll(self.node_seq, self.attempt_no, self.index, text)
         except (ValueError, SessionError) as exc:
@@ -1131,6 +1142,19 @@ class RunScreenMixin:
     `debug_window` and `step_input_widgets()` — and decides nothing about a run itself: every call
     here goes to the session or to the store.
     """
+
+    #: Which layout the window is showing (packet 25b). MainWindow keeps exactly one Run screen
+    #: active: the hidden layout mirrors the session but never acts on it, so a control on it can
+    #: never answer a run twice.
+    _active = True
+
+    def set_active(self, active: bool) -> None:
+        """Make this the layout that acts, or the one that only mirrors the session."""
+        self._active = bool(active)
+
+    def is_active(self) -> bool:
+        """True when this screen is the layout the window is showing."""
+        return bool(getattr(self, "_active", True))
 
     def _confirm_store_choice(self, mismatches: list[tuple[str, Optional[str], str, str]]) -> Optional[bool]:
         """Ask the Operator what to do with mismatched files before the run starts (ticket 06c).
@@ -1166,6 +1190,8 @@ class RunScreenMixin:
         every field it did not change; Project is pushed as typed, because a blank Project must
         refuse the run rather than carry an earlier one (spec 08). The run then starts through
         `session.start()`, which queues its signals and returns immediately."""
+        if not self.is_active():
+            return  # the layout that is not showing must not start a run (packet 25b)
         operator = self.fields.operator_edit.text().strip()
         project = self.fields.project_edit.text().strip()
         uut_type = self.fields.uut_type_edit.text().strip()

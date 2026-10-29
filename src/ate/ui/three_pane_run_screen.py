@@ -81,9 +81,12 @@ class StepTable(QWidget):
     #: A Stop-on-Fail prompt answered from one of the inline bars: CONTINUE, RETRY or ABORT.
     prompt_choice = pyqtSignal(str)
 
-    def __init__(self, session: Optional[HeadlessRunSession] = None) -> None:
+    def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["ThreePaneRunScreen"] = None) -> None:
         super().__init__()
         self.session = session
+        # The layout this table sits in (packet 25b): its inputs and prompts answer only while this
+        # layout is the visible one.
+        self.screen = screen
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -180,7 +183,7 @@ class StepTable(QWidget):
                     continue
                 table.insertRow(row)
                 table.setSpan(row, 0, 1, len(COLUMNS))
-                widget = StepInputWidget(declaration, self.session, seq)
+                widget = StepInputWidget(declaration, self.session, seq, owner=self.screen)
                 table.setCellWidget(row, 0, widget)
                 table.setRowHeight(row, widget.sizeHint().height())
                 self.input_widgets.setdefault(seq, []).append(widget)
@@ -418,7 +421,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         left_layout.addLayout(run_row)
         left_layout.addWidget(self.counts)
 
-        self.table = StepTable(session)
+        self.table = StepTable(session, screen=self)
         self.log_pane = LogPane("Log — INFO and above")
         self.debug_window = LogPane("Debug — every level")
         right = QWidget()
@@ -513,6 +516,8 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
 
     def _request_abort(self) -> None:
         """Abort the run: answer a pending prompt, or stop at the next step boundary."""
+        if not self.is_active():
+            return  # the layout that is not showing cannot abort the run (packet 25b)
         if self._paused_seq is not None:
             self._on_prompt_choice("ABORT")
             return
@@ -630,6 +635,8 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
 
     def _on_prompt_choice(self, choice: str) -> None:
         """A prompt was answered: clear the pause's display, then tell the session."""
+        if not self.is_active():
+            return  # the hidden layout's inline prompt never answers the pause (packet 25b)
         self._paused_seq = None
         self._paused_result = ""
         self._paused_message = ""
