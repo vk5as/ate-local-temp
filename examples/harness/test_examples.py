@@ -10,7 +10,10 @@ type and widget is declared, answered and recorded, and every run writes its rep
 adds the flow schedule: a step that fails on Attempt 1 and passes on a scripted Retry, Pre-test and
 Post-test Actions across a Sub-schedule tree, a hidden Sub-schedule included more than once with
 different keyvals and prefixes, a nested include, a disabled header, and modules shared between the
-includes.
+includes. Packet 29d adds the Device schedule: every Device Type run against the simulator peers
+`examples/harness/peers.py` starts, with its partial reads, timed-out reads, onError handlers,
+per-call overrides, Device opened in a Pre-test Action, and the Device trace lines the harness
+config turns on.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -33,7 +36,25 @@ from ate.catalog import (
     module_map,
 )
 
+from examples.harness.peers import FLUSHED_BYTES, REPLIES
 from examples.harness.run_examples import RELEASE_DIR, RUNS, run_all, visible_schedules
+
+#: The commands the Device schedule sends the SCPI peer, in include order: the Pre-test Device asks
+#: one question, the TCP and SERIAL Sub-schedules four each (VISA never sends MULTI?, because it has
+#: no receive buffer to flush).
+SCPI_COMMANDS = (
+    ["MEAS:VOLT?"]
+    + ["*IDN?", "PARTIAL?", "NEVER?", "MULTI?"] * 2
+    + ["*IDN?", "PARTIAL?", "NEVER?"]
+)
+
+#: Every Device Type the schedule opens, and the peer it reaches.
+DEVICE_KINDS = ("TCP", "UDP", "SERIAL", "VISA")
+
+
+def _ms(text: str) -> float:
+    """The wall-clock milliseconds a Device trace line claims, from its trailing `(n.n ms)`."""
+    return float(text.rsplit("(", 1)[1].removesuffix(" ms)"))
 
 
 @pytest.fixture(scope="module")
@@ -70,14 +91,16 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
     rows = list_schedule_rows(RELEASE_DIR)
     assert all(row.error is None for row in rows), "no broken rows in the picker"
     names = sorted(row.name for row in rows)
-    assert names == ["Example basics", "Flow and retry", "Report every Result", "Step inputs", "Stop on fail"]
+    assert names == ["Device types", "Example basics", "Flow and retry", "Report every Result",
+                     "Step inputs", "Stop on fail"]
     assert sorted(visible_schedules()) == names
 
     # Packet 29c: the Sub-schedules are listed so includes can resolve them, but hidden means the
     # Operator is never offered one as a Test Schedule in its own right.
     hidden = sorted(entry.rel_path for entry in definition.files if entry.hidden)
-    assert hidden == ["nest_a.tslua", "nest_b.tslua", "nest_c.tslua", "sub_channel.tslua"]
-    sub_schedule_names = {"Channel check", "Nested A", "Nested B", "Nested C"}
+    assert hidden == ["nest_a.tslua", "nest_b.tslua", "nest_c.tslua", "sub_channel.tslua",
+                      "sub_device.tslua"]
+    sub_schedule_names = {"Channel check", "Device check", "Nested A", "Nested B", "Nested C"}
     assert not sub_schedule_names & set(names), "hidden Sub-schedules are not offered in the picker"
 
     # Module names: derived from the path (lib/attempts.lua -> lib.attempts), and explicit where the
@@ -92,17 +115,19 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Five schedules, eight runs: Stop on fail is run twice (Continue and Abort), Example basics twice
-    (its optional step left disabled, then enabled by the Operator) and Flow and retry twice (Stop on
-    Fail with a Retry, and with Stop on Fail switched off), so the record count is the schedule count
-    plus those three extra runs."""
-    assert len(records) == len(visible_schedules()) + 3
+    Six schedules, eleven runs: Stop on fail is run twice (Continue and Abort), Example basics twice
+    (its optional step left disabled, then enabled by the Operator), Flow and retry twice (Stop on
+    Fail with a Retry, and with Stop on Fail switched off), and the Device schedule three times (as
+    written, with its disabled-by-default `onError` returns nil step enabled, and with its SCPI peer
+    unreachable), so the record count is the schedule count plus those five extra runs."""
+    assert len(records) == len(visible_schedules()) + 5
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
         assert run is not None, "the run row is written"
         assert run["result"] in ("PASS", "FAIL")
-        assert run["end_reason"] in ("COMPLETED", "STOPPED_ON_FAIL")
+        assert run["end_reason"] in ("COMPLETED", "STOPPED_ON_FAIL", "PRETEST_FAILED"), \
+            "the Device schedule with its peer down ends PRETEST_FAILED"
         assert run["ended_at"], "the run was closed, not left open"
         assert [release["media_number"] for release in record["media_releases"]] == ["MR-EXAMPLE"]
         # Every file the run loaded is recorded with its expected and computed checksum. ATE's own
@@ -579,3 +604,206 @@ def test_required_modules_share_one_state_across_the_includes(records: dict[str,
     assert bundled["kind"] == "ate-module" and bundled["expected_sha256"] is None
     assert len(bundled["computed_sha256"]) == 64, "ATE records the checksum of the bundled module it used"
     assert bundled["mismatch"] == 0
+
+
+def test_every_device_type_is_opened_written_read_flushed_and_closed(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 29d: TCP, UDP, SERIAL and VISA each run against the peers the harness started.
+
+    The Device schedule's own steps check the outcomes, so every one of them reports PASS: the reply
+    matches what the peer answered, the partial reads are partial, the timed-out read is recovered by
+    the handler `open` gave, and the flushes discard exactly what the buffer held. The `onError`
+    that returns nil is disabled by default, so the green run leaves it NOTRUN."""
+    record = records["devices"]
+    run = record["run"]
+    assert (run["result"], run["end_reason"]) == ("PASS", "COMPLETED")
+
+    steps = [n for n in record["nodes"] if n["kind"] == "step"]
+    expected = [("1.", "Pre-test Device still open", "PASS")]
+    for index, kind in enumerate(DEVICE_KINDS, start=2):
+        for number, suffix in enumerate(("open, write and read", "partial read", "read times out",
+                                        "flush", "close"), start=1):
+            expected.append((f"{index}.{number}.", f"{kind} {suffix}", "PASS"))
+    expected += [("6.", "Close the Pre-test Device", "PASS"), ("7.", "Read a closed Device", "NOTRUN")]
+    assert [(n["step_number"], n["step_name"], n["result"]) for n in steps] == expected
+
+    closed_by_schedule = next(n for n in steps if n["step_name"] == "Read a closed Device")
+    assert (closed_by_schedule["default_enabled"], closed_by_schedule["enabled"],
+            closed_by_schedule["attempt_count"]) == (0, 0, 0)
+
+    peers = record["peers"]
+    assert peers["scpiConnections"] == 4, "the Pre-test Device plus the TCP, SERIAL and VISA Devices"
+    assert peers["scpiCommands"] == SCPI_COMMANDS, "the schedule's commands, in include order"
+    assert peers["udpReceived"] == [b"PING", b"a datagram longer than the size asked for",
+                                   b"DROP:no reply"]
+    assert peers["udpEchoes"] == [b"ECHO:PING", b"ECHO:a datagram longer than the size asked for"]
+
+    # ATE closes nothing the schedule closed itself: the run ends with no Device left open.
+    assert not [line for line in record["logs"] if "left open at end of run" in line["text"]]
+
+
+def test_every_device_is_traced_and_declared_as_equipment(records: dict[str, dict[str, Any]]) -> None:
+    """With `deviceTrace.enabled`, every Device operation is recorded and every Device is Equipment.
+
+    Tracing is on in the harness's config, so each open, write, read and close writes one DEBUG line
+    with source `device` naming the Device Type and its address (ate-table-reference.md, "Tracing").
+    `ATE.addEquipment` declares the instruments the run used: ATE does not link Equipment rows to
+    Devices, so the schedule has to describe each one itself."""
+    record = records["devices"]
+    trace = [line for line in record["logs"]
+             if line["source"] == "device" and line["level"] == "DEBUG"]
+    for kind in DEVICE_KINDS:
+        for operation in ("open", "write", "read", "close"):
+            assert any(line["text"].startswith(f"{operation} {kind} ") for line in trace), \
+                f"no {operation} traced for a {kind} Device"
+
+    # The Device the Pre-test Action opened is traced from the Action, before any step ran.
+    pre_open = next(line for line in trace if line["text"].startswith("open TCP "))
+    assert pre_open["node_seq"] is None and pre_open["action_seq"] is not None
+    assert any(line["node_seq"] == 0 for line in trace if line["text"].startswith("write TCP "))
+
+    idn = REPLIES["*IDN?"].rstrip("\n")
+    assert any(f'{len(idn)} bytes "{idn}"' in line["text"] for line in trace)
+    # MULTI?'s reply arrives as one chunk: the schedule reads two of its lines and discards the
+    # third with flush. Only open, read, write and close are traced, so flush has no line of its own
+    # - the step's reported count is what records it.
+    assert any('"chan=1"' in line["text"] for line in trace)
+    assert any('"chan=2"' in line["text"] for line in trace)
+
+    # The per-call overrides are visible in the trace: the write sends CRLF even though the Device
+    # was opened with LF, and the stream partial reads waited their 0.4 s override rather than the
+    # 2.0 s the Device was opened with. UDP's partial read is a `size` truncation, so it returns at
+    # once and waits nothing.
+    for kind in ("TCP", "SERIAL", "VISA"):
+        assert any(line["text"].startswith(f"write {kind} ") and '7 bytes "*IDN?\\r\\n"' in line["text"]
+                   for line in trace), f"no CRLF write traced for {kind}"
+    stream_waits = [_ms(line["text"]) for line in trace
+                    if " partial (" in line["text"] and "UDP" not in line["text"]]
+    assert len(stream_waits) == 3 and all(300 <= wait <= 900 for wait in stream_waits), stream_waits
+
+    equipment = record["equipment"]
+    assert len(equipment) == 5, "the Pre-test Device plus one row per Device Type"
+    assert all(field in row for row in equipment for field in ("name", "serial", "connection"))
+    connections = [row["connection"] for row in equipment]
+    for kind in DEVICE_KINDS:
+        assert any(connection.startswith(f"{kind} ") for connection in connections), \
+            f"no Equipment row describes a {kind} Device"
+    assert equipment[0]["cal_due"] == "2026-01-01"
+
+
+def test_partial_reads_and_timeouts_record_what_their_results_say(records: dict[str, dict[str, Any]]) -> None:
+    """A partial read logs a WARNING and is not a failure; a read that times out with nothing is."""
+    record = records["devices"]
+    logs = record["logs"]
+    trace = [line["text"] for line in logs if line["source"] == "device"]
+
+    # Three stream Devices timed out mid-bytes; UDP's partial read is `size` cutting a datagram
+    # short, which the host says is truncation rather than a timeout.
+    assert sum("timed out after 38 byte(s)" in line["text"] for line in logs
+               if line["source"] == "ate") == 3
+    assert sum("datagram truncated to 10 byte(s)" in line["text"] for line in logs
+               if line["source"] == "ate") == 1
+    assert sum(" partial (" in text for text in trace) == 4
+
+    # The read that got nothing at all is a Device failure: its trace line carries the error, and the
+    # handler given to `open` is the fallback that catches it. Each waited the 0.3 s its call asked
+    # for, not the 2.0 s the Device was opened with.
+    assert sum('0 bytes "" err "timeout"' in text for text in trace) == 4
+    timeout_waits = [_ms(text) for text in trace if 'err "timeout"' in text]
+    assert len(timeout_waits) == 4 and all(200 <= wait <= 700 for wait in timeout_waits), timeout_waits
+    assert sorted(line["text"] for line in logs if "device error: timeout" in line["text"]) == [
+        "SERIAL device error: timeout", "TCP device error: timeout", "UDP device error: timeout",
+        "VISA device error: timeout",
+    ]
+
+    partial = sorted((attempt["actual"], attempt["expected"]) for attempt in record["attempts"]
+                     if " with no terminator" in attempt["msg"])
+    assert partial == [("10", "10"), ("38", "38"), ("38", "38"), ("38", "38")]
+
+    # Flush discards what the buffer held: 7 bytes for TCP and SERIAL (MULTI?'s unread third line),
+    # 0 for UDP (every echo was read) and for VISA, which has no receive buffer.
+    flushed = sorted(attempt["actual"] for attempt in record["attempts"]
+                     if attempt["msg"].startswith("flush discarded"))
+    assert flushed == ["0", "0", str(len(FLUSHED_BYTES)), str(len(FLUSHED_BYTES))]
+
+
+def test_an_on_error_that_returns_nil_raises_and_records_error(records: dict[str, dict[str, Any]]) -> None:
+    """The step disabled by default, run with the Operator enabling it.
+
+    Reading a Device that is already closed is a Device failure, so it goes through `onError`. This
+    handler returns nil, so the call raises, the step records Result.ERROR, and the schedule's own
+    `ATE.report` never runs."""
+    record = records["devices_nil_onerror"]
+    step = next(n for n in record["nodes"] if n["step_name"] == "Read a closed Device")
+    assert (step["default_enabled"], step["enabled"]) == (0, 1)
+    assert step["result"] == "ERROR" and step["attempt_count"] == 1
+
+    raised = next(line for line in record["logs"]
+                  if line["level"] == "ERROR" and "ATE.read" in line["text"])
+    assert "device closed" in raised["text"], "the Device was closed by step 6"
+    assert not any(attempt["msg"] == "never reached" for attempt in record["attempts"])
+    assert record["run"]["result"] == "FAIL"
+    assert record["unexpected_prompts"] == [], "this schedule stops on fail off, so no pause"
+
+
+def test_a_per_call_read_term_ends_only_that_read(records: dict[str, dict[str, Any]]) -> None:
+    """The header's promise: a `readTerm` on one call, not on the Device.
+
+    The Pre-test Device is opened with the builder's default `\\n`. Step 1 reads once with the
+    per-call terminator "3", which cuts the peer's `1.234\\n` answer after "1.2" and leaves the rest
+    in the receive buffer for the next read, which uses the Device's own terminator. The trace shows
+    both reads, so the override demonstrably applied to one call only."""
+    record = records["devices"]
+    attempt = next(a for a in record["attempts"] if a["msg"].startswith('readTerm "3" gave'))
+    assert (attempt["pass_fail"], attempt["actual"], attempt["expected"]) == ("PASS", "4", "4")
+    assert attempt["msg"] == 'readTerm "3" gave 1.2, the rest 4', attempt["msg"]
+
+    trace = [line["text"] for line in record["logs"] if line["source"] == "device"]
+    assert any(t.startswith("read TCP ") and '3 bytes "1.2"' in t for t in trace), "the readTerm read is traced"
+    assert any(t.startswith("read TCP ") and '1 bytes "4"' in t for t in trace), "the rest of the reply is read next"
+
+
+def test_a_second_close_does_nothing_and_traces_nothing(records: dict[str, dict[str, Any]]) -> None:
+    """Device lifetime, pinned: a Device closed twice returns `{ok = true` both times, and only the
+    close that actually happened is traced.
+
+    Step 6 calls `ATE.close` on the Pre-test Device twice, so the schedule makes six close calls
+    across five Devices while the trace carries five close lines."""
+    record = records["devices"]
+    step = next(n for n in record["nodes"] if n["step_name"] == "Close the Pre-test Device")
+    assert (step["result"], step["attempt_count"]) == ("PASS", 1)
+    (attempt,) = [a for a in record["attempts"] if a["msg"].startswith("discarded ")]
+    assert attempt["pass_fail"] == "PASS", "the second close is a no-op that still reports success"
+    assert (attempt["actual"], attempt["expected"]) == ("true/true", "true/true"), \
+        "both ATE.close calls returned {ok = true}"
+    closes = [line["text"] for line in record["logs"]
+              if line["source"] == "device" and line["level"] == "DEBUG" and line["text"].startswith("close ")]
+    assert len(closes) == 5, f"one traced close per Device, none for the no-op second close: {closes}"
+    assert sum(text.startswith("close TCP ") for text in closes) == 2, "the Pre-test Device and the TCP include"
+
+
+def test_the_device_schedule_fails_cleanly_when_its_scpi_peer_is_down(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 29d review: the same schedule with nothing listening on the SCPI port.
+
+    The Pre-test open fails, so `onError` runs; it logs the reason and returns nil, which means no
+    recovery, so `ATE.open` raises. A Pre-test failure ends the run on its own: `PRETEST_FAILED`,
+    result `FAIL`, every step `NOTRUN`, nothing opened, and no Python traceback in the log - the
+    failure is reported as a Device failure, not as an engine crash."""
+    record = records["devices_peer_down"]
+    logs = record["logs"]
+    assert not any("Traceback" in line["text"] for line in logs), "a failed open must not crash the engine"
+    assert not any("AttributeError" in line["text"] for line in logs)
+
+    assert (record["run"]["result"], record["run"]["end_reason"]) == ("FAIL", "PRETEST_FAILED")
+    pre = [a for a in record["actions"] if a["phase"] == "pre"]
+    assert pre and pre[0]["outcome"] == "error", "the Pre-test Action raised, and is recorded as such"
+
+    steps = [n for n in record["nodes"] if n["kind"] == "step"]
+    assert all(n["result"] == "NOTRUN" for n in steps), "the run ends before any step runs"
+    assert not any(n["attempt_count"] for n in steps)
+
+    assert any("SCPI peer unreachable" in line["text"] for line in logs), "the handler logged why"
+    assert any("ATE.open" in line["text"] for line in logs), "and the raise names the call and the Device"
+
+    peers = record["peers"]
+    assert peers["scpiConnections"] == 0 and peers["scpiCommands"] == [], "nothing reached the SCPI peer"
+    assert peers["udpReceived"] == [] and peers["udpEchoes"] == [], "no step ran, so no Device was opened"

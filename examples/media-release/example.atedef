@@ -25,6 +25,15 @@
       "sha256": "39580d8699e15dc3ce4c5a84391022996eacdd500f1f97652596deb4e8130b7f"
     },
     {
+      "path": "devices.tslua",
+      "sha256": "cc206850f0e2f2aecd4066cd47f39f42572d09ac64d527d4583b75c1704f946a"
+    },
+    {
+      "path": "sub_device.tslua",
+      "sha256": "92ac6b893b40c49ac83ebdb31339ead32e5208749639fcb04a7dbab2cbe24dbc",
+      "hidden": true
+    },
+    {
       "path": "sub_channel.tslua",
       "sha256": "01e8bba28244aaa30af096a1030d88361b73489d277b13500ddb25b7f5a4df01",
       "hidden": true
