@@ -439,6 +439,11 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
 
     session.input_asked.connect(_on_ask)
 
+    # The run-end report spawns a PDF helper (packet 22a); hook its completion now so the test can
+    # wait for it before the session goes out of scope, instead of Qt killing the process at teardown.
+    report_done = threading.Event()
+    session.report_written.connect(lambda *_seen: report_done.set())
+
     screen.steps_options_stage.run_button.click()  # queued start (begin_run runs on the next pump)
 
     # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
@@ -475,3 +480,12 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
     ).fetchone()
     assert err is not None and err["pass_fail"] == "ERROR"
     assert err["msg"] == "Aborted by Operator"
+
+    # The run is over: let its report helper exit before the session can be collected, or the
+    # QProcess is destroyed mid-run and Qt aborts the test process at teardown (packet 25a review).
+    # The helper finishes only while the event loop spins, so pump rather than block on a wait.
+    report_deadline = time.monotonic() + 10.0
+    while not report_done.is_set() and time.monotonic() < report_deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert report_done.is_set(), "the PDF helper never reported done"
