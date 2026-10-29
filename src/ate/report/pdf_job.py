@@ -94,12 +94,18 @@ def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> N
     proc.start(program, args)
 
 
+# A helper killed by :func:`stop_pdf_jobs` is waited for only briefly: the point is to end it, not to
+# watch it render, and ``waitForFinished`` returns as soon as the child exits.
+STOP_WAIT_MS = 1_000
+
+
 def stop_pdf_jobs(parent=None) -> None:
     """End every helper process owned by ``parent`` (all of them when ``parent`` is None).
 
     The connections are cut first so the job's callback never fires against a session that is going
-    away, then the process is killed and waited for, so Qt never destroys a QProcess that is still
-    running (packet 25b review: that is what aborted the test run at teardown).
+    away, then the process is killed and waited for briefly, so Qt never destroys a QProcess that is
+    still running (packet 25b review: that is what aborted the test run at teardown). With nothing
+    live this does no work at all, so calling it after every test costs nothing.
     """
     for proc in list(_live_pdf_jobs):
         if parent is not None and proc.parent() is not parent:
@@ -115,7 +121,7 @@ def stop_pdf_jobs(parent=None) -> None:
         try:
             if proc.state() != QProcess.ProcessState.NotRunning:
                 proc.kill()
-                proc.waitForFinished(2000)
+                proc.waitForFinished(STOP_WAIT_MS)
         except RuntimeError:
             pass
         _live_pdf_jobs.discard(proc)

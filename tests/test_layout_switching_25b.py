@@ -6,6 +6,7 @@ listen to the same session, so a switch is only a change of the visible pane: th
 keeps its state and its controls are inert while it is not the one showing.
 """
 
+import inspect
 import json
 import time
 from pathlib import Path
@@ -52,15 +53,21 @@ def _launch(env, tmp_path, ui=None):
     return outcome, alerts
 
 
-def _wait(qapp, predicate, timeout=10.0) -> bool:
-    """Pump the event loop until ``predicate`` is true, or give up."""
+def _wait(qapp, predicate, timeout: float = 10.0) -> bool:
+    """Pump the event loop until ``predicate`` is true, and say so loudly when it never is.
+
+    Packet 25b review: a wait used to give up quietly after 10 s, so a run that never reached the
+    state being waited for still "passed" while costing the suite ten seconds. Every wait here is for
+    a signal or a state the run really reaches, and a timeout is a failure."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         qapp.processEvents()
         if predicate():
             return True
         time.sleep(0.005)
-    return False
+    raise AssertionError(
+        f"no match for {inspect.getsource(predicate).strip()} within {timeout} s"
+    )
 
 
 def _pick_and_start(qapp, window, schedule, stop_on_fail=True, **fields):
@@ -82,19 +89,25 @@ def _pick_and_start(qapp, window, schedule, stop_on_fail=True, **fields):
     return asked, prompts
 
 
-def _finish(qapp, window):
-    """Abort whatever is still running and let the report helper exit, so teardown is clean."""
-    if window.session.state != SessionState.FINISHED:
-        try:
-            window.session.request_abort()
-        except Exception:
-            pass
-        _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
-    from ate.report.pdf_job import _live_pdf_jobs
+def _finish(qapp, window) -> None:
+    """End the run and its PDF helper, so the next test starts clean.
 
-    deadline = time.time() + 12
-    while _live_pdf_jobs and time.time() < deadline:
-        qapp.processEvents()
+    The wait is on the worker stopping, not on the session's state label: re-picking a schedule after
+    a run has finished puts the session back to SELECTING, so waiting for FINISHED here never landed
+    and burned the whole timeout (packet 25b review). A Stop-on-Fail pause still outstanding is
+    answered with Abort first — the worker blocks in the pause until someone chooses, and an abort
+    requested from outside is not a choice."""
+    session = window.session
+    engine = getattr(session, "_engine", None)
+    if engine is not None and engine.isRunning():
+        if session.pause_pending():
+            session.choose("ABORT")
+        else:
+            session.request_abort()
+        _wait(qapp, lambda: not engine.isRunning())
+    from ate.report.pdf_job import stop_pdf_jobs
+
+    stop_pdf_jobs()
 
 
 def _select_schedule(screen, name) -> bool:
