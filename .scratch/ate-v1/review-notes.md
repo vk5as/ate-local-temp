@@ -480,3 +480,20 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Leftovers:
   - The suite is now ~115 s (it was ~80 s at 10a). Consider a speed pass.
   - The step table's columns overflow below ~1000 px window width.
+
+## 25b — Layout setting and switching (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions). Both layouts live in a QStackedWidget, bound to one session, with an `is_active()` flag.
+- Reviews: Haiku 3 must-fix, Strata 2 must-fix (union 4):
+  - the hidden layout was active at launch (it could answer inputs and start/abort runs);
+  - a switch after FINISHED wiped the three-pane results;
+  - pause state wasn't reconciled across layouts (stale prompt; the first Abort was a no-op);
+  - no focus on the waiting input after a switch.
+- Rework (Strata, high, 1 compaction). Its turn ended twice early (a malformed tool call), and I resumed it with `t3_thread_send` both times.
+  - Fixed all 4, plus: guards on every hidden-screen action; deferred store reads on the hidden screen; a staged "(N Attempts)" badge; a new engine `prompt_answered` signal; `session.pause_pending()`.
+  - **Teardown-crash root cause (the flake since 10a):** the PDF helper QProcess was parented to the session, and GC at teardown destroyed it mid-render, after which its finished callback hit dead Qt objects. Fixed with `stop_pdf_jobs()` in `HeadlessRunSession.close`/`__del__`, guards in `pdf_job.finish`, and an autouse fixture.
+  - The rework first made the suite ~196 s: a test helper waited 10 s on a condition that could never be true and swallowed the timeout. Fixed: `_wait` raises on timeout, and conftest's engine join asserts instead of waiting quietly.
+- Light review: 984 passed ×3 (~132 s); collection 954 → 984, none lost; screenshots /tmp/25b-r2-shots OK.
+- Leftovers:
+  - A layout switch after FINISHED re-picks the schedule via `_carry_over`, which moves the session to SELECTING. The view switch has a session side effect; results still display.
+  - `StagedRunScreen._step_identity` has dead code after its return.
+  - RunView's header/rollup code is duplicated between the paused and finished renderers.
