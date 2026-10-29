@@ -264,6 +264,8 @@ class StepsOptionsStage(QWidget):
         have no box, so their itemChanged events are ignored."""
         if self._loading or self.session is None or not self._checkable:
             return
+        if self.screen is not None and not self.screen.is_active():
+            return  # the layout that is not showing cannot change what the next run runs (packet 25b)
         seq = next((step for step, step_item in self._step_items.items() if step_item is item), None)
         if seq is None:
             return  # an input row (ticket 10a), not a step with a box
@@ -634,6 +636,9 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # A Stop-on-Fail pause names its failing step in the prompt bar (packet 12d); the bar's
         # buttons answer it. Both are display-only — the session's choose() is the only call out.
         self.session.failure_prompt.connect(self._on_failure_prompt)
+        # The pause ends when the session says it ends, not when this layout's own button is clicked
+        # (packet 25b): a prompt answered in the other layout has to clear here too.
+        self.session.prompt_answered.connect(self._on_prompt_answered)
         self.run_view.failure_prompt_bar.choice_made.connect(self._on_prompt_choice)
 
         # Status bar (packet 14d): every new Action or Step names the phase and restarts the
@@ -667,6 +672,10 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_header)
         self._timer.start(1000)
+
+        # A screen built without a window is the layout that acts: MainWindow names which of the two
+        # layouts acts when it builds both for one session (packet 25b).
+        self.set_active(True)
 
     # -- navigation ---------------------------------------------------------
 
@@ -717,7 +726,10 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         raises if there is no run in progress (the button is disabled whenever one is not)."""
         if not self.is_active():
             return  # the layout that is not showing cannot abort the run (packet 25b)
-        if self.run_view.failure_prompt_bar.isVisible():
+        if self.session.pause_pending():
+            # The worker is blocked on a prompt: answer it with ABORT (packet 25b). The decision comes
+            # from the session, not from this layout's bar — the pause may have been answered in the
+            # other layout, and then this bar would be stale.
             self._on_prompt_choice("ABORT")
             return
         self.session.request_abort()
@@ -931,6 +943,20 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.run_view.state_header.setStyleSheet("")
         self._phase_text = "Running"  # the bar is back on the run's state (packet 14d)
         self._update_header()
+
+    def _on_prompt_answered(self, node_seq: int, attempt_no: int, choice: str) -> None:
+        """The session says the pause is over: clear this layout's prompt UI, whoever answered it.
+
+        Packet 25b: a prompt answered in the layout that was showing must not leave the other one
+        still holding a bar, a red highlight and "Paused" — the run resumed, so both layouts say so.
+        This is driven by the session's signal, never by this layout's own button."""
+        self.run_view.failure_prompt_bar.hide()
+        self._clear_paused_display()
+
+    def _paused_prompt_widget(self):
+        """The prompt bar's Continue button while this layout has a prompt up."""
+        bar = self.run_view.failure_prompt_bar
+        return bar.continue_button if bar.isVisible() else None
 
     # -- Step Inputs (ticket 10a) ---------------------------------------------
 

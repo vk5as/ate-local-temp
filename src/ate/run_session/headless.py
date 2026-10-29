@@ -67,6 +67,8 @@ class HeadlessRunSession(QObject):
     input_answered = pyqtSignal(int, int, int, object)
     step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    # (node_seq, attempt_no, choice): that pause was answered and the worker moved on (packet 25b).
+    prompt_answered = pyqtSignal(int, int, str)
     action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
@@ -380,6 +382,13 @@ class HeadlessRunSession(QObject):
             raise SessionError("cannot abort when no run is in progress")
         self._engine.request_abort()
 
+    def pause_pending(self) -> bool:
+        """True while the worker is blocked on a Stop-on-Fail prompt (packet 25b).
+
+        The layouts decide Abort from this rather than from their own prompt bar: the bar of the
+        layout that is not showing says nothing about whether the run is paused."""
+        return bool(self._engine is not None and self._engine.pause_pending())
+
     def choose(self, choice: str) -> None:
         """Answer a Stop-on-Fail failure prompt (CONTINUE / RETRY / ABORT).
 
@@ -539,6 +548,9 @@ class HeadlessRunSession(QObject):
         # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
         # answer it through this session once it fires — same connection timing as input asks above.
         self._engine.failure_prompt.connect(self._on_failure_prompt)
+        # The pause's end, not each layout's own button, is what clears a prompt UI (packet 25b):
+        # whichever layout is showing, both see the run resume.
+        self._engine.prompt_answered.connect(self.prompt_answered.emit)
         # Forward the worker's phase announcements (packet 14d) so the Run screen's status bar can
         # count Pre-/Post-test Actions and restart its current-item timer without polling the worker.
         self._engine.action_started.connect(self._on_action_started)

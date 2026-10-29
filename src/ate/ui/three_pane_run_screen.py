@@ -328,6 +328,8 @@ class StepTable(QWidget):
 
         Re-syncing the headers around a toggle repaints their boxes, and a repaint must not read as
         another Operator toggle, so the enabler's recorded state is compared first."""
+        if self.screen is not None and not self.screen.is_active():
+            return  # the layout that is not showing cannot change what the next run runs (packet 25b)
         if self.enabler is None or not self.checks[node_seq].isEnabled():
             return
         checked = bool(state)
@@ -459,6 +461,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
 
         self.session.state_changed.connect(self._on_state_changed)
         self.session.failure_prompt.connect(self._on_failure_prompt)
+        # The pause ends when the session says it ends (packet 25b): a prompt answered in the other
+        # layout has to clear this one's banner, prompt and "Paused" as well.
+        self.session.prompt_answered.connect(self._on_prompt_answered)
         self.session.action_started.connect(self._on_action_started)
         self.session.step_started.connect(self._on_step_started)
         self.session.input_asked.connect(self._on_input_asked)
@@ -473,6 +478,10 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._timer.timeout.connect(self._update_header)
         self._timer.start(1000)
 
+        # A screen built without a window is the layout that acts: MainWindow names which of the two
+        # layouts acts when it builds both for one session (packet 25b).
+        self.set_active(True)
+
     # -- setup ------------------------------------------------------------
 
     def _on_selection(self, name: str) -> None:
@@ -483,6 +492,11 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         (packet 25a review). A pick made mid-run is recorded on the session for the next run and
         ignored by this layout."""
         if self.state == SessionState.STARTED:
+            return
+        if self._carrying_over:
+            # MainWindow re-rendered this picker as part of a layout switch (packet 25b): the table
+            # keeps whatever the run in view put in it, and the setup preview is carried over by hand.
+            self._update_start_button()
             return
         if not name:
             self.table.load_steps([])
@@ -518,7 +532,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         """Abort the run: answer a pending prompt, or stop at the next step boundary."""
         if not self.is_active():
             return  # the layout that is not showing cannot abort the run (packet 25b)
-        if self._paused_seq is not None:
+        if self.session.pause_pending():
+            # The run is paused on a prompt (packet 25b): the session says so, not this pane's banner,
+            # which can be stale if the choice was made in the other layout.
             self._on_prompt_choice("ABORT")
             return
         self.session.request_abort()
@@ -630,8 +646,32 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._paused_seq = node_seq
         self._paused_result = result
         self._paused_message = message
-        self._sync_from_store()
+        if not self.is_active():
+            self.mark_store_dirty()  # the hidden pane does not read the store for a pause it cannot show
+        else:
+            self._sync_from_store()
         self._update_header()
+
+    def _on_prompt_answered(self, node_seq: int, attempt_no: int, choice: str) -> None:
+        """The session says the pause is over: clear this layout's prompt, banner and "Paused".
+
+        Packet 25b: the prompt may have been answered in the layout the Operator was looking at, and
+        the layout that was hidden must not keep a stale prompt that its Abort then answers again."""
+        self._paused_seq = None
+        self._paused_result = ""
+        self._paused_message = ""
+        self.table.clear_pause()
+        self._phase_text = "Running"
+        if self.is_active():
+            self._sync_from_store()
+        else:
+            self.mark_store_dirty()
+        self._update_header()
+
+    def _paused_prompt_widget(self):
+        """The inline prompt's Continue button while this pane has a prompt up."""
+        bar = self.table._prompt_bars.get(self._paused_seq) if self._paused_seq is not None else None
+        return bar.continue_button if bar is not None and bar.isVisible() else None
 
     def _on_prompt_choice(self, choice: str) -> None:
         """A prompt was answered: clear the pause's display, then tell the session."""
@@ -658,7 +698,10 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         The ask is also when the log pane is most worth reading: whatever the step logged before it
         blocked is already in the store, and the Operator needs it to decide what to type
         (packet 25a review)."""
-        self._refresh_log()
+        if self.is_active():
+            self._refresh_log()
+        else:
+            self.mark_store_dirty()  # the hidden pane reads the log when it becomes the visible one
         widget = self.input_widget(node_seq, index)
         if widget is not None:
             widget.activate(attempt_no)
@@ -668,4 +711,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         for widget in self.table.input_widgets.get(node_seq, ()):
             if widget.declaration.type == "POLL":
                 widget.deactivate()
-        self._sync_from_store()
+        # The pane that is not showing does not read the store for rows nobody is looking at: it
+        # marks itself dirty and syncs once when the Operator switches to it (packet 25b review).
+        if not self.is_active():
+            self.mark_store_dirty()
+        else:
+            self._sync_from_store()

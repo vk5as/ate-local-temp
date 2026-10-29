@@ -22,7 +22,7 @@ from ate.storage.store import RunStore
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 
-from ._fixtures import WRITES_PDF, add_logging_input_schedule, fake_pdf_helper, write_ate_env
+from ._fixtures import WRITES_PDF, _append_file, add_logging_input_schedule, fake_pdf_helper, write_ate_env
 
 SHOTS = Path("/tmp/25b-shots")
 FIELDS = ("operator", "project", "uut_type", "serial")
@@ -457,6 +457,299 @@ def test_a_switch_never_writes_the_config(qapp, tmp_path):
     window.staged_layout_action.trigger()
     qapp.processEvents()
     assert env["config"].read_text(encoding="utf-8") == before
+
+
+# -- a finished run, a pause, and the keyboard survive the switch -------------
+
+PAUSE_AND_BLOCK = """\
+return ScheduleParams("Pause and block schedule", "a logged failure, then a blocking step")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.INFO, "the first step is failing")
+        ATE.report(Result.FAIL, "wrong colour", "Red", "Green")
+      end),
+    StepParams("second"):setStepNo("2.")
+      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function()
+        ATE.log(Log.DEBUG, "probe chatter before the ask")
+        local v = ATE.input(1)
+        ATE.report(Result.PASS, "voltage " .. v, "7", "7")
+      end),
+  })
+"""
+
+
+def _add_pause_and_block_schedule(tmp_path: Path) -> str:
+    """A schedule that fails (pausing the run), logs, then blocks on an input: results, a log and a
+    run still in progress, all at once."""
+    _append_file(tmp_path / "defs", "pause_block.tslua", PAUSE_AND_BLOCK)
+    return "Pause and block schedule"
+
+
+def _staged_step_texts(screen) -> list[str]:
+    """The staged Run view's step rows, as the Operator reads them."""
+    return [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
+
+
+def _three_step_results(screen) -> dict[int, tuple[str, str]]:
+    """``node_seq -> (Result, Attempts)`` for every step row in the three-pane centre table."""
+    results = {}
+    for seq, row in screen.table._step_rows.items():
+        results[seq] = (screen.table.cell(row, 2), screen.table.cell(row, 3))
+    return results
+
+
+def test_a_finished_run_keeps_its_results_across_both_switches(qapp, tmp_path):
+    """Finish a run with a FAIL step and a PASS step, then switch both ways: the results, the
+    Attempts and the log are still on screen in the layout that comes to the front."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    asked, prompts = _pick_and_start(qapp, window, schedule)
+    assert prompts, "the failing step paused the run"
+    window.staged_screen.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert window.session.state == SessionState.STARTED, "the run resumed"
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked)), "step 2 never asked for its input"
+    answer = window.staged_screen.input_widget(1, 1)
+    answer.line_edit.setText("7")
+    answer.ok_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+    staged, three = window.staged_screen, window.three_pane_screen
+
+    rows = _staged_step_texts(staged)
+    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    assert staged.log_pane.rendered_lines(), "the staged log lost the run's log"
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    results = _three_step_results(three)
+    assert results.get(0) == ("FAIL", "1"), results
+    assert results.get(1) == ("PASS", "1"), results
+    assert any("the first step is failing" in line for line in three.log_pane.rendered_lines()), three.log_pane.rendered_lines()
+    assert any("probe chatter" in line for line in three.debug_window.rendered_lines())
+
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    rows = _staged_step_texts(staged)
+    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    assert any("the first step is failing" in line for line in staged.log_pane.rendered_lines()), (
+        "the log went empty when staged came back"
+    )
+    first_row = three.table.step_row(0)
+    assert three.table.cell(first_row, 4) == "Red" and three.table.cell(first_row, 5) == "Green"
+    assert "wrong colour" in three.table.cell(first_row, 6)
+
+
+def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_path):
+    """Answer a Stop-on-Fail pause in one layout: the other shows no prompt, and its Abort aborts
+    the run on the first click rather than answering a prompt that is no longer there."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    staged, three = window.staged_screen, window.three_pane_screen
+
+    # Start in the three-pane layout and answer the pause there.
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    _asked, prompts = _pick_and_start(qapp, window, schedule)
+    assert prompts, "the failing step paused the run"
+    bar = three.table._prompt_bars[prompts[0][0]]
+    assert bar.isVisible()
+    bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: not window.session.pause_pending()), "the pause never resumed"
+    assert window.session.state == SessionState.STARTED, "the run is still up"
+
+    # Both layouts say the run is running again: no bar, no banner, no "Paused".
+    assert staged.run_view.failure_prompt_bar.isVisible() is False, "the hidden layout kept its prompt bar"
+    assert staged._failed_row is None, "the hidden layout still highlights the paused step"
+    assert three.table.banner.isVisible() is False
+    assert three.status_bar.status_label.text() == "Running"
+    assert staged.run_view.status_bar.status_label.text() != "Paused"
+
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    assert staged.run_view.failure_prompt_bar.isVisible() is False, "the prompt bar came back with the layout"
+    assert staged.run_view.status_bar.status_label.text() != "Paused"
+    assert staged.run_view.state_header.text() != "WAITING"
+
+    # One click of Abort on this layout aborts the run.
+    window.staged_screen.run_view.abort_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "Abort did nothing"
+    row = window.session.store.get_test_run(window.session.run_uuid)
+    assert row["end_reason"] == "ABORTED", row
+    _finish(qapp, window)
+
+
+def test_the_mirror_case_pause_answered_in_staged_leaves_the_three_pane_clean(qapp, tmp_path):
+    """Same from the other side: answer the pause in staged, switch to three-pane, one Abort aborts."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    _asked, prompts = _pick_and_start(qapp, window, schedule)
+    window.staged_screen.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: not window.session.pause_pending()), "the pause never resumed"
+    assert window.staged_screen.run_view.failure_prompt_bar.isVisible() is False
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    three = window.three_pane_screen
+    assert three.table.banner.isVisible() is False, "the three-pane kept the pause banner"
+    assert three._paused_seq is None, "the three-pane still thinks a step is paused"
+    assert not [bar for bar in three.table._prompt_bars.values() if bar.isVisible()], "a stale prompt bar"
+    assert three.status_bar.status_label.text() != "Paused"
+
+    three.abort_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "one Abort click did nothing"
+    row = window.session.store.get_test_run(window.session.run_uuid)
+    assert row["end_reason"] == "ABORTED", row
+    _finish(qapp, window)
+
+
+def test_the_waiting_input_has_the_focus_after_a_mid_run_switch(qapp, tmp_path):
+    """Switch layouts while an input is waiting, then answer it from the keyboard alone."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = add_logging_input_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    asked, _ = _pick_and_start(qapp, window, schedule)
+    seq = asked[0][0]
+    index = 1  # the blocking INTEGER input
+    assert _wait(qapp, lambda: any(a[2] == index for a in asked)), "the step is waiting for its input"
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    three = window.three_pane_screen
+    waiting = three.input_widget(seq, index)
+    assert waiting is not None and waiting.line_edit is not None
+    assert QApplication.focusWidget() is waiting.line_edit, "the new layout did not take the keyboard"
+    QTest.keyClicks(QApplication.focusWidget(), "42")
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Return)
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    rows = window.session.store.input_values(window.session.run_uuid)
+    assert len(rows) == 1 and rows[0]["value"] == "42", rows
+    _finish(qapp, window)
+
+    # And the way back: focus follows the layout that is showing when it is paused.
+    outcome2, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
+    window2 = outcome2.window
+    window2.show()
+    qapp.processEvents()
+    _asked2, prompts2 = _pick_and_start(qapp, window2, "Fail then pass schedule")
+    window2.staged_layout_action.trigger()
+    qapp.processEvents()
+    staged2 = window2.staged_screen
+    assert QApplication.focusWidget() is staged2.run_view.failure_prompt_bar.continue_button, (
+        "the paused layout did not focus its prompt bar"
+    )
+    _finish(qapp, window2)
+
+
+def test_a_step_box_on_the_hidden_layout_does_not_change_the_run(qapp, tmp_path):
+    """Ticking a step's enable box on the layout that is not showing reaches no session."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    staged, three = window.staged_screen, window.three_pane_screen
+    assert _select_schedule(staged, "Fail then pass schedule")
+    staged.test_schedule_stage.run_button.click()  # previews the steps, boxes still editable
+    qapp.processEvents()
+    assert window.session.node_enables is None
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    # The staged layout is hidden now: un-ticking one of its boxes must not reach the session.
+    staged.steps_options_stage.step_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+    qapp.processEvents()
+    assert window.session.node_enables is None, "the hidden layout toggled a step"
+    assert three.table.checks[1].isChecked() is True, "the visible layout's box followed the hidden one"
+
+    # Switch back and the same box on the now-hidden three-pane layout is inert too.
+    window.staged_layout_action.trigger()
+    qapp.processEvents()
+    three.table.checks[0].setChecked(False)
+    qapp.processEvents()
+    assert window.session.node_enables is None, "the hidden three-pane toggled a step"
+    assert staged.steps_options_stage.step_list.item(0).checkState() == Qt.CheckState.Checked
+
+
+def test_a_hidden_layouts_prompt_bar_answers_nothing(qapp, tmp_path):
+    """The prompt of the layout that is not showing mirrors the pause but cannot answer it."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    _pick_and_start(qapp, window, schedule)
+    staged, three = window.staged_screen, window.three_pane_screen
+    assert staged.is_active() and not three.is_active()
+    assert staged.run_view.failure_prompt_bar.isVisible(), "the visible layout shows the pause"
+
+    hidden_bar = three.table._prompt_bars.get(0)
+    if hidden_bar is not None:
+        hidden_bar.continue_button.click()
+        qapp.processEvents()
+    assert window.session.pause_pending(), "the hidden layout answered the pause"
+    attempts = window.session.store.attempts(window.session.run_uuid)
+    assert all(row.get("prompt_choice") is None for row in attempts), attempts
+
+    staged.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: not window.session.pause_pending())
+    _finish(qapp, window)
+
+
+def test_a_hidden_layout_defers_its_store_reads_until_it_is_showing(qapp, tmp_path):
+    """The layout that is not showing reads the store once, when it comes to the front."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    three = window.three_pane_screen
+    syncs: list[int] = []
+    original_sync = three._sync_from_store
+    three._sync_from_store = lambda: (syncs.append(1), original_sync())
+
+    _pick_and_start(qapp, window, schedule)
+    assert not syncs, f"the hidden three-pane read the store {len(syncs)} times while hidden"
+    assert three._store_dirty is True, "the hidden layout did not remember what it skipped"
+
+    window.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    assert len(syncs) == 1, f"switching synced {len(syncs)} times, expected one deferred sync"
+    assert three._store_dirty is False
+    assert any("the first step is failing" in line for line in three.log_pane.rendered_lines())
+    _finish(qapp, window)
 
 
 # -- the screenshots -----------------------------------------------------------

@@ -105,7 +105,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.history_screen)
         self.setCentralWidget(self.stack)
         self.stack.setCurrentWidget(self.run_screen)  # stage 1: the Run screen is the launch view
-        self.run_screen.set_active(True)
+        # Exactly one layout acts and the other mirrors the session (packet 25b): both are named
+        # explicitly, so neither screen carries a stale default at launch or after a switch.
+        for name, screen in self.run_screens.items():
+            screen.set_active(name == self.layout)
 
         view_menu = self.menuBar().addMenu("View")
         self.view_menu = view_menu
@@ -154,8 +157,14 @@ class MainWindow(QMainWindow):
         previous.set_active(False)
         self.layout = layout
         self.run_screen = self.run_screens[layout]
-        self.run_screen.set_active(True)
+        # Carry the setup across while the target is still inert, then make it the acting layout: that
+        # is where the store reads it deferred while hidden are drawn (packet 25b).
         self._carry_over(previous, self.run_screen)
+        self.run_screen.set_active(True)
+        # The layout that just came to the front takes the keyboard: its waiting input, or the prompt
+        # it is paused on (packet 25b). `activate` only focuses the layout that is showing, so a
+        # mid-run switch has to hand the focus over here.
+        self.run_screen.focus_waiting()
         self._mark_layout()
         if self.stack.currentWidget() in (previous, self.run_screen):
             self.stack.setCurrentWidget(self.run_screen)
@@ -177,9 +186,24 @@ class MainWindow(QMainWindow):
             if src is not None and dst is not None:
                 dst.setText(src.text())
         target.picker.filter_edit.setText(source.picker.filter_edit.text())
-        # Re-rendering against the session's selection makes the picked schedule current here too.
-        target.picker.render()
-        if self.session.state != SessionState.STARTED and self.session.selected_schedule:
+        # Re-rendering against the session's selection makes the picked schedule current here too, but
+        # a switch is not the Operator picking a schedule: the target must not rebuild its step table
+        # from that preview (packet 25b review).
+        target._carrying_over = True
+        try:
+            target.picker.render()
+        finally:
+            target._carrying_over = False
+        # A run that is up, or one this session just finished, already has its rows on both layouts:
+        # reloading the schedule here would blank the Result/Attempts/Actual/Expected/Message cells and
+        # the log the Operator switched to look at (packet 25b review). The target redraws from the
+        # store instead; only the setup preview is re-loaded, and only when there is no run to show.
+        has_run_to_show = self.session.run_uuid is not None and self.session.state in (
+            SessionState.STARTED, SessionState.FINISHED
+        )
+        if has_run_to_show:
+            target.mark_store_dirty()  # drawn as soon as this layout becomes the visible one
+        elif self.session.selected_schedule:
             steps = load_schedule_steps(self.session, self.session.selected_schedule)
             if target is self.staged_screen:
                 target.steps_options_stage.load_steps(steps)

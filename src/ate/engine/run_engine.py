@@ -75,6 +75,8 @@ class RunEngine(QThread):
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
     step_finished = pyqtSignal(int)  # node_seq: this step's Attempts are done, so its POLL inputs close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    # (node_seq, attempt_no, choice): the pause above was answered and the worker is running again.
+    prompt_answered = pyqtSignal(int, int, str)
     action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
 
@@ -270,7 +272,17 @@ class RunEngine(QThread):
         self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=choice)
         with self._pause_lock:
             self._pending.pop((node_seq, attempt_no), None)
+        # The pause is over: every layout clears its prompt UI from this, not from its own button.
+        self.prompt_answered.emit(node_seq, attempt_no, choice)
         return choice
+
+    def pause_pending(self) -> bool:
+        """True while the worker is blocked waiting for a Stop-on-Fail choice (packet 25b).
+
+        The layouts ask this instead of looking at their own prompt bar: the bar of a layout that is
+        not on screen is not the run's truth, and a pause answered in one layout is over for both."""
+        with self._pause_lock:
+            return bool(self._pending)
 
     def choose(self, choice: str) -> None:
         """Answer a Stop-on-Fail failure prompt from the operator/main thread (packet 12b).
