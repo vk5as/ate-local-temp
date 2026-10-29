@@ -412,9 +412,12 @@ def test_staged_run_records_blocking_input_value(qapp, tmp_path):
 def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_path):
     """Packet 13a checkbox 1: the Run view's Abort button sets the session's abort flag.
 
-    Runs ABORTABLE through StagedRunScreen (selection -> Run view) and clicks ``screen.run_view.abort_button``
-    while step 1 blocks on its INTEGER input; the operator answers that input first so step 1 records
-    cleanly, then hits Abort between steps. The button is reached only through the screen — no run logic here."""
+    Runs ABORTABLE_TWO_INPUTS through StagedRunScreen (selection -> Run view) and clicks
+    ``screen.run_view.abort_button`` while the worker is provably parked inside step 2's blocking
+    input. Step 1's own input is answered first so it records cleanly; the Abort click can then never
+    land after the run has finished (packet 30b review: the old single-input fixture let a worker race
+    through steps 2 and 3 first, so under load the run closed PASS before the button was pressed).
+    The button is reached only through the screen — no run logic here."""
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
@@ -426,16 +429,17 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)  # to the Test Schedule stage
 
-    item = _find_item(screen.test_schedule_stage.schedule_list, "Abortable schedule")
+    item = _find_item(screen.test_schedule_stage.schedule_list, "Abortable two-input schedule")
     screen.test_schedule_stage.schedule_list.setCurrentItem(item)
-    assert session.selected_schedule == "Abortable schedule"
+    assert session.selected_schedule == "Abortable two-input schedule"
 
-    answered = threading.Event()
+    parked_in_step_2 = threading.Event()
 
     def _on_ask(node_seq, attempt_no, index):
-        op = screen.engine.operator_input  # set by begin_run once the run starts; valid while running
-        op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly
-        answered.set()
+        if node_seq == 0:
+            screen.engine.operator_input.supply_input(index - 1, 5)  # answer step 1 so it passes
+        else:
+            parked_in_step_2.set()  # the worker is now waiting inside step 2's ATE.input
 
     session.input_asked.connect(_on_ask)
 
@@ -446,14 +450,16 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
 
     screen.steps_options_stage.run_button.click()  # queued start (begin_run runs on the next pump)
 
-    # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
-    # Do not wait for FINISHED here: a bare wait would let the worker race through steps 2 & 3 first.
-    answered_deadline = time.monotonic() + 10.0  # a time bound, not a pump count
-    while not answered.is_set() and time.monotonic() < answered_deadline:
+    # Pump until step 1 has been answered AND step 2 has announced its input: that is the moment the
+    # worker is provably inside a step, so the Abort click cannot race with a run that already
+    # finished (packet 30b review).
+    deadline = time.monotonic() + 10.0  # a time bound, not a pump count
+    while not parked_in_step_2.is_set() and time.monotonic() < deadline:
         qapp.processEvents()
-    assert answered.is_set(), "step 1 never announced its input within 10 s"  # announced and answered exactly once through the run session
+    assert parked_in_step_2.is_set(), "step 2 never announced its input within 10 s"
+    assert session.state == SessionState.STARTED, "the run finished before Abort could be pressed"
 
-    # Abort between steps while step 1 waits; then let the worker record ERROR / NOTRUN / ABORTED.
+    # Abort while the worker is blocked on step 2's input; it records ERROR / NOTRUN / ABORTED.
     screen.run_view.abort_button.click()
     assert _wait_finished(qapp, session)
 

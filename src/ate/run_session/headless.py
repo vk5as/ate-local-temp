@@ -283,6 +283,18 @@ class HeadlessRunSession(QObject):
         to prefill and a run always records something meaningful."""
         return self._selected_stop_on_fail if self._selected_stop_on_fail is not None else True
 
+    @property
+    def stop_on_fail(self) -> bool:
+        """The On failure choice the next run will use (spec 37: options carry over).
+
+        The Operator's override if one was made, otherwise the selected schedule's :setStopOnFail
+        default. :meth:`select_schedule` re-reads the schedule's own default even when the same
+        schedule is picked again, so a layout that prefills its radio from this — rather than from
+        :attr:`selected_stop_on_fail` — keeps the choice the Operator made for the last run."""
+        if getattr(self, "_pending_stop_on_fail", None) is not None:
+            return bool(self._pending_stop_on_fail)
+        return self.selected_stop_on_fail
+
     def select_schedule(self, name: str) -> None:
         """Select a schedule by its loaded name and remember its Stop on Fail default.
 
@@ -292,10 +304,11 @@ class HeadlessRunSession(QObject):
         while a run is in progress the selection is remembered but not announced."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
-        # Switching schedules drops the previous schedule's step overrides; selecting
-        # the same one keeps them (spec 37: options carry over within a schedule).
+        # Switching schedules drops the previous schedule's step overrides and its On failure
+        # override; selecting the same one keeps them (spec 37: options carry over within a schedule).
         if self._selected_name != name:
             self._pending_node_enables = None
+            self._pending_stop_on_fail = None
         self._selected_name = name
         stop_on_fail = True  # spec default when unset, unknown, or the schedule fails to load
         config = self._config

@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
+    QStackedWidget,
     QGroupBox,
     QVBoxLayout,
     QWidget,
@@ -609,6 +610,11 @@ class SchedulePicker(QWidget):
 
     selection_changed = pyqtSignal(str)  # the exact schedule name, or "" when nothing runnable is current
 
+    #: Set while MainWindow is copying the Operator's setup across a layout switch: re-rendering
+    #: this picker as part of that is not the Operator choosing a schedule, so the picker paints
+    #: the row but never writes the selection to the session (packets 25b, 30b review).
+    _carrying_over = False
+
     def __init__(self, session: HeadlessRunSession, inline_mismatches: bool = False) -> None:
         super().__init__()
         self.session = session
@@ -791,7 +797,6 @@ class SchedulePicker(QWidget):
         item = self.schedule_list.currentItem()
         name = (item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
         if name:
-            self.session.select_schedule(name)
             self._set_notes(item.text() or (item.data(Qt.ItemDataRole.UserRole + 2) or ""))
             # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c) —
             # unless the list already draws it inside the row, in which case naming it again below
@@ -799,6 +804,8 @@ class SchedulePicker(QWidget):
             flagged = self._mismatch_flags.get(name, [])
             release = self._release_labels.get(flagged[0][3], "") if flagged else ""
             self._set_mismatch("" if self.inline_mismatches else _mismatch_flag_text(flagged, release))
+            if not self._carrying_over:
+                self.session.select_schedule(name)
         else:
             self._clear_selection()
         self.selection_changed.emit(name)
@@ -822,6 +829,8 @@ class SchedulePicker(QWidget):
         (packet 05b review). A run already in progress keeps its own selection."""
         self._set_notes("")
         self._set_mismatch("")
+        if self._carrying_over:
+            return  # a layout switch that lost the row is not the Operator dropping the schedule (30b)
         if self.session.selected_schedule and self.session.state != SessionState.STARTED:
             self.session.clear_selection()
 
@@ -1181,6 +1190,19 @@ class RunScreenMixin:
         """True when this screen is the layout the window is showing."""
         return bool(getattr(self, "_active", False))
 
+    def _show_if_on_screen(self) -> None:
+        """Reveal this layout only when the window's stack is already on it (packet 30b review).
+
+        The window keeps both layouts as pages of one :class:`QStackedWidget`, and the stack hides
+        the page the Operator is not looking at. A layout that reveals itself with ``show()``
+        un-hides that page and Qt paints it over the layout on screen: the hidden staged screen's
+        header, step list and setup fields sat on top of the three-pane view while a run was up
+        and after it finished. Which page is visible is the window's decision, never a layout's."""
+        stack = self.parent()
+        if isinstance(stack, QStackedWidget) and stack.currentWidget() is not self:
+            return
+        self.show()
+
     def mark_store_dirty(self) -> None:
         """Something the hidden layout did not read needs reading when it is showing again."""
         self._store_dirty = True
@@ -1250,6 +1272,38 @@ class RunScreenMixin:
         else:
             dialog.exec()
         return dialog.store_choice()
+
+    def _set_stop_on_fail(self, value: bool) -> None:
+        """Set the "On failure" pair on whichever layout this is (packet 30b)."""
+        self.stop_on_fail_radio.setChecked(value)
+        self.continue_all_radio.setChecked(not value)
+
+    def new_run(self) -> Optional[str]:
+        """The Operator's "New run": unlock the session for the next run, clearing nothing.
+
+        A session stays FINISHED after a run, and a FINISHED session has its step boxes locked and
+        its options shut (packet 30b review). The only Operator action that unlocks it is picking a
+        schedule again (spec 37), so New run re-selects the schedule already picked: that moves
+        FINISHED → SELECTING and keeps the step-enable overrides, because ``select_schedule`` drops
+        overrides only for a *different* schedule. Nothing here writes the setup fields, so Project,
+        Operator, UUT Type, serial and schedule all carry over. Re-selecting does re-read the
+        schedule's own :setStopOnFail default, so the choice the Operator made is put back after it."""
+        if not self.is_active():
+            return None  # the layout not showing cannot start the next run (packet 25b)
+        schedule = self.session.selected_schedule
+        if not schedule:
+            return None
+        stop_on_fail = self.stop_on_fail_radio.isChecked()
+        self.session.select_schedule(schedule)
+        self._set_stop_on_fail(stop_on_fail)
+        return schedule
+
+    def start_new_run(self) -> None:
+        """The layout's "New run" control (packet 30b review): unlock the session for the next run.
+
+        The staged layout overrides this to take the Operator back to stage 1 as well; the three-pane
+        setup pane is always on screen, so unlocking the session is the whole action there."""
+        self.new_run()
 
     def begin_run(self) -> None:
         """Capture the Operator's fields and start a run. Clears nothing on purpose.
