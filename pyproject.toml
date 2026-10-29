@@ -9,15 +9,25 @@ description = "Automated Test Execution — run Lua 5.5 Test Schedules against h
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
+classifiers = [
+    # The wheel targets Debian stable's system Python (3.13) and the frozen
+    # builds' CPython (3.14); see docs/building-from-source.md.
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+# Floors, not exact pins: the wheel floats to whatever PyPI has that works.
+# Lower bounds are the oldest versions this suite is known to pass against.
+# tests/test_wheel_build_28a.py compares each floor with the version installed in the
+# venv running the suite, so a floor that was never released (pyvisa>=1.22) fails.
 dependencies = [
-    "PyQt6",
-    "PyQt6-WebEngine",
+    "PyQt6>=6.7",
+    "PyQt6-WebEngine>=6.7",
     "lupa>=2.8",
     "SQLAlchemy>=2.0",
-    "Jinja2",
-    "pyserial",
-    "pyvisa",
-    "pyvisa-py",
+    "Jinja2>=3.1",
+    "pyserial>=3.3",
+    "pyvisa>=1.16",  # PyPI's newest is 1.16.2; 1.22 was never released
+    "pyvisa-py>=0.7",
 ]
 
 # Version is derived from the git tag at build time (see src/ate/_version.py),
@@ -26,8 +36,12 @@ dependencies = [
 [tool.setuptools.dynamic]
 version = {attr = "ate._version.__version__"}
 
+# setuptools and build are here because a fresh venv ships pip only: the wheel test
+# builds a wheel with --no-isolation and docs/building-from-source.md says
+# `python -m build --wheel`, and both fail with a bare `pip install -e ".[test]"`
+# without them.
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-qt"]
+test = ["pytest>=7", "pytest-qt", "setuptools>=64", "build>=1.0"]
 
 [project.scripts]
 ate = "ate.cli:main"
@@ -35,16 +49,23 @@ ate = "ate.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ship the bundled Jinja2 report template (and any other data files) inside the package.
+# Ship everything the app reads at runtime, not just Python: the Jinja2 report template,
+# the bundled Lua modules, and CSS/HTML/text/JSON files. The wildcard key covers every
+# package, so a new resource needs no pyproject change ONLY if its extension is one of
+# the six listed here. A file with a new extension (.png, .yaml, .xml, ...) must be added
+# to the list: tests/test_wheel_build_28a.py builds a wheel and fails on every non-.py
+# file under src/ate that the wheel does not carry.
 [tool.setuptools.package-data]
-"ate.report" = ["templates/*.j2"]
-"ate.lua" = ["*.lua"]  # packet 06d: the modules `require("ate.<name>")` resolves to
+"*" = ["*.j2", "*.css", "*.lua", "*.html", "*.txt", "*.json"]
 
 [tool.pytest.ini_options]
 # `examples` holds the seam-1 harness for the example Media Release (packet 29a), so the regular
 # suite runs it too and CI catches an example schedule that stops working.
 testpaths = ["tests", "examples"]
 addopts = "-ra"
+markers = [
+    "slow: seconds of work or a network; deselect with -m 'not slow'",
+]
 # The engine and run session must never import widgets. This is enforced by a
-# dedicated test (see tests/test_architecture_rules.py); keep this marker here
+# dedicated test (see tests/test_architecture_rules.py); keep this note here
 # so the rule is documented at configuration time too.

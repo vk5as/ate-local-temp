@@ -11,8 +11,9 @@ schedule's raw Lua tables are converted to plain Python before reaching it (see 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 
 # The Step Input types the format allows. ENUM is the only type that carries a widget; PROMPT and
@@ -165,6 +166,43 @@ def _validate_one(index: int, raw: Mapping[str, Any]) -> StepInput:
     return StepInput(
         index=index, desc=desc, type=decl_type, prompt=prompt_values, orient=orient, tooltip=tooltip
     )
+
+
+def value_error(decl: StepInput, raw: Any) -> Optional[str]:
+    """Why a supplied value is not acceptable for ``decl``, or ``None`` when it is.
+
+    Ticket 10a: the Run screen's input widgets show this inline (the mockup's ``.err`` line) and
+    submit nothing while it is non-empty. The rules are the declaration's own — INTEGER/FLOAT stay
+    numbers inside their ``range``, STRING matches its ``pattern``, RADIOBUT needs a choice — so the
+    widget never decides anything itself, it only asks this module. Messages are word-for-word the
+    mockup's (``Enter a whole number``, ``Must be 0.5 to 2.0``, ``Choose one``)."""
+    if decl.type == "ENUM":
+        # Only RADIOBUT needs an answer before OK: CHECKBOX with nothing ticked is a legitimate
+        # "none of them", and PUSHBUT answers by clicking one of its buttons.
+        if decl.widget == "RADIOBUT" and not raw:
+            return "Choose one"
+        return None
+
+    if decl.type in ("INTEGER", "FLOAT"):
+        text = "" if raw is None else str(raw).strip()
+        try:
+            number = int(text) if decl.type == "INTEGER" else float(text)
+        except ValueError:
+            return "Enter a whole number" if decl.type == "INTEGER" else "Enter a number"
+        bounds = decl.range
+        if bounds and not (bounds["min"] <= number <= bounds["max"]):
+            return f"Must be {bounds['min']} to {bounds['max']}"
+        return None
+
+    if decl.type == "STRING" and decl.pattern:
+        try:
+            if re.search(decl.pattern, str(raw or "")) is None:
+                return f"Must match {decl.pattern}"
+        except re.error:
+            return f"Must match {decl.pattern} (invalid pattern)"
+        return None
+
+    return None
 
 
 def _as_string_list(value: Any, index: int) -> list[str]:

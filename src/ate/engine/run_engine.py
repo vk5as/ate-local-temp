@@ -77,7 +77,10 @@ class RunEngine(QThread):
     run_uuid_reported = pyqtSignal(str)  # the freshly generated run key, on start
     state_changed = pyqtSignal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    step_finished = pyqtSignal(int)  # node_seq: this step's Attempts are done, so its POLL inputs close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
+    step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
 
     def __init__(
         self,
@@ -184,6 +187,15 @@ class RunEngine(QThread):
         self._equipment_cursor = 0
         # Set when a Stop-on-Fail pause is aborted (packet 12b); ends the run STOPPED_ON_FAIL.
         self._stopped_on_fail = False
+        # Packet 10a review: which step/Attempt is running right now, and which of its POLL inputs
+        # are open. An answered blocking input, or a POLL whose step has ended, is no longer live,
+        # and the session rejects answers sent for anything else.
+        self._ask_step: Optional[int] = None
+        self._ask_attempt: int = 0
+        self._ask_inputs: list[Any] = []
+        self._poll_open: set[tuple[int, int, int]] = set()
+        # A blocking ask announced by the worker (get_raw) reaches the GUI through input_asked.
+        self._op.asked.connect(self._on_asked)
 
     @property
     def aborted(self) -> bool:
@@ -206,6 +218,33 @@ class RunEngine(QThread):
         Owned by the engine (a fresh one per real run); tests and the GUI drive it directly so a
         blocking supply or POLL click reaches the worker while it waits, without importing widgets."""
         return self._op
+
+    def _on_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
+        """A blocking ``ATE.input(index)`` has just started waiting: announce it as an input ask.
+
+        Qt queues this cross-thread signal to the engine's own thread, so the GUI and the session see
+        the ask while the worker sits in :meth:`OperatorInput.get_raw` (packet 10a review)."""
+        self.input_asked.emit(node_seq, attempt_no, index)
+
+    def input_declaration(self, node_seq: int, attempt_no: int, index: int) -> Optional[Any]:
+        """The running step's n-th Step Input declaration, or None if that step/Attempt/index isn't running.
+
+        The session uses it to reject an answer sent for a step that isn't asking, an old Attempt, or
+        an index the step never declared (packet 10a review)."""
+        if node_seq != self._ask_step or attempt_no != self._ask_attempt:
+            return None
+        if 1 <= index <= len(self._ask_inputs):
+            return self._ask_inputs[index - 1]
+        return None
+
+    def is_asking(self, node_seq: int, attempt_no: int, index: int) -> bool:
+        """True while this step's blocking ``ATE.input(index)`` call is actually waiting."""
+        decl = self.input_declaration(node_seq, attempt_no, index)
+        return decl is not None and decl.type != "POLL" and self._op.is_waiting(index - 1)
+
+    def is_poll_open(self, node_seq: int, attempt_no: int, index: int) -> bool:
+        """True while this step's POLL button is live — that is, while its Attempt runs."""
+        return (node_seq, attempt_no, index) in self._poll_open
 
     def _pause_for_operator(self, run_uuid: str, node_seq: int, attempt_no: int) -> str:
         """Stop-on-Fail pause for a failed Attempt: announce the pending choice and block until answered.
@@ -804,9 +843,13 @@ class RunEngine(QThread):
         pretest_failed = False  # a Pre-test Action that raised aborts the whole run (packet 14b)
         pre_started: list[int] = []
         run_order = 0
+        # Packet 14d: the status bar shows "Pre-test n/total" as each Action starts, so announce
+        # every one with its phase, position and the phase's total before it runs.
+        pre_total = sum(len(self._phase_actions(host.instances[s].schedule, "pre")) for s in self._action_instances(host))
         for instance_seq in self._action_instances(host):
             pre_started.append(instance_seq)
             for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "pre"):
+                self.action_started.emit("pre", run_order + 1, pre_total)
                 outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="pre", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
                 run_order += 1
                 if outcome == "error":
@@ -873,6 +916,9 @@ class RunEngine(QThread):
             attempt_count = 0
             while True:
                 attempt_count += 1
+                # Packet 14d: announce the Attempt so the status bar restarts its current-item timer
+                # (a Retry is a new start of the same step, and gets its own timing).
+                self.step_started.emit(seq)
                 host._attempt_no = attempt_count  # ATE.input POLL reads its sticky state under this key
                 # Ticket 10: put this Attempt's OperatorInput context in place before the action runs
                 # so ATE.input(n) range-checks against THIS step's declarations, and announce each
@@ -881,11 +927,23 @@ class RunEngine(QThread):
                 # op.reset() below starts this Attempt's recording window clean so its values attach
                 # to it (a retried Attempt re-asks under its own number, packet 12c).
                 self._op.reset()
-                for index in range(1, len(validated) + 1):
-                    # Announce this input so the OperatorInput controller counts it as outstanding; a
-                    # blocking supply or POLL click decrements that count when delivered.
-                    self._op.note_asked()
-                    self.input_asked.emit(seq, attempt_count, index)
+                # Packet 10a review: a blocking input opens only when its ``ATE.input(n)`` call
+                # actually blocks — the OperatorInput's ``asked`` signal, wired to ``input_asked`` in
+                # __init__ — while a POLL is live for the whole Attempt, so it is announced here,
+                # before the action runs. A step that declares inputs its action never reads therefore
+                # opens nothing and never keeps the run waiting. op.reset() above starts this Attempt's
+                # recording window clean, so a retried Attempt re-asks under its own number (12c).
+                self._ask_step = seq
+                self._ask_attempt = attempt_count
+                self._ask_inputs = list(validated)
+                self._poll_open = {
+                    (seq, attempt_count, index)
+                    for index, decl in enumerate(validated, start=1)
+                    if decl.type == "POLL"
+                }
+                for index, decl in enumerate(validated, start=1):
+                    if decl.type == "POLL":
+                        self.input_asked.emit(seq, attempt_count, index)
                 start = len(host.reports)
                 error_text: Optional[str] = None
                 # Packet 17b: a device failure from now until the Attempt's action ends is owned by it,
@@ -990,6 +1048,11 @@ class RunEngine(QThread):
                         break
                 break
 
+            # Packet 10a review: this step ran its last Attempt, so nothing may answer its POLL any
+            # more — the layout closes its widget on this signal.
+            self._poll_open = {key for key in self._poll_open if key[0] != seq}
+            self.step_finished.emit(seq)
+
             # The step's node row is written once, after its last Attempt, carrying that Attempt's
             # result and the number of Attempts executed (packet 12c). The mid-step abort path above
             # already recorded its own ERROR node and attempt, so it is skipped here.
@@ -1032,11 +1095,13 @@ class RunEngine(QThread):
         # Pre-test order above — an instance reached in the Pre-test pass gets its teardown even
         # when its own Pre-test Action failed, and one the pass never got to gets none.
         run_order = 0
+        post_total = sum(len(self._phase_actions(host.instances[s].schedule, "post")) for s in pre_started)
         for instance_seq in reversed(pre_started):
             for action_fn in self._phase_actions(host.instances[instance_seq].schedule, "post"):
                 # Clear before every action, not just the first: a second abort ends only the action it
                 # lands in, so the flag must not carry over and kill the next one on its first hook tick.
                 self._abort_flag.clear()
+                self.action_started.emit("post", run_order + 1, post_total)
                 outcome, error = self._record_phase_action(host, run_uuid, instance_seq=instance_seq, phase="post", fn=action_fn, pass_fail=pass_fail, run_order=run_order)
                 run_order += 1
                 if outcome == "aborted":
