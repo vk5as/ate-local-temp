@@ -547,18 +547,53 @@ class _AteTable:
         return _DEVICE_FAILURE, self._host._runtime.table_from(result), params, handler, message
 
     def _handler_for(self, device: Any, error_handler: Any) -> Any:
-        """The call's own ``onError`` if given, else the one given to ``open`` (or nil)."""
-        return error_handler if error_handler is not None else self._open_handlers.get(device)
+        """The call's own ``onError`` if given, else the one given to ``open`` (or nil).
+
+        The fallback is looked up only for a real handle: that table is keyed by weak reference, and
+        a string or nil passed where a Device belongs (packet 29d review) has no handler to inherit."""
+        if error_handler is not None:
+            return error_handler
+        return self._open_handlers.get(device) if self._is_device_handle(device) else None
 
     def _device_driver(self, device: Any) -> type:
         """The driver class that opened ``device``, so ``read``/``write`` validate their per-call
         fields against that Device Type rather than always TCP (packet 18a).
 
-        Anything that is not a device handle — a string, a number, a closed-over value — falls back
-        to TCP, which is what these wrappers used before, so a bad argument still raises and still
-        reports "device closed" exactly as it did."""
+        Only ever asked after :meth:`_is_device_handle` has accepted the argument, so this is a
+        handle's own driver; the TCP fallback covers a handle that was opened before tracing wrapped
+        it."""
         driver = getattr(device, "driver", None)
         return driver if isinstance(driver, type) else TcpDriver
+
+    def _is_device_handle(self, handle: Any) -> bool:
+        """Whether ``handle`` is a Device handle, or a value the schedule made up (packet 29d review).
+
+        Every driver's device object — and the tracing wrapper around it — describes itself, and the
+        sandbox gives a schedule no way to build one, so ``describe`` is what a handle is. A string
+        left behind by a failed ``open`` whose ``onError`` returned one, a number, or nil is not a
+        Device: using it is a Device failure through ``onError``, not a Python ``AttributeError``."""
+        return callable(getattr(handle, "describe", None))
+
+    def _handle_name(self, handle: Any) -> str:
+        """How a value passed where a Device handle belongs is named in the failure message."""
+        if handle is None:
+            return "nil"
+        if isinstance(handle, str):
+            return "a string"
+        if isinstance(handle, (int, float)):
+            return "a number"
+        if isinstance(handle, self._host._table_cls):
+            return "a table"
+        return type(handle).__name__
+
+    def _not_a_device(self, name: str, handle: Any, params: Any, error_handler: Any, result: dict[str, Any]) -> tuple:
+        """The failure for a Device call whose first argument is not a Device (packet 29d review).
+
+        ``result`` is the operation's own failure shape with ``err = "not a Device"``, so ``onError``
+        sees the fields it would for a closed Device; with no handler (or one returning nil) the call
+        raises ``<file>:<line>: ATE.<fn>: <value>: not a Device``."""
+        result["err"] = "not a Device"
+        return self._failure(name, self._handle_name(handle), result, params, self._handler_for(handle, error_handler))
 
     def _do_open(self, device_type: Any, params: Any = None, error_handler: Any = None) -> Any:
         """Open a Device of ``device_type`` with ``params``; returns an opaque handle (userdata).
@@ -590,6 +625,8 @@ class _AteTable:
         tracking returns False on the second call, but we still report success. A close that fails goes
         through ``onError``."""
         params, error_handler = self._split_args(params, error_handler)
+        if not self._is_device_handle(device):
+            return self._not_a_device("close", device, params, error_handler, {"ok": False})
         registry = self._host._devices
         try:
             registry.close_device(device)
@@ -625,6 +662,10 @@ class _AteTable:
         Packet 17a: the buffer cap is remembered by the reader thread; the first read after an
         overflow carries ``overflow = true`` and logs one WARNING (source device) for it."""
         params, error_handler = self._split_args(params, error_handler)
+        if not self._is_device_handle(device):
+            return self._not_a_device(
+                "read", device, params, error_handler, {"data": None, "count": 0, "partial": False}
+            )
         raw = self._raw_params(params, ("readTerm",)) or {}  # a skipped params table is the empty one
         driver = self._device_driver(device)  # the Device Type that opened this handle
         validated = validate_params(driver, raw, driver.read_fields)
@@ -676,6 +717,8 @@ class _AteTable:
         timeouts/failures come back from the device as result tables, never raised here, and go through
         ``onError``, as does writing to a closed Device. ``count`` is the number of bytes actually sent,
         terminator included."""
+        if not self._is_device_handle(device):
+            return self._not_a_device("write", device, params, error_handler, {"ok": False, "count": 0})
         driver = self._device_driver(device)  # the Device Type that opened this handle
         validated = validate_params(driver, self._raw_params(params, ("data", "writeTerm")), driver.write_fields)
         if self._host._devices.is_open(device):
@@ -698,6 +741,8 @@ class _AteTable:
         Device or one the reader marked failed returns the failure through ``onError``, like a
         read on a closed Device."""
         params, error_handler = self._split_args(params, error_handler)
+        if not self._is_device_handle(device):
+            return self._not_a_device("flush", device, params, error_handler, {"ok": False, "count": 0})
         validate_params(self._device_driver(device), self._raw_params(params, ()) or {}, {})  # flush takes no fields
         if self._host._devices.is_open(device):
             ok, count, err = device.flush()
