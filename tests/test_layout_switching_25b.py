@@ -740,14 +740,26 @@ def test_a_hidden_layout_defers_its_store_reads_until_it_is_showing(qapp, tmp_pa
     original_sync = three._sync_from_store
     three._sync_from_store = lambda: (syncs.append(1), original_sync())
 
-    _pick_and_start(qapp, window, schedule)
-    assert not syncs, f"the hidden three-pane read the store {len(syncs)} times while hidden"
+    asked, prompts = _pick_and_start(qapp, window, schedule)
+    assert not syncs, f"the hidden three-pane synced {len(syncs)} times while hidden"
+    assert not three.log_pane.rendered_lines(), "the hidden pane read a log nobody was looking at"
+    assert three._store_dirty is True, "the hidden layout did not remember what it skipped"
+    window.staged_screen.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked)), "step 2 never asked for its input"
+    answer = window.staged_screen.input_widget(1, 1)
+    answer.line_edit.setText("7")
+    answer.ok_button.click()
+    assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+    assert not syncs, f"the hidden three-pane synced {len(syncs)} times while hidden"
     assert three._store_dirty is True, "the hidden layout did not remember what it skipped"
 
     window.three_pane_layout_action.trigger()
     qapp.processEvents()
     assert len(syncs) == 1, f"switching synced {len(syncs)} times, expected one deferred sync"
     assert three._store_dirty is False
+    assert _three_step_results(three) == {0: ("FAIL", "1"), 1: ("PASS", "1")}
     assert any("the first step is failing" in line for line in three.log_pane.rendered_lines())
     _finish(qapp, window)
 
