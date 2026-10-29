@@ -1,4 +1,4 @@
-"""CI harness for the example Media Release (packets 29a, 29b and 29c).
+"""CI harness for the example Media Release (packets 29a-29e).
 
 Every visible Test Schedule in ``examples/media-release/`` runs headless through the seam-1 run
 session with scripted Operator answers, and its recorded Test Run is checked here: the Test
@@ -13,7 +13,9 @@ different keyvals and prefixes, a nested include, a disabled header, and modules
 includes. Packet 29d adds the Device schedule: every Device Type run against the simulator peers
 `examples/harness/peers.py` starts, with its partial reads, timed-out reads, onError handlers,
 per-call overrides, Device opened in a Pre-test Action, and the Device trace lines the harness
-config turns on.
+config turns on. Packet 29e closes the example out as a regression suite: every run writes its
+Test Report (name, PDF beside it, Cover/Steps/Equipment/Configuration/Run log in the HTML), and
+every visible schedule has a run that ends PASS.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -23,6 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import datetime, timedelta
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -115,12 +121,14 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Six schedules, eleven runs: Stop on fail is run twice (Continue and Abort), Example basics twice
-    (its optional step left disabled, then enabled by the Operator), Flow and retry twice (Stop on
-    Fail with a Retry, and with Stop on Fail switched off), and the Device schedule three times (as
-    written, with its disabled-by-default `onError` returns nil step enabled, and with its SCPI peer
-    unreachable), so the record count is the schedule count plus those five extra runs."""
-    assert len(records) == len(visible_schedules()) + 5
+    Six schedules, thirteen runs: Stop on fail three times (Continue, Abort, and with its failing
+    steps disabled so the schedule has a green run), Example basics twice (its optional step left
+    disabled, then enabled by the Operator), Flow and retry twice (Stop on Fail with a Retry, and
+    with Stop on Fail switched off), Report every Result twice (as written, and with its FAIL/ERROR
+    steps disabled), and the Device schedule three times (as written, with its disabled-by-default
+    `onError` returns nil step enabled, and with its SCPI peer unreachable), so the record count is
+    the schedule count plus those seven extra runs."""
+    assert len(records) == len(visible_schedules()) + 7
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
@@ -147,6 +155,127 @@ def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[st
         # Every prompt was one the harness scripted: a schedule that pauses when it does not say it
         # will is a bug, not something to answer.
         assert record["unexpected_prompts"] == [], f"{run['schedule_name']} paused unexpectedly"
+
+
+#: The Test Report's sections in the order the spec lists them
+#: (.scratch/ate-v1-wayfinding/assets/test-report-format.md): Cover, Steps, Equipment,
+#: Configuration, Run log. The Cover is everything before the first <h2>.
+REPORT_SECTIONS = ("Steps", "Equipment", "Configuration", "Run log")
+
+
+def _report_sections(text: str) -> dict[str, str]:
+    """The report split on its <h2> headings, keyed by heading, in document order.
+
+    The first chunk, before any <h2>, is the Cover."""
+    chunks = re.split(r"<h2[^>]*>(.*?)</h2>", text)
+    return {"Cover": chunks[0], **{chunks[i].strip(): chunks[i + 1] for i in range(1, len(chunks) - 1)}}
+
+
+def _local_start_stamp(run: dict[str, Any]) -> str:
+    """The run's local start as ``yyyymmdd-HHMMSS``, the stamp the report file name carries."""
+    offset = (run["utc_offset"] or "+00:00").strip()
+    sign = -1 if offset.startswith("-") else 1
+    hours, minutes = (int(part) for part in offset.lstrip("+-").split(":"))
+    start = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00")) + sign * timedelta(
+        hours=hours, minutes=minutes
+    )
+    return start.strftime("%Y%m%d-%H%M%S")
+
+
+def test_every_example_run_writes_its_test_report(records: dict[str, dict[str, Any]]) -> None:
+    """Every example run writes its Test Report at run end - PASS, FAIL or PRETEST_FAILED alike.
+
+    The harness waits on the session's `report_written` signal rather than sleeping (see
+    `run_examples.run_schedule`), so this test only ever sees finished runs. Each report is the
+    spec's `<reports.directory>/<UUT Type>/<UUT Type>_<serial>_<local start>_<PASS|FAIL>.html` with
+    the PDF beside it, and the HTML carries this run's UUT, serial, schedule, result and End Reason
+    and all five sections in the order the spec gives them."""
+    seen: dict[str, int] = {}  # stem -> how many runs already used it, in run order
+    for key, record in records.items():
+        run = record["run"]
+        written = record["reports"]
+        assert len(written) == 1, f"{key}: one report per run, got {written}"
+        html_path, pdf_path = written[0]
+        assert html_path and pdf_path, f"{key}: report_written emitted {html_path!r}, {pdf_path!r}"
+        html, pdf = Path(html_path), Path(pdf_path)
+        assert html.exists(), f"{key}: the HTML report is not on disk: {html}"
+        assert pdf.exists(), f"{key}: the PDF report is not on disk: {pdf}"
+        assert pdf.with_suffix(".html") == html, f"{key}: {pdf.name} is not the PDF of {html.name}"
+        assert pdf.stat().st_size, f"{key}: {pdf.name} is empty"
+
+        # Naming: the UUT Type is the directory, the file is UUT Type, serial, local start, result.
+        # A report is never overwritten, so runs that start in the same second and end the same way
+        # take the first free -2, -3 ... suffix (spec: File names).
+        assert html.parent.name == run["uut_type"], f"{key}: {html.parent.name!r} is not the UUT Type folder"
+        assert html.parent.parent.name == "reports", f"{key}: {html.parent.parent} is not reports.directory"
+        stem = f"{run['uut_type']}_{run['uut_serial']}_{_local_start_stamp(run)}_{run['result']}"
+        taken = seen.get(stem, 0) + 1
+        seen[stem] = taken
+        wanted = f"{stem}.html" if taken == 1 else f"{stem}-{taken}.html"
+        assert html.name == wanted, f"{key}: {html.name!r} is not the spec's name {wanted!r}"
+
+        text = unescape(html.read_text(encoding="utf-8"))
+        sections = _report_sections(text)
+        for value in (run["uut_type"], run["uut_serial"], run["schedule_name"], run["result"], run["end_reason"]):
+            assert value in text, f"{key}: the report never mentions {value!r}"
+
+        # Cover -> Steps -> Equipment -> Configuration -> Run log.
+        assert [name for name in sections if name in REPORT_SECTIONS] == list(REPORT_SECTIONS), \
+            f"{key}: sections are {list(sections)}"
+        cover = sections["Cover"]
+        assert (run["doc_title"] or run["schedule_name"]) in cover, f"{key}: the Cover has no document title"
+        assert {"Summary", "Operator"} <= set(sections), f"{key}: the Cover has no Summary or Operator"
+        assert list(sections).index("Summary") < list(sections).index("Steps"), \
+            f"{key}: the Cover must come before the Steps"
+        if run["end_reason"] == "PRETEST_FAILED":
+            assert "failed:" in cover, f"{key}: the Cover does not name the failed Pre-test Action"
+
+        # Steps: every step of the expanded tree, disabled ones included, with its Result.
+        steps = sections["Steps"]
+        for node in record["nodes"]:
+            if node["kind"] == "step":
+                assert node["step_name"] in steps, f"{key}: step {node['step_name']!r} is not in the Steps table"
+
+        # Failures are on the Cover, and only when there are any.
+        failed = [n for n in record["nodes"]
+                  if n["kind"] == "step" and n["result"] in ("FAIL", "ERROR", "NOREPORT")]
+        assert ("Failures" in sections) == bool(failed), f"{key}: the Failures section does not match the run"
+        for node in failed:
+            assert node["step_name"] in sections["Failures"], f"{key}: {node['step_name']!r} missing from Failures"
+
+        equipment = sections["Equipment"]
+        if record["equipment"]:
+            for item in record["equipment"]:
+                assert item["name"] in equipment, f"{key}: equipment {item['name']!r} is not in the report"
+        else:
+            assert "No equipment declared" in equipment, f"{key}: the empty Equipment section says nothing"
+
+        configuration = sections["Configuration"]
+        assert run["media_number"] in configuration, f"{key}: the Configuration section omits the release"
+        for file in record["run_files"]:
+            assert file["path"] in configuration, f"{key}: {file['path']!r} is not listed in Configuration"
+
+        # A report written at run end always carries the Run log, and never the DEBUG lines or the
+        # Device trace, which stay in the database.
+        run_log = sections["Run log"]
+        assert "Run log left out" not in run_log, f"{key}: a run-end report left the Run log out"
+        logged = [line for line in record["logs"] if line["level"] in ("INFO", "WARNING", "ERROR")]
+        assert any(line["text"] in run_log for line in logged) or "No INFO, WARNING or ERROR lines" in run_log, \
+            f"{key}: the Run log holds none of the run's lines"
+        assert "DEBUG" not in text, f"{key}: DEBUG lines leaked into the report"
+
+
+def test_every_visible_example_schedule_has_a_green_run(records: dict[str, dict[str, Any]]) -> None:
+    """Every schedule the catalog makes visible runs green in CI: at least one PASS/COMPLETED run.
+
+    The schedules that exist to fail keep their failing runs; they just also need a run where the
+    Operator disables the failing steps. The list comes from the catalog, so a new example schedule
+    with no green run fails here rather than being quietly skipped."""
+    green = {record["run"]["schedule_name"] for record in records.values()
+             if record["run"]["result"] == "PASS" and record["run"]["end_reason"] == "COMPLETED"}
+    missing = set(visible_schedules()) - green
+    assert not missing, f"visible schedules with no PASS/COMPLETED run: {sorted(missing)}"
+
 
 
 def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[str, dict[str, Any]]) -> None:

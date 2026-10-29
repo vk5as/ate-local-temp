@@ -104,6 +104,15 @@ RUNS: list[dict[str, Any]] = [
     {"key": "devices_nil_onerror", "schedule": "Device types",
      "enable": {"Read a closed Device": True}},
     {"key": "devices_peer_down", "schedule": "Device types", "scpi_down": True},
+    # Packet 29e: every visible schedule has to run green in CI, so the two schedules that exist to
+    # fail get a run with their FAIL/ERROR steps disabled by the Operator. The failing runs above
+    # stay - they are what proves Stop on Fail and every Result value - they just are not the green
+    # one for their schedule.
+    {"key": "results_green", "schedule": "Report every Result",
+     "enable": {"A failure": False, "Never reports": False, "Lua error": False,
+                "Reported error": False}},
+    {"key": "stop_on_fail_green", "schedule": "Stop on fail",
+     "enable": {"First check": False, "Reported error": False}},
 ]
 
 # A POLL is live for the whole Attempt (packet 10a), so `input_asked` announces it when the Attempt
