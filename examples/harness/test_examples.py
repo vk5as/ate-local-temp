@@ -151,7 +151,7 @@ def test_results_schedule_records_every_result(records: dict[str, dict[str, Any]
     # Numbers, strings and booleans all reach the record as text.
     assert (by_node[0]["actual"], by_node[0]["expected"]) == ("Green", "Green")
     assert (by_node[1]["actual"], by_node[1]["expected"]) == ("42", "42")
-    assert (by_node[2]["actual"], by_node[2]["expected"]) == ("True", "True")
+    assert (by_node[2]["actual"], by_node[2]["expected"]) == ("true", "true")  # Lua tostring, not Python str(True)
 
     # Two reports in one step: the last one is the step's result.
     assert (by_node[3]["pass_fail"], by_node[3]["msg"]) == ("PASS", "second reading")

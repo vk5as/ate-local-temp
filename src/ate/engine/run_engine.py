@@ -58,12 +58,8 @@ class RunStatus(enum.Enum):
 # because delivery rides the receiver's own event loop.
 
 
-def _to_text(value: Any) -> Optional[str]:
-    """Store an ATE.report value as text (``nil`` becomes blank)."""
-    if value is None:
-        return ""
-    return str(value)
-
+# Reported values are stored as text exactly as Lua prints them; the Lua host owns that conversion
+# (see :meth:`_LuaHost.to_text`), so nothing here re-serialises a value that came out of Lua.
 
 # The phase a Pre-test/Post-test Action runs in, stored on its action row ("pre"/"post"), mapped to
 # the internal execution context string the Lua host uses for lockdown and error location. A step
@@ -329,17 +325,20 @@ class RunEngine(QThread):
             "attempt_no": attempt_no,
             "input_index": input_index,  # no declaration for this index (defensive)
             "type": "",
-            "value_text": str(raw),
+            "value_text": self._host.to_text(raw) or "",
             "at": _now_iso(),
         }
 
     def _serialise(self, decl: Any, raw: Any) -> str:
-        """Serialise a supplied raw value to its stored text form for one declaration."""
+        """Serialise a supplied raw value to its stored text form for one declaration.
+
+        The typed value is what the schedule reads back from ``ATE.input(n)``, so its text is Lua's
+        ``tostring`` of it, not Python's ``str`` (see :meth:`_LuaHost.to_text`)."""
         if decl.type == "ENUM" and decl.widget == "CHECKBOX":
             labels = list(raw) if isinstance(raw, (list, tuple)) else [raw]
-            return json.dumps([str(label) for label in labels])  # CHECKBOX is recorded as JSON
+            return json.dumps([self._host.to_text(label) or "" for label in labels])  # CHECKBOX is recorded as JSON
         typed = self._host._map_input(decl, raw)
-        return str(typed)
+        return self._host.to_text(typed) or ""
 
     def _insert_node(self, run_uuid: str, seq: int, node: Any, **fields: Any) -> None:
         """Write one node row, stamped with its place in the expanded tree (packet 15b).
@@ -993,8 +992,8 @@ class RunEngine(QThread):
                         attempt_count,
                         pass_fail=report_pass_fail,
                         msg=report_msg,
-                        actual=_to_text(report_actual),
-                        expected=_to_text(report_expected),
+                        actual=report_actual,
+                        expected=report_expected,
                     )
                     last_result = report_pass_fail
                 else:
