@@ -15,7 +15,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QProcess, Qt
+from PyQt6.QtCore import QCoreApplication, QObject, QProcess, Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
@@ -507,6 +507,34 @@ def test_a_closed_session_ends_its_pdf_helper_process(qapp, monkeypatch, tmp_pat
     for job in jobs:
         assert job.state() == QProcess.ProcessState.NotRunning, "the helper process outlived its session"
         assert job.parent() is session, "the helper was orphaned from the session that owned it"
+
+
+def test_a_pdf_helper_whose_owner_is_gone_reports_nothing(qapp, monkeypatch, tmp_path) -> None:
+    """Packet 25b review, teardown crash: a job whose owner dies mid-render reports nothing.
+
+    Qt destroys a ``QProcess`` together with its parent while the render is still in flight, and the
+    job's ``finished`` callback then runs against a process whose Qt side is gone. Reporting into
+    that dead process raises inside a Qt slot, which PyQt turns into ``Fatal Python error: Aborted``.
+    The callback therefore has to swallow it and drop the job from the live set."""
+    slow_helper = "import sys, time; time.sleep(3); open(sys.argv[1], 'wb').write(b'%PDF-1.4 stub')"
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", _fake_helper(slow_helper))
+
+    from ate.report.pdf_job import _live_pdf_jobs, start_pdf_job
+
+    owner = QObject()
+    start_pdf_job(owner, tmp_path / "report.html", tmp_path / "report.pdf")
+    job = next(proc for proc in _live_pdf_jobs if proc.parent() is owner)
+
+    owner.deleteLater()
+    qapp.processEvents()  # the owner goes, and its process with it, while the helper is running
+
+    deadline = time.monotonic() + 10
+    while any(proc is job for proc in _live_pdf_jobs) and time.monotonic() < deadline:
+        qapp.processEvents()
+
+    assert not any(proc is job for proc in _live_pdf_jobs), (
+        "a job whose owner was destroyed stayed registered as live"
+    )
 
 
 def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qapp, tmp_path) -> None:
