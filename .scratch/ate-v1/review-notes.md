@@ -410,3 +410,24 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Suite: 1 failed + 877 passed on run 1 of 3. 7 later full runs and 8 runs of the 28a files all passed, and the failing test was not captured. It is likely a pre-existing flake; watch for it.
   - Suite time is now ~95 s (was ~89 s; the wheel builds add ~6 s).
 - Leftovers: `ate --help` exits 1 and `ate setup --help` runs setup (pre-existing CLI issue). Fold this into 30a.
+
+## 29a — Example Media Release scaffold and harness (merged 2026-10-29)
+- Implementer (Strata, high): 88 steps, 94 min, 1 of 4 parallel sessions.
+- Reviews: Haiku 1 must-fix; Strata 6 must-fix. The examples flushed out two real engine bugs:
+  - reported values were stored with Python `str()` instead of Lua `tostring` ("True" vs "true"; float repr);
+  - a step that *reports* `Result.ERROR` never paused under Stop on Fail.
+  - The other four:
+    - an auto-CONTINUE harness that couldn't prove "no pause";
+    - a false "range-checked" comment;
+    - no `.gitattributes`, so CRLF on Windows would break the checksums;
+    - polling of the private `session._state`.
+- Rework (Strata, high, 0 compactions):
+  - merged integration and adapted the harness to 10a's ask-time inputs;
+  - one Lua-side `to_text` path now serves reports, log args and input values;
+  - the engine pauses on a reported ERROR;
+  - added `.gitattributes` (LF for .tslua/.lua/.atedef);
+  - the harness has scripted prompt choices, asserts the report files arrive, uses a scoped PDF stub, reads more `ATE.run` fields and includes an Operator-enabled run;
+  - `headless.py` now passes the Media Release number to `ATE.run`.
+  - Each fix is mutation-proven.
+- Light review: 893 passed ×3 (~100 s); collection 878 → 893, none lost; `python -m examples.harness.run_examples` ran 5 runs and exited 0.
+- Leftovers: the harness imports `tests._fixtures` (fine from a source checkout). The suite has grown to ~100 s.
