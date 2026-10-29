@@ -9,8 +9,9 @@
 --     logs a WARNING and is not a Device failure), one times out with nothing at all (a Device
 --     failure, which goes through onError).
 --   * onError: the handler given to `open` is the fallback for that Device's later read/write/close
---     calls. One handler logs and returns a value, so the call continues with it; one returns nil,
---     so the call raises and the step records Result.ERROR.
+--     calls. One handler logs and returns a value, so the call continues with it; one logs and
+--     returns nil, so the call raises - which is what ends the run when the Pre-test Action cannot
+--     open its Device.
 --   * Per-call overrides: a timeout, a writeTerm, a readTerm and a size on one call, leaving the
 --     open-time configuration alone.
 --   * `ATE.flush` throwing away what the receive buffer already holds.
@@ -18,25 +19,27 @@
 --     (pyvisa-py's TCPIP...::SOCKET resource).
 --
 -- There is no hardware here. examples/harness/run_examples.py starts an SCPI-style TCP peer and a
--- UDP echo peer on ephemeral ports (examples/harness/peers.py) and writes those ports in place of
--- the __SCPI_PORT__ and __UDP_PORT__ placeholders below. Point the schedule at real instruments by
--- leaving the placeholders as they are and changing the defaults - see examples/README.md.
+-- UDP echo peer on ephemeral ports (examples/harness/peers.py) and exports them as ATE_SCPI_HOST,
+-- ATE_SCPI_PORT and ATE_UDP_PORT, so the shipped file runs unchanged. To point it at real
+-- instruments, set those variables or change the defaults in `bench` - see examples/README.md.
 
 local devices = require("ate.devices")
 
 -- Where the instruments are: the schedule's own configuration, independent of the Test Run.
--- `bench` is what a real test station would carry; the two placeholders are filled in by the
--- harness with the live ports of the peers it starts.
+-- `bench` is what a real test station would carry; the harness hands it its peers' live ports
+-- through the environment rather than rewriting this file.
 local bench = {
-  scpiHost = "127.0.0.1",
-  scpiPort = __SCPI_PORT__ or 5025,      -- the usual SCPI-over-TCP port
-  udpHost = "127.0.0.1",
-  udpPort = __UDP_PORT__ or 5026,
-  serialPort = "socket://127.0.0.1:" .. (__SCPI_PORT__ or 5025),  -- pyserial's TCP URL
-  visaResource = "TCPIP0::127.0.0.1::" .. (__SCPI_PORT__ or 5025) .. "::SOCKET",  -- pyvisa-py
+  scpiHost = os.getenv("ATE_SCPI_HOST") or "127.0.0.1",
+  scpiPort = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025,  -- the usual SCPI-over-TCP port
+  udpHost = os.getenv("ATE_UDP_HOST") or "127.0.0.1",
+  udpPort = tonumber(os.getenv("ATE_UDP_PORT")) or 5026,
 }
+-- One peer, three Device Types: pyserial's TCP URL and pyvisa-py's TCPIP socket resource are both
+-- built from the same host and port.
+bench.serialPort = "socket://" .. bench.scpiHost .. ":" .. bench.scpiPort
+bench.visaResource = "TCPIP0::" .. bench.scpiHost .. "::" .. bench.scpiPort .. "::SOCKET"
 
--- The Device the Pre-test Action opens. Steps 1 and 6 use it; nothing else can, because a device
+-- The Device the Pre-test Action opens. Steps 1, 6 and 7 use it; nothing else can, because a device
 -- object only lasts for the Test Run it was opened in.
 local scpi = nil
 
@@ -48,12 +51,14 @@ return ScheduleParams("Device types", "TCP, UDP, SERIAL and VISA Devices against
   -- than a pause to answer. (Stop on Fail itself is demonstrated by stop_on_fail.tslua and flow.tslua.)
   :setStopOnFail(false)
   :setPreTestAction(function()
-    -- An open that fails is a Device failure: it goes through onError. This handler logs and
-    -- returns a value, so the run carries on instead of aborting on the Pre-test Action.
+    -- An open that fails is a Device failure, so it goes through onError. This handler logs and
+    -- returns nil, which means "no recovery": ATE.open raises, the Pre-test Action records the
+    -- failure, and the run ends with PRETEST_FAILED and every step NOTRUN rather than running steps
+    -- against a Device that never opened.
     scpi = ATE.open(DeviceType.TCP, devices.Tcp(bench.scpiHost, bench.scpiPort):setTimeout(2.0),
       function(opResult, opArgs)
         ATE.log(Log.ERROR, "SCPI peer unreachable: " .. opResult.err)
-        return ""  -- a non-nil return becomes the call's value and the schedule continues
+        return nil  -- nil means no recovery: the call raises and the run ends before any step runs
       end)
     ATE.addEquipment("SCPI simulator", "SIM-1",
       "TCP " .. bench.scpiHost .. ":" .. bench.scpiPort, "2026-01-01",
@@ -62,13 +67,20 @@ return ScheduleParams("Device types", "TCP, UDP, SERIAL and VISA Devices against
   :setPostTestAction(function(passFail) ATE.log(Log.INFO, "device run finished: " .. passFail) end)
   :setSchedule({
     -- 1. The Device opened in the Pre-test Action is still open here: write it, read it, check the
-    --    reply. The read's per-call timeout is shorter than the one the Device was opened with.
+    --    reply. This step overrides the Device's own configuration twice on one call each: a shorter
+    --    read timeout, and a readTerm that stops the read at "3" instead of the newline.
     StepParams("Pre-test Device still open"):setStepNo("1.")
       :setAction(function()
         local sent = ATE.write(scpi, devices.Write("MEAS:VOLT?"))
-        local r = ATE.read(scpi, devices.Read():setTimeout(1.5))
-        local ok = sent.ok and sent.count == 11 and r.data == "1.234" and not r.partial
-        ATE.report(ok and Result.PASS or Result.FAIL, "SCPI reply " .. (r.data or "nothing"), r.count, 5)
+        -- The peer answers "1.234\n". This read ends at the per-call terminator "3", so it returns
+        -- "1.2"; the next read, with the Device's own "\n", takes what is left of the reply.
+        local stopAt = ATE.read(scpi, devices.Read():setTimeout(1.0):setReadTerm("3"))
+        local rest = ATE.read(scpi, devices.Read():setTimeout(1.5))
+        local ok = sent.ok and sent.count == 11 and stopAt.data == "1.2" and stopAt.count == 3
+          and rest.data == "4" and rest.count == 1 and not rest.partial
+        ATE.report(ok and Result.PASS or Result.FAIL,
+          "readTerm \"3\" gave " .. (stopAt.data or "nothing") .. ", the rest " .. (rest.data or "nothing"),
+          stopAt.count + rest.count, 4)
       end),
 
     -- 2. to 5. one include per Device Type: the keyvals are this instance's connection and the
@@ -114,14 +126,14 @@ return ScheduleParams("Device types", "TCP, UDP, SERIAL and VISA Devices against
       }):setPrefix("5."),
 
     -- 6. Close the Device the Pre-test Action opened: flush first, then release it. Closing a second
-    --    time does nothing and still reports success.
+    --    time does nothing and still reports success (and is not traced: nothing happened).
     StepParams("Close the Pre-test Device"):setStepNo("6.")
       :setAction(function()
         local f = ATE.flush(scpi)
         local c = ATE.close(scpi)
         local again = ATE.close(scpi)
         ATE.report(Result.PASS, "discarded " .. f.count .. " buffered bytes and closed",
-          c.ok and again.ok, true)
+          tostring(c.ok) .. "/" .. tostring(again.ok), "true/true")
       end),
 
     -- 7. Disabled by default so the run is green; the harness enables it in a second run. Using a

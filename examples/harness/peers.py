@@ -12,15 +12,14 @@ No hardware is needed to run `devices.tslua`. Two small peers stand in for the i
     beginning `DROP:`, which it records and ignores so a read has nothing to find.
 
 Like the peers in `tests/_fixtures.py` both bind an ephemeral port on 127.0.0.1 in `__init__`, so
-concurrent runs never collide on a fixed port; the harness writes the live ports into a copy of the
-Test Definition before the run.
+concurrent runs never collide on a fixed port; `harness/run_examples.py` exports those ports in the
+environment before the runs, and the schedule reads them from there.
 """
 
 from __future__ import annotations
 
 import socket
 import threading
-from typing import Any
 
 #: The SCPI peer's whole conversation, as (command, reply) with the replies' exact bytes. The
 #: harness asserts against this table, so changing a reply changes what the run records.
@@ -35,6 +34,11 @@ REPLIES: dict[str, str] = {
 #: The last line of MULTI?'s reply, which the schedule never reads: the bytes ATE.flush discards.
 FLUSHED_BYTES = "chan=3\n"
 
+#: How long each peer's wait on its socket is. Closing a socket from another thread does not wake an
+#: `accept` or `recvfrom` already blocked on it on Linux, so a peer stops only because its loop wakes
+#: on this timeout and sees the stop flag: `stop()` then joins in hundredths of a second, not 2 s.
+POLL_SECONDS = 0.05
+
 
 class ScpiPeer:
     """A line-oriented SCPI simulator on an ephemeral port on 127.0.0.1."""
@@ -46,6 +50,7 @@ class ScpiPeer:
     def __init__(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.settimeout(POLL_SECONDS)  # so stop() can wake the accept loop (see POLL_SECONDS)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
@@ -74,12 +79,15 @@ class ScpiPeer:
         except OSError:
             pass
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=1.0)
+            assert not self._thread.is_alive(), "the accept loop was still in accept when the listener closed"
 
     def _accept_loop(self) -> None:
         while self._running:
             try:
                 conn, _addr = self._sock.accept()
+            except socket.timeout:
+                continue  # woke on POLL_SECONDS: loop round and check the stop flag
             except OSError:
                 break  # the listener is closed
             conn.settimeout(self.READ_TIMEOUT)
@@ -120,6 +128,7 @@ class UdpEchoPeer:
     def __init__(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.settimeout(POLL_SECONDS)  # so stop() can wake the drain loop (see POLL_SECONDS)
         self._sock.bind(("127.0.0.1", 0))
         self.port = self._sock.getsockname()[1]
         self.received: list[bytes] = []  # every datagram the Device sent, in order
@@ -140,14 +149,15 @@ class UdpEchoPeer:
         except OSError:
             pass
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=1.0)
+            assert not self._thread.is_alive(), "the drain loop was still blocked when the peer closed"
 
     def _recv_loop(self) -> None:
         while self._running:
             try:
                 data, addr = self._sock.recvfrom(65536)  # one recv is one datagram
             except socket.timeout:
-                continue  # a socket timeout just wakes the loop to check the stop flag
+                continue  # woke on POLL_SECONDS: loop round and check the stop flag
             except OSError:
                 return  # the peer is closed
             self.received.append(data)
@@ -173,13 +183,6 @@ class Peers:
         self.udp.start()
 
     def stop(self) -> None:
+        """Stop both peers; each loop wakes on its socket timeout, so the joins return at once."""
         self.scpi.stop()
         self.udp.stop()
-
-    def connection_count(self) -> int:
-        """How many Devices connected to the SCPI peer (TCP, SERIAL, VISA and the Pre-test Device)."""
-        return len(self.scpi.connections)
-
-    def keyvals(self) -> dict[str, Any]:
-        """The ports the schedule's keyvals need, for the harness to write into its copy."""
-        return {"__SCPI_PORT__": self.scpi.port, "__UDP_PORT__": self.udp.port}

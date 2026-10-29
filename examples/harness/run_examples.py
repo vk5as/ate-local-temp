@@ -7,9 +7,9 @@ returns each Test Run record read back from the store.
 
 Packet 29d: the Device schedule talks to simulator peers started here, not to hardware. The peers
 in ``examples/harness/peers.py``, bound to ephemeral ports, are started for the whole batch of runs,
-and ``release_copy`` writes the live ports into a copy of the Test Definition — then re-checksums
-that copy with the real CLI, so the run records no checksum mismatch. Device tracing is on in the
-harness's config so every Device operation is recorded.
+and their addresses are exported as ``ATE_SCPI_HOST``/``ATE_SCPI_PORT``/``ATE_UDP_HOST``/``ATE_UDP_PORT``
+so ``devices.tslua`` runs exactly as shipped — no rewriting, no re-checksumming. Device tracing is on
+in the harness's config so every Device operation is recorded.
 
 Run it from a source checkout:
 
@@ -26,8 +26,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
+import socket
 import sys
 import tempfile
 import time
@@ -56,7 +55,6 @@ from ate.run_session.headless import HeadlessRunSession, SessionState  # noqa: E
 from examples.harness.peers import Peers  # noqa: E402
 
 RELEASE_DIR = Path(__file__).resolve().parents[1] / "media-release"
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # One entry per headless run: the schedule to pick and the Operator's scripted answers.
 #   inputs      - the value to supply, keyed by the Step Name of the step whose input is asked.
@@ -71,6 +69,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #                 :setStopOnFail default should be overridden (packet 29c).
 #   polls       - Step Name -> (n, button text) for a POLL input, clicked once the step's read loop
 #                 has had POLL_CLICK_AFTER_SECONDS to read it as nil (packet 29b).
+#   scpi_down   - run the Device schedule with ATE_SCPI_PORT pointing at a port nothing listens on,
+#                 so its Pre-test open fails (packet 29d review). Handled by `run_all`, not the session.
 # `run_all` checks the schedules against the catalog, so a new example schedule has to be added
 # here or the harness fails.
 RUNS: list[dict[str, Any]] = [
@@ -97,11 +97,13 @@ RUNS: list[dict[str, Any]] = [
     # The same schedule again, with its disabled-by-default step enabled by the Operator.
     {"key": "basics_enabled", "schedule": "Example basics", "inputs": {"Operator input": 1.5},
      "enable": {"Optional check": True}},
-    # Packet 29d: the Device schedule, run twice - once as written (every step green, the
-    # onError-returns-nil step disabled), once with that step enabled so its raise is recorded.
+    # Packet 29d: the Device schedule, run with the peers up - once as written (every step green, the
+    # onError-returns-nil step disabled), once with that step enabled so its raise is recorded - and
+    # once with `scpi_down`, which points the schedule at a port nothing listens on.
     {"key": "devices", "schedule": "Device types"},
     {"key": "devices_nil_onerror", "schedule": "Device types",
      "enable": {"Read a closed Device": True}},
+    {"key": "devices_peer_down", "schedule": "Device types", "scpi_down": True},
 ]
 
 # A POLL is live for the whole Attempt (packet 10a), so `input_asked` announces it when the Attempt
@@ -129,27 +131,38 @@ def step_seqs(schedule: str, release_dir: Path = RELEASE_DIR) -> dict[str, int]:
     return {node.name: seq for seq, node in enumerate(host.tree) if not node.is_header}
 
 
-def release_copy(tmp_dir: Path, peers: Peers) -> Path:
-    """A copy of the example release with the simulator peers' live ports written in.
+def dead_port() -> int:
+    """An ephemeral port with nothing listening on it, so a Device open to it is refused."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
 
-    ``devices.tslua`` carries ``__SCPI_PORT__`` and ``__UDP_PORT__`` placeholders so the schedule
-    reads like a real one (the placeholders fall back to the usual instrument ports). Writing the
-    live ports into the copy changes the file, so the copy's Test Definition is re-checksummed by
-    the real CLI - never by hand - and the run records no mismatch.
-    """
-    copy = tmp_dir / "media-release"
-    shutil.copytree(RELEASE_DIR, copy)
-    schedule = copy / "devices.tslua"
-    text = schedule.read_text(encoding="utf-8")
-    for placeholder, port in peers.keyvals().items():
-        text = text.replace(placeholder, str(port))
-    schedule.write_text(text, encoding="utf-8")
-    subprocess.run(
-        [sys.executable, "-m", "ate.cli", "definition", "update", str(copy / "example.atedef")],
-        check=True, capture_output=True, text=True, cwd=str(_ROOT),
-        env={**os.environ, "PYTHONPATH": str(_SRC)},
-    )
-    return copy
+
+@contextmanager
+def bench_env(peers: Peers, *, scpi_down: bool = False):
+    """Export the addresses `devices.tslua` reads its `bench` from, then put back what was there.
+
+    The schedule takes its instruments from the environment, so the harness runs the shipped release
+    unchanged: no placeholder rewriting, no re-checksummed copy. With ``scpi_down`` the SCPI port is
+    one nothing listens on, which is how the harness runs the schedule with its peer unreachable."""
+    env = {
+        "ATE_SCPI_HOST": "127.0.0.1",
+        "ATE_SCPI_PORT": str(dead_port() if scpi_down else peers.scpi.port),
+        "ATE_UDP_HOST": "127.0.0.1",
+        "ATE_UDP_PORT": str(peers.udp.port),
+    }
+    saved = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def write_config(tmp_dir: Path, release_dir: Path = RELEASE_DIR) -> Path:
@@ -315,10 +328,10 @@ def run_schedule(
 def run_all(tmp_dir: Path) -> dict[str, dict[str, Any]]:
     """Run every visible example schedule with its scripted answers; one record per run, keyed by `key`.
 
-    Packet 29d: the simulator peers the Device schedule talks to are started here, and every run uses
-    a copy of the release whose placeholders have been replaced with those peers' live ports. Each
-    record from a Device run carries what the peers saw, so the assertions can check the conversation
-    as well as the Test Run record."""
+    Packet 29d: the simulator peers the Device schedule talks to are started here and their addresses
+    are exported to the environment, so every run uses the shipped release as it is. Each record from
+    a Device run carries what the peers saw, so the assertions can check the conversation as well as
+    the Test Run record."""
     planned = {entry["schedule"] for entry in RUNS}
     missing = set(visible_schedules()) - planned
     if missing:
@@ -326,18 +339,24 @@ def run_all(tmp_dir: Path) -> dict[str, dict[str, Any]]:
     peers = Peers()
     peers.start()
     try:
-        release = release_copy(tmp_dir, peers)
-        config = write_config(tmp_dir, release)
+        config = write_config(tmp_dir)
         records = {}
         for entry in RUNS:
-            record = run_schedule(config, entry["schedule"], release_dir=release,
-                                  **{k: v for k, v in entry.items() if k not in ("key", "schedule")})
+            options = {k: v for k, v in entry.items() if k not in ("key", "schedule", "scpi_down")}
+            # Snapshot the peers before the run so each record carries that run's conversation only:
+            # the peers are shared across the batch, so their totals would otherwise pile up.
+            before = (len(peers.scpi.commands), len(peers.scpi.connections),
+                      len(peers.udp.received), len(peers.udp.echoes))
+            with bench_env(peers, scpi_down=entry.get("scpi_down", False)):
+                record = run_schedule(config, entry["schedule"], **options)
             if entry["schedule"] == "Device types":
+                after = (len(peers.scpi.commands), len(peers.scpi.connections),
+                         len(peers.udp.received), len(peers.udp.echoes))
                 record["peers"] = {
-                    "scpiCommands": list(peers.scpi.commands),
-                    "scpiConnections": len(peers.scpi.connections),
-                    "udpReceived": list(peers.udp.received),
-                    "udpEchoes": list(peers.udp.echoes),
+                    "scpiCommands": peers.scpi.commands[before[0]:after[0]],
+                    "scpiConnections": after[1] - before[1],
+                    "udpReceived": peers.udp.received[before[2]:after[2]],
+                    "udpEchoes": peers.udp.echoes[before[3]:after[3]],
                 }
             records[entry["key"]] = record
         return records

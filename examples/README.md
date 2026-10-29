@@ -61,19 +61,31 @@ pyserial's `socket://host:port` URL, and as a `VISA` instrument through pyvisa-p
 `TCPIP::host::port::SOCKET` resource.
 
 The schedule's addresses are its own configuration: a `bench` table at the top of `devices.tslua`
-and the `keyvals` of its four includes. It carries `__SCPI_PORT__` and `__UDP_PORT__` placeholders,
-which fall back to the usual instrument ports (5025 for SCPI over TCP, 5026 for the echo) and which
-the harness replaces with the live peer ports in a copy of the release - the copy's `example.atedef`
-is re-checksummed by the real CLI, so the run records no mismatch.
+and the `keyvals` of its four includes. `bench` reads the environment first and falls back to the
+usual instrument ports, so the harness can start its peers on ephemeral ports without rewriting the
+file:
 
-To run the schedule against real instruments, edit `bench` and the keyvals:
+| Variable | Default | Used for |
+| --- | --- | --- |
+| `ATE_SCPI_HOST` | `127.0.0.1` | the SCPI instrument's address |
+| `ATE_SCPI_PORT` | `5025` | the usual SCPI-over-TCP port |
+| `ATE_UDP_HOST` | `127.0.0.1` | the datagram peer's address |
+| `ATE_UDP_PORT` | `5026` | the peer in this example's echo protocol |
 
-- `scpiHost`/`scpiPort` - the LAN instrument that answers SCPI on, say, port 5025. It must answer
-  the same five questions, so the steps' expectations still hold: reply to `*IDN?` and `MEAS:VOLT?`,
-  answer `PARTIAL?` with bytes and no newline, `MULTI?` with three newline-terminated lines, and
-  stay silent for `NEVER?`.
+The `SERIAL` port (`socket://host:port`) and the `VISA` resource
+(`TCPIP0::host::port::SOCKET`) are both derived from `ATE_SCPI_HOST` and `ATE_SCPI_PORT`, and the
+harness exports these four variables before it runs, so the shipped bytes run unchanged.
+
+To run the schedule against real instruments, set those variables or edit `bench` and the keyvals:
+
+- `scpiHost`/`scpiPort` (or `ATE_SCPI_HOST`/`ATE_SCPI_PORT`) - the LAN instrument that answers SCPI
+  on, say, port 5025. It must answer the same five questions, so the steps' expectations still hold:
+  reply to `*IDN?` and `MEAS:VOLT?`, answer `PARTIAL?` with bytes and no newline, `MULTI?` with three
+  newline-terminated lines, and stay silent for `NEVER?`. The read that uses a per-call `readTerm`
+  expects `MEAS:VOLT?` to answer `1.234\n`, and the `*IDN?` reply is checked against the keyval
+  `reply`, so change those to what your instrument actually says.
 - `udpHost`/`udpPort` - a peer that answers each datagram it receives. Change
-  `silentCommand = "DROP:no reply"` to whatever the peer ignores.
+  `silentCommand = "DROP:no reply"` to whatever the peer ignores, and `reply` to what it echoes.
 - `serialPort` - a real port name (`"COM3"`, `"/dev/ttyUSB0"`) instead of pyserial's `socket://` URL;
   the baud in the keyvals is the port's own.
 - `visaResource` - a real VISA resource, e.g. `"GPIB0::5::INSTR"` (which needs a VISA backend:

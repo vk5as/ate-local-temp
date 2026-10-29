@@ -115,18 +115,19 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Six schedules, ten runs: Stop on fail is run twice (Continue and Abort), Example basics twice
+    Six schedules, eleven runs: Stop on fail is run twice (Continue and Abort), Example basics twice
     (its optional step left disabled, then enabled by the Operator), Flow and retry twice (Stop on
-    Fail with a Retry, and with Stop on Fail switched off), and the Device schedule twice (as
-    written, and with its disabled-by-default `onError` returns nil step enabled), so the record
-    count is the schedule count plus those four extra runs."""
-    assert len(records) == len(visible_schedules()) + 4
+    Fail with a Retry, and with Stop on Fail switched off), and the Device schedule three times (as
+    written, with its disabled-by-default `onError` returns nil step enabled, and with its SCPI peer
+    unreachable), so the record count is the schedule count plus those five extra runs."""
+    assert len(records) == len(visible_schedules()) + 5
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
         assert run is not None, "the run row is written"
         assert run["result"] in ("PASS", "FAIL")
-        assert run["end_reason"] in ("COMPLETED", "STOPPED_ON_FAIL")
+        assert run["end_reason"] in ("COMPLETED", "STOPPED_ON_FAIL", "PRETEST_FAILED"), \
+            "the Device schedule with its peer down ends PRETEST_FAILED"
         assert run["ended_at"], "the run was closed, not left open"
         assert [release["media_number"] for release in record["media_releases"]] == ["MR-EXAMPLE"]
         # Every file the run loaded is recorded with its expected and computed checksum. ATE's own
@@ -742,3 +743,67 @@ def test_an_on_error_that_returns_nil_raises_and_records_error(records: dict[str
     assert not any(attempt["msg"] == "never reached" for attempt in record["attempts"])
     assert record["run"]["result"] == "FAIL"
     assert record["unexpected_prompts"] == [], "this schedule stops on fail off, so no pause"
+
+
+def test_a_per_call_read_term_ends_only_that_read(records: dict[str, dict[str, Any]]) -> None:
+    """The header's promise: a `readTerm` on one call, not on the Device.
+
+    The Pre-test Device is opened with the builder's default `\\n`. Step 1 reads once with the
+    per-call terminator "3", which cuts the peer's `1.234\\n` answer after "1.2" and leaves the rest
+    in the receive buffer for the next read, which uses the Device's own terminator. The trace shows
+    both reads, so the override demonstrably applied to one call only."""
+    record = records["devices"]
+    attempt = next(a for a in record["attempts"] if a["msg"].startswith('readTerm "3" gave'))
+    assert (attempt["pass_fail"], attempt["actual"], attempt["expected"]) == ("PASS", "4", "4")
+    assert attempt["msg"] == 'readTerm "3" gave 1.2, the rest 4', attempt["msg"]
+
+    trace = [line["text"] for line in record["logs"] if line["source"] == "device"]
+    assert any(t.startswith("read TCP ") and '3 bytes "1.2"' in t for t in trace), "the readTerm read is traced"
+    assert any(t.startswith("read TCP ") and '1 bytes "4"' in t for t in trace), "the rest of the reply is read next"
+
+
+def test_a_second_close_does_nothing_and_traces_nothing(records: dict[str, dict[str, Any]]) -> None:
+    """Device lifetime, pinned: a Device closed twice returns `{ok = true` both times, and only the
+    close that actually happened is traced.
+
+    Step 6 calls `ATE.close` on the Pre-test Device twice, so the schedule makes six close calls
+    across five Devices while the trace carries five close lines."""
+    record = records["devices"]
+    step = next(n for n in record["nodes"] if n["step_name"] == "Close the Pre-test Device")
+    assert (step["result"], step["attempt_count"]) == ("PASS", 1)
+    (attempt,) = [a for a in record["attempts"] if a["msg"].startswith("discarded ")]
+    assert attempt["pass_fail"] == "PASS", "the second close is a no-op that still reports success"
+    assert (attempt["actual"], attempt["expected"]) == ("true/true", "true/true"), \
+        "both ATE.close calls returned {ok = true}"
+    closes = [line["text"] for line in record["logs"]
+              if line["source"] == "device" and line["level"] == "DEBUG" and line["text"].startswith("close ")]
+    assert len(closes) == 5, f"one traced close per Device, none for the no-op second close: {closes}"
+    assert sum(text.startswith("close TCP ") for text in closes) == 2, "the Pre-test Device and the TCP include"
+
+
+def test_the_device_schedule_fails_cleanly_when_its_scpi_peer_is_down(records: dict[str, dict[str, Any]]) -> None:
+    """Packet 29d review: the same schedule with nothing listening on the SCPI port.
+
+    The Pre-test open fails, so `onError` runs; it logs the reason and returns nil, which means no
+    recovery, so `ATE.open` raises. A Pre-test failure ends the run on its own: `PRETEST_FAILED`,
+    result `FAIL`, every step `NOTRUN`, nothing opened, and no Python traceback in the log - the
+    failure is reported as a Device failure, not as an engine crash."""
+    record = records["devices_peer_down"]
+    logs = record["logs"]
+    assert not any("Traceback" in line["text"] for line in logs), "a failed open must not crash the engine"
+    assert not any("AttributeError" in line["text"] for line in logs)
+
+    assert (record["run"]["result"], record["run"]["end_reason"]) == ("FAIL", "PRETEST_FAILED")
+    pre = [a for a in record["actions"] if a["phase"] == "pre"]
+    assert pre and pre[0]["outcome"] == "error", "the Pre-test Action raised, and is recorded as such"
+
+    steps = [n for n in record["nodes"] if n["kind"] == "step"]
+    assert all(n["result"] == "NOTRUN" for n in steps), "the run ends before any step runs"
+    assert not any(n["attempt_count"] for n in steps)
+
+    assert any("SCPI peer unreachable" in line["text"] for line in logs), "the handler logged why"
+    assert any("ATE.open" in line["text"] for line in logs), "and the raise names the call and the Device"
+
+    peers = record["peers"]
+    assert peers["scpiConnections"] == 0 and peers["scpiCommands"] == [], "nothing reached the SCPI peer"
+    assert peers["udpReceived"] == [] and peers["udpEchoes"] == [], "no step ran, so no Device was opened"
