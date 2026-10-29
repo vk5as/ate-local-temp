@@ -1,0 +1,120 @@
+-- Example Media Release: a hidden Sub-schedule (sub_device.tslua) that runs one Device Type through
+-- the whole Device life: open, write, read, partial read, timed-out read, flush, close.
+--
+-- What it demonstrates:
+--   * keyvals: devices.tslua includes this file four times, once per Device Type, and each include
+--     gets its own `kv` - the Type, its instrument's name, where the peer is, and what the peer is
+--     expected to answer.
+--   * `ate.devices` builders: `open` has no defaults, so the builder for the Type seeds every field.
+--   * Per-call overrides on one read or write, without changing the Device's open configuration.
+--   * The open's onError as the fallback for the Device's later calls.
+--
+-- UDP differs from the others in one way that matters: one datagram is one message, so there are no
+-- terminators to override and the only partial read is a `size` cutting a datagram short.
+
+local kv = ...                        -- this include's keyvals; {} for a top-level schedule
+local devices = require("ate.devices")
+local dev = nil                       -- this instance's Device, opened by step 1
+
+-- Every field `open` requires, from the builder for this Device Type.
+local params
+if kv.kind == "TCP" then
+  params = devices.Tcp(kv.host, kv.port):setTimeout(2.0):setReadTerm("\n"):setWriteTerm("\n")
+elseif kv.kind == "UDP" then
+  params = devices.Udp(kv.host, kv.port):setTimeout(2.0)  -- no terminators: a datagram is the message
+elseif kv.kind == "SERIAL" then
+  params = devices.Serial(kv.port):setBaud(kv.baud):setDataBits(8):setStopBits(1)
+    :setParity(Parity.NONE):setFlowControl(FlowControl.NONE):setTimeout(2.0)
+else
+  params = devices.Visa(kv.resource):setTimeout(2.0):setReadTerm("\n"):setWriteTerm("\n")
+end
+
+-- How the Test Report describes this Device: the Type and the address it was opened with.
+local connection
+if kv.kind == "TCP" or kv.kind == "UDP" then
+  connection = kv.host .. ":" .. kv.port
+else
+  connection = kv.port or kv.resource
+end
+
+-- This handler is this Device's onError: `open`'s handler is the fallback for its later read, write
+-- and close calls that do not give one of their own. Returning a value makes the failed call return
+-- that value and the schedule carry on.
+local function logAndContinue(opResult, opArgs)
+  ATE.log(Log.WARNING, kv.kind .. " device error: " .. opResult.err)
+  return "recovered"
+end
+
+return ScheduleParams("Device check", "one Device Type, opened, written, read, flushed and closed")
+  :setPreTestAction(function()
+    -- Equipment the Test Report lists; the connection string is how the schedule describes the Device.
+    ATE.addEquipment(kv.instrument, kv.serial, kv.kind .. " " .. (kv.host or kv.port or kv.resource))
+  end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, kv.kind .. " check finished: " .. passFail) end)
+  :setSchedule({
+    -- 1. Open the Device, send a command, read the answer. The write overrides the open-time
+    --    writeTerm for this one call: SCPI instruments take CRLF. UDP has no terminators at all -
+    --    one datagram is one message - so its write carries only the data.
+    StepParams(kv.kind .. " open, write and read"):setStepNo("1.")
+      :setAction(function()
+        dev = ATE.open(DeviceType[kv.kind], params, logAndContinue)
+        local w
+        if kv.kind == "UDP" then
+          w = ATE.write(dev, devices.Write(kv.command))
+        else
+          w = ATE.write(dev, devices.Write(kv.command):setWriteTerm("\r\n"))
+        end
+        local r = ATE.read(dev)
+        local ok = w.ok and r.data == kv.reply and not r.partial
+        ATE.report(ok and Result.PASS or Result.FAIL, kv.kind .. " answered " .. (r.data or "nothing"),
+          r.count, #kv.reply)
+      end),
+
+    -- 2. A partial read: bytes arrive, the terminator does not, and the call returns what it got
+    --    with partial = true (and logs a WARNING). UDP has no terminator, so the partial read is
+    --    one `size` cutting a datagram short - the tail of it is gone.
+    StepParams(kv.kind .. " partial read"):setStepNo("2.")
+      :setAction(function()
+        ATE.write(dev, devices.Write(kv.partialCommand))
+        local r
+        if kv.kind == "UDP" then
+          r = ATE.read(dev, devices.Read():setSize(kv.partialBytes))
+        else
+          r = ATE.read(dev, devices.Read():setTimeout(0.4))
+        end
+        ATE.report(r.partial and r.count == kv.partialBytes and Result.PASS or Result.FAIL,
+          "read " .. r.count .. " bytes with no terminator", r.count, kv.partialBytes)
+      end),
+
+    -- 3. A read that times out with nothing at all is a Device failure, so it goes through onError:
+    --    the one given to `open` logs it and returns a value, which becomes this read's return.
+    StepParams(kv.kind .. " read times out"):setStepNo("3.")
+      :setAction(function()
+        ATE.write(dev, devices.Write(kv.silentCommand))
+        local r = ATE.read(dev, devices.Read():setTimeout(0.3))
+        ATE.report(r == "recovered" and Result.PASS or Result.FAIL,
+          "onError recovered the timed-out read", r, "recovered")
+      end),
+
+    -- 4. Flush throws away whatever the receive buffer already holds. TCP and SERIAL ask the peer for
+    --    three lines, read two, and discard the third; UDP's queue is empty because every echo was
+    --    read, and VISA has no receive buffer at all, so both flush 0 bytes.
+    StepParams(kv.kind .. " flush"):setStepNo("4.")
+      :setAction(function()
+        if kv.flushCommand then
+          ATE.write(dev, devices.Write(kv.flushCommand))
+          ATE.read(dev)  -- chan=1
+          ATE.read(dev)  -- chan=2
+        end
+        local f = ATE.flush(dev)
+        ATE.report(f.ok and f.count == kv.flushBytes and Result.PASS or Result.FAIL,
+          "flush discarded " .. f.count .. " buffered bytes", f.count, kv.flushBytes)
+      end),
+
+    -- 5. Release it. A Device closed here is gone: using it afterwards is a Device failure.
+    StepParams(kv.kind .. " close"):setStepNo("5.")
+      :setAction(function()
+        local c = ATE.close(dev)
+        ATE.report(Result.PASS, connection .. " closed", c.ok, true)
+      end),
+  })

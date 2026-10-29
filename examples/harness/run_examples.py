@@ -5,6 +5,12 @@ Runs the Test Schedules in ``examples/media-release/`` through the headless run 
 the script — including clicking a POLL button while its step's read loop runs (packet 29b) — and
 returns each Test Run record read back from the store.
 
+Packet 29d: the Device schedule talks to simulator peers started here, not to hardware. The peers
+in ``examples/harness/peers.py``, bound to ephemeral ports, are started for the whole batch of runs,
+and ``release_copy`` writes the live ports into a copy of the Test Definition — then re-checksums
+that copy with the real CLI, so the run records no checksum mismatch. Device tracing is on in the
+harness's config so every Device operation is recorded.
+
 Run it from a source checkout:
 
     QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples
@@ -19,6 +25,9 @@ patches it there; the CLI path patches it for the duration of the run only.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,9 +35,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-_SRC = Path(__file__).resolve().parents[2] / "src"  # so a bare checkout can import `ate`
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _ROOT / "src"  # so a bare checkout can import `ate`
+for _path in (_SRC, _ROOT):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from PyQt6.QtCore import QCoreApplication  # noqa: E402
 
@@ -42,7 +53,10 @@ from ate.catalog import (  # noqa: E402
 from ate.engine.lua_host import LuaHost  # noqa: E402
 from ate.run_session.headless import HeadlessRunSession, SessionState  # noqa: E402
 
+from examples.harness.peers import Peers  # noqa: E402
+
 RELEASE_DIR = Path(__file__).resolve().parents[1] / "media-release"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # One entry per headless run: the schedule to pick and the Operator's scripted answers.
 #   inputs      - the value to supply, keyed by the Step Name of the step whose input is asked.
@@ -83,6 +97,11 @@ RUNS: list[dict[str, Any]] = [
     # The same schedule again, with its disabled-by-default step enabled by the Operator.
     {"key": "basics_enabled", "schedule": "Example basics", "inputs": {"Operator input": 1.5},
      "enable": {"Optional check": True}},
+    # Packet 29d: the Device schedule, run twice - once as written (every step green, the
+    # onError-returns-nil step disabled), once with that step enabled so its raise is recorded.
+    {"key": "devices", "schedule": "Device types"},
+    {"key": "devices_nil_onerror", "schedule": "Device types",
+     "enable": {"Read a closed Device": True}},
 ]
 
 # A POLL is live for the whole Attempt (packet 10a), so `input_asked` announces it when the Attempt
@@ -93,16 +112,16 @@ RUNS: list[dict[str, Any]] = [
 POLL_CLICK_AFTER_SECONDS = 0.3
 
 
-def visible_schedules() -> list[str]:
+def visible_schedules(release_dir: Path = RELEASE_DIR) -> list[str]:
     """Every visible Test Schedule in the example Media Release, in scan order."""
-    return [name for name, _description, _media in list_schedules(RELEASE_DIR)]
+    return [name for name, _description, _media in list_schedules(release_dir)]
 
 
-def step_seqs(schedule: str) -> dict[str, int]:
+def step_seqs(schedule: str, release_dir: Path = RELEASE_DIR) -> dict[str, int]:
     """The runner node_seq of every ordinary step in a schedule, keyed by Step Name.
 
     Built from the same expanded tree the Steps stage previews."""
-    definition = resolve_schedule_definition(RELEASE_DIR, schedule_name=schedule)
+    definition = resolve_schedule_definition(release_dir, schedule_name=schedule)
     if definition is None:
         raise AssertionError(f"no Test Definition covers schedule {schedule!r}")
     path = resolve_schedule_path(definition, schedule)
@@ -110,14 +129,41 @@ def step_seqs(schedule: str) -> dict[str, int]:
     return {node.name: seq for seq, node in enumerate(host.tree) if not node.is_header}
 
 
-def write_config(tmp_dir: Path) -> Path:
-    """A config that points at the example release and a scratch database under ``tmp_dir``."""
+def release_copy(tmp_dir: Path, peers: Peers) -> Path:
+    """A copy of the example release with the simulator peers' live ports written in.
+
+    ``devices.tslua`` carries ``__SCPI_PORT__`` and ``__UDP_PORT__`` placeholders so the schedule
+    reads like a real one (the placeholders fall back to the usual instrument ports). Writing the
+    live ports into the copy changes the file, so the copy's Test Definition is re-checksummed by
+    the real CLI - never by hand - and the run records no mismatch.
+    """
+    copy = tmp_dir / "media-release"
+    shutil.copytree(RELEASE_DIR, copy)
+    schedule = copy / "devices.tslua"
+    text = schedule.read_text(encoding="utf-8")
+    for placeholder, port in peers.keyvals().items():
+        text = text.replace(placeholder, str(port))
+    schedule.write_text(text, encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-m", "ate.cli", "definition", "update", str(copy / "example.atedef")],
+        check=True, capture_output=True, text=True, cwd=str(_ROOT),
+        env={**os.environ, "PYTHONPATH": str(_SRC)},
+    )
+    return copy
+
+
+def write_config(tmp_dir: Path, release_dir: Path = RELEASE_DIR) -> Path:
+    """A config that points at the example release and a scratch database under ``tmp_dir``.
+
+    Device tracing is on: the Device schedule is the run the harness wants to see every Device
+    operation of, and it costs nothing in the schedules that open no Device."""
     config = {
         "format": 1,
         "station": {"name": "BENCH-EXAMPLE", "uuid": "11111111-2222-3333-4444-555555555555"},
         "database": {"type": "sqlite", "path": str(tmp_dir / "ate.db")},
         "reports": {"directory": str(tmp_dir / "reports")},
-        "testDefinitions": {"directories": [str(RELEASE_DIR)]},
+        "testDefinitions": {"directories": [str(release_dir)]},
+        "deviceTrace": {"enabled": True},
     }
     path = tmp_dir / "config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
@@ -149,6 +195,7 @@ def run_schedule(
     enable: dict[str, bool] | None = None,
     stop_on_fail: bool | None = None,
     polls: dict[str, tuple[int, str]] | None = None,
+    release_dir: Path = RELEASE_DIR,
     operator: str = "Ada Lovelace",
     project: str = "Example project",
     uut_type: str = "Example board",
@@ -164,7 +211,7 @@ def run_schedule(
     # Step Name -> the node_seq that step gets in this run, so the scripted answers can be keyed by
     # the name a schedule writer would recognise rather than by a bare index. Built once: the old
     # per-toggle step_seq() rebuilt a whole LuaHost every time (packet 29b review).
-    seqs = step_seqs(schedule)
+    seqs = step_seqs(schedule, release_dir)
 
     def _seq(name: str) -> int:
         if name not in seqs:
@@ -266,15 +313,36 @@ def run_schedule(
 
 
 def run_all(tmp_dir: Path) -> dict[str, dict[str, Any]]:
-    """Run every visible example schedule with its scripted answers; one record per run, keyed by `key`."""
+    """Run every visible example schedule with its scripted answers; one record per run, keyed by `key`.
+
+    Packet 29d: the simulator peers the Device schedule talks to are started here, and every run uses
+    a copy of the release whose placeholders have been replaced with those peers' live ports. Each
+    record from a Device run carries what the peers saw, so the assertions can check the conversation
+    as well as the Test Run record."""
     planned = {entry["schedule"] for entry in RUNS}
     missing = set(visible_schedules()) - planned
     if missing:
         raise AssertionError(f"example schedules not covered by the harness: {sorted(missing)}")
-    config = write_config(tmp_dir)
-    return {entry["key"]: run_schedule(config, entry["schedule"],
-                                      **{k: v for k, v in entry.items() if k not in ("key", "schedule")})
-            for entry in RUNS}
+    peers = Peers()
+    peers.start()
+    try:
+        release = release_copy(tmp_dir, peers)
+        config = write_config(tmp_dir, release)
+        records = {}
+        for entry in RUNS:
+            record = run_schedule(config, entry["schedule"], release_dir=release,
+                                  **{k: v for k, v in entry.items() if k not in ("key", "schedule")})
+            if entry["schedule"] == "Device types":
+                record["peers"] = {
+                    "scpiCommands": list(peers.scpi.commands),
+                    "scpiConnections": len(peers.scpi.connections),
+                    "udpReceived": list(peers.udp.received),
+                    "udpEchoes": list(peers.udp.echoes),
+                }
+            records[entry["key"]] = record
+        return records
+    finally:
+        peers.stop()
 
 
 @contextmanager
@@ -307,6 +375,9 @@ def main() -> int:
     if bad:
         print(f"FAILED: no run record for {bad}", file=sys.stderr)
         return 1
+    peers = records["devices"]["peers"]
+    print(f"peers: {peers['scpiConnections']} SCPI connections, {len(peers['scpiCommands'])} SCPI "
+          f"commands, {len(peers['udpEchoes'])} echoes of {len(peers['udpReceived'])} datagrams")
     print(f"ran {len(records)} headless runs of {len(visible_schedules())} example schedules")
     return 0
 
