@@ -587,6 +587,35 @@ def test_a_finished_run_is_drawn_only_when_the_hidden_layout_comes_back(qapp, tm
     assert any("the first step is failing" in line for line in staged.log_pane.rendered_lines())
     _finish(qapp, window)
 
+    # The other way round: a run finished while the three-pane layout was hidden is drawn when the
+    # Operator switches to it, and not before.
+    outcome2, _ = _launch(env, tmp_path)
+    window2 = outcome2.window
+    window2.show()
+    qapp.processEvents()
+    staged2, three2 = window2.staged_screen, window2.three_pane_screen
+    asked2, prompts2 = _pick_and_start(qapp, window2, schedule)
+    staged2.run_view.failure_prompt_bar.continue_button.click()
+    qapp.processEvents()
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked2)), "step 2 never asked for its input"
+    answer2 = staged2.input_widget(1, 1)
+    answer2.line_edit.setText("7")
+    answer2.ok_button.click()
+    assert _wait(qapp, lambda: window2.session.state == SessionState.FINISHED)
+    qapp.processEvents()
+
+    hidden = _three_step_results(three2)
+    assert not any(result for result, _ in hidden.values()), (
+        f"the hidden three-pane layout read the finished run while it was not showing: {hidden}"
+    )
+    window2.three_pane_layout_action.trigger()
+    qapp.processEvents()
+    results = _three_step_results(three2)
+    assert results.get(0) == ("FAIL", "1"), results
+    assert results.get(1) == ("PASS", "1"), results
+    assert three2.log_pane.rendered_lines(), "the three-pane log stayed empty after the switch"
+    _finish(qapp, window2)
+
 
 def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_path):
     """Answer a Stop-on-Fail pause in one layout: the other shows no prompt, and its Abort aborts

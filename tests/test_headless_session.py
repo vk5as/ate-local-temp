@@ -6,6 +6,7 @@ are recorded on the run row; interrupted runs left open by a crash are closed as
 at launch (spec rule 98). No widgets, no mocks.
 """
 
+import gc
 import os
 import re
 import sys
@@ -525,8 +526,8 @@ def test_a_pdf_helper_whose_owner_is_gone_reports_nothing(qapp, monkeypatch, tmp
     start_pdf_job(owner, tmp_path / "report.html", tmp_path / "report.pdf")
     job = next(proc for proc in _live_pdf_jobs if proc.parent() is owner)
 
-    owner.deleteLater()
-    qapp.processEvents()  # the owner goes, and its process with it, while the helper is running
+    del owner  # released while the render is in flight: Qt destroys the process underneath it
+    gc.collect()
 
     deadline = time.monotonic() + 10
     while any(proc is job for proc in _live_pdf_jobs) and time.monotonic() < deadline:
