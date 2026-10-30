@@ -121,17 +121,21 @@ Qt exclusions) — Qt's libraries and QtWebEngine are the bulk of it.
 ## Windows installer
 
 The installer is `packaging/windows/ate.iss`, compiled by `packaging/windows/build_installer.py`.
-It needs **Windows** and **Inno Setup 6.3 or newer** (`x64compatible` and `createallsubdirs` are
-6.3 features); `iscc` is looked for in `$ISCC`, then on `PATH`, then in
+It needs **Windows** and **Inno Setup 6.3 or newer** (`x64compatible` is the 6.3-era directive);
+`iscc` is looked for in `$ISCC`, then on `PATH`, then in
 `C:\Program Files\Inno Setup 6\ISCC.exe`.
 
 ```powershell
-python packaging\build_installer.py --dist dist --build      # builds dist\ate first, then the installer
-python packaging\build_installer.py --dist dist              # dist\ate already built
-python packaging\build_installer.py --dry-run                # print the iscc command, compile nothing
+python packaging\windows\build_installer.py --dist dist --build   # builds dist\ate first, then the installer
+python packaging\windows\build_installer.py --dist dist           # dist\ate already built
+python packaging\windows\build_installer.py --dry-run             # print the iscc command, compile nothing
 ```
 
-`--dry-run` works on any platform, which is how this script is exercised on Linux.
+`--dry-run` works on any platform, which is how this script is exercised on Linux. `--dist`,
+`--out` and `--iss` are resolved to absolute paths before they reach `iscc`: Inno resolves a
+relative `SourceDir`, `Source` or `OutputDir` against the folder holding `ate.iss`
+(`packaging\windows`), not the directory the compiler was started in, so handing it `dist`
+would make it look in `packaging\windows\dist`.
 
 The artifact is `dist\ate-<version>-windows-x64-setup.exe`. What it does:
 
@@ -140,13 +144,22 @@ The artifact is `dist\ate-<version>-windows-x64-setup.exe`. What it does:
 - Adds `{app}` to the **machine** PATH (`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`,
   written as `expandsz` so `%VAR%` entries survive) and tells Explorer the environment changed,
   so `ate` is on the PATH straight after the install. `NeedsAddPath` in the script compares
-  whole `;`-separated entries case-insensitively, so an upgrade never adds the directory twice.
+  whole `;`-separated entries case-insensitively, ignoring a trailing backslash, so an upgrade
+  never adds the directory twice. It is called as `NeedsAddPath(ExpandConstant('{app}'))`:
+  a `Check:` parameter is plain Pascal, and Inno does not expand constants inside it, so
+  `NeedsAddPath('{app}')` would search for the literal text `{app}` and append another entry
+  on every upgrade.
 - Runs `ate setup` at the end. It is run with `Exec` and its exit code checked rather than as a
-  `[Run]` entry, because `[Run]` entries ignore exit codes: if setup fails, the installer says
-  so and names the fix (`ate setup` from an elevated command prompt) instead of reporting a
-  clean install. The program itself stays installed.
+  `[Run]` entry, because `[Run]` entries ignore exit codes: if setup fails, the installer names
+  the fix (`ate setup` from an elevated command prompt) and, through `GetCustomSetupExitCode`,
+  exits non-zero. Under `/VERYSILENT` there is no message box to read, so the exit code and the
+  `/LOG` file are what a build or CI run has to go on. The program itself stays installed.
 - Upgrades install in place. `[InstallDelete]` clears `{app}\_internal` before the new bundle is
-  copied, so files the new build no longer ships cannot linger. The Station's config and data
+  copied, so files the new build no longer ships cannot linger. A running ATE is closed first
+  (`CloseApplications=yes`, `RestartApplications=no`): Setup finds the processes holding the
+  bundle's files and shuts them down — silently under `/VERYSILENT`, which is the
+  `/CLOSEAPPLICATIONS` behaviour. No `AppMutex` is used; the app would have to create one at
+  GUI launch, and the file handles already tell Setup what to close. The Station's config and data
   are in `%PROGRAMDATA%\ATE`, outside `{app}`, so they survive; the uninstaller removes the
   program and its PATH entry and nothing else, and there is deliberately no `uninsdeletevalue`
   on the PATH entry, which would wipe the machine's entire PATH.
@@ -157,12 +170,17 @@ second ATE beside the first and leave the old uninstall entry behind.
 ### Signing
 
 Optional, as the spec's packaging notes say. When **both** `ATE_SIGN_CERT` and
-`ATE_SIGN_PASSWORD` are set, the wrapper compiles with `/DSignEnabled` and
-`/Ssigntool=signtool.exe sign /fd SHA256 /f $q<cert>$q /p $q<password>$q ... $f`, which signs
-the installer, its uninstaller and `ate.exe`. With neither variable set the build is unsigned
-and nothing complains; setting only one is an error rather than a silent unsigned build. The
-password comes from the environment only and is never printed — `--dry-run` shows the command
-with it replaced by `<from ATE_SIGN_PASSWORD>`.
+`ATE_SIGN_PASSWORD` are set, the wrapper compiles with `/DSignEnabled` (the switch that turns
+the script's signing guard on) and `/Ssigntool=signtool.exe sign /fd SHA256 /f $q<cert>$q
+/p $q<password>$q ... $f` (the switch that defines the Sign Tool the guard names): signing
+needs both. With neither variable set the build is unsigned and nothing complains; setting
+only one is an error rather than a silent unsigned build.
+
+The password comes from the environment only, but it is passed to `iscc` on its command line,
+so anyone who can list processes on the build machine can see it. Nothing here logs it:
+`--dry-run` shows the command with it replaced by `<from ATE_SIGN_PASSWORD>`, and a failed
+compile's stdout and stderr are redacted before they are printed. Do not pipe `iscc` output
+into a CI log that is stored or displayed raw.
 
 > **Never compiled, never run.** Every machine that has written this script is Linux, with no
 > Inno Setup and no Wine. `--dry-run` and `tests/test_inno_installer_27b.py` (which reads the
