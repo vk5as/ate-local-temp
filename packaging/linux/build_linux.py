@@ -173,8 +173,19 @@ def _deb_version(version: str) -> str:
     bare ``-`` sorts *after* the digits before it. So every prerelease suffix becomes ``~``:
     ``0.0.0-dev`` -> ``0.0.0~dev``, ``1.2.3-rc1`` -> ``1.2.3~rc1``. A prerelease then precedes the
     release it is a prerelease of, which is what it means.
+
+    A PEP 440 prerelease has no separator at all — the bundle built from tag ``v0.1.0-rc1``
+    reports ``0.1.0rc1`` — and dpkg reads that as a revision *after* ``0.1.0``, so the marker
+    gets the same ``~``: ``0.1.0rc1`` -> ``0.1.0~rc1`` and ``0.1.0rc1.dev3+gabc1234`` ->
+    ``0.1.0~rc1.dev3+gabc1234``, both below ``0.1.0`` and in the order the tags were cut.
     """
     text = (version or "").strip() or "0.0.0"
+    text = re.sub(
+        r"^(?P<core>\d+(?:\.\d+)*)(?P<pre>alpha|beta|rc|a|b)(?P<tail>.*)$",
+        lambda m: f"{m.group('core')}~{m.group('pre')}{m.group('tail')}",
+        text,
+        count=1,
+    )
     text = re.sub(r"-(?:dev|pre|alpha|beta|rc)\d*", lambda m: "~" + m.group(0)[1:], text, flags=re.IGNORECASE)
     text = re.sub(r"[^A-Za-z0-9.+~:-]", "-", text)
     return text if any(ch.isdigit() for ch in text) else "0.0.0"

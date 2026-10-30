@@ -56,6 +56,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BUILD_LINUX = HERE / "build_linux.py"
+VERSION_FILE = REPO / "src" / "ate" / "_version.py"
 SAMPLE_RELEASE = REPO / "examples" / "media-release"
 
 KINDS = ("deb", "tar", "wheel")
@@ -237,6 +238,35 @@ def check_glibc(runner: Runner, dist: Path) -> None:
     print(f"glibc: built against {'.'.join(map(str, built))}, container has {'.'.join(map(str, container))}")
 
 
+def _version_module():
+    """``src/ate/_version.py``, read the way the packaging scripts read ``build_linux.py``.
+
+    The smoke container has no git and no installed ATE, and this script must not import the
+    package it is testing. `_version.py` is stdlib only, so the file can be loaded on its own.
+    """
+    spec = importlib.util.spec_from_file_location("ate_version", VERSION_FILE)
+    if spec is None or spec.loader is None:
+        fail(f"cannot read {VERSION_FILE}: the tag-to-version rule lives there")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def expected_version(expect: str | None) -> str | None:
+    """The tag, spelled the way the artifact reports it.
+
+    `release.yml` passes the tag as it was cut, `0.1.0-rc1`, and the bundle built from it prints
+    `0.1.0rc1`, because that is how PEP 440 and the wheel's metadata write it. `_version.normalise`
+    is the only place that knows how the two are related, so the comparison goes through it instead
+    of through a second rule here. An expectation it cannot read — a branch name from
+    `workflow_dispatch`, say — is compared exactly as given.
+    """
+    if not expect:
+        return None
+    parsed = _version_module().normalise(expect)
+    return parsed or expect
+
+
 def check_ate_runs(runner: Runner, ate: str, expect_version: str | None = None) -> None:
     """The installed program runs, and prints the version the tag built it with.
 
@@ -251,11 +281,12 @@ def check_ate_runs(runner: Runner, ate: str, expect_version: str | None = None) 
     printed = result.stdout.strip()
     if not printed:
         fail(f"{ate} --version printed nothing")
-    if expect_version and printed != expect_version:
+    expected = expected_version(expect_version)
+    if expected and printed != expected:
         fail(
-            f"{ate} --version prints {printed!r}, but this artifact was built for {expect_version!r}: "
-            f"the version comes from the tag and is stamped into the bundle and the wheel at build time "
-            "(assets/packaging.md, 'Version')"
+            f"{ate} --version prints {printed!r}, but this artifact was built for {expect_version!r} "
+            f"(as a version string that is {expected!r}): the version comes from the tag and is "
+            "stamped into the bundle and the wheel at build time (assets/packaging.md, 'Version')"
         )
     print(f"ate --version: {printed}")
 

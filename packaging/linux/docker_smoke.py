@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -37,8 +38,26 @@ REPO = Path(__file__).resolve().parents[2]
 BUILD_LINUX = REPO / "packaging" / "linux" / "build_linux.py"
 IMAGE = "debian:stable"
 KINDS = ("deb", "tar", "wheel")
-TAG = "v1.2.3"
-VERSION = TAG[1:]
+# The tag the containers are built from. ATE's version is the tag, so this must be a tag git
+# can describe: `v0.1.0-rc1` builds artifacts that report `0.1.0rc1`, not `0.1.0-rc1`.
+TAG = os.environ.get("ATE_SMOKE_TAG", "v1.2.3")
+
+
+def _version_of(tag: str) -> str:
+    """The version a checkout tagged `tag` builds as: `v0.1.0-rc1` builds `0.1.0rc1`.
+
+    `src/ate/_version.py` is the only place that knows how a tag becomes a version, so the
+    expectation the build is checked against comes from it rather than from the tag string.
+    """
+    spec = importlib.util.spec_from_file_location("ate_version", REPO / "src" / "ate" / "_version.py")
+    if spec is None or spec.loader is None:
+        return tag.lstrip("v")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.normalise(tag) or tag.lstrip("v")
+
+
+VERSION = _version_of(TAG)
 
 
 class DockerError(Exception):

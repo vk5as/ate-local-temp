@@ -38,6 +38,16 @@ import sys
 FALLBACK = "0.0.0-dev"
 
 _SEMVER_RE = re.compile(r"\d+\.\d+\.\d+")
+# What follows the semver core in a tag or `git describe` output: an optional prerelease
+# suffix (`-rc1`, `-alpha.1`, `-b2`) and an optional commits-since-the-tag part (`-3-gabc1234`).
+# Longer kinds first, so `alpha` is never read as `a` with leftovers after it.
+_SUFFIX_RE = re.compile(
+    r"^[-.]?(?P<pre>(?:alpha|beta|rc|a|b)[\d.]*)?(?:-(?P<count>\d+)-g(?P<sha>[0-9a-f]{7,40}))?$",
+    re.IGNORECASE,
+)
+# What PEP 440 calls each kind.
+_MARKER = {"rc": "rc", "alpha": "a", "beta": "b", "a": "a", "b": "b"}
+_KIND_RE = re.compile(r"^(?:alpha|beta|rc|a|b)", re.IGNORECASE)
 
 
 def _repo_root() -> str:
@@ -60,28 +70,52 @@ def _describe() -> str | None:
 
 
 def _parse(text: str) -> str | None:
-    """Turn ``git describe`` output into a PEP 440 version string.
+    """Turn a tag, or ``git describe`` output, into a PEP 440 version string.
 
-    A clean tag such as ``v1.2.3`` yields the final release ``1.2.3``; commits
-    since the tag yield a dev prerelease like ``1.2.3.dev4+gabc123de``. Returns
-    ``None`` when no semver core can be found so the caller can fall back.
+    A clean tag such as ``v1.2.3`` yields the final release ``1.2.3``; commits since
+    the tag yield a dev prerelease like ``1.2.3.dev4+gabc123de``. A prerelease tag keeps
+    its suffix, written the PEP 440 way: ``v1.2.3-rc1`` is ``1.2.3rc1``, and three
+    commits after that tag, ``v1.2.3-rc1-3-gabc123de``, is ``1.2.3rc1.dev3+gabc123de``.
+    ``-alpha.N``, ``-aN``, ``-beta.N`` and ``-bN`` behave the same. Returns ``None``
+    when nothing here is a version, so the caller can fall back.
     """
     match = _SEMVER_RE.search(text)
     if not match:
         return None
     base = match.group(0)
 
-    # Everything after the tag, e.g. "-4-gabc123de" for commits since the tag,
-    # or "" for a clean checkout sitting exactly on the tag.
-    rest = text[match.end():].lstrip("-")
+    # Everything after the semver core: "-4-gabc123de" for commits since the tag,
+    # "-rc1" for a prerelease tag, or "" for a clean checkout sitting exactly on the tag.
+    rest = text[match.end():]
     if not rest:
         return base  # clean tag with no commits since -> final release
-    # Commits since the tag: ``<count>-g<sha>`` -> dev prerelease.
-    dev = re.match(r"^(?P<count>\d+)-g(?P<sha>[0-9a-f]{7,40})$", rest)
-    if dev:
-        return f"{base}.dev{dev.group('count')}+g{dev.group('sha')}"
-    # Unexpected shape (e.g. a non-semver tag): stay safe and deterministic.
-    return None
+
+    suffix = _SUFFIX_RE.match(rest)
+    if suffix is None:
+        # Unexpected shape (e.g. a non-semver tag): stay safe and deterministic.
+        return None
+
+    marker = ""
+    pre = suffix.group("pre")
+    if pre:
+        kind = _KIND_RE.match(pre).group(0).lower()
+        # `alpha.1` and `alpha1` are the same prerelease; PEP 440 writes it `a1`.
+        marker = _MARKER[kind] + pre[len(kind):].replace(".", "")
+
+    if suffix.group("count") is not None:
+        # Commits since the tag: ``<count>-g<sha>`` -> dev prerelease.
+        return f"{base}{marker}.dev{suffix.group('count')}+g{suffix.group('sha')}"
+    return f"{base}{marker}" if marker else None
+
+
+def normalise(text: str) -> str | None:
+    """The PEP 440 spelling of a tag: ``v0.1.0-rc1`` and ``0.1.0-rc1`` are both ``0.1.0rc1``.
+
+    A release is cut from a tag written with a dash, while the artifacts it builds report
+    the version without one, because that is how PEP 440 and the wheel's metadata write it.
+    Anything that compares a tag with what a build prints has to pass through here.
+    """
+    return _parse(text or "")
 
 
 def _frozen_version() -> str | None:
