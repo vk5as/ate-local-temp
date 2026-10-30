@@ -18,3 +18,23 @@
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/` (`app-config-format.md`, `packaging.md`); the spec is `.scratch/ate-v1/spec.md` (CLI ~220, Config ~190). Keep to this packet's checkboxes.
 - [x] (added at the 27a merge) `tests/test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e added the "Report generated <local time>" footer: make the comparison exclude or freeze that timestamp so it is deterministic.
+
+## Review rework (30c review, 2026-10-30)
+
+- [x] `_platform_default()` returns a `Path`, so bare `ate` and `ate db status`/`migrate` with no
+      `--config` no longer raise `AttributeError`. A missing default config prints
+      `ate db: config file not found at <path>` / `run 'ate setup' or pass --config PATH first`,
+      exits 1, and creates nothing. `ATE_DEFAULT_CONFIG` is the subprocess seam.
+- [x] "Create default config and launch" against an unwritable data directory refuses with the
+      path and the fix instead of a `PermissionError` traceback; `write_config` stages its JSON,
+      so a failed write leaves no half-written file. A config whose write succeeded is kept — the
+      format refuses to start only when the write itself fails. `ATE_DATA_DIR` is the data-dir seam.
+- [x] The migrate hint names `--config <path>` when a non-default config is in use, and every
+      refusal names the database path.
+- [x] `ate setup` creates `<data>/definitions`, so a fresh Station does not warn on every scan.
+- [x] `ATE_AUTO_DISMISS_DIALOG` treats `""`/`"0"`/`"false"`/`"no"`/`"off"` as unset; the docstring
+      now says the prompts answer their negative branch; documented in `docs/building-from-source.md`.
+- [x] `tests/test_gui_launch_30a.py` again asserts no stray `./ate.db` and the exact
+      "created or upgraded database at <path>" line.
+- [x] The 21b fake clock carries a real `timezone`, so removing the `generated_at` seam is caught
+      by the second-crossing assertion rather than an `AttributeError`.

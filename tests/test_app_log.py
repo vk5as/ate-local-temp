@@ -147,3 +147,18 @@ def test_unwritable_directory_refuses_to_open(tmp_path):
     with pytest.raises(LogError):
         AppLog(str(ro))
 
+
+def test_a_log_directory_that_cannot_be_created_is_a_log_error(tmp_path):
+    """Creating the log directory fails the same way: a :class:`LogError`, not the raw
+    ``PermissionError`` the bare ``mkdir`` used to raise (packet 30c review). The launch layer
+    catches :class:`LogError` and shows a dialog, so anything else is a traceback."""
+    if os.geteuid() == 0:
+        pytest.skip("running as root")
+
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    os.chmod(ro, 0o555)
+    with pytest.raises(LogError, match="cannot create the application log directory"):
+        AppLog(ro / "logs")
+    assert not (ro / "logs").exists()
+

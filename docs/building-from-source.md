@@ -35,6 +35,18 @@ the ownership and permissions of the station directories. Run unprivileged it wa
 skips those steps (or force the skip with `--no-permissions`); the directories themselves
 are still created. See the spec's Packaging section.
 
+### Where the Station's files live
+
+The config's path defaults are written with the `<data>` placeholder (`<data>/ate.db`,
+`<data>/logs`, …). `<data>` is the platform **data directory**: `%PROGRAMDATA%\ATE` on
+Windows, `/var/lib/ate` on Linux (`assets/app-config-format.md`). The reader resolves it at
+launch, so a config that keeps the placeholders stays portable between machines.
+
+`ate setup --root DIR` writes the config with those paths **already resolved** against
+`DIR/data` (its `definitions`, `reports` and `logs` subdirectories are created too), so a
+rooted Station reads and writes inside `DIR` and never touches the platform data directory.
+`ate setup` without `--root` uses the platform directories from the table above.
+
 On Windows the venv paths are `.venv\Scripts\activate` instead.
 
 ## Building the wheel
@@ -121,3 +133,19 @@ because a PyInstaller build takes minutes:
 ```bash
 ATE_BUILD_TESTS=1 pytest -m build -q
 ```
+
+### Testing seams: three environment variables
+
+Tests that run `ate` in a real subprocess need to aim the platform paths somewhere writable
+and to close Qt dialogs that would otherwise block offscreen. These are test seams, not
+Station features — nothing else reads them, and a config's own paths still get no
+environment expansion.
+
+| Variable | What it does | Read by |
+| --- | --- | --- |
+| `ATE_DEFAULT_CONFIG` | Replaces the platform default **config file** path (`/etc/ate/config.json`, `%PROGRAMDATA%\ATE\config.json`), so a test can prove "no config at the default location" without touching `/etc` | `ate.config._platform_default` only |
+| `ATE_DATA_DIR` | Replaces the platform **data directory** (`/var/lib/ate`, `%PROGRAMDATA%\ATE`) that `<data>` resolves to | `ate.config._platform_data_dir` only |
+| `ATE_AUTO_DISMISS_DIALOG` | Closes every launch dialog by itself, so a refusal exits instead of blocking in `exec()`. It closes with `accept()`, which clicks no button: the missing-config prompt therefore answers **Abort** and the "abort the run and quit?" confirmation answers **keep running**. `""`, `"0"`, `"false"`, `"no"` and `"off"` mean unset | `ate.app._dismiss_if_headless` |
+
+`conftest.py` also points `<data>` at pytest's `basetemp` for the whole session, so no test
+ever writes under `/var/lib`.

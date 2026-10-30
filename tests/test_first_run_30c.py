@@ -32,7 +32,7 @@ import pytest
 
 import ate.app as ate_app
 from ate.app import launch
-from ate.config import ConfigError, config_hint, config_path, read_config
+from ate.config import ConfigError, MissingConfigError, config_hint, config_path, read_config
 from ate.storage import SCHEMA_VERSION, RunStore
 
 _SRC = str(Path(__file__).resolve().parent.parent / "src")
@@ -175,6 +175,27 @@ def test_the_platform_default_is_a_path_and_can_be_overridden(tmp_path: Path, mo
     assert config_path(str(tmp_path / "other.json")) == tmp_path / "other.json"
     # The override changes only the default location: a real path still wins over it.
     assert config_path(None) != config_path(str(tmp_path / "other.json"))
+
+
+def test_read_config_without_a_path_reads_the_platform_default(tmp_path: Path, monkeypatch) -> None:
+    """In-process: ``read_config(None)`` takes the default path, missing or not, as a Path."""
+    from ate.config import _platform_default
+
+    # The seam works in-process too, and the machine's real /etc/ate/config.json is irrelevant.
+    default = tmp_path / "default.json"
+    monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(default))
+    assert _platform_default() == default
+
+    db = tmp_path / "ate.db"
+    RunStore(db)
+    default.write_text(json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8")
+    cfg = read_config(None)
+    assert cfg.path == default and cfg.database_path == db
+
+    monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(tmp_path / "missing" / "config.json"))
+    with pytest.raises(MissingConfigError, match="config file not found at "):
+        read_config(None)
+    assert not (tmp_path / "missing").exists(), "the failed read created a directory"
 
 
 def test_db_status_without_a_config_names_the_missing_default_exactly(tmp_path: Path) -> None:
