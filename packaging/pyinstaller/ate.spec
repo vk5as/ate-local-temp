@@ -36,7 +36,9 @@ resources = sorted(
     for p in (SRC / "ate").rglob("*")
     if p.is_file() and p.suffix not in {".py", ".pyc"} and "__pycache__" not in p.parts
 )
-datas = [(str(p), str(p.parent.relative_to(SRC))) for p in resources]
+# Destinations are written with forward slashes: PyInstaller normalises them on every platform,
+# and a Windows backslash in a spec is easy to misread as an escape.
+datas = [(str(p), p.parent.relative_to(SRC).as_posix()) for p in resources]
 
 # The build script writes the version it took from the git tag into the work directory and
 # passes its path here, so `ate --version` in a frozen app reports the version the bundle was
@@ -48,8 +50,10 @@ if version_file and Path(version_file).is_file():
 # ------------------------------------------------------- QtWebEngine assets ----
 # PyInstaller's own hooks (hook-PyQt6.QtWebEngineCore and friends) collect the Qt libraries
 # plus QtWebEngine's `QtWebEngineProcess` helper, its `.pak` resources, ICU data and
-# translations, so the spec only has to make sure those modules are actually reached: the
-# PDF helper imports QtWebEngineCore, and the GUI imports QtWebEngineWidgets. NI-VISA is
+# translations, so the spec only has to make sure those modules are actually reached: the PDF
+# helper imports QtWebEngineCore, and QtWebEngineWidgets is named so the view binding is in the
+# bundle for anything that wants a page on screen. Qt requires AA_ShareOpenGLContexts to be set
+# before the first QCoreApplication, so `ate _selftest` only checks the Core binding. NI-VISA is
 # never bundled; pyvisa-py is, so TCPIP and USBTMC work with nothing installed.
 hiddenimports = [
     "PyQt6.QtWebEngineCore",
@@ -76,8 +80,38 @@ hiddenimports = [
     "pyvisa_py.protocols.xdrlib",
 ]
 
-excludes = []  # nothing excluded: pyvisa imports its NI-VISA-only resources statically,
-# and ATE simply never installs NI-VISA (see packaging.md), so pyvisa falls back to pyvisa-py.
+excludes = [
+    # Qt bindings ATE never imports: the GUI is QtCore/QtGui/QtWidgets, the report renderer
+    # QtWebEngineCore/Widgets, and pyvisa-py QtNetwork. Every Qt shared library that QtWebEngine
+    # is actually linked against is still collected by PyInstaller's own dependency walk, so
+    # dropping these bindings costs only their own ``*.abi3.so``/``*.dll``. NI-VISA is never
+    # bundled either: ATE installs no NI-VISA, so pyvisa falls back to pyvisa-py (see packaging.md).
+    "PyQt6.Qt3DAnimation",
+    "PyQt6.Qt3DCore",
+    "PyQt6.Qt3DExtras",
+    "PyQt6.Qt3DInput",
+    "PyQt6.Qt3DLogic",
+    "PyQt6.Qt3DRender",
+    "PyQt6.QtBluetooth",
+    "PyQt6.QtCharts",
+    "PyQt6.QtDataVisualization",
+    "PyQt6.QtDBus",
+    "PyQt6.QtDesigner",
+    "PyQt6.QtHelp",
+    "PyQt6.QtMultimedia",
+    "PyQt6.QtMultimediaWidgets",
+    "PyQt6.QtNfc",
+    "PyQt6.QtPdf",
+    "PyQt6.QtPdfWidgets",
+    "PyQt6.QtQml",
+    "PyQt6.QtQuick",
+    "PyQt6.QtQuick3D",
+    "PyQt6.QtQuickWidgets",
+    "PyQt6.QtRemoteObjects",
+    "PyQt6.QtSql",
+    "PyQt6.QtTextToSpeech",
+    "PyQt6.QtXml",
+]
 
 a = Analysis(
     [str(ENTRY)],

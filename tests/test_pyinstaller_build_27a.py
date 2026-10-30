@@ -250,6 +250,37 @@ def test_selftest_run_executes_a_schedule_and_writes_both_reports(capsys) -> Non
     assert "bytes HTML" in out and "bytes PDF" in out, out
 
 
+def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
+    """The spec drops the Qt modules ATE never touches, and nothing in ATE imports them.
+
+    QtQuick/QML, Qt3D, QtMultimedia and QtBluetooth are the heavy ones: 89 MB of the bundle
+    (2688 files → 489.6 MB vs 578.8 MB). The shared libraries QtWebEngine is *linked* against
+    are still collected by PyInstaller's own dependency walk, so what goes away is only the
+    binding the hooks would have pulled in. If ATE ever imports one of these, the exclusion has
+    to go with it — hence the second half of this test.
+    """
+    spec = _executed_spec()
+    excluded = set(spec["excludes"])
+    expected = {
+        "PyQt6.QtQml", "PyQt6.QtQuick", "PyQt6.QtQuickWidgets", "PyQt6.QtQuick3D",
+        "PyQt6.Qt3DCore", "PyQt6.Qt3DRender", "PyQt6.QtMultimedia", "PyQt6.QtMultimediaWidgets",
+        "PyQt6.QtBluetooth",
+    }
+    missing = sorted(expected - excluded)
+    assert not missing, f"the spec stopped excluding {missing}"
+
+    used = set()
+    for source in (REPO / "src" / "ate").rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("PyQt6."):
+                used.add(node.module)
+            elif isinstance(node, ast.Import):
+                used.update(alias.name for alias in node.names if alias.name.startswith("PyQt6."))
+    clash = sorted(used & excluded)
+    assert not clash, f"ATE imports {clash}, which the spec excludes"
+
+
+# Build scratch that must not be left in the checkout by a run.
 def _repo_build_state() -> list[str]:
     """dist/, build/ and any spec scratch in the checkout, as paths."""
     junk = [REPO / "dist", REPO / "build"]
