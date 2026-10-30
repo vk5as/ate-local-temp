@@ -59,7 +59,10 @@ class AppLog:
 
     def __init__(self, directory: str | Path, level: str = "info", *, name: Optional[str] = None) -> None:
         self._dir = Path(directory)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # an unwritable data directory is a refusal, not a traceback (30c)
+            raise LogError(f"cannot create the application log directory {self._dir}: {exc}") from exc
         self._level = _normalize_level(level)
         stamp = name or datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         self.path = self._dir / f"ate-app-{stamp}.log"

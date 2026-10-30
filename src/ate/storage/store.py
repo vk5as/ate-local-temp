@@ -46,14 +46,24 @@ class DbLaunchResult:
 
     status: DbLaunchStatus
     user_version: Optional[int] = None  # PRAGMA user_version, or None if unreadable/missing
+    path: Optional[Path] = None  # the database checked, so the message can name it (30c)
+    config_file: Optional[Path] = None  # a non-default config in use, to carry into the hint
 
     @property
     def message(self) -> str:
-        """A human-readable refusal message for non-OK statuses; empty when OK."""
+        """A human-readable refusal message for non-OK statuses; empty when OK.
+
+        It names the database path, and the migrate hint carries ``--config <path>`` when the
+        Station is reading a config that is not the platform default (packet 30c review)."""
         if self.status == DbLaunchStatus.NEEDS_MIGRATE:
-            return "run `ate db migrate` to create or upgrade the database"
+            hint = "ate db migrate"
+            if self.config_file is not None:
+                hint += f" --config {self.config_file}"
+            where = f" at {self.path}" if self.path else ""
+            return f"run `{hint}` to create or upgrade the database{where}"
         if self.status == DbLaunchStatus.TOO_OLD:
-            return "this ATE is too old for this database; update ATE"
+            where = f"the database at {self.path}" if self.path else "this database"
+            return f"this ATE is too old for {where}; update ATE"
         return ""
 
 
@@ -86,19 +96,25 @@ def _inspect_db(path: str | Path) -> tuple[bool, Optional[int]]:
     return has_tables, int(user_version)
 
 
-def check_database_at_launch(path: str | Path) -> DbLaunchResult:
+def check_database_at_launch(path: str | Path, config_file: str | Path | None = None) -> DbLaunchResult:
     """Decide whether ATE may launch against ``path``; never migrates.
 
     Compares the database's PRAGMA user_version to :data:`SCHEMA_VERSION`: a missing,
     empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), and a
     newer one refuses with TOO_OLD ("this ATE is too old"). Only an exact match returns OK.
+
+    ``config_file`` is the config this launch read, already filtered by
+    :func:`ate.config.config_hint` to ``None`` when it is the platform default: it lets the
+    refusal tell the Operator which config to migrate (packet 30c review).
     """
     has_tables, user_version = _inspect_db(path)
+    database = Path(path)
+    hint = Path(config_file) if config_file is not None else None
     if not has_tables or user_version < SCHEMA_VERSION:
-        return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version)
+        return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version, database, hint)
     if user_version > SCHEMA_VERSION:
-        return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version)
-    return DbLaunchResult(DbLaunchStatus.OK, user_version)
+        return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version, database, hint)
+    return DbLaunchResult(DbLaunchStatus.OK, user_version, database, hint)
 
 
 def _enable_wal(engine) -> None:

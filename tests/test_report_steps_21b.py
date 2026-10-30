@@ -12,6 +12,7 @@ headings repeat on every printed page."""
 from __future__ import annotations
 
 import base64
+import datetime as _datetime
 import hashlib
 import html as html_escape
 import json
@@ -383,8 +384,17 @@ def test_markup_in_printed_values_is_escaped(tmp_path: Path) -> None:
     assert "&lt;b&gt;serial&lt;/b&gt;" in html, "the UUT serial on the Cover is escaped"
 
 
+#: The footer's "Report generated <local time>" stamp (packet 29e) makes the page time-dependent:
+#: both renders below freeze it to this instant so the byte comparison never straddles a second.
+GENERATED_AT = "2026-03-14T12:34:56Z"
+
+
 def test_autoescape_does_not_change_the_cover_bytes(tmp_path: Path) -> None:
-    """Cover markup is marked safe, so escaping changes nothing but the escaped characters."""
+    """Cover markup is marked safe, so escaping changes nothing but the escaped characters.
+
+    The generation timestamp injected via ``generated_at`` (packet 30c) keeps the comparison
+    deterministic: without it the two renders can straddle a second boundary and differ only in
+    the footer stamp."""
     store, run_uuid = _run(tmp_path, {"steps.tslua": PASS_FAIL}, "Steps pass fail schedule")
     logo = tmp_path / "logo.png"
     logo.write_bytes(bytes(range(1, 256)))
@@ -394,15 +404,49 @@ def test_autoescape_does_not_change_the_cover_bytes(tmp_path: Path) -> None:
         reports_logo=logo,
         reports_paper_size="A4",
     )
-    escaped = render_report(store, run_uuid, config)
+    escaped = render_report(store, run_uuid, config, generated_at=GENERATED_AT)
     # The same context rendered with autoescape off is what the Cover used to emit.
     plain = Environment(loader=PackageLoader("ate.report", "templates")).get_template("report.html.j2").render(
-        **_report_context(store, run_uuid, config)
+        **_report_context(store, run_uuid, config, generated_at=GENERATED_AT)
     )
+    assert "Report generated 2026-03-14 12:34:56 +00:00 by ATE" in plain, "the frozen stamp is the footer's"
     assert html_escape.unescape(escaped) == plain, "only escaping differs from the pre-autoescape page"
     assert f"data:image/png;base64,{base64.b64encode(logo.read_bytes()).decode()}" in escaped, "the logo data URI is untouched"
     assert "margin: 24mm 14mm 18mm 14mm;" in escaped, "the print margin CSS is untouched"
     assert escaped.count("<br>") == plain.count("<br>"), "the <br> joins are still joins"
+
+
+def test_generated_stamp_is_frozen_not_wall_clock(tmp_path: Path, monkeypatch) -> None:
+    """Two renders of the same run are byte-identical even when the wall clock ticks a second
+    between them: the footer stamp comes from ``generated_at``, not from ``datetime.now`` (30c)."""
+    store, run_uuid = _run(tmp_path, {"steps.tslua": PASS_FAIL}, "Steps pass fail schedule")
+    config = Config(path=tmp_path / "config.json")
+
+    class _SecondCrossingDateTime(_datetime.datetime):
+        """``now`` walks forward one whole second per call, so any render that consults the wall
+        clock between the second boundary gets a different stamp."""
+
+        _next = _datetime.datetime(2026, 3, 14, 23, 59, 59, tzinfo=_datetime.timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            out = _SecondCrossingDateTime._next
+            _SecondCrossingDateTime._next = out + _datetime.timedelta(seconds=1)
+            return out
+
+    class _Dt:
+        datetime = _SecondCrossingDateTime
+        timedelta = _datetime.timedelta
+        # A real timezone: if the ``generated_at`` seam is ever dropped, ``_dt.now(_dt.timezone.utc)``
+        # runs against the second-crossing clock and the equality assertion below catches it,
+        # instead of the fake module blowing up with an AttributeError (30c review).
+        timezone = _datetime.timezone
+
+    monkeypatch.setattr("ate.report.html._dt", _Dt)
+    first = render_report(store, run_uuid, config, generated_at=GENERATED_AT)
+    second = render_report(store, run_uuid, config, generated_at=GENERATED_AT)
+    assert first == second, "the frozen generated_at makes the renders identical across a second boundary"
+    assert "Report generated 2026-03-14 12:34:56 +00:00 by ATE" in first
 
 
 def test_step_table_columns_and_pass_fail_rows(tmp_path: Path) -> None:

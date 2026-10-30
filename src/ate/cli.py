@@ -284,7 +284,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="ate",
         description="ATE — Automated Test Equipment. With no subcommand, opens the application.",
     )
-    parser.add_argument("--config", metavar="PATH", help="config file for the GUI launch (default: the platform config)")
+    parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
     parser.add_argument("-V", "--version", action="store_true", help="print ATE's version and exit")
 
     sub = parser.add_subparsers(dest="command", metavar="db|setup|definition")
@@ -356,7 +356,7 @@ def main(argv=None) -> int:
 
         return launch(argv).code
     if command == "db":
-        return _cmd_db(_subcommand_args(argv, command))
+        return _cmd_db(_subcommand_args(argv, command), config_path=args.config)
     if command == "setup":
         return _cmd_setup(_subcommand_args(argv, command))
     if command == "definition":
@@ -366,33 +366,50 @@ def main(argv=None) -> int:
     return 1
 
 
-def _cmd_db(argv: list[str]) -> int:
+def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
     """Dispatch ``ate db <status|migrate> [PATH] [--yes]``.
 
     The path is the first non-flag token after the subcommand, so `--yes` may appear anywhere
-    in the db arguments without being taken as the path (30a review item 6)."""
+    in the db arguments without being taken as the path (30a review item 6). With no path the
+    configured database is used — from ``--config`` or the platform default config — so
+    ``ate --config X db migrate --yes`` touches the database that config names, not a stray
+    ``./ate.db`` in the working directory (packet 30c). An explicit path still overrides it."""
     if not argv:
         print("ate db: no subcommand given\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
         return 1
 
     sub = argv[0]
     rest = argv[1:]
-    path = next((token for token in rest if not token.startswith("-")), "ate.db")
+    path = next((token for token in rest if not token.startswith("-")), None)
+    hint = None  # the config to name in the migrate hint, when one is not the platform default
+    if path is None:
+        from .config import ConfigError, config_hint, read_config
+
+        try:
+            config = read_config(config_path)
+        except ConfigError as exc:  # missing or invalid config: name it, don't guess a path
+            print(f"ate db: {exc}\nrun 'ate setup' or pass --config PATH first", file=sys.stderr)
+            return 1
+        path = str(config.database_path)
+        hint = config_hint(config.path)
     if sub == "status":
-        return _db_status(path)
+        return _db_status(path, hint)
     if sub == "migrate":
-        return _db_migrate(path, rest)
+        return _db_migrate(path, rest, hint)
     print(f"ate db: unknown command '{sub}'\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
     return 1
 
 
-def _db_status(path: str) -> int:
-    """Print the database's schema version (PRAGMA user_version); read-only."""
+def _db_status(path: str, hint: Path | None = None) -> int:
+    """Print the database's schema version (PRAGMA user_version); read-only.
+
+    The refusal names the database and, when a non-default config is in use, the ``--config``
+    to migrate it through (packet 30c review)."""
     from .storage import DbLaunchStatus, check_database_at_launch
 
-    result = check_database_at_launch(path)
+    result = check_database_at_launch(path, config_file=hint)
     if result.status != DbLaunchStatus.OK:
-        print(f"database {path}: {result.message}", file=sys.stderr)
+        print(result.message, file=sys.stderr)
         return 1
     conn = __import__("sqlite3").connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -403,7 +420,7 @@ def _db_status(path: str) -> int:
     return 0
 
 
-def _db_migrate(path: str, extra: list[str]) -> int:
+def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
     """Create or upgrade the database at ``path`` after confirmation.
 
     ``--yes``/``-y`` skips the interactive prompt (for automation and tests). A database
@@ -422,11 +439,11 @@ def _db_migrate(path: str, extra: list[str]) -> int:
 
     from .storage import DbLaunchStatus, RunStore, check_database_at_launch
 
-    result = check_database_at_launch(path)
+    result = check_database_at_launch(path, config_file=hint)
     # Only a database built by a newer ATE must be refused; a missing or older one is
     # exactly what migrate exists to create or upgrade.
     if result.status == DbLaunchStatus.TOO_OLD:
-        print(f"database {path}: {result.message}", file=sys.stderr)
+        print(result.message, file=sys.stderr)
         return 1
 
     store = RunStore(path)  # creates the tables if missing and sets the schema version

@@ -206,7 +206,8 @@ defs.mkdir(parents=True, exist_ok=True)
 config = {"format": 1, "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"}, "defaultProject": "Power board",
           "database": {"type": "sqlite", "path": str(work / "ate.db")},
           "reports": {"directory": str(work / "reports")},
-          "testDefinitions": {"directories": [str(defs)]}}
+          "testDefinitions": {"directories": [str(defs)]},
+          "log": {"directory": str(work / "logs")}}
 config_path = work / "config.json"
 config_path.write_text(json.dumps(config), encoding="utf-8")
 

@@ -143,6 +143,26 @@ def _clean_qt_state(qapp: QApplication) -> None:
     qapp.processEvents()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _platform_data_dir_under_basetemp(tmp_path_factory):
+    """Keep the ``<data>`` platform data directory inside pytest's basetemp for the session.
+
+    The config format's defaults are written as ``<data>/...`` and the reader resolves
+    ``<data>`` to the real platform data directory (``/var/lib/ate`` on Linux,
+    ``%PROGRAMDATA%\\ATE`` on Windows) — packet 30c. No test may create files under
+    ``/var/lib`` or ``C:\\ProgramData``. Session scope so module-scoped fixtures that open
+    a session are covered too; tests wanting a specific directory patch it again, and
+    subprocess tests are unaffected because a real Station's config carries the paths
+    setup wrote resolved."""
+    import ate.config
+
+    data_dir = tmp_path_factory.mktemp("platform-data")
+    original = ate.config._platform_data_dir
+    ate.config._platform_data_dir = lambda: data_dir
+    yield
+    ate.config._platform_data_dir = original
+
+
 @pytest.fixture(autouse=True)
 def _fake_pdf_helper(request, monkeypatch):
     """Every finished run with a config starts the PDF helper; outside the one real end-to-end test,

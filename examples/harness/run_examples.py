@@ -185,6 +185,7 @@ def write_config(tmp_dir: Path, release_dir: Path = RELEASE_DIR) -> Path:
         "database": {"type": "sqlite", "path": str(tmp_dir / "ate.db")},
         "reports": {"directory": str(tmp_dir / "reports")},
         "testDefinitions": {"directories": [str(release_dir)]},
+        "log": {"directory": str(tmp_dir / "logs")},  # a scratch run must not write to the platform data dir (30c)
         "deviceTrace": {"enabled": True},
     }
     path = tmp_dir / "config.json"

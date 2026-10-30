@@ -231,8 +231,9 @@ def test_missing_config_abort_exits_non_zero(tmp_path):
     assert str(config) in alerts[0], alerts
 
 
-def test_missing_config_create_writes_the_config_and_launches(tmp_path):
+def test_missing_config_create_writes_the_config_and_launches(tmp_path, monkeypatch):
     """Answering with Create writes the default config, and the launch then opens the window."""
+    monkeypatch.setattr("ate.config._platform_data_dir", lambda: tmp_path / "data")
     config = tmp_path / "config.json"
     alerts: list[str] = []
     launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=alerts.append)
@@ -240,8 +241,9 @@ def test_missing_config_create_writes_the_config_and_launches(tmp_path):
     data = json.loads(config.read_text(encoding="utf-8"))
     assert data["format"] == 1 and data["station"]["uuid"], data
 
-    # The generated defaults point at <data>/ate.db; migrate that database, then launch again.
-    data_dir = config.parent / "<data>"
+    # The generated defaults point at <data>/ate.db, which the reader resolves to the platform
+    # data directory (patched above); migrate that database, then launch again (30c).
+    data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     RunStore(data_dir / "ate.db")
     outcome = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=alerts.append)
@@ -371,7 +373,7 @@ def test_one_application_log_per_launch_carries_launch_and_session_lines(qapp, t
     monkeypatch.setattr(log_module, "datetime", _TickingClock())
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     assert outcome.code == 0, alerts
-    logs = sorted((tmp_path / "<data>" / "logs").glob("ate-app-*.log"))
+    logs = sorted((tmp_path / "logs").glob("ate-app-*.log"))
     assert len(logs) == 1, f"expected one application log, found {[p.name for p in logs]}"
     text = logs[0].read_text()
     assert "launched with config" in text, "the launch line is missing"
@@ -383,7 +385,7 @@ def test_schema_refusal_is_logged_to_the_application_log(tmp_path):
     env = write_ate_env(tmp_path)
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     assert outcome.code == 1 and outcome.window is None
-    logs = list((tmp_path / "<data>" / "logs").glob("ate-app-*.log"))
+    logs = list((tmp_path / "logs").glob("ate-app-*.log"))
     assert logs, "the launch opened no application log"
     text = logs[0].read_text()
     assert "launch refused" in text and "ate db migrate" in text, text
@@ -459,12 +461,20 @@ def test_unknown_command_exits_one_with_the_old_hint(capsys):
 
 
 def test_db_migrate_yes_without_path_does_not_take_yes_as_the_path(capsys, tmp_path, monkeypatch):
-    """``ate db migrate --yes`` (no path) migrates ate.db; --yes may appear anywhere in the db args."""
+    """``ate db migrate --yes`` (no path) migrates the database named by the config, and --yes
+    may appear anywhere in the db args without being taken as the path (packet 30c)."""
     monkeypatch.chdir(tmp_path)
-    assert main(["db", "migrate", "--yes"]) == 0
-    assert (tmp_path / "ate.db").exists(), capsys.readouterr().err
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"format": 1, "database": {"type": "sqlite", "path": "station/ate.db"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "station").mkdir()
+    assert main(["--config", str(config), "db", "migrate", "--yes"]) == 0
+    assert (tmp_path / "station" / "ate.db").exists(), capsys.readouterr().err
+    assert not (tmp_path / "ate.db").exists(), "db migrate created a stray ./ate.db in the cwd"
     assert not (tmp_path / "--yes").exists(), "the --yes flag was parsed as the database path"
-    assert "created or upgraded database at ate.db" in capsys.readouterr().out
+    assert f"created or upgraded database at {tmp_path / 'station' / 'ate.db'}" in capsys.readouterr().out
 
 
 def test_help_does_not_advertise_the_hidden_pdf_helper(capsys):
