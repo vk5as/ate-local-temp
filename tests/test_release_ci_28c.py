@@ -317,6 +317,16 @@ def _fake_bundle(root: Path) -> Path:
 _CACHE: dict[str, Path] = {}
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _clean_the_fake_artifacts():
+    """The stub artifacts are built once for the session and removed at the end: they are not
+    pytest `tmp_path` files, so nothing else would take them out of `/tmp`."""
+    yield
+    for path in _CACHE.values():
+        shutil.rmtree(path, ignore_errors=True)
+    _CACHE.clear()
+
+
 def _artifacts() -> Path:
     """One set of artifacts (tarball, .deb, wheel, glibc marker) built once, from a stub bundle."""
     if "dist" not in _CACHE:
@@ -342,6 +352,7 @@ def _artifacts() -> Path:
             zf.writestr(f"ate-{version.replace('-dev', '.dev0')}.dist-info/WHEEL", "Wheel-Version: 1.0\n")
         (dist / "glibc-build.txt").write_text("ldd (Ubuntu GLIBC 2.39-0ubuntu2) 2.39\n", encoding="utf-8")
         _CACHE["dist"] = dist
+        _CACHE["where"] = where
     return _CACHE["dist"]
 
 
