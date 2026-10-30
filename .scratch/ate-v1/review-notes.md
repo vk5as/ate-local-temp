@@ -580,3 +580,22 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - The staged Debug pane shows a doubled vertical scrollbar.
   - Below ~725 px window height the window still grows.
   - The finished header has no PASS/FAIL chip or Report button (mockup).
+
+## 29e — Example: Test Report check (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions): the harness asserts a report for all 13 runs, plus a green run for every catalog-visible schedule (two extra runs disable the deliberately failing steps). CI already runs the examples.
+- Reviews: Haiku 4 must-fix, Strata 1 must-fix. The rendered reports showed gaps left over from 21a:
+  - **Cover Duration always "—"**;
+  - **schedule file and Media Release name/version missing**;
+  - **footer had no run UUID or "Run recorded by / Report generated" line** (`run_ftr` never set);
+  - **the PRETEST_FAILED banner didn't name the schedule**.
+  - The harness Run-log check was `any()`, not "every line, grouped".
+  - CI never set `QT_QPA_PLATFORM=offscreen`.
+- Rework (Strata, high, 0 compactions): all report fields filled, and the footer is in `@bottom-left` on every PDF page. The harness:
+  - checks every INFO+ line by owner group and time order;
+  - checks the Cover fields, footer, seven counts and banner text;
+  - parses sections with HTMLParser.
+  - Also: CI job-level offscreen env; derived extra-run count.
+- Light review: 1042 passed + 1 skipped ×3 (~158 s); collection 1033 → 1043, none lost; PDF page 1 renders checked.
+- Leftovers:
+  - `test_run.schedule_file` is never written by RunEngine (always NULL; the Cover reads `schedule_instance` seq 0 instead).
+  - Parent 29 is fully covered by 29a–29e.
