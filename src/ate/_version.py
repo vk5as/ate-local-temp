@@ -7,6 +7,8 @@ This module is the single source of truth for ATE's version:
   so a wheel built from a tagged checkout carries the tag's semver.
 * The CLI and tests read :data:`__version__` at runtime, so ``ate --version``
   prints exactly what was baked into the build.
+* A frozen build (packet 27a) has no git, so the build script writes the tag into
+  ``ate/version.txt`` and the bundle carries it as package data.
 
 The value comes from ``git describe --tags`` when a tag is reachable; otherwise
 it falls back to a deterministic dev version so an untagged checkout — or one on
@@ -15,9 +17,11 @@ a machine without git — never fails to build.
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import re
 import subprocess
+import sys
 
 # Fallback used when no tag is reachable, git is unavailable, or parsing fails.
 FALLBACK = "0.0.0-dev"
@@ -69,8 +73,25 @@ def _parse(text: str) -> str | None:
     return None
 
 
+def _frozen_version() -> str | None:
+    """The version a build script recorded into the bundle (packet 27a).
+
+    A PyInstaller bundle has no git and no installed distribution metadata, so
+    ``packaging/build_pyinstaller.py`` writes the tag's version to ``ate/version.txt`` and the
+    spec bundles it as package data. Returns ``None`` when the file is not there."""
+    try:
+        text = (importlib.resources.files("ate") / "version.txt").read_text(encoding="utf-8").strip()
+    except (OSError, ModuleNotFoundError):
+        return None
+    return text or None
+
+
 def _compute_version() -> str:
     """The ATE version string for this checkout."""
+    if getattr(sys, "frozen", False):
+        # Frozen: there is no repository here, and ``git describe`` would read whatever
+        # repository the operator's working directory happens to be in.
+        return _frozen_version() or FALLBACK
     describe = _describe()
     if not describe:
         return FALLBACK

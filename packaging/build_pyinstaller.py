@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Build ATE's frozen one-directory bundle with PyInstaller (packet 27a).
+
+    python packaging/build_pyinstaller.py                # build dist/ate/
+    python packaging/build_pyinstaller.py --smoke        # build, then run the smoke checks
+    python packaging/build_pyinstaller.py --clean        # ...and remove dist/ and build/ after
+    python packaging/build_pyinstaller.py --no-venv      # use this interpreter (deps already present)
+
+The build is deliberately CPython-version-agnostic: it makes a throwaway venv with the
+interpreter running this script (3.13 on a workstation, 3.14 in the release CI), installs
+the package and PyInstaller into it, and hands ``packaging/pyinstaller/ate.spec`` to
+PyInstaller. Nothing here reads a version number, so the same recipe builds the Windows
+installer (27b), the ``.tar.gz`` and the ``.deb`` (28b).
+
+Output: ``dist/ate/ate`` plus its ``_internal`` directory. Smoke checks:
+
+    dist/ate/ate --version           the version baked from the git tag
+    dist/ate/ate _pdf in.html out.pdf   proves QtWebEngine works frozen (offscreen)
+    dist/ate/ate _selftest           proves lupa, the bundled Lua, pyvisa-py and WebEngine are there
+
+``build/`` and ``dist/`` are in ``.gitignore``: no build output is ever committed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+SPEC = REPO / "packaging" / "pyinstaller" / "ate.spec"
+SEMVER = re.compile(r"\d+\.\d+\.\d+")
+
+# A page small enough to render in a second; the smoke check only cares that the frozen
+# QWebEngine can load a file and print it.
+SMOKE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>ATE build smoke test</title></head>
+<body><h1>ATE frozen build smoke test</h1><p>QWebEngine renders this to PDF.</p></body></html>
+"""
+
+
+def _python_in(venv: Path) -> Path:
+    """The interpreter inside ``venv`` (``Scripts`` on Windows, ``bin`` elsewhere)."""
+    return venv / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+
+
+def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
+    """Run a command, printing it, and exit loudly on failure."""
+    print("$ " + " ".join(str(part) for part in cmd))
+    proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        detail = (proc.stdout + "\n" + proc.stderr)[-1500:]
+        raise SystemExit(f"{' '.join(map(str, cmd))}\nfailed with exit {proc.returncode}:\n{detail}")
+    return proc
+
+
+def _build_venv(path: Path) -> Path:
+    """Create (or reuse) the throwaway build venv and return its interpreter."""
+    python = _python_in(path)
+    if not python.exists():
+        _run([sys.executable, "-m", "venv", str(path)])
+    return python
+
+
+def _install_deps(python: Path) -> None:
+    """Install ATE and PyInstaller into the build venv. Needs the network on a fresh venv."""
+    try:
+        _run([str(python), "-m", "pip", "install", "--quiet", ".", "pyinstaller"], timeout=900)
+    except SystemExit as exc:
+        raise SystemExit(f"could not install ATE and PyInstaller into the build venv: {exc}")
+
+
+def _version(python: Path) -> str:
+    """The version the bundle will carry, computed the same way the wheel's is."""
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"))
+    return _run([str(python), "-c", "from ate._version import __version__; print(__version__)"], env=env).stdout.strip()
+
+
+def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
+    """Run PyInstaller and return the one-directory bundle (``dist/ate``)."""
+    env = dict(os.environ, ATE_BUILD_VERSION_FILE=str(version_file))
+    _run(
+        [
+            str(python),
+            "-m",
+            "PyInstaller",
+            str(SPEC),
+            "--distpath",
+            str(dist),
+            "--workpath",
+            str(work / "pyinstaller-work"),
+            "--buildpath",
+            str(work / "pyinstaller-build"),
+        ],
+        env=env,
+    )
+    bundle = dist / "ate"
+    exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
+    if not exe.is_file():
+        raise SystemExit(f"PyInstaller produced no executable at {exe}")
+    return exe
+
+
+def _run_smoke(exe: Path, expected_version: str) -> list[str]:
+    """Run the three checks a frozen bundle must pass; return one line per check."""
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    lines: list[str] = []
+
+    # 1. the CLI runs and prints the version baked at build time.
+    out = _run([str(exe), "--version"], env=env, timeout=120)
+    version = out.stdout.strip()
+    if not SEMVER.search(version):
+        raise SystemExit(f"smoke: --version printed {version!r}, not a semver")
+    lines.append(f"version: {version} (build expected {expected_version})")
+
+    # 2. QWebEngine renders a page to PDF inside the frozen bundle.
+    tmp = Path(tempfile.mkdtemp(prefix="ate-smoke-"))
+    try:
+        html, pdf = tmp / "report.html", tmp / "report.pdf"
+        html.write_text(SMOKE_HTML, encoding="utf-8")
+        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4"], env=env, timeout=180)
+        data = pdf.read_bytes()
+        if not data.startswith(b"%PDF"):
+            raise SystemExit(f"smoke: _pdf wrote {len(data)} bytes that are not a PDF")
+        lines.append(f"pdf: rendered {html.name} -> {pdf.name} ({len(data)} bytes)")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # 3. the bundle's own inventory: lupa + bundled Lua, pyvisa-py, QtWebEngine.
+    out = _run([str(exe), "_selftest"], env=env, timeout=120)
+    lines.append("selftest: " + "; ".join(out.stdout.strip().splitlines()))
+    return lines
+
+
+def _size(path: Path) -> tuple[int, int]:
+    """Total bytes and file count under ``path``."""
+    total = 0
+    count = 0
+    for f in path.rglob("*"):
+        if f.is_file():
+            total += f.stat().st_size
+            count += 1
+    return total, count
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dist", default=str(REPO / "dist"), help="where dist/ate lands (default: the repo's dist/)")
+    parser.add_argument("--work", default=str(REPO / "build"), help="PyInstaller work/build directories")
+    parser.add_argument("--venv", default=None, help="build venv to create or reuse (default: <work>/pyinstaller-venv)")
+    parser.add_argument("--no-venv", action="store_true", help="build with the current interpreter instead of a fresh venv")
+    parser.add_argument("--skip-install", action="store_true", help="don't pip-install into the venv (reuse it as-is)")
+    parser.add_argument("--smoke", action="store_true", help="run the smoke checks after building")
+    parser.add_argument("--clean", action="store_true", help="remove dist/ and the work directories when finished")
+    args = parser.parse_args(argv)
+
+    dist, work = Path(args.dist), Path(args.work)
+    venv = Path(args.venv) if args.venv else work / "pyinstaller-venv"
+    python = sys.executable if args.no_venv else _build_venv(venv)
+
+    if not args.skip_install:
+        _install_deps(python)
+    version = _version(python)
+
+    version_file = work / "build_version.txt"
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    version_file.write_text(version, encoding="utf-8")
+
+    started = time.monotonic()
+    exe = _build(python, dist, work, version_file)
+    elapsed = time.monotonic() - started
+    total, files = _size(dist / "ate")
+    print(f"built {exe} in {elapsed:.1f}s: {files} files, {total / 1e6:.1f} MB")
+
+    if args.smoke:
+        for line in _run_smoke(exe, version):
+            print(f"smoke ok: {line}")
+
+    if args.clean:
+        shutil.rmtree(dist, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
