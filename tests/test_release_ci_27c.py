@@ -47,6 +47,26 @@ EXAMPLE = REPO / "examples" / "media-release"
 SRC = str(REPO / "src")
 
 
+@pytest.fixture(autouse=True)
+def _clean_webengine_environment():
+    """Keep the sandbox knobs out of the environment between tests (packet 30d).
+
+    A test that runs the frozen entry point writes `QTWEBENGINE_DISABLE_SANDBOX` into `os.environ`
+    itself; a `monkeypatch.delenv` recorded after that writes restores the value, which then leaks
+    into every later test in the session. These two variables are scrubbed before each test here and
+    put back afterwards."""
+    keys = ("QTWEBENGINE_DISABLE_SANDBOX", "QTWEBENGINE_CHROMIUM_FLAGS")
+    saved = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 # --- the headless scan: `ate _selftest --scan <dir>` -------------------------------------------
 
 
@@ -412,8 +432,17 @@ class FakeInstaller:
             if not self.data_dir.joinpath("ate.db").is_file():
                 return smoke.CommandResult(1, "", "database does not exist")
             return smoke.CommandResult(0, f"{self.flags['schema']}\n", "")
-        if command[:2] == ["_selftest", "--run"]:
+        if command[:1] == ["--allow-unsandboxed-pdf"] and command[1:3] == ["_selftest", "--run"]:
             return smoke.CommandResult(0, "run end-to-end: ok - selftest ran\n", "")
+        if command[:2] == ["_selftest", "--run"]:
+            # Packet 30d: the runner is privileged, so without the flag the selftest reports the PDF
+            # as skipped and exits non-zero. A smoke run that forgets the flag fails here.
+            return smoke.CommandResult(
+                1,
+                "run end-to-end: MISSING - the PDF was skipped: ATE is running as root or an "
+                "administrator and no --allow-unsandboxed-pdf was given\n",
+                "",
+            )
         if command[:2] == ["_selftest", "--scan"]:
             out = (
                 f"scan: {'ok' if self.flags['broken'] == 0 and self.flags['mismatches'] == 0 else 'MISSING'} - "
@@ -903,27 +932,60 @@ def test_ci_workflow_job_name_uses_a_real_expression():
     assert "offscreen" in str(doc["jobs"]["test"]["env"]["QT_QPA_PLATFORM"]), "CI needs the offscreen platform too"
 
 
-# --- the frozen `_pdf` on a privileged runner: Chromium refuses a sandbox there ----------------
+# --- the sandbox: never off unless the packet 30d choice was made ------------------------------
 
 
-def test_pdf_helper_disables_the_sandbox_when_running_as_root(monkeypatch):
-    """Chromium's Linux renderer refuses to start sandboxed as root (crbug.com/638180).
+def test_the_helper_env_disables_the_sandbox_only_when_told_to(monkeypatch):
+    """Chromium's Linux renderer refuses to start sandboxed as root (crbug.com/638180), so a
+    privileged render needs `--no-sandbox` — but only when the parent's decision said yes.
 
-    A Station administered with `sudo`, and any run started by a root process, would otherwise
-    die before the report is written."""
+    A root process that was never asked gets an environment with nothing turned off: that is the
+    packet 30d rule, and it is what makes a helper run directly as root refuse."""
     from ate.report import pdf
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)
-    env = pdf._child_env()
+
+    env = pdf._child_env(True)
     assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
     assert "--no-sandbox" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
     assert env["QT_QPA_PLATFORM"] == "offscreen"
 
+    env = pdf._child_env()
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, "a privileged helper is not allowed to guess"
+    assert "--no-sandbox" not in env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+
     monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
-    assert pdf._child_env()["QTWEBENGINE_CHROMIUM_FLAGS"] == "--disable-gpu --no-sandbox", "the caller's flags are thrown away"
+    assert pdf._child_env(True)["QTWEBENGINE_CHROMIUM_FLAGS"] == "--disable-gpu --no-sandbox", "the caller's flags are thrown away"
+    assert pdf._child_env()["QTWEBENGINE_CHROMIUM_FLAGS"] == "--disable-gpu"
 
 
-def test_pdf_helper_disables_the_sandbox_for_a_windows_administrator(monkeypatch):
+def test_the_helper_command_carries_the_decision_as_an_argument(monkeypatch):
+    """The child is told in its own argv, not by an environment it has to interpret (packet 30d)."""
+    from ate.report import pdf
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    _program, args, env = pdf.pdf_helper_command("a.html", "a.pdf", "A4", True)
+    assert pdf.UNSANDBOXED_FLAG in args, args
+    assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+
+    _program, args, env = pdf.pdf_helper_command("a.html", "a.pdf", "A4")
+    assert pdf.UNSANDBOXED_FLAG not in args, args
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env
+
+
+def test_an_ordinary_user_keeps_the_sandbox_even_with_the_flag(monkeypatch):
+    """Turning the sandbox off is a real loss of isolation: only a privileged process needs it."""
+    from ate.report import pdf
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    for allow in (False, True):
+        env = pdf._child_env(allow)
+        assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, f"the flag disabled the sandbox for an ordinary user (allow={allow})"
+        assert "--no-sandbox" not in env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        assert env["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_a_windows_administrator_gets_the_knobs_only_when_chosen(monkeypatch):
     """The installer runs `ate setup` elevated, and Chromium's Windows sandbox has been
     reported to fail for an elevated parent (Electron's `launch-failed exitCode 18`)."""
     import ctypes
@@ -934,24 +996,17 @@ def test_pdf_helper_disables_the_sandbox_for_a_windows_administrator(monkeypatch
     monkeypatch.setattr(
         ctypes, "windll", types.SimpleNamespace(shell32=types.SimpleNamespace(IsUserAnAdmin=lambda: True)), raising=False
     )
-    env = pdf._child_env()
+    env = pdf._child_env(True)
     assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
     assert "--no-sandbox" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
 
-
-def test_pdf_helper_leaves_the_sandbox_on_for_an_ordinary_user(monkeypatch):
-    """Turning the sandbox off is a real loss of isolation: only a privileged process needs it."""
-    from ate.report import pdf
-
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
     env = pdf._child_env()
-    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env
-    assert "--no-sandbox" not in env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    assert env["QT_QPA_PLATFORM"] == "offscreen"
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, "being elevated is not permission by itself"
 
 
-def test_the_frozen_entry_point_sets_the_sandbox_for_a_privileged_runner(monkeypatch):
-    """The frozen bundle decides this before QtWebEngine starts, so it has to be right here."""
+def test_the_frozen_entry_point_never_disables_the_sandbox_by_itself(monkeypatch):
+    """The frozen bundle sets its environment before QtWebEngine starts, so it must not be the one
+    that silently turns the sandbox off (packet 30d): only the `--unsandboxed` argument does that."""
     spec = importlib.util.spec_from_file_location("ate_entry_27c", ATE_ENTRY)
     entry = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(entry)
@@ -960,13 +1015,39 @@ def test_the_frozen_entry_point_sets_the_sandbox_for_a_privileged_runner(monkeyp
     monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
     monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
 
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
-    entry._prepare_webengine_env()
-    assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, "an ordinary user keeps the sandbox"
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    entry._prepare_webengine_env(["_selftest", "--run"])
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, "a root ATE turned the sandbox off on its own"
     assert "--no-sandbox" not in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
     assert "--no-gpu" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
-    entry._prepare_webengine_env()
-    assert os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--paper", "A4", "--unsandboxed"])
+    assert os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1", "the parent's decision did not reach the helper"
     assert "--no-sandbox" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+    # The same argument handed to an ordinary user changes nothing.
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+    entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--unsandboxed"])
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ
+    assert "--no-sandbox" not in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+
+def test_the_smoke_passes_the_sandbox_flag_because_the_installer_runs_elevated(tmp_path):
+    """Packet 30d: Setup runs elevated, so the selftest it runs has no working Chromium sandbox.
+
+    Without `--allow-unsandboxed-pdf` the selftest reports its PDF as skipped and exits non-zero,
+    which stops the smoke run. A script that forgets the flag fails here, not silently."""
+    _checks, _registry, runner = _smoke(tmp_path)
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_a_selftest_without_the_flag_is_refused_by_an_elevated_runner(tmp_path):
+    """What the fake models, and why the check above matters: an elevated runner asked for a PDF
+    with no decision returns non-zero and names the flag."""
+    app = tmp_path / "ATE"
+    registry = FakeRegistry(value=BASE_PATH + ";" + str(app))
+    runner = FakeInstaller(registry, app, tmp_path / "ProgramData" / "ATE")
+    result = runner.run([str(app / "ate.exe"), "_selftest", "--run"])
+    assert result.returncode != 0 and "--allow-unsandboxed-pdf" in result.output(), result.output()

@@ -5,6 +5,7 @@
     python packaging/build_pyinstaller.py --smoke        # build, then run the smoke checks
     python packaging/build_pyinstaller.py --clean        # ...and remove dist/ and build/ after
     python packaging/build_pyinstaller.py --no-venv      # use this interpreter (deps already present)
+    python packaging/build_pyinstaller.py --verify dist/ate/ate  # check a bundle without building or running it
 
 The build is deliberately CPython-version-agnostic: it makes a throwaway venv with the
 interpreter running this script (3.13 on a workstation, 3.14 in the release CI), installs
@@ -12,7 +13,10 @@ the package and PyInstaller into it, and hands ``packaging/pyinstaller/ate.spec`
 PyInstaller. Nothing here reads a version number, so the same recipe builds the Windows
 installer (27b), the ``.tar.gz`` and the ``.deb`` (28b).
 
-Output: ``dist/ate/ate`` plus its ``_internal`` directory. Smoke checks:
+Output: ``dist/ate/ate`` plus its ``_internal`` directory. Every build is checked for the parts
+Qt needs before it can print a PDF — a platform plugin, ``QtWebEngineProcess``, the WebEngine
+resources — so a bundle whose hooks collected nothing is a failed build, not a small one. Smoke
+checks (``--smoke``) then run the bundle:
 
     dist/ate/ate --version           the version baked from the git tag
     dist/ate/ate _pdf in.html out.pdf   proves QtWebEngine works frozen (offscreen)
@@ -137,6 +141,61 @@ def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
     return exe
 
 
+def verify_bundle(exe: Path) -> list[str]:
+    """Check that the bundle can actually render a Test Report, before anything ships it.
+
+    PyInstaller's PyQt6 hooks wrap their collection in `if pyqt6_library_info.version is not None:`:
+    when PyQt6 cannot be imported while PyInstaller is running — no libGL, no libglib, no X library —
+    the version is None, the hooks collect nothing, and PyInstaller still writes the executable and
+    reports success. That bundle has no Qt platform plugin, no `QtWebEngineProcess` and no WebEngine
+    resources: `ate --version` prints fine, every `ate _pdf` dies at "Could not find the Qt platform
+    plugin", and the build script used to say "built ... 121 files, 362 MB" and exit 0, because only
+    ``--smoke`` looked at the contents. This runs on every build: the .deb, the .tar.gz and the
+    Windows installer all take this bundle as their input (packet 30d review).
+
+    Returns one line per thing found; raises SystemExit naming what is missing and why.
+    """
+    internal = exe.parent / "_internal"
+    if not internal.is_dir():
+        raise SystemExit(f"{exe.parent} is not a one-directory bundle: no _internal beside {exe.name}")
+
+    for rel in ("ate/lua/devices.lua", "ate/report/templates/report.html.j2"):
+        if not (internal / rel).is_file():
+            raise SystemExit(f"bundle check: {rel} is not in the bundle")
+
+    helper_name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
+    helper = [p for p in internal.rglob(helper_name) if p.is_file()]
+    paks = [p for p in internal.rglob("*.pak") if p.is_file()]
+    icu = [p for p in internal.rglob("icudtl.dat") if p.is_file()]
+    # A platform plugin is what Qt needs before anything else: no plugin, no QApplication, no page,
+    # no PDF — however many megabytes of Qt are sitting next to it.
+    plugins = [p for p in internal.rglob("*") if "platforms" in p.parts and p.suffix in (".so", ".dll") and p.is_file()]
+
+    if not plugins:
+        raise SystemExit(
+            f"bundle check: no Qt platform plugin under {internal}: PyQt6 could not be "
+            "imported while PyInstaller ran, so its hooks collected nothing and this bundle cannot "
+            "start Qt at all. Install what Qt is linked against (libgl1, libegl1, libglib2.0-0t64, "
+            "libX11, libXext, libxcb, libxkbcommon) or build on a machine that has them, and rebuild."
+        )
+    if not helper:
+        raise SystemExit(
+            f"bundle check: no {helper_name} in the bundle: the QtWebEngine helper is not there, so a "
+            "Test Report PDF has nothing to render it. The PyQt6 hook collected part of Qt only."
+        )
+    if not paks or not icu:
+        raise SystemExit(
+            f"bundle check: QtWebEngine resources missing ({len(paks)} .pak files, {len(icu)} icudtl.dat): "
+            "the renderer has no ICU data and no web resources to load a page with."
+        )
+
+    return [
+        f"qt platform plugins: {len(plugins)} files (one per platform Qt can open)",
+        f"webengine helper: {helper[0].name}",
+        f"webengine resources: {len(paks)} .pak files, {len(icu)} icudtl.dat",
+    ]
+
+
 def _run_smoke(exe: Path, expected_version: str) -> list[str]:
     """Run the four checks a frozen bundle must pass; return one line per check."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
@@ -149,12 +208,14 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
         raise SystemExit(f"smoke: --version printed {version!r}, not a semver")
     lines.append(f"version: {version} (build expected {expected_version})")
 
-    # 2. QWebEngine renders a page to PDF inside the frozen bundle.
+    # 2. QWebEngine renders a page to PDF inside the frozen bundle. Packet 30d: the helper is told
+    #    explicitly to render unsandboxed (the build runners are root); an ordinary user's `_pdf`
+    #    ignores the flag and keeps the sandbox.
     tmp = Path(tempfile.mkdtemp(prefix="ate-smoke-"))
     try:
         html, pdf = tmp / "report.html", tmp / "report.pdf"
         html.write_text(SMOKE_HTML, encoding="utf-8")
-        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4"], env=env, timeout=300)
+        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4", "--unsandboxed"], env=env, timeout=300)
         data = pdf.read_bytes()
         if not data.startswith(b"%PDF"):
             raise SystemExit(f"smoke: _pdf wrote {len(data)} bytes that are not a PDF")
@@ -164,32 +225,14 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
 
     # 3. the bundle's own inventory, and a built-in Test Schedule run end to end through it:
     #    engine, store, report HTML, and the _pdf child (the bundle's own executable when frozen).
-    out = _run([str(exe), "_selftest", "--run"], env=env, timeout=300)
+    #    The flag (packet 30d) is what lets a privileged runner's schedule produce a PDF at all.
+    out = _run([str(exe), "--allow-unsandboxed-pdf", "_selftest", "--run"], env=env, timeout=300)
     lines.append("selftest: " + "; ".join(out.stdout.strip().splitlines()))
 
-    # 4. the files the hooks are supposed to have collected: the WebEngine helper and its
-    # resources, the report template, the bundled Lua modules. The helper's name and the directory
-    # Qt keeps it in are platform-specific, hence rglob on this platform's name.
-    internal = exe.parent / "_internal"
-    helper_name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
-    helper = [p for p in internal.rglob(helper_name) if p.is_file()]
-    paks = [p for p in internal.rglob("*.pak") if p.is_file()]
-    for rel in ("ate/lua/devices.lua", "ate/report/templates/report.html.j2"):
-        if not (internal / rel).is_file():
-            raise SystemExit(f"smoke: {rel} is not in the bundle")
-    if not helper or not paks:
-        raise SystemExit(f"smoke: QtWebEngine assets missing (helper={len(helper)}, pak={len(paks)})")
-    lines.append(f"webengine assets: {helper[0].name}, {len(paks)} .pak resources")
-
-    # 5. a Qt platform plugin. PyInstaller's PyQt6 hooks collect the plugins only when PyQt6 can be
-    # imported in the build environment; on a machine without libGL/libglib the import fails, the
-    # hooks are skipped quietly, and the bundle ships the helper and its .pak files but no
-    # `qoffscreen` — every `_pdf` then dies with "Could not find the Qt platform plugin". The helper
-    # being present is not enough: without a plugin there is no Qt to run it.
-    plugins = [p for p in internal.rglob("*") if "platforms" in p.parts and p.suffix in (".so", ".dll") and p.is_file()]
-    if not plugins:
-        raise SystemExit("smoke: no Qt platform plugin in the bundle: the Qt hooks collected nothing")
-    lines.append(f"qt platform plugins: {len(plugins)} files, one per platform Qt can open")
+    # 4. the bundle's inventory — the WebEngine helper, its resources, the report template, the
+    #    bundled Lua, a Qt platform plugin. verify_bundle already ran when this build was made; it
+    #    runs again here so a bundle handed in from elsewhere is checked too.
+    lines.extend(verify_bundle(exe))
 
     return lines
 
@@ -228,8 +271,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-venv", action="store_true", help="build with the current interpreter instead of a fresh venv")
     parser.add_argument("--skip-install", action="store_true", help="don't pip-install into the venv (reuse it as-is)")
     parser.add_argument("--smoke", action="store_true", help="run the smoke checks after building")
+    parser.add_argument("--verify", metavar="EXE", help="check an existing bundle and exit: no build, no run")
     parser.add_argument("--clean", action="store_true", help="remove dist/ and the work directories when finished")
     args = parser.parse_args(argv)
+
+    if args.verify:
+        exe = Path(args.verify)
+        if not exe.is_file():
+            raise SystemExit(f"--verify: {exe} is not an executable")
+        for line in verify_bundle(exe):
+            print(f"bundle ok: {line}")
+        return 0
 
     dist, work = Path(args.dist), Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -249,6 +301,11 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.monotonic() - started
     total, files = _size(dist / "ate")
     print(f"built {exe} in {elapsed:.1f}s: {files} files, {total / 1e6:.1f} MB")
+
+    # The bundle is checked whatever the flags say: a bundle with no Qt in it is not a build that
+    # succeeded, and packaging (28b) and the installer (27b) take it as input.
+    for line in verify_bundle(exe):
+        print(f"bundle ok: {line}")
 
     if args.smoke:
         for line in _run_smoke(exe, version):

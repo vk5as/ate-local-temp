@@ -731,14 +731,22 @@ def report_stem_and_directory(store: RunStore, run_uuid: str, config: Config) ->
     return directory, stem
 
 
-def write_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> Path:
+def write_report(
+    store: RunStore,
+    run_uuid: str,
+    config: Config,
+    *,
+    include_run_log: bool = True,
+    generated_at: Optional[str] = None,
+) -> Path:
     """Render and write this run's HTML report under ``reports.directory``.
 
     File name is ``<UUT Type>/<UUT Type>_<serial>_<local start yyyymmdd-HHMMSS>_<PASS|FAIL>.html``;
     Windows-invalid characters are replaced, and an existing file is never overwritten (a free
     ``-2``, ``-3`` … suffix is used instead). The optional ``include_run_log`` flag passes through to
-    :func:`render_report`, so a regenerated report can omit the run log."""
-    html = render_report(store, run_uuid, config, include_run_log=include_run_log)
+    :func:`render_report`, so a regenerated report can omit the run log, and ``generated_at`` freezes
+    the footer's "Report generated ..." stamp for a byte-deterministic write."""
+    html = render_report(store, run_uuid, config, include_run_log=include_run_log, generated_at=generated_at)
     row = store.get_test_run(run_uuid)
     assert row is not None, "no test run recorded for the report"
 

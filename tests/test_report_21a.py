@@ -91,18 +91,26 @@ def test_logo_embedded_as_data_uri_and_no_external_urls(app: object) -> None:
 
 
 def test_file_naming_and_content(app: object) -> None:
-    """write_report names the file per rule and writes the rendered HTML."""
+    """write_report names the file per rule and writes the rendered HTML.
+
+    The comparison against a fresh render is byte-exact, so the footer's "Report generated ..." stamp
+    is frozen with ``generated_at`` (packet 30c): left on ``datetime.now`` it ticks a second between
+    the two renders, which is what made this test flake."""
+    frozen = "2026-10-30T12:00:00+00:00"  # the run's own clock is +10:30, so the stamp is 22:30
     with tempfile.TemporaryDirectory() as td:
         store, ru = _record(app, DOC_FIELDS)
         config = _cfg(reports_directory=Path(td) / "reports", reports_organisation="ACME")
-        out = write_report(store, ru, config)
+        out = write_report(store, ru, config, generated_at=frozen)
         written = out.read_text(encoding="utf-8")
 
     # The file lives under <reports.directory>/<UUT Type>/ and follows the naming rule.
     assert out.parent == Path(td) / "reports" / "PowerSupply"
     assert re.match(r"^PowerSupply_PS7_\d{8}-\d{6}_PASS\.html$", out.name)
+    # The stamp in the file is the frozen one, not the clock at write time: a write_report that
+    # ignores ``generated_at`` fails here instead of leaving the test to race a second boundary.
+    assert "Report generated 2026-10-30 22:30:00 +10:30 by ATE" in written
     # Its contents match a fresh render of the same recorded run.
-    assert written == render_report(store, ru, config)
+    assert written == render_report(store, ru, config, generated_at=frozen)
 
 
 def test_filename_replaces_windows_invalid_chars(app: object) -> None:

@@ -172,7 +172,9 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     environment; in a container without libGL/libglib the import fails, the hooks are skipped, and
     the bundle ships `QtWebEngineProcess` and its .pak files while `_pdf` dies with "Could not
     find the Qt platform plugin". Checking the helper alone is not enough: the smoke check has to
-    fail on the missing plugin, and pass when one is present.
+    fail on the missing plugin, and pass when one is present. The same check wants the WebEngine
+    resources it is easy to ship without: `icudtl.dat` and the `.pak` files, since the renderer cannot
+    build a page without them.
     """
     bundle = tmp_path / "ate"
     bundle.mkdir()
@@ -194,6 +196,7 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_bytes(b"ELF")
     (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
     (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_bytes(b"icu")
 
     build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
     with pytest.raises(SystemExit) as caught:
@@ -349,8 +352,18 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
             timeout=3600,
         )
         assert result.returncode == 0, f"build failed: {result.stderr[-3000:]}"
-        for marker in ("smoke ok: version:", "smoke ok: pdf:", "smoke ok: selftest:", "smoke ok: webengine assets:"):
+        for marker in (
+            "bundle ok: qt platform plugins:",
+            "bundle ok: webengine helper:",
+            "bundle ok: webengine resources:",
+            "smoke ok: version:",
+            "smoke ok: pdf:",
+            "smoke ok: selftest:",
+        ):
             assert marker in result.stdout, f"{marker} missing from the build output:\n{result.stdout[-2000:]}"
+        # The inventory check is part of the build, not of the smoke: it runs before the bundle is
+        # ever executed, so a bundle whose hooks collected nothing never reaches a package.
+        assert result.stdout.index("bundle ok: qt platform plugins") < result.stdout.index("smoke ok: version:"), result.stdout[-1500:]
         assert "run end-to-end: ok" in result.stdout, "the frozen bundle did not run a Test Schedule end to end"
         assert "MISSING" not in result.stdout, f"the frozen bundle is short something:\n{result.stdout[-2000:]}"
         assert (dist / "ate" / ("ate.exe" if os.name == "nt" else "ate")).is_file()

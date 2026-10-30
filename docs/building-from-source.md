@@ -50,6 +50,35 @@ rooted Station reads and writes inside `DIR` and never touches the platform data
 
 On Windows the venv paths are `.venv\Scripts\activate` instead.
 
+## Running ATE as root or as an administrator (packet 30d)
+
+Chromium's renderer sandbox does not start under root or an elevated Windows
+administrator, so a Test Report PDF rendered there can only be printed with the
+sandbox off. ATE never does that silently:
+
+* an ordinary user is never asked and never loses the sandbox, with or without the flag;
+* an elevated user is asked before **each** PDF — at run end and on History's
+  *Regenerate* — with a dialog whose buttons are "Generate PDF without sandbox" and
+  "Skip PDF", the latter being the default. Skipping writes no PDF: the HTML Test
+  Report is already on disk, the skip is logged in the application log, and the run-end
+  flow still completes;
+* the start-up flag `--allow-unsandboxed-pdf` presets Yes for a privileged run with no
+  dialog, and logs that it did:
+  `ate --allow-unsandboxed-pdf _selftest --run`;
+* with no flag and no way to ask (headless, `ate _selftest --run`, a dialog dismissed by
+  `ATE_AUTO_DISMISS_DIALOG`) the answer is No and no PDF is written. `ate _selftest --run`
+  then reports the PDF as skipped and fails, naming the flag.
+
+The decision is passed to the hidden `ate _pdf` child as an argument (`--unsandboxed`) and
+through the child's environment; nothing in `ate.report.pdf`, the run session or the frozen
+entry point decides it from who started ATE. Run `ate _pdf` directly as root without the
+argument and it refuses with a non-zero exit. Handed to an unprivileged process, the
+argument is ignored with a warning: the sandbox is kept.
+
+The release smoke scripts pass the flag, because their containers and runners are
+privileged.
+
+
 ## Building the wheel
 
 ```bash
@@ -254,22 +283,30 @@ outside `[A-Za-z0-9.+~:-]` is rewritten as `-`, and a bundle whose `--version` p
 refused rather than packaged as `ate__amd64.deb`.
 
 The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, freetype, fontconfig
-and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is the
-system glibc, GL/EGL and a font. The list is not derived from a manifest: `packaging/linux/docker_smoke.py`
-builds the bundle in a `debian:stable` container, installs the `.deb` there with `apt-get`, and runs
-`ate _selftest --run`. With these five packages the run passes. Remove `libgl1` or `libegl1` and the
-selftest dies with `libGL.so.1: cannot open shared object file`; remove the two font packages and the
-report renders as a 1.7 KB PDF with no text in it, which `ate.report.pdf.pdf_has_text` catches.
+and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot guarantee to
+carry is the system glibc, GL/EGL, the six X libraries the platform plugin needs, and a font. The list
+is not derived from a manifest: `packaging/linux/docker_smoke.py` builds the bundle in a `debian:stable`
+container, installs the `.deb` there with `apt-get`, and runs `ate _selftest --run`. With these
+packages the run passes. Remove `libgl1` or `libegl1` and the selftest dies with `libGL.so.1: cannot
+open shared object file`; remove the two font packages and the report renders as a 1.7 KB PDF with no
+text in it, which `ate.report.pdf.pdf_has_text` catches; and run the same bundle's GUI under
+`xvfb-run` without the six X libraries and Qt aborts with "Could not load the Qt platform plugin xcb"
+(headless renders never notice, a Station with a screen always does). `packaging/build_pyinstaller.py`
+checks the bundle it built — a Qt platform plugin, `QtWebEngineProcess`, `icudtl.dat` and the `.pak`
+resources — before it says the build succeeded, because a bundle whose PyQt6 hooks imported nothing
+looks like a build and is not one.
 
 | Depends | Why |
 | --- | --- |
 | `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
 | `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
+| `libxcb-cursor0`, `libxcb-icccm4`, `libxcb-keysyms1`, `libxcb-shape0`, `libxcb-xkb1`, `libxkbcommon-x11-0` | the xcb platform plugin's own dependencies: without them the GUI does not start |
 | `fontconfig`, `fonts-dejavu-core` | a stock Debian image ships no fonts at all, and QtWebEngine then writes a report PDF with no glyphs |
 
 `libdrm2`, `libxcb1`, `libxcb-dri3-0` and `libwayland-client0` are not listed because apt installs them
-as dependencies of `libgl1`/`libegl1` anyway. The Wayland and extra xcb platform plugins, GTK and CUPS
-are linked against but never opened headless, so they are not depended on either.
+as dependencies of `libgl1`/`libegl1` anyway. The Wayland and the remaining extra xcb platform plugins,
+GTK and CUPS are linked against but never opened: the GUI runs on X, and the render of a Test Report
+is a headless offscreen process.
 
 ### Testing seams
 

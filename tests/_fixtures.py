@@ -1026,14 +1026,33 @@ def add_failing_poll_schedule(tmp_path: Path) -> str:
 
 def fake_pdf_helper(script: str):
     """A stand-in for :func:`ate.report.pdf.pdf_helper_command`: a tiny Python process that gets the
-    PDF path as ``argv[1]``, so tests exercise the real QProcess path without QWebEngine."""
+    PDF path as ``argv[1]``, so tests exercise the real QProcess path without QWebEngine.
+
+    It takes the same arguments as the real helper, including packet 30d's ``unsandboxed``."""
     import os
     import sys
 
-    def command(html_path, pdf_path, paper="A4"):  # noqa: ANN001 - mirrors pdf_helper_command
+    def command(html_path, pdf_path, paper="A4", unsandboxed=False, log=None):  # noqa: ANN001 - mirrors pdf_helper_command
         return sys.executable, ["-c", script, str(pdf_path)], dict(os.environ)
 
     return command
 
 
 WRITES_PDF = "import sys; open(sys.argv[1], 'wb').write(b'%PDF-1.4 stub')"
+
+
+def recording_pdf_helper(record: list, script: str = WRITES_PDF):
+    """A stand-in that keeps the child trivial but records what the real helper would have been given.
+
+    Each call appends ``{"args": [...], "env": {...}}` for one PDF (packet 30d): the test then asserts
+    which sandbox settings reached the helper without spawning QWebEngine."""
+    import sys
+
+    from ate.report.pdf import pdf_helper_command
+
+    def command(html_path, pdf_path, paper="A4", unsandboxed=False, log=None):  # noqa: ANN001 - mirrors pdf_helper_command
+        _program, args, env = pdf_helper_command(html_path, pdf_path, paper, bool(unsandboxed), log)
+        record.append({"args": args, "env": env})
+        return sys.executable, ["-c", script, str(pdf_path)], env
+
+    return command

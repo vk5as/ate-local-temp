@@ -43,20 +43,33 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD_LINUX = REPO / "packaging" / "linux" / "build_linux.py"
+BUILD_PYINSTALLER = REPO / "packaging" / "build_pyinstaller.py"
 INSTALL_SH = REPO / "packaging" / "linux" / "install.sh"
 POSTINST = REPO / "packaging" / "linux" / "deb" / "postinst"
 POSTRM = REPO / "packaging" / "linux" / "deb" / "postrm"
 
-# What the bundle cannot carry: glibc, GL/EGL, and a font. Verified by installing the .deb in a
-# clean debian:stable container and running `ate _selftest --run` (packaging/linux/docker_smoke.py):
-# libgl1 and libegl1 are needed (without them the selftest dies on libGL.so.1), and a font is needed
-# (without fontconfig/fonts-dejavu-core the report renders as a 1.7 KB PDF with no text in it).
-# libdrm, libxcb and the rest come in as apt's own dependencies of libgl1/libegl1, so naming them
-# here would only repeat what apt already does.
+# What the bundle cannot carry: glibc, GL/EGL, the X libraries the platform plugin needs, and a font.
+# Verified by installing the .deb in a clean debian:stable container and running `ate _selftest --run`
+# (packaging/linux/docker_smoke.py): libgl1 and libegl1 are needed (without them the selftest dies on
+# libGL.so.1), and a font is needed (without fontconfig/fonts-dejavu-core the report renders as a
+# 1.7 KB PDF with no text in it). libdrm and libxcb come in as apt's own dependencies of
+# libgl1/libegl1, so naming them here would only repeat what apt already does.
+#
+# The six X libraries are not apt's doing and the selftest cannot see them: they are the xcb platform
+# plugin's own dependencies, which a headless render never loads. The bundle built in a debian:stable
+# container and installed without them aborts under `xvfb-run` with "Could not load the Qt platform
+# plugin \"xcb\"", and starts once they are installed (2026-10-31). Whether they are inside
+# `_internal` depends on the build machine, so the package asks for them.
 REQUIRED_DEPENDS = {
     "libc6",
     "libgl1",
     "libegl1",
+    "libxcb-cursor0",
+    "libxcb-icccm4",
+    "libxcb-keysyms1",
+    "libxcb-shape0",
+    "libxcb-xkb1",
+    "libxkbcommon-x11-0",
     "fontconfig",
     "fonts-dejavu-core",
 }
@@ -96,13 +109,21 @@ SONAME_PACKAGES = {
     "libEGL.so.1": "libegl1",
     "libdrm.so.2": "libdrm2",
     "libxcb.so.1": "libxcb1",
+    "libxcb-cursor.so.0": "libxcb-cursor0",  # the xcb platform plugin: the GUI will not start without it
+    "libxcb-icccm.so.4": "libxcb-icccm4",
+    "libxcb-keysyms.so.1": "libxcb-keysyms1",
+    "libxcb-shape.so.0": "libxcb-shape0",
+    "libxcb-xkb.so.1": "libxcb-xkb1",
+    "libxkbcommon-x11.so.0": "libxkbcommon-x11-0",
     "libfontconfig.so.1": "fontconfig",
     "libfreetype.so.6": "libfreetype6",
 }
 
-# Libraries the bundle is linked against but never opens: the Wayland and extra xcb platform plugins
-# (this Station runs headless, QT_QPA_PLATFORM=offscreen) and the GTK/CUPS print backend. A machine
-# without them still runs the program, which is why they are not in Depends.
+# Libraries the bundle is linked against but never opens: the Wayland platform plugins, the extra
+# xcb helpers the X plugin pulls in itself, and the GTK/CUPS print backend. A machine without them
+# still runs the program, which is why they are not in Depends. The six xcb libraries the platform
+# plugin needs directly (cursor, icccm, keysyms, shape, xkb, xkbcommon-x11) are not on this list: a
+# Station with a screen loads them, so the package depends on them.
 NEVER_OPENED = {
     "libatk-1.0.so.0",
     "libcairo-gobject.so.2",
@@ -115,15 +136,9 @@ NEVER_OPENED = {
     "libpangocairo-1.0.so.0",
     "libwayland-cursor.so.0",
     "libwayland-egl.so.1",
-    "libxcb-cursor.so.0",
-    "libxcb-icccm.so.4",
     "libxcb-image.so.0",
-    "libxcb-keysyms.so.1",
     "libxcb-render-util.so.0",
-    "libxcb-shape.so.0",
     "libxcb-util.so.1",
-    "libxcb-xkb.so.1",
-    "libxkbcommon-x11.so.0",
 }
 
 # The stub stands in for the frozen executable: it prints a version and records every call.
@@ -143,16 +158,29 @@ exit 0
 
 
 def _fake_bundle(root: Path, script: str = STUB_ATE) -> Path:
-    """A bundle shaped like ``dist/ate``: the executable plus an ``_internal`` directory."""
+    """A bundle shaped like ``dist/ate``: the executable, an ``_internal`` directory, and the parts
+    `packaging/build_pyinstaller.py`'s `verify_bundle` insists on, so packaging has something to
+    accept."""
     bundle = root / "dist" / "ate"
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
-    (bundle / "_internal" / "ate").mkdir(parents=True)
+    internal = bundle / "_internal"
+    (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "ate" / "lua").mkdir(parents=True)
+    (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
     exe.write_text(script, encoding="utf-8")
     exe.chmod(0o755)
-    (bundle / "_internal" / "base_library.zip").write_text("not really a zip", encoding="utf-8")
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
-    (bundle / "_internal" / "ate" / "version.txt").write_text("1.2.3", encoding="utf-8")
+    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8")
+    (internal / "ate" / "version.txt").write_text("1.2.3", encoding="utf-8")
     return bundle
 
 
@@ -175,6 +203,49 @@ def _package(bundle: Path, out: Path, *, tmpdir: Path | None = None) -> tuple[Pa
     tarball = next(p for p in out.iterdir() if p.suffix == ".gz")
     deb = next(p for p in out.iterdir() if p.suffix == ".deb")
     return tarball, deb
+
+
+def test_packaging_refuses_a_bundle_whose_hooks_collected_nothing(tmp_path: Path) -> None:
+    """A bundle with an executable but no Qt in it is not ATE, and packaging must say so (30d review).
+
+    PyInstaller writes an executable even when its PyQt6 hooks imported nothing, so `dist/ate/ate`
+    exists, `--version` prints, and the `.deb` ships a program that aborts at the first Test Report.
+    Take the platform plugin, the WebEngine helper and its resources out of a bundle and packaging
+    stops, with the missing part named and no artifacts written.
+    """
+    bundle = _fake_bundle(tmp_path)
+    internal = bundle / "_internal"
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    shutil.rmtree(internal / "PyQt6" / "Qt6" / "plugins" / "platforms")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").unlink()
+    shutil.rmtree(internal / "PyQt6" / "Qt6" / "resources")
+
+    proc = subprocess.run(
+        [sys.executable, str(BUILD_LINUX), "--dist", str(bundle.parent), "--out", str(out)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode != 0, "packaging shipped a bundle with no Qt in it"
+    text = proc.stdout + proc.stderr
+    assert "platform plugin" in text, text
+    assert not [p for p in out.iterdir()], f"a broken bundle was packaged as {sorted(p.name for p in out.iterdir())}"
+
+
+def test_the_build_script_checks_a_bundle_it_is_only_asked_to_verify(tmp_path: Path) -> None:
+    """`build_pyinstaller.py --verify` accepts a complete bundle and refuses an incomplete one."""
+    bundle = _fake_bundle(tmp_path)
+    exe = bundle / "ate"
+    good = subprocess.run([sys.executable, str(BUILD_PYINSTALLER), "--verify", str(exe)], capture_output=True, text=True, timeout=300)
+    assert good.returncode == 0, good.stdout + good.stderr
+    assert "qt platform plugins" in good.stdout, good.stdout
+
+    shutil.rmtree(bundle / "_internal" / "PyQt6" / "Qt6" / "plugins" / "platforms")
+    bad = subprocess.run([sys.executable, str(BUILD_PYINSTALLER), "--verify", str(exe)], capture_output=True, text=True, timeout=300)
+    assert bad.returncode != 0, "a bundle with no Qt platform plugin verified clean"
+    assert "PyQt6 could not be imported" in bad.stdout + bad.stderr, bad.stdout + bad.stderr
 
 
 def _control_text(deb: Path) -> str:
@@ -294,6 +365,9 @@ def test_the_tarball_is_root_owned_and_install_sh_is_executable(tmp_path: Path) 
     here = tmp_path / "packaging" / "linux"
     here.mkdir(parents=True)
     shutil.copyfile(BUILD_LINUX, here / "build_linux.py")
+    # build_linux.py finds build_pyinstaller.py relative to itself, so the copy needs it beside it:
+    # the bundle check is part of packaging, not something the copy can reach in the checkout.
+    shutil.copyfile(BUILD_PYINSTALLER, here.parent / "build_pyinstaller.py")
     shutil.copyfile(INSTALL_SH, here / "install.sh")
     (here / "install.sh").chmod(0o644)
     (here / "deb").mkdir()
@@ -568,23 +642,15 @@ def test_the_deb_version_is_a_valid_debian_version(tmp_path: Path) -> None:
     assert dpkg_lt("0.0.0~dev", "0.0.0")
 
     # A bundle whose --version prints the untagged fallback still builds a package dpkg accepts.
-    bundle = tmp_path / "dist" / "ate"
-    bundle.mkdir(parents=True)
-    exe = bundle / "ate"
-    exe.write_text(FROZEN_STUB, encoding="utf-8")
-    exe.chmod(0o755)
-    _, deb = _package(bundle, tmp_path / "out")
+    _, deb = _package(_fake_bundle(tmp_path, FROZEN_STUB), tmp_path / "out")
     assert deb.name == "ate_0.0.0~dev_amd64.deb", deb.name
     assert _control(deb)["Version"] == "0.0.0~dev"
 
 
 def test_a_bundle_that_prints_no_version_is_refused(tmp_path: Path) -> None:
     """An empty `--version` would name the artifacts `ate--linux…` and `ate__amd64.deb`, so stop."""
-    bundle = tmp_path / "dist" / "ate"
-    bundle.mkdir(parents=True)
-    exe = bundle / "ate"
-    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    exe.chmod(0o755)
+    bundle = _fake_bundle(tmp_path)
+    (bundle / "ate").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     out = tmp_path / "out"
 
     proc = subprocess.run(

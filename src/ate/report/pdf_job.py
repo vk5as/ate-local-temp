@@ -7,7 +7,7 @@ signals arrive on that thread and the process dies with it; holding each live jo
 reachable until :meth:`QProcess.deleteLater` runs.
 
 Public API:
-    start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> None  # fires ``on_done`` when done
+    start_pdf_job(parent, html_path, pdf_path, paper="A4", *, unsandboxed=False, on_done=None) -> None
 """
 
 from __future__ import annotations
@@ -30,7 +30,16 @@ PDF_TIMEOUT_MS = 60_000
 _live_pdf_jobs: set[QProcess] = set()
 
 
-def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> None:
+def start_pdf_job(
+    parent,
+    html_path,
+    pdf_path,
+    paper="A4",
+    unsandboxed=False,
+    *,
+    on_done=None,
+    log=None,
+) -> None:
     """Render ``html_path`` to ``pdf_path`` in a QProcess owned by ``parent``, without waiting.
 
     The helper runs as a child of ``parent`` (its parent), so its signals land on that thread and no
@@ -38,10 +47,14 @@ def start_pdf_job(parent, html_path, pdf_path, paper="A4", *, on_done=None) -> N
     means success, otherwise an error string names the failure (spec 22b). Nothing here raises into
     the caller. The PDF is confirmed to exist and be non-empty before a success is reported.
 
+    ``unsandboxed`` is the packet 30d decision for this one PDF: only when it is True does the child
+    get ``--unsandboxed`` and the sandbox-off environment. ``log`` is the application log, used to
+    report an inherited sandbox-off setting that this render did not choose (packet 30d review).
+
     The process must not outlive ``parent``: :func:`stop_pdf_jobs` kills it and disconnects its
     signals, and :func:`finish` below ignores a callback whose owner's Qt side is already gone.
     """
-    program, args, env = pdf_helper_command(str(html_path), str(pdf_path), paper)
+    program, args, env = pdf_helper_command(str(html_path), str(pdf_path), paper, bool(unsandboxed), log)
     proc = QProcess(parent)
     penv = QProcessEnvironment()
     for key, value in env.items():

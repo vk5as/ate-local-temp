@@ -492,7 +492,9 @@ def run_smoke(kind: str, dist: Path, runner: Runner, station: Station, sample: P
         check_ate_runs(runner, ate, expect_version)
         note("ate runs from where it was installed, printing the version the tag built")
 
-        result = runner.run([ate, "_selftest", "--run"])
+        # Packet 30d: the container runs as root, so Chromium cannot sandbox this render. The flag
+        # says so out loud instead of ATE quietly turning the sandbox off.
+        result = runner.run([ate, "--allow-unsandboxed-pdf", "_selftest", "--run"])
         if result.returncode != 0:
             fail(f"ate _selftest --run failed (exit {result.returncode}): {result.output()[-600:]}")
         # The selftest's own lines are the evidence the CI log needs: the report PDF it writes and

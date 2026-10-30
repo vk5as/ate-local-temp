@@ -303,14 +303,27 @@ def _stub_ate() -> str:
 
 
 def _fake_bundle(root: Path) -> Path:
-    """A bundle shaped like `dist/ate`: the executable plus an `_internal` directory."""
+    """A bundle shaped like `dist/ate`: the executable, an `_internal` directory, and the parts
+    `packaging/build_pyinstaller.py --verify` requires, so packaging has something to accept."""
     bundle = root / "dist" / "ate"
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
+    internal = bundle / "_internal"
+    (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "ate" / "lua").mkdir(parents=True)
+    (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
     exe.write_text(_stub_ate(), encoding="utf-8")
     exe.chmod(0o755)
-    (bundle / "_internal" / "base_library.zip").write_text("not really a zip", encoding="utf-8")
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
+    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8")
     return bundle
 
 
@@ -600,10 +613,19 @@ class FakeContainer:
             if self.version_exit:
                 return smoke.CommandResult(self.version_exit, "", "ate: the installed program would not start")
             return smoke.CommandResult(0, f"{self.version}\n", "")
-        if args[:2] == ["_selftest", "--run"]:
+        if args[:1] == ["--allow-unsandboxed-pdf"] and args[1:3] == ["_selftest", "--run"]:
             # The frozen bundle's end-to-end run needs QtWebEngine; the CI runs it, the fake says
             # what 27a's smoke prints when it passes, and `selftest_exit` makes it fail.
             return smoke.CommandResult(self.selftest_exit, self.selftest_output, "")
+        if args[:2] == ["_selftest", "--run"]:
+            # Packet 30d: this container is root, so a selftest that was not given the flag reports
+            # its PDF as skipped and exits non-zero. A smoke run that forgets the flag fails here.
+            return smoke.CommandResult(
+                1,
+                "run end-to-end: MISSING - the PDF was skipped: ATE is running as root or an "
+                "administrator and no --allow-unsandboxed-pdf was given\n",
+                "",
+            )
         return self._subprocess(argv)
 
 
@@ -804,7 +826,23 @@ def test_selftest_run_that_fails_is_reported(tmp_path: Path) -> None:
     runner, station = _container(tmp_path, selftest_exit=1, selftest_output="run end-to-end: MISSING - the PDF has no fonts\n")
     with pytest.raises(smoke.SmokeError, match="ate _selftest --run failed"):
         smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
-    assert any(c[1:] == ["_selftest", "--run"] for c in runner.calls), runner.calls
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_the_smoke_passes_the_sandbox_flag_because_the_container_is_root(tmp_path: Path) -> None:
+    """Packet 30d: the container runs as root, so a selftest without the flag reports its PDF as
+    skipped and exits non-zero. If the smoke script stopped passing the flag, this run would fail
+    before it ever printed the selftest line."""
+    runner, station = _container(tmp_path)
+    smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_the_pdf_probe_tells_its_root_helper_to_render_unsandboxed() -> None:
+    """The probe container is root too, so its bare `ate _pdf` call would refuse (packet 30d)."""
+    source = DOCKER_SMOKE.read_text(encoding="utf-8")
+    assert "--paper A4 --unsandboxed" in source, "the probe would run a privileged _pdf with no decision"
+    assert "apt-get install -y -qq tar poppler-utils" in source
 
 
 def test_an_ate_that_will_not_start_is_reported(tmp_path: Path) -> None:

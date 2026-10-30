@@ -32,6 +32,7 @@ from ..engine.run_engine import RunEngine, RunStatus
 from ..engine.step_inputs import value_error
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
+from ..report.pdf import PDF_SKIPPED, PDF_UNSANDBOXED, pdf_sandbox_choice
 from ..report.pdf_job import start_pdf_job, stop_pdf_jobs
 from ..storage.store import RunStore
 
@@ -73,12 +74,21 @@ class HeadlessRunSession(QObject):
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
-    def __init__(self, config: Config | str | Path | None = None, app_log: Optional[AppLog] = None) -> None:
+    def __init__(
+        self,
+        config: Config | str | Path | None = None,
+        app_log: Optional[AppLog] = None,
+        pdf_choice: Optional[Callable[[], str]] = None,
+    ) -> None:
         super().__init__()
         # Accept an already-read Config (the GUI launch reads the file once, spec "read once at
         # launch") or the path form used by existing callers (30a review).
         self._config = config if isinstance(config, Config) else (read_config(config) if config is not None else None)
         self._store = RunStore(self._config.database_path) if self._config is not None else None
+        # Packet 30d: the launch hands this session the decision about Chromium's sandbox — it is
+        # asked for every PDF, and the session never reads the environment itself. Without one, a
+        # privileged session skips its PDF rather than silently disabling the sandbox.
+        self._pdf_choice = pdf_choice or pdf_sandbox_choice()
         self._selected_name: Optional[str] = None
         # The selected schedule's declared Stop on Fail default, captured when it is chosen;
         # ``None`` until a schedule has been selected. Prefills the Steps stage radio (True when
@@ -105,6 +115,11 @@ class HeadlessRunSession(QObject):
                 self._app_log = None
         self._run_uuid: Optional[str] = None
         self._engine: Optional[RunEngine] = None
+        # Packet 30d review: the report write is scheduled after FINISHED is announced, so the session
+        # knows whether it still owes one; `report_written` has fired once `_report_written` is set.
+        self._report_pending = False
+        self._report_written = False
+        self._pdf_error: Optional[str] = None
         # Spec 08: Project is prefilled from config's `defaultProject` — the same value the Run
         # screen shows — and the Operator's typing replaces it. A run cannot start without one.
         self._pending_project: str = self._config.default_project if self._config is not None else ""
@@ -137,6 +152,12 @@ class HeadlessRunSession(QObject):
         """Release this session's resources: end its PDF helper, close the store, and close the
         application log if the session opened its own (a log handed in by the launch belongs to the
         launch)."""
+        # Packet 30d review: the run-end report is scheduled on a zero timer *after* FINISHED is
+        # announced, so a session closed in the same breath would never write its HTML. Write it
+        # here instead — the report itself is not optional (spec 21a) — but never start a helper
+        # process for a session that is going away.
+        if self._report_pending and self._state is SessionState.FINISHED:
+            self._write_run_report(render_pdf=False)
         stop_pdf_jobs(self)  # a helper still running when the session dies aborts the process
         if self._store is not None:
             self._store.close()
@@ -211,57 +232,108 @@ class HeadlessRunSession(QObject):
 
         Releasing ``_engine`` when a run reaches FINISHED lets the next start() capture
         fresh field values (spec "new run keeps every field") without racing the old
-        worker, which is no longer running."""
+        worker, which is no longer running.
+
+        Packet 30d review: the report write — and the sandbox question inside it — is scheduled on a
+        zero timer *after* FINISHED is emitted, never inside the state signal. Asked while the signal
+        is still running, the dialog opened with the Run screen reading STARTED: Abort enabled, Start
+        disabled, the status bar saying "Running", and the Operator answering a question about a run
+        the screen had not yet finished.
+        """
         if state != self._state:
             self._state = state
             if state == SessionState.FINISHED:
-                # The run row is already closed by then; write its HTML report now, then render the PDF
-                # on a background thread (never blocking FINISHED). A failure is logged and never raised
-                # so it can't crash the session or a live run (spec 22b).
-                self._write_run_report()
                 self._engine = None
             self.state_changed.emit(state)
+            if state == SessionState.FINISHED:
+                # The run row is closed by then. On the next turn of the GUI thread: write the HTML
+                # report, then ask about the sandbox and render the PDF (never blocking FINISHED). A
+                # failure is logged and never raised so it cannot crash the session or a live run
+                # (spec 22b).
+                self._report_pending = True
+                QTimer.singleShot(0, self._write_run_report)
 
-    def _write_run_report(self) -> None:
-        """Write this run's HTML report at run end, then render its PDF without blocking the run.
+    def _write_run_report(self, render_pdf: bool = True) -> None:
+        """Write this run's HTML report, then render its PDF without blocking the run.
 
         The HTML is written synchronously (spec 21a); the PDF follows in the helper process (see
-        :meth:`_start_pdf`), so FINISHED never waits for it. A failure here never raises."""
+        :meth:`_start_pdf`), so FINISHED never waits for it. Packet 30d: the sandbox question is asked
+        *after* the HTML is on disk — so a declined PDF still leaves the report, and
+        :attr:`report_written` still fires exactly once (with no PDF path when there is no PDF)
+        instead of leaving the UI or the harness waiting. A failure here never raises.
+        """
         config = self._config
-        if config is None or self._run_uuid is None or self._store is None:
+        if config is None or self._run_uuid is None or self._store is None or self._report_written:
             return
+        self._report_pending = False
         try:
             html_path = _write_run_report(self._store, self._run_uuid, config)
-        except Exception as exc:  # noqa: BLE001 - a report failure must not crash the run
-            self._log_error(f"Failed to write Test Report for {self._run_uuid}: {exc}")
-            return
+            if not render_pdf:
+                # The session is closing: the HTML is written, no helper is started for a dead session.
+                self._report_written = True
+                self.report_written.emit(str(html_path), "")
+                return
+            plan = self._pdf_choice(str(html_path))
+            if plan == PDF_SKIPPED:
+                self._report_written = True
+                self._log(
+                    "WARNING",
+                    f"Test Report PDF skipped for {self._run_uuid}: ATE is privileged and the choice was "
+                    f"No, so nothing was rendered without Chromium's sandbox. HTML report: {html_path}",
+                )
+                self.report_written.emit(str(html_path), "")
+                return
+            self._start_pdf(Path(html_path), config.reports_paper_size, plan == PDF_UNSANDBOXED)
+        except Exception as exc:  # noqa: BLE001 - a report failure must not crash the run or the event loop
+            self._report_written = True
+            self._log("ERROR", f"Failed to write Test Report for {self._run_uuid}: {exc}")
 
-        self._start_pdf(Path(html_path), config.reports_paper_size)
+    def _log(self, level: str, msg: str) -> None:
+        """One line in the application log (ticket 08), or on stdout when there is no log.
 
-    def _log_error(self, msg: str) -> None:
+        A log closed by a teardown still has to be written somewhere: the deferred report write can
+        land after the session is done (packet 30d review), and an exception raised inside a Qt timer
+        callback takes the process down."""
         if self.on_log is not None:
-            self.on_log("ERROR", "ate", msg)
+            try:
+                self.on_log(level, "ate", msg)
+            except Exception:  # noqa: BLE001 - the log is closed or unwritable; stdout is the fallback
+                print(msg)
         else:
             print(msg)
 
-    def _start_pdf(self, html_path: Path, paper: str) -> None:
+    def _log_error(self, msg: str) -> None:
+        self._log("ERROR", msg)
+
+    def _start_pdf(self, html_path: Path, paper: str, unsandboxed: bool) -> None:
         """Render ``html_path`` to a PDF beside it in the helper process, without waiting for it.
 
         The QProcess logic lives in :func:`ate.report.pdf_job.start_pdf_job` (shared with any other
         caller); here we only translate its completion into this session's ``report_written`` signal —
         both paths on success, an empty pdf path plus an ERROR log line when the helper fails (spec 22b).
+        ``unsandboxed`` is this PDF's packet 30d decision, passed to the child as an argument.
         Nothing here raises into the run."""
         pdf_path = html_path.with_suffix(".pdf")
         run_uuid = self._run_uuid
 
         def on_done(error: Optional[str]) -> None:
             if error is None:
+                self._report_written = True
                 self.report_written.emit(str(html_path), str(pdf_path))
             else:
-                self._log_error(f"Failed to write Test Report PDF for {run_uuid}: {error}")
+                # The helper's own stderr is in `error`: keep it so `_selftest --run` can say what the
+                # renderer actually complained about (packet 30d review).
+                self._pdf_error = error
+                self._report_written = True
+                self._log("ERROR", f"Failed to write Test Report PDF for {run_uuid}: {error}")
                 self.report_written.emit(str(html_path), "")
 
-        start_pdf_job(self, html_path, pdf_path, paper, on_done=on_done)
+        start_pdf_job(self, html_path, pdf_path, paper, unsandboxed, on_done=on_done, log=self.on_log)
+
+    @property
+    def pdf_error(self) -> Optional[str]:
+        """The last run-end PDF helper's failure, or ``None`` if it wrote its PDF."""
+        return self._pdf_error
 
 
     @property

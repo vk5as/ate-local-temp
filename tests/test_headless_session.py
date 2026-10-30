@@ -34,6 +34,22 @@ except Exception as _exc:  # noqa: BLE001 - any import failure means no real PDF
     PYQT_WEBENGINE_IMPORT_ERROR = _exc
 
 
+def _pump_until(predicate, *, deadline: float | None = None) -> bool:
+    """Pump the offscreen event loop until ``predicate()`` is true, or the deadline passes.
+
+    Packet 30d review: the run-end report is scheduled on a zero timer after FINISHED is emitted, so
+    a test that wants the report has to pump the loop rather than read the disk straight away."""
+    app = QCoreApplication.instance() or QCoreApplication([])
+    if deadline is None:
+        deadline = time.time() + 20.0
+    while not predicate():
+        app.processEvents()
+        if time.time() > deadline:
+            return False
+        time.sleep(0.002)
+    return True
+
+
 def _pump_until_report_written(session: HeadlessRunSession, events: list[tuple[str, str]], *, deadline: float | None = None) -> bool:
     """Pump the event loop until ``report_written`` fired (or ``deadline``), returning whether it did.
 
@@ -125,6 +141,9 @@ def test_run_end_writes_html_report(tmp_path) -> None:
 
     engine = session.start()
     assert _wait_finished(session)
+    # Packet 30d review: the report is written on a zero timer after FINISHED is announced, so the
+    # pump has to run one more turn before the file is there.
+    assert _pump_until(lambda: session._report_written), "the run-end report never ran"
 
     # The run-end hook wrote a <Type>/<Type>_<serial>_<stamp>_PASS.html report.
     written = list(env["reports_dir"].glob("**/*_PASS.html"))
@@ -154,6 +173,9 @@ def test_run_end_writes_html_and_pdf_reports(tmp_path, monkeypatch) -> None:
 
     engine = session.start()
     assert _wait_finished(session)
+    # Packet 30d review: FINISHED is announced first; the report write and the helper follow on the
+    # event loop, so pump until the helper reports before looking for the files.
+    assert _pump_until_report_written(session, events)
 
     # HTML report exists next to the PDF.
     written = list(env["reports_dir"].glob("**/*_PASS.html"))
@@ -161,7 +183,6 @@ def test_run_end_writes_html_and_pdf_reports(tmp_path, monkeypatch) -> None:
     html_path = str(written[0])
 
     # The helper finished and report_written delivered both paths.
-    assert _pump_until_report_written(session, events)
     html, pdf = events[-1]
     assert html == html_path
     assert Path(pdf).exists() and Path(pdf).stat().st_size > 0
@@ -189,6 +210,7 @@ def test_run_end_pdf_failure_keeps_html_and_logs_error(tmp_path, monkeypatch) ->
 
     engine = session.start()
     assert _wait_finished(session)
+    assert _pump_until_report_written(session, events)  # packet 30d: the report follows FINISHED on the event loop
 
     # HTML stays; no PDF.
     written = list(env["reports_dir"].glob("**/*_PASS.html"))
@@ -248,7 +270,8 @@ def test_run_end_writes_real_pdf_report(tmp_path) -> None:
 
     engine = session.start()
     assert _wait_finished(session)
-
+    # Packet 30d review: FINISHED is emitted before the report is written, so pump until it is.
+    assert _pump_until(lambda: list(env["reports_dir"].glob("**/*_PASS.html"))), "the run-end report never ran"
     written = list(env["reports_dir"].glob("**/*_PASS.html"))
     assert len(written) == 1, f"no PASS report: {[p.name for p in env['reports_dir'].glob('**/*.html')]}"
 
@@ -494,6 +517,9 @@ def test_a_closed_session_ends_its_pdf_helper_process(qapp, monkeypatch, tmp_pat
 
     from ate.report.pdf_job import _live_pdf_jobs
 
+    # Packet 30d review: the helper is started from the deferred report write, so the loop has to
+    # turn once before the job exists to be killed.
+    assert _pump_until(lambda: any(proc.parent() is session for proc in _live_pdf_jobs)), "the finished run started no PDF helper"
     jobs = [proc for proc in _live_pdf_jobs if proc.parent() is session]
     assert jobs, "the finished run started no PDF helper to test"
     assert all(proc.state() != QProcess.ProcessState.NotRunning for proc in jobs), (
