@@ -321,11 +321,11 @@ def _dismiss_if_headless(box: QMessageBox) -> None:
 
     The seam for headless subprocess tests (packet 30c): offscreen Qt still blocks in
     ``exec()``, so tests that want to prove a refusal exits 1 rather than aborts need the
-    dialog to close on its own. It closes by clicking the dialog's default button, which is
-    *not* always "yes": the missing-config prompt answers "Create default config and launch",
-    the close confirmation answers "Abort the run and quit", and an alert answers OK.
-    ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"`` mean unset, so a test that sets it
-    conditionally still sees the real dialog. Documented in ``docs/building-from-source.md``.
+    dialog to close on its own. It closes through ``accept()``, which clicks no button, so
+    ``clickedButton()`` is None and every prompt answers its *negative* branch: the
+    missing-config prompt aborts, the "abort the run and quit?" confirmation keeps the run
+    going, and an alert is acknowledged. ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"``
+    mean unset. Documented in ``docs/building-from-source.md``.
     """
     value = os.environ.get("ATE_AUTO_DISMISS_DIALOG", "").strip().lower()
     if value and value not in ("0", "false", "no", "off"):
