@@ -624,3 +624,25 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - whether the excluded QML data is needed by WebEngine on Windows;
   - the ~76 MB debug .pak on Windows.
   - Flake: `test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e's footer timestamp. Folded into 30c.
+
+## 30c — First run after `ate setup` (merged 2026-10-30)
+- New packet from the 27a review: `<data>` never resolved; `ate db` ignored `--config`; launch refusals dropped the QApplication (abort 134). Also took the 21b timestamp flake.
+- Implementer (Strata, high, 0 compactions). The first turn ended on a malformed empty tool call, the 3rd such Strata failure, and was resumed.
+  - Resolve on read to the platform data dir; `ate setup --root` writes resolved paths.
+  - `_cmd_db` reads the config.
+  - Dialogs keep the QApplication, with an `ATE_AUTO_DISMISS_DIALOG` seam.
+  - `render_report(generated_at=)`.
+- Reviews: Haiku 2 must-fix, Strata 2 must-fix (union 2 + 1 test):
+  - `read_config(None)` crashed (`str.resolve`), pre-existing, so `ate` and `ate db` without `--config` failed; its test passed on the traceback.
+  - Create-default-config + unprivileged → PermissionError traceback instead of a refusal.
+- Rework (Strata, high, 0 compactions):
+  - `_platform_default` returns a Path; a clear missing-config message;
+  - `ATE_DEFAULT_CONFIG`/`ATE_DATA_DIR` test seams (documented);
+  - any OSError creating the config/dirs/log is a refusal; `write_config` is atomic;
+  - the migrate hint names `--config` and the db path;
+  - setup creates `definitions`;
+  - auto-dismiss falsy values;
+  - the 30a/21b tests strengthened;
+  - docs explain `<data>`.
+- Light review: 1089 passed + 2 skipped ×3 (~167 s); collection 1057 → 1091, none lost. Manual probe: setup → `db status` 5; missing default config → clean message, exit 1, nothing created.
+- Leftovers: a hand-edited `<data>` on a `--root` station resolves to the platform dir (the spec doesn't define `<data>` beyond the Location table).
