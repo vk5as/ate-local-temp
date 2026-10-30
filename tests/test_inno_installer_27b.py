@@ -203,6 +203,7 @@ def test_code_removes_only_its_own_path_entry_on_uninstall() -> None:
     assert "usPostUninstall".lower() in lowered, "the PATH cleanup belongs in the post-uninstall step"
     assert "curuninstallstepchanged" in lowered, "the uninstaller needs CurUninstallStepChanged"
     assert "regwritestringvalue" in lowered, "the cleaned PATH has to be written back"
+    assert code.count("RemoveOwnPathFromMachinePath") >= 2, "the cleanup must be defined *and* called"
     assert "expandconstant('{app}')" in lowered, "the entry removed must be the one this installer added"
     assert "uninsdelete" not in lowered, "deleting the value is never acceptable"
     # Everything else in PATH is somebody else's.
@@ -261,6 +262,23 @@ def test_dry_run_with_a_certificate_configures_signing(tmp_path: Path) -> None:
     assert "ATE_SIGN_PASSWORD" in output, "the redacted command should say where the password came from"
 
 
+def test_half_a_certificate_is_an_error(tmp_path: Path) -> None:
+    """Configuring only one of the two variables is a mistake, not "unsigned is fine"."""
+    module = _build_module()
+    original = dict(os.environ)
+    try:
+        os.environ.pop("ATE_SIGN_CERT", None)
+        os.environ["ATE_SIGN_PASSWORD"] = "hunter2"
+        with pytest.raises(SystemExit) as exc:
+            module._signing()
+        assert "ATE_SIGN_CERT" in str(exc.value)
+        os.environ.pop("ATE_SIGN_PASSWORD", None)
+        assert module._signing() is None, "no certificate at all means an unsigned build, not an error"
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+
 def test_windows_version_mapping() -> None:
     module = _build_module()
     cases = {
@@ -294,6 +312,25 @@ def test_missing_iscc_without_dry_run_fails_clearly(tmp_path: Path) -> None:
         env=dict(os.environ, ISCC="", PATH=tempfile.mkdtemp()),
     )
     assert proc.returncode != 0, "a missing iscc must not look like a successful build"
-    combined = (proc.stdout + proc.stderr).lower()
-    assert "iscc" in combined or "windows" in combined
+    combined = proc.stdout + proc.stderr
+    assert "iscc" in combined.lower() or "windows" in combined.lower()
     assert "--dry-run" in combined, "the error should point at --dry-run for machines without Inno Setup"
+    assert "Traceback" not in combined, "refusing to build is a clean exit, not a crash"
+
+
+def test_iscc_is_found_from_the_environment(tmp_path: Path) -> None:
+    """A build machine points at its compiler with ISCC; otherwise PATH, then the default location."""
+    module = _build_module()
+    fake = tmp_path / "ISCC.exe"
+    fake.write_text("", encoding="utf-8")
+    original = dict(os.environ)
+    try:
+        os.environ["ISCC"] = str(fake)
+        assert module._find_iscc() == str(fake), "ISCC must be honoured"
+        os.environ["PATH"] = ""
+        os.environ.pop("ISCC", None)
+        assert module._find_iscc() is None, "with no ISCC and no PATH there is no compiler to find"
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+

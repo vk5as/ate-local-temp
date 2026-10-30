@@ -129,7 +129,7 @@ def _iscc_command(iscc: str, iss: Path, version: str, source_dir: Path, out: Pat
 
 def _display(command: list[str], secret: str) -> str:
     """The command as it would be typed, with the signing password replaced by its source."""
-    parts = [part.replace(secret, "$q<from ATE_SIGN_PASSWORD>$q") if secret else part for part in command]
+    parts = [part.replace(secret, "<from ATE_SIGN_PASSWORD>") if secret else part for part in command]
     return " ".join(f'"{part}"' if " " in part else part for part in parts)
 
 
