@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -58,11 +59,15 @@ UNINSTALL_FLAGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES")
 MARKER = "27c-smoke-marker.txt"
 STALE = Path("_internal") / "stale-from-the-previous-build.py"  # a file the previous build shipped
 
-# What a failed install looks like in Inno's /LOG. ate.iss records `ate setup`'s exit code with
-# "exited with code", and Inno prefixes every error line with "Error".
-LOG_FAILURE_MARKERS = ("error", "exited with code", "could not", "failed")
+# What a failed install looks like in Inno's /LOG, line by line. Inno prefixes its own error
+# lines with "Error", and ate.iss logs `ate setup`'s exit code as "exited with code N" and a
+# failed PATH cleanup as "Could not remove ...". A line that merely mentions "failed" in prose
+# — a file named failed.log, a warning about a skipped component — is not a failure.
+LOG_FAILURE_LINE = re.compile(r"^\s*-?\s*(error\b|could not\b|failed to\b|exited with code [1-9])", re.IGNORECASE)
 # ate.iss logs this before running setup; tests pin the line in the script so this is not a guess.
 SETUP_LOG_LINE = "Preparing the Station"
+# The scan line `ate _selftest --scan` prints: "<dir>: N schedules, N broken, N mismatched".
+SCAN_COUNTS = re.compile(r"(\d+)\s+schedules,\s+(\d+)\s+broken,\s+(\d+)\s+mismatched")
 
 
 class SmokeError(Exception):
@@ -86,14 +91,49 @@ class CommandResult:
 # --- PATH: plain functions over values ----------------------------------------------------------
 
 
+def expand_path_value(value: str) -> str:
+    r"""A PATH value with every ``%VAR%`` expanded.
+
+    `winreg.QueryValueEx` hands back a `REG_EXPAND_SZ` value exactly as stored — with the
+    `%VAR%` still in it — and `CreateProcess` does not expand it either, so an entry like
+    `%USERPROFILE%\bin` is searched as a directory literally named `%USERPROFILE%`."""
+    if IS_WINDOWS:
+        return winreg.ExpandEnvironmentStrings(value)
+    return re.sub(r"%([A-Za-z0-9_]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), value)
+
+
 def normalise_entry(entry: str) -> str:
-    """A PATH entry as a directory: {app} never ends in a backslash, and paths are not names."""
-    return entry.strip().rstrip("\\").lower()
+    """A PATH entry as a directory: `%VAR%` expanded, no trailing backslash, and not a name."""
+    return expand_path_value(entry).strip().rstrip("\\").lower()
 
 
 def path_entries(value: str) -> list[str]:
     """The `;`-separated entries of a PATH value, blanks dropped."""
     return [entry for entry in value.split(";") if entry.strip()]
+
+
+def search_path(value: str) -> str:
+    """A PATH value as `shutil.which` reads it: entries expanded, re-joined for this host.
+
+    `os.pathsep` is `;` on Windows and `:` on POSIX, so re-joining is a no-op where the script
+    runs and lets the Linux tests feed it Windows values."""
+    return os.pathsep.join(expand_path_value(entry) for entry in path_entries(value))
+
+
+def resolve_command(name: str, path_value: str) -> str:
+    r"""The full path of `name` as found on `path_value`.
+
+    `CreateProcess` searches the PARENT process's PATH for a bare command name: the `env`
+    handed to the child is not consulted. On a runner whose own PATH predates the install,
+    `subprocess.run(["ate", ...])` is a `FileNotFoundError` however freshly Setup wrote the
+    machine PATH, so every `ate` call here is made with the path `which` resolved."""
+    found = shutil.which(name, path=search_path(path_value)) or shutil.which(name + ".exe", path=search_path(path_value))
+    if not found:
+        fail(
+            f"'{name}' is not on the machine PATH the installer wrote ({path_value}): "
+            f"a bare name is looked up in the runner's own PATH, so it has to be run by full path"
+        )
+    return found
 
 
 def app_path_count(value: str, app_dir: str) -> int:
@@ -145,9 +185,9 @@ def check_install_log(result: CommandResult, log_text: str, stage: str) -> None:
         )
     if not log_text.strip():
         fail(f"{stage}: /LOG produced no log file, so there is nothing to prove the install did")
-    hits = [line for line in log_text.splitlines() if any(marker in line.lower() for marker in LOG_FAILURE_MARKERS)]
+    hits = [line.strip() for line in log_text.splitlines() if LOG_FAILURE_LINE.search(line)]
     if hits:
-        fail(f"{stage}: the install log reports a failure: {hits[0].strip()}")
+        fail(f"{stage}: the install log reports a failure: {hits[0]}")
     if SETUP_LOG_LINE.lower() not in log_text.lower():
         fail(
             f"{stage}: the log never shows the installer running 'ate setup' (it logs "
@@ -168,13 +208,20 @@ def check_ate_runs(config_path: Path, ate_result: CommandResult, app_dir: str) -
 
 
 def check_scan(result: CommandResult, definitions: Path) -> None:
-    """The headless launch scanned the sample release: schedules found, nothing broken, no mismatch."""
+    """The headless launch scanned the sample release: schedules found, nothing broken, no mismatch.
+
+    The numbers are parsed, not searched for: `"0 broken" in out` is also true of
+    `"10 broken"`, so a substring check calls a Media Release with ten broken schedules clean."""
     out = result.output()
-    if "0 broken" not in out:
-        fail(f"the headless scan of {definitions} reported broken Test Definitions: {out[-400:]}")
-    if "0 mismatched" not in out:
-        fail(f"the headless scan of {definitions} reported checksum mismatches: {out[-400:]}")
-    if "0 schedules" in out:
+    counts = SCAN_COUNTS.search(out)
+    if not counts:
+        fail(f"the headless scan of {definitions} printed no counts: {out[-400:]}")
+    schedules, broken, mismatched = (int(number) for number in counts.groups())
+    if broken:
+        fail(f"the headless scan of {definitions} reported {broken} broken Test Definitions: {out[-400:]}")
+    if mismatched:
+        fail(f"the headless scan of {definitions} reported {mismatched} checksum mismatches: {out[-400:]}")
+    if schedules <= 0:
         fail(f"the headless scan of {definitions} found no Test Schedule: copying the example release failed")
     if result.returncode != 0:
         fail(f"the headless scan of {definitions} exited {result.returncode}: {out[-400:]}")
@@ -194,10 +241,10 @@ def run_smoke(
     ate: str = "ate",
     install_log: Path | None = None,
     sleep=time.sleep,
-    poll_limit: int = 60,
+    poll_limit: int = 300,
 ) -> list[str]:
     """Install, smoke, upgrade, uninstall. Returns the checks that passed."""
-    log = Path(install_log) if install_log else Path.cwd() / "install.log"
+    log = Path(install_log).resolve() if install_log else (Path.cwd() / "install.log").resolve()
     passed: list[str] = []
 
     def note(name: str) -> None:
@@ -205,12 +252,23 @@ def run_smoke(
         print(f"ok: {name}")
 
     def flags() -> list[str]:
+        # Absolute: Inno resolves a relative /LOG against its own working directory, not this
+        # process's, and then there is nothing to read back.
         return [*INSTALL_FLAGS, f"/LOG={log}"]
+
+    def install() -> CommandResult:
+        """Run Setup, after deleting the log: /LOG= appends, so the upgrade's check would
+        otherwise pass on the lines the first install wrote."""
+        try:
+            log.unlink()
+        except FileNotFoundError:
+            pass
+        return runner.run([str(installer), *flags()])
 
     before_value, before_type = registry.read()
     print(f"machine PATH before install: {before_value}")
 
-    result = runner.run([str(installer), *flags()])
+    result = install()
     check_install_log(result, log.read_text(encoding="utf-8") if log.is_file() else "", "install")
     note("installer exit code 0 and a clean /LOG")
 
@@ -218,28 +276,32 @@ def run_smoke(
     check_machine_path("install", before_value, after_value, before_type, after_type, str(app_dir), 1)
     note("one {app} entry on the machine PATH, others unchanged, REG_EXPAND_SZ")
 
-    env = dict(os.environ, PATH=after_value)  # a NEW process sees the PATH Setup just wrote
-    result = runner.run([ate, "--version"], env=env)
+    # Setup has written the machine PATH, but a new process still cannot be started by the bare
+    # name `ate`: CreateProcess searches the runner's own PATH, not the env passed to the child.
+    # Resolve it from the value the installer just wrote and run that, PATH expanded as well.
+    ate_exe = resolve_command(ate, after_value)
+    env = dict(os.environ, PATH=expand_path_value(after_value))
+    result = runner.run([ate_exe, "--version"], env=env)
     check_ate_runs(data_dir / "config.json", result, str(app_dir))
-    note("ate --version runs from the refreshed PATH")
+    note("ate --version runs from the refreshed PATH (resolved to a full path)")
 
     config = json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
     database = Path(config.get("database", {}).get("path", ""))
     if not database.is_file():
         fail(f"'ate setup' created no database at {database}")
-    result = runner.run([ate, "db", "status"], env=env)
+    result = runner.run([ate_exe, "db", "status"], env=env)
     if result.returncode != 0 or not result.stdout.strip().isdigit():
         fail(f"ate db status did not print a schema version: exit {result.returncode}: {result.output()[-300:]}")
     note(f"database at {database} reports schema version {result.stdout.strip()}")
 
-    result = runner.run([ate, "_selftest", "--run"], env=env)
+    result = runner.run([ate_exe, "_selftest", "--run"], env=env)
     if result.returncode != 0:
         fail(f"ate _selftest --run failed: {result.output()[-600:]}")
     note("the frozen bundle runs a Test Schedule end to end")
 
     definitions = Path((config.get("testDefinitions", {}).get("directories") or [str(data_dir / "definitions")])[0])
     shutil.copytree(sample_dir, definitions, dirs_exist_ok=True)
-    result = runner.run([ate, "_selftest", "--scan", str(definitions)], env=env)
+    result = runner.run([ate_exe, "_selftest", "--scan", str(definitions)], env=env)
     check_scan(result, definitions)
     note("headless launch scanned the sample Media Release")
 
@@ -251,7 +313,7 @@ def run_smoke(
     stale.parent.mkdir(parents=True, exist_ok=True)
     stale.write_text("a file the previous build shipped and this one does not", encoding="utf-8")
     before_upgrade_value, before_upgrade_type = registry.read()
-    result = runner.run([str(installer), *flags()])
+    result = install()
     check_install_log(result, log.read_text(encoding="utf-8") if log.is_file() else "", "upgrade")
     note("upgrade exit code 0 and a clean /LOG")
     after_upgrade_value, after_upgrade_type = registry.read()
@@ -268,17 +330,22 @@ def run_smoke(
         )
     note("the marker in %PROGRAMDATA%\\ATE survived and the stale _internal file is gone")
 
-    # Uninstall: unins000 re-spawns itself, so wait for {app} to disappear before checking.
+    # Uninstall: unins000 re-spawns itself, and the child it spawns is what removes the PATH
+    # entry. Waiting only for {app} to disappear reads the PATH while that child is still
+    # working, so wait for both, and give a 490 MB tree room: 300 polls of a second.
     result = runner.run([str(app_dir / "unins000.exe"), *UNINSTALL_FLAGS])
     if result.returncode != 0:
         fail(f"unins000.exe exited {result.returncode}: {result.output()[-300:]}")
     for _ in range(poll_limit):
-        if not app_dir.exists():
+        if not app_dir.exists() and app_path_count(registry.read()[0], str(app_dir)) == 0:
             break
         sleep(1)
     else:
-        fail(f"the uninstaller never removed {app_dir} within {poll_limit} polls — it re-spawns itself, and this wait gave up")
-    note("unins000.exe finished and {app} is gone")
+        fail(
+            f"the uninstall never finished within {poll_limit} polls: {app_dir} or its PATH entry "
+            f"is still there — unins000 re-spawns itself, and this wait gave up"
+        )
+    note("unins000.exe finished and {app} is gone, with its PATH entry cleaned")
     after_uninstall_value, after_uninstall_type = registry.read()
     check_machine_path("uninstall", before_value, after_uninstall_value, before_type, after_uninstall_type, str(app_dir), 0)
     note("no {app} PATH entry left, other entries unchanged, REG_EXPAND_SZ")
@@ -333,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", default=None, help="the Station data directory (default: %PROGRAMDATA%\\ATE)")
     parser.add_argument("--sample", default=str(REPO / "examples" / "media-release"), help="Media Release to copy for the scan")
     parser.add_argument("--install-log", default="install.log", help="the /LOG file the installer writes")
-    parser.add_argument("--poll-limit", type=int, default=60, help="how long to wait for the re-spawned uninstaller")
+    parser.add_argument("--poll-limit", type=int, default=300, help="how many seconds to wait for the re-spawned uninstaller")
     args = parser.parse_args(argv)
 
     installer = Path(args.installer) if args.installer else find_installer(Path(args.dist))
@@ -348,6 +415,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    log = Path(args.install_log).resolve()
+
+    def dump_log() -> None:
+        """Whatever /LOG wrote, printed to stderr: a silent install leaves no other record."""
+        if log.is_file():
+            print(f"--- {log} ---", file=sys.stderr)
+            print(log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
+
     try:
         checks = run_smoke(
             installer=installer,
@@ -356,15 +431,19 @@ def main(argv: list[str] | None = None) -> int:
             registry=MachinePath(),
             runner=SubprocessRunner(),
             sample_dir=Path(args.sample),
-            install_log=Path(args.install_log),
+            install_log=log,
             poll_limit=args.poll_limit,
         )
     except SmokeError as exc:
         print(f"smoke test failed: {exc}", file=sys.stderr)
-        log = Path(args.install_log)
-        if log.is_file():
-            print(f"--- {log} ---", file=sys.stderr)
-            print(log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
+        dump_log()
+        return 1
+    except Exception as exc:
+        # Anything else — an OSError spawning setup.exe, a FileNotFoundError because `ate`
+        # could not be resolved, a config that is not valid JSON — still has to print the
+        # install log, because that log is the only trace a silent install leaves.
+        print(f"smoke test crashed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        dump_log()
         return 1
     print(f"smoke test passed: {len(checks)} checks")
     return 0
