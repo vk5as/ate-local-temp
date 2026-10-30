@@ -95,7 +95,8 @@ bundle must carry and exits 1 if any is missing. It is a build-time inventory, n
 it touches no Station, database or Test Run.
 
 `build/` and `dist/` are gitignored: build output is never committed, and the build is
-reproducible from a clean checkout.
+reproducible from a clean checkout. The bundle is roughly 550 MB on disk — Qt's libraries
+and QtWebEngine are the bulk of it.
 
 ## Tests
 

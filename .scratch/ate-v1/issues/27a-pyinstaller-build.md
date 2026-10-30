@@ -6,9 +6,12 @@
 
 **Blocked by:** 22b (PDF at run end), 26b (`ate setup`: permissions)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A PyInstaller one-directory build bundling CPython 3.14, QWebEngine and pyvisa-py; the built `ate --version` runs
+- [x] A PyInstaller one-directory build bundling CPython 3.14, QWebEngine and pyvisa-py; the built `ate --version` runs
+  Built with the recipe in `packaging/pyinstaller/ate.spec` + `packaging/build_pyinstaller.py`.
+  The build is CPython-version-agnostic: the local proof run used CPython 3.13 (the only
+  Python on this machine); CI's 3.14 runner uses the same spec and script.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
 
