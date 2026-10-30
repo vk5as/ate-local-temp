@@ -453,9 +453,7 @@ def test_the_real_bundle_packages_and_runs_from_the_deb() -> None:
         assert selftest.returncode == 0, selftest.stderr
         assert "MISSING" not in selftest.stdout, selftest.stdout
 
-        control = _control(deb)
-        assert {d.strip() for d in control["Depends"].split(",")} == REQUIRED_DEPENDS or set(
-            REQUIRED_DEPENDS
-        ) <= {d.strip() for d in control["Depends"].split(",")}
+        depends = {d.strip() for d in control["Depends"].split(",")}
+        assert REQUIRED_DEPENDS <= depends, f"the real package's Depends is {sorted(depends)}"
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
