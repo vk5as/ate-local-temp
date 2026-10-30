@@ -14,8 +14,10 @@ includes. Packet 29d adds the Device schedule: every Device Type run against the
 `examples/harness/peers.py` starts, with its partial reads, timed-out reads, onError handlers,
 per-call overrides, Device opened in a Pre-test Action, and the Device trace lines the harness
 config turns on. Packet 29e closes the example out as a regression suite: every run writes its
-Test Report (name, PDF beside it, Cover/Steps/Equipment/Configuration/Run log in the HTML), and
-every visible schedule has a run that ends PASS.
+Test Report (name, PDF beside it, Cover/Steps/Equipment/Configuration/Run log in the HTML), the
+Cover shows every Run detail, Schedule and Media Release field and the Summary's seven counts, the
+footer names the run UUID and both ATE versions, the Run log carries every INFO/WARNING/ERROR line
+grouped by owner, and every visible schedule has a run that ends PASS.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -491,7 +493,6 @@ def test_every_example_report_cover_shows_the_run_and_its_footer(records: dict[s
         run = record["run"]
         raw = Path(record["reports"][0][0]).read_text(encoding="utf-8")
         parser = _parse_report(raw)
-        cover = parser.sections["Cover"]
         fields = _cover_fields(parser.rows["Cover"])
         missing = [label for label in COVER_LABELS if label not in fields]
         assert not missing, f"{key}: the Cover is missing {missing}"
@@ -554,11 +555,11 @@ def test_every_example_report_cover_shows_the_run_and_its_footer(records: dict[s
         if run["end_reason"] == "PRETEST_FAILED":
             failed = next(a for a in record["actions"] if a["phase"] == "pre" and a["outcome"] == "error")
             instance = next(i for i in record["schedule_instances"] if i["instance_seq"] == failed["instance_seq"])
-            assert instance["schedule_name"] in cover, \
-                f"{key}: the banner does not name the schedule whose Pre-test Action failed"
-            assert failed["error"] in cover, f"{key}: the banner carries no error message"
+            banners = re.findall(r'<div class="banner">(.*?)</div>', raw)
+            assert any(instance["schedule_name"] in b and failed["error"] in b for b in banners), \
+                f"{key}: no banner names the schedule {instance['schedule_name']!r} and its error {failed['error']!r}: {banners}"
             if instance["prefix"]:
-                assert instance["prefix"] in cover, f"{key}: the banner omits the include prefix"
+                assert any(instance["prefix"] in b for b in banners), f"{key}: the banner omits the include prefix"
 
 
 def test_every_visible_example_schedule_has_a_green_run(records: dict[str, dict[str, Any]]) -> None:
