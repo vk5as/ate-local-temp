@@ -17,6 +17,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Nothing here needs to write to the repository: the job reads the tag and uploads an artifact.
+permissions:
+  contents: read
+
 jobs:
   windows-installer:
     name: Windows installer (build and smoke)
@@ -44,17 +48,17 @@ jobs:
       - name: Install Inno Setup 6
         shell: pwsh
         run: |
-          $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
-          if (Test-Path $iscc) {
-            Write-Output "Inno Setup is already on the runner: $((Get-Item $iscc).Version)"
-          } else {
-            # Pinned: `x64compatible` in ate.iss needs 6.3 or newer.
-            choco install innosetup --no-progress -y --version=6.7.1
-          }
-          if (-not (Test-Path $iscc)) {
-            Write-Error "iscc.exe not found: the installer cannot be compiled"
+          # Pinned: `x64compatible` in ate.iss needs Inno 6.3 or newer.
+          # Chocolatey installs Inno Setup 6 under "C:\Program Files (x86)\Inno Setup 6", so this
+          # step does not test one directory — that check fails on a clean runner. iscc lands on
+          # PATH, and packaging/windows/build_installer.py resolves it from $ISCC, then PATH, then
+          # both standard locations.
+          choco install innosetup --no-progress -y --version=6.7.1
+          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue)) {
+            Write-Error "iscc.exe is not on PATH after installing Inno Setup: the installer cannot be compiled"
             exit 1
           }
+          iscc --version
 
       - name: Build the frozen bundle (27a smoke checks)
         run: python packaging/build_pyinstaller.py --smoke
@@ -62,6 +66,8 @@ jobs:
       - name: Compile the installer
         # Signing is optional (assets/packaging.md, "Code signing"): an unset secret arrives as an
         # empty string, and build_installer.py builds unsigned when either variable is empty.
+        # Before real signing secrets are configured, put this job behind a protected
+        # `environment:` so only approved tags and reviewers can reach them.
         env:
           ATE_SIGN_CERT: ${{ secrets.ATE_SIGN_CERT }}
           ATE_SIGN_PASSWORD: ${{ secrets.ATE_SIGN_PASSWORD }}
@@ -78,6 +84,8 @@ jobs:
         with:
           name: ate-windows-installer
           path: dist/ate-*-windows-x64-setup.exe
+          # A glob that matches nothing is a build that quietly produced no artifact.
+          if-no-files-found: error
 
   # The Linux artifacts are packet 28c's job and are deliberately not written here. This is where
   # they go, built from the same dist/ate bundle and smoke-tested in a Debian stable container:

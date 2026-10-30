@@ -20,6 +20,7 @@ directory. That part really does run here, on Linux, against the shipped example
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import inspect
 import json
@@ -31,11 +32,15 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / ".github" / "workflows" / "release.yml"
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 SMOKE = REPO / "packaging" / "windows" / "smoke_installer.py"
 ISS = REPO / "packaging" / "windows" / "ate.iss"
+BUILD_INSTALLER = REPO / "packaging" / "windows" / "build_installer.py"
+PYINSTALLER = REPO / "packaging" / "build_pyinstaller.py"
 EXAMPLE = REPO / "examples" / "media-release"
 SRC = str(REPO / "src")
 
@@ -146,55 +151,124 @@ def test_scan_is_hidden_from_help():
     assert "_selftest" not in proc.stdout, proc.stdout
 
 
-# --- release.yml -------------------------------------------------------------------------------
-
-
-def test_release_workflow_exists():
-    assert WORKFLOW.is_file(), "release.yml is missing"
+# --- release.yml: parsed, not grepped -----------------------------------------------------------
 
 
 def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def _workflow_code() -> str:
-    """The workflow without comment lines: a fact stated in a comment is not a fact the runner obeys."""
-    return "\n".join(line for line in _workflow_text().splitlines() if not line.strip().startswith("#"))
+def _workflow() -> dict:
+    """The workflow as YAML. `on` is a boolean key in YAML 1.1, hence the two lookups."""
+    doc = yaml.safe_load(_workflow_text())
+    assert isinstance(doc, dict), "release.yml is not a mapping"
+    return doc
 
 
-def test_release_workflow_triggers_on_tags_only():
-    text = _workflow_code()
-    assert "tags" in text
-    assert "workflow_dispatch" in text
-    assert re.search(r"^\s*push:\s*$", text, re.MULTILINE), "push must be narrowed to tags"
-    # A push to a branch would start a release build on every merge.
-    assert not re.search(r"branches\s*:", text), "release CI must not trigger on branch pushes"
+def _on(doc: dict) -> dict:
+    return doc["on"] if "on" in doc else doc[True]
 
 
-def test_release_workflow_builds_with_python_3_14_and_full_tag_history():
-    code = _workflow_code()
-    assert 'python-version: "3.14"' in code, "the frozen bundles are required to carry CPython 3.14"
-    assert "fetch-depth: 0" in code, "the version comes from the git tag: tags must be fetched"
-    assert "smoke_installer.py" in code, "the workflow must run the smoke script"
-    assert "upload-artifact" in code, "the installer goes to an artifact"
-    assert "build_pyinstaller.py --smoke" in code, "27a's smoke build runs before the installer"
-    assert "build_installer.py" in code, "the .iss is compiled by 27b's wrapper"
-    assert "runs-on: windows-latest" in code
+def _job(doc: dict) -> dict:
+    return doc["jobs"]["windows-installer"]
+
+
+def _steps(doc: dict) -> list[dict]:
+    return _job(doc)["steps"]
+
+
+def _step_by_use(doc: dict, needle: str) -> dict:
+    return next(step for step in _steps(doc) if needle in str(step.get("uses", "")))
+
+
+def _installer_artifact() -> tuple[str, str]:
+    r"""The installer's file name and directory, computed from the script that builds it.
+
+    `ate.iss` sets `OutputDir` and `OutputBaseFilename`; `iscc` appends `.exe`, and
+    `build_installer.py` passes `--dist` as the output directory (absolute, because Inno
+    resolves a relative one against the folder holding the script)."""
+    iss = ISS.read_text(encoding="utf-8")
+    base = re.search(r"^OutputBaseFilename=(.+)$", iss, re.MULTILINE).group(1).strip()
+    outdir = re.search(r"^OutputDir=(.+)$", iss, re.MULTILINE).group(1).strip()
+    name = base.replace("{#AppVersion}", "1.2.3") + ".exe"
+    assert "windows-x64-setup.exe" in BUILD_INSTALLER.read_text(encoding="utf-8"), "the wrapper prints a different name"
+    return name, outdir
+
+
+def test_release_workflow_triggers_on_tags_and_manual_runs_only():
+    """A release artifact is only ever made for a release: tags and a manual run, nothing else."""
+    on = _on(_workflow())
+    assert set(on) == {"push", "workflow_dispatch"}, f"unexpected triggers: {sorted(on)}"
+    assert on["push"] == {"tags": ["v*"]}, f"push must be narrowed to v* tags, got {on['push']}"
+    assert "branches" not in on["push"], "a branch push must not start a release build"
+
+
+def test_release_workflow_is_read_only():
+    doc = _workflow()
+    assert doc.get("permissions") == {"contents": "read"}, "the job needs no write access to the repository"
+
+
+def test_the_workflow_builds_the_bundle_then_compiles_then_smokes():
+    doc = _workflow()
+    job = _job(doc)
+    assert job["runs-on"] == "windows-latest"
+    checkout = _step_by_use(doc, "actions/checkout")
+    assert checkout["with"]["fetch-depth"] == 0, "the version comes from the git tag: tags must be fetched"
+    setup = _step_by_use(doc, "setup-python")
+    assert setup["with"]["python-version"] == "3.14", "the frozen bundle is required to carry CPython 3.14"
+    commands = [step["run"].strip() for step in _steps(doc) if step.get("run", "").strip().startswith("python ")]
+    expected = [
+        "python packaging/build_pyinstaller.py --smoke",
+        "python packaging/windows/build_installer.py --dist dist",
+        "python packaging/windows/smoke_installer.py",
+    ]
+    assert commands == expected, f"build the bundle, compile the .iss, then smoke it, in that order: {commands}"
+
+
+def test_every_python_step_names_a_file_that_exists():
+    """A step that runs a script the repository does not have fails on the runner, not here."""
+    for step in _steps(_workflow()):
+        run = step.get("run", "")
+        for script in re.findall(r"\bpython\s+([^\s]+\.py)", run):
+            assert (REPO / script).is_file(), f"the workflow runs {script}, which is not in the repository"
+
+
+def test_qt_is_offscreen_at_job_level():
+    """Every Qt-using step inherits it: the bundle's `_pdf` helper and the smoke script's `ate` calls."""
+    env = _job(_workflow()).get("env") or {}
+    assert env.get("QT_QPA_PLATFORM") == "offscreen", env
+
+
+def test_the_upload_glob_matches_the_file_the_build_produces():
+    """The artifact glob has to match what `build_installer.py` writes, or the release has no installer."""
+    upload = _step_by_use(_workflow(), "upload-artifact")
+    produced, outdir = _installer_artifact()
+    glob = upload["with"]["path"]
+    assert fnmatch.fnmatch(produced, Path(glob).name), f"{glob} matches nothing: the build writes {produced}"
+    assert str(Path(glob).parent) == "dist", f"{glob} looks in {Path(glob).parent}, the build writes to {outdir}"
+    assert upload["with"].get("if-no-files-found") == "error", "an artifact glob that matches nothing must fail, not warn"
+
+
+def test_the_inno_step_does_not_gate_on_one_hardcoded_path():
+    """Chocolatey puts Inno Setup 6 in "Program Files (x86)"; a step that tests only "Program
+    Files" fails on a clean runner. `build_installer.py` already searches both locations."""
+    run = next(step["run"] for step in _steps(_workflow()) if "Inno Setup" in str(step.get("name", "")))
+    assert not re.search(r"Test-Path\s+\"?C:\\Program Files(?: \(x86\))?\\Inno Setup", run), run
+    assert "Get-Command iscc" in run, "the check has to be on PATH, which choco adds"
+    assert "choco install innosetup" in run and "6.7.1" in run, "Inno 6.3+ is pinned for x64compatible"
 
 
 def test_release_workflow_passes_the_signing_secrets_and_nothing_else():
-    code = _workflow_code()
-    # The names build_installer.py reads; an empty secret there means an unsigned build.
-    assert re.search(r"ATE_SIGN_CERT:\s*\$\{\{\s*secrets\.ATE_SIGN_CERT\s*\}\}", code)
-    assert re.search(r"ATE_SIGN_PASSWORD:\s*\$\{\{\s*secrets\.ATE_SIGN_PASSWORD\s*\}\}", code)
+    doc = _workflow()
+    compile_step = next(step for step in _steps(doc) if step.get("run", "").strip().startswith("python packaging/windows/build_installer.py"))
+    env = compile_step.get("env") or {}
+    assert env.get("ATE_SIGN_CERT") == "${{ secrets.ATE_SIGN_CERT }}"
+    assert env.get("ATE_SIGN_PASSWORD") == "${{ secrets.ATE_SIGN_PASSWORD }}"
     for line in _workflow_text().splitlines():
         if "secrets." not in line:
             continue
         assert re.match(r"^\s*[A-Z_]+:\s*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}\s*$", line), f"secret used outside an env assignment: {line!r}"
-
-
-def test_release_workflow_leaves_room_for_the_linux_jobs():
-    assert "28c" in _workflow_text(), "the Linux artifacts (28c) need a named place in this workflow"
+    assert "environment" not in _job(doc), "the note says to use a protected environment; the job must not claim one until it exists"
 
 
 # --- the smoke script: its assertions against a fake registry and a fake installer ------------
@@ -796,20 +870,32 @@ def test_smoke_refuses_to_run_where_setup_exe_cannot_run(tmp_path, capsys):
     assert "release CI" in capsys.readouterr().err
 
 
-def test_release_workflow_parses_as_yaml_when_yaml_is_available():
-    try:
-        import yaml
-    except ImportError:
-        pytest.skip("PyYAML is not installed; the text checks above still ran")
-    doc = yaml.safe_load(_workflow_text())
-    on = doc[True] if True in doc else doc["on"]
-    assert set(on) == {"push", "workflow_dispatch"}, on
-    assert set(on["push"]) == {"tags"}, "push must be restricted to tags"
-    job = doc["jobs"]["windows-installer"]
-    assert job["runs-on"] == "windows-latest"
-    steps = job["steps"]
-    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
-    assert checkout["with"]["fetch-depth"] == 0
-    setup = next(s for s in steps if "setup-python" in str(s.get("uses", "")))
-    assert setup["with"]["python-version"] == "3.14"
-    assert not any("run" in s and "secrets." in s["run"] for s in steps), "a secret must not reach a run line"
+def test_no_secret_reaches_a_run_line():
+    """A secret interpolated into a shell command ends up in the process list and the CI log."""
+    for step in _steps(_workflow()):
+        assert "secrets." not in step.get("run", ""), f"secret in a run line: {step['run']!r}"
+
+
+# --- the two build/wrapper settings the release job depends on -----------------------------------
+
+
+def test_the_pyinstaller_build_gives_a_windows_runner_long_enough():
+    """A PyInstaller onedir build with QtWebEngine on a Windows runner takes far more than 10
+    minutes; the 600 s floor killed the release job while the build was still running."""
+    spec = importlib.util.spec_from_file_location("build_pyinstaller", PYINSTALLER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    timeout = inspect.signature(module._run).parameters["timeout"].default
+    assert timeout >= 1800, f"the build timeout is {timeout} s; a frozen QtWebEngine bundle needs at least 1800"
+
+
+def test_ci_workflow_job_name_uses_a_real_expression():
+    """`${matrix.python-version}` is literal text: GitHub Actions expressions are `${{ ... }}`.
+
+    A job named `pytest (ubuntu-latest, Python ${matrix.python-version})` is the same name for
+    every entry in the matrix, so the two Python versions are indistinguishable in the log."""
+    doc = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    name = doc["jobs"]["test"]["name"]
+    assert "${matrix.python-version}" not in name, f"unexpanded expression in the job name: {name!r}"
+    assert "{{ matrix.python-version }}" in name and "{{ matrix.os }}" in name, name
+    assert "offscreen" in str(doc["jobs"]["test"]["env"]["QT_QPA_PLATFORM"]), "CI needs the offscreen platform too"

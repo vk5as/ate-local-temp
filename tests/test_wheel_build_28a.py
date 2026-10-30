@@ -50,8 +50,9 @@ EXPECTED_DEPS = {
     "pyserial": "3.3",
 }
 
-# The build tooling a fresh venv does not have and this file and the docs need.
-BUILD_TOOLING = {"setuptools", "build"}
+# The build tooling a fresh venv does not have and this file and the docs need. PyYAML is in the
+# same boat: tests/test_release_ci_27c.py parses the release workflow instead of grepping it.
+BUILD_TOOLING = {"setuptools", "build", "pyyaml"}
 
 
 def _runtime_resources() -> set[str]:
