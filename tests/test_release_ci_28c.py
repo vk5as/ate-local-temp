@@ -825,6 +825,13 @@ def test_the_smoke_passes_the_sandbox_flag_because_the_container_is_root(tmp_pat
     assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
 
 
+def test_the_pdf_probe_tells_its_root_helper_to_render_unsandboxed() -> None:
+    """The probe container is root too, so its bare `ate _pdf` call would refuse (packet 30d)."""
+    source = DOCKER_SMOKE.read_text(encoding="utf-8")
+    assert "--paper A4 --unsandboxed" in source, "the probe would run a privileged _pdf with no decision"
+    assert "apt-get install -y -qq tar poppler-utils" in source
+
+
 def test_an_ate_that_will_not_start_is_reported(tmp_path: Path) -> None:
     runner, station = _container(tmp_path, version_exit=127)
     with pytest.raises(smoke.SmokeError, match="ate is not runnable"):

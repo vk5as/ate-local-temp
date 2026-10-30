@@ -144,10 +144,12 @@ def pdf_probe(kind: str, scratch: Path) -> str:
         spec.loader.exec_module(packaging)
         _exec(container, "apt-get install -y -qq python3 python3-venv pipx " + " ".join(packaging.WHEEL_SYSTEM_LIBS))
         _exec(container, "pipx install /work/artifacts/ate-*.whl")
+    # Packet 30d: this container runs as root, so `ate _pdf` refuses unless the parent's decision is
+    # handed to it as an argument.
     result = _exec(
         container,
         "printf '<html><body><h1>ATE PDF probe</h1><p>Text must survive the render.</p></body></html>' "
-        f"> /tmp/ate-pdf.html && {_ate_path(kind)} _pdf /tmp/ate-pdf.html /tmp/ate-pdf.pdf --paper A4 && "
+        f"> /tmp/ate-pdf.html && {_ate_path(kind)} _pdf /tmp/ate-pdf.html /tmp/ate-pdf.pdf --paper A4 --unsandboxed && "
         "stat -c 'probe pdf %s bytes' /tmp/ate-pdf.pdf && pdftotext /tmp/ate-pdf.pdf - | sed -n '1,5p'",
         timeout=600,
         check=False,
