@@ -722,3 +722,22 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - Real Docker runs passed for deb, tar and wheel, with PDF text read back (66 KB). Bundles were built on 3.13.
 - Light review: collection 1206 → 1270, none lost. Three runs: 1266 passed; 1 failed `test_run_engine.py::test_whole_run_abort_between_steps_...`; 1 failed `test_report_21a.py::test_file_naming_and_content`. Both are pre-existing races in files 28c doesn't touch → moved into 30d. Merged on that basis.
 - Still never run: the workflow itself, the 3.14 build, everything Windows.
+
+## 30d — Choice before an unsandboxed PDF (merged 2026-10-31)
+- User decision (option 3): no silent sandbox-off. An elevated user chooses before each PDF; `--allow-unsandboxed-pdf` presets Yes for headless use; ordinary users are unaffected.
+- Implementer (Strata, high, 1 compaction; resumed once after ending on background runs). Flakes fixed: 180 clean runs.
+- Reviews: Strata 2 must-fix, Haiku 3 must-fix (union 5):
+  - an inherited `QTWEBENGINE_DISABLE_SANDBOX`/`--no-sandbox` still reached the helper;
+  - HTML-before-question was untested;
+  - FINISHED waited for the answer;
+  - `_selftest --run` named an HTML file it deleted;
+  - **a frozen bundle could ship with no Qt in it.**
+- Rework (Strata, high, 1 compaction).
+  - **Root cause of the empty bundle:** PyInstaller's PyQt6 hooks collect nothing when PyQt6 can't be imported at build time, and still exit 0. `verify_bundle()` now runs on every build, and `build_linux.py` refuses a bad bundle.
+  - Also found: the xcb plugin needs 6 more Debian libs (headless tests never load it); added to Depends. GUI as root stays up on Xvfb.
+  - FINISHED is emitted first, then the report and question via a zero timer; inherited settings are stripped with a WARNING; the dialog wording is clearer, with a warning icon.
+- Light review: 1309 passed + 4 skipped ×3 (~214 s). Collection 1270 → 1313. 4 27c tests removed on purpose: they asserted the old automatic sandbox-off, and 30d replaces them. Gated build + Docker tests: 3 passed per the implementer; not re-run by me.
+- Leftovers:
+  - The Run screen has no report status; a skipped PDF shows only in the app log.
+  - Suite time is ~214 s (was ~80 s at 10a).
+  - Still never run: `release.yml`, the 3.14 build, everything Windows.
