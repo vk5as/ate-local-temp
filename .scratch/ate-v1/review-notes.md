@@ -666,3 +666,24 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Light review: 1109 passed + 3 skipped ×3 (~168 s); collection 1091 → 1112, none lost. Real-build test passed per the implementer (186 s); not re-run by me.
 - Artifact sizes: .tar.gz 197 MB, .deb 146 MB.
 - Leftovers: lintian isn't installed here (28c could run it). No `Homepage` in the control file (the repo has no project URL). Purge leaves the `ate` group (spec-consistent).
+
+## 27b — Inno Setup installer (merged 2026-10-30)
+- **Written, never compiled or run**: no Inno Setup or Wine here. 27c's Windows runner is the first real test.
+- Implementer (Strata, high, 0 compactions): `packaging/windows/ate.iss`, `build_installer.py`, 17 text/dry-run tests.
+- Reviews (a desk check): Haiku 3 must-fix, Strata 2 must-fix (union 5):
+  - `NeedsAddPath('{app}')` was unexpanded, so PATH grew on every upgrade;
+  - the PATH-removal logic was unfalsifiable (an inverted comparison still passed);
+  - `--output-dir` instead of ISCC's `/O`;
+  - relative paths resolved against the script folder;
+  - `RegWriteStringValue` vs the expand type (the reviewers disagreed; the explicit writer is used).
+- Rework (Strata, high, 0 compactions):
+  - all 5 fixed;
+  - a Python mirror of the PATH logic plus pinned Pascal lines (the mirror doesn't run the Pascal);
+  - `GetCustomSetupExitCode`;
+  - `CloseApplications=yes`;
+  - `_is_root()` works on Windows (`IsUserAnAdmin`), so ACLs get applied;
+  - comment-stripped test parser;
+  - password redaction in iscc output.
+- Orchestrator tiny fix after the merge: `;` comments in `[Code]` → `//`.
+- Light review: 1144 passed + 3 skipped ×3 (~166 s); collection 1112 → 1147, none lost.
+- Leftovers: `ate.exe` is `console=True`, so the Start-menu shortcut opens a console beside the GUI.
