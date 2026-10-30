@@ -115,11 +115,11 @@ Name: "{group}\ATE"; Filename: "{app}\ate.exe"
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 
 [Code]
-; The machine PATH is one registry value. Setup appends {app} to it above; the
-; uninstaller below removes exactly that one entry and leaves everything else alone.
-;
-; PATH is compared entry by entry, never as a substring, and a trailing backslash on an
-; entry means the same directory: {app} never ends in one, but somebody's PATH can.
+// The machine PATH is one registry value. Setup appends {app} to it above; the
+// uninstaller below removes exactly that one entry and leaves everything else alone.
+// 
+// PATH is compared entry by entry, never as a substring, and a trailing backslash on an
+// entry means the same directory: {app} never ends in one, but somebody's PATH can.
 
 var
   SetupExitCode: Integer;
@@ -235,10 +235,10 @@ begin
     RemoveOwnPathFromMachinePath;
 end;
 
-; [Run] entries ignore exit codes, so `ate setup` is run with Exec and its result is
-; checked: an installer that says "installed" while the Station is not prepared is worse
-; than one that says what is missing. The failure is also recorded in SetupExitCode so a
-; silent install exits non-zero, not 0.
+// [Run] entries ignore exit codes, so `ate setup` is run with Exec and its result is
+// checked: an installer that says "installed" while the Station is not prepared is worse
+// than one that says what is missing. The failure is also recorded in SetupExitCode so a
+// silent install exits non-zero, not 0.
 procedure RunStationSetup;
 var
   ResultCode: Integer;
