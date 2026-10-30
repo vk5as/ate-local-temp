@@ -165,6 +165,77 @@ def test_the_ticked_box_claims_only_what_was_built_here() -> None:
     assert not any(line.startswith("- [x]") and "build_pyinstaller" in line for line in ci.splitlines()), "the line belongs in 27c's body, not a checkbox"
 
 
+def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
+    """The logged bundle size is the bytes it holds, not the bytes behind every link.
+
+    ``_size`` must not follow a symlink and must not count the same inode twice: with ``stat()``
+    this temporary tree read as 2 KB in three files, while it is one 1 KB file.
+    """
+    build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
+    real = tmp_path / "real.bin"
+    real.write_bytes(b"x" * 1024)
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "link.bin").symlink_to(real)
+    try:
+        (nested / "hard.bin").hardlink_to(real)
+    except OSError:
+        pass  # a filesystem with no hard links: the symlink alone is the point
+    total, files = build._size(tmp_path)
+    assert total == 1024 and files == 1, f"counted {files} entries and {total} bytes for one 1 KB file"
+
+
+def test_the_frozen_helper_search_covers_both_platform_layouts(tmp_path: Path) -> None:
+    """PyQt6 keeps QtWebEngineProcess in Qt6/libexec on Linux and Qt6/bin on Windows.
+
+    The entry point points Qt at the bundled helper, so it has to find it in the layout the hooks
+    collect into on the platform the bundle is built for — and in any other layout a Qt build
+    happens to use.
+    """
+    entry = _load_module(ENTRY, "ate_entry")
+    for index, rel in enumerate(
+        (
+            ("PyQt6", "Qt6", "bin", "QtWebEngineProcess.exe"),  # PyQt6 wheel, Windows
+            ("PyQt6", "Qt6", "libexec", "QtWebEngineProcess"),  # PyQt6 wheel, Linux
+            ("PyQt6", "Qt", "libexec", "QtWebEngineProcess"),  # PyQt6 before the Qt6 layout
+        )
+    ):
+        base = tmp_path / f"bundle{index}"
+        helper = base.joinpath(*rel)
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_bytes(b"ELF")
+        found = entry._webengine_process(str(base), rel[-1])
+        assert found == str(helper), f"the helper at {helper} was not found"
+
+    # Anywhere else the helper is: still found.
+    odd = tmp_path / "odd" / "deep" / "nest"
+    odd.mkdir(parents=True)
+    helper = odd / "QtWebEngineProcess"
+    helper.write_bytes(b"ELF")
+    assert entry._webengine_process(str(tmp_path / "odd"), "QtWebEngineProcess") == str(helper)
+    assert entry._webengine_process(str(tmp_path / "nothing"), "QtWebEngineProcess") is None
+
+
+def test_the_gpu_flags_do_not_replace_the_callers(monkeypatch) -> None:
+    """``--no-gpu`` is added to Chromium's flags, never written over them."""
+    entry = _load_module(ENTRY, "ate_entry")
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-process-per-site")
+    flags = entry._chromium_flags().split()
+    assert "--disable-process-per-site" in flags, f"the caller's flag was dropped: {flags}"
+    assert "--no-gpu" in flags and "--disable-gpu" in flags, flags
+    assert flags.count("--no-gpu") == 1, f"flags repeated: {flags}"
+
+
+def test_the_build_venv_interpreter_is_the_platform_one(monkeypatch, tmp_path: Path) -> None:
+    """A Windows venv keeps its interpreter in ``Scripts``, not ``bin``."""
+    build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
+    venv = tmp_path / "venv"
+    monkeypatch.setattr(os, "name", "nt")
+    assert build._python_in(venv) == venv / "Scripts" / "python.exe"
+    monkeypatch.setattr(os, "name", "posix")
+    assert build._python_in(venv) == venv / "bin" / "python"
+
+
 def test_selftest_run_executes_a_schedule_and_writes_both_reports(capsys) -> None:
     """``_selftest --run`` runs a built-in Test Schedule and proves both reports were written.
 

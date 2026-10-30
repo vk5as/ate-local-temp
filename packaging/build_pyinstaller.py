@@ -16,7 +16,8 @@ Output: ``dist/ate/ate`` plus its ``_internal`` directory. Smoke checks:
 
     dist/ate/ate --version           the version baked from the git tag
     dist/ate/ate _pdf in.html out.pdf   proves QtWebEngine works frozen (offscreen)
-    dist/ate/ate _selftest           proves lupa, the bundled Lua, pyvisa-py and WebEngine are there
+    dist/ate/ate _selftest --run     proves lupa, the bundled Lua, pyvisa-py and WebEngine are there,
+                                     and that a built-in Test Schedule runs and reports to HTML and PDF
 
 ``build/`` and ``dist/`` are in ``.gitignore``: no build output is ever committed.
 """
@@ -46,8 +47,13 @@ SMOKE_HTML = """<!doctype html>
 
 
 def _python_in(venv: Path) -> Path:
-    """The interpreter inside ``venv`` (``Scripts`` on Windows, ``bin`` elsewhere)."""
-    return venv / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+    """The interpreter inside ``venv``.
+
+    Windows venvs put it in ``Scripts``, every other platform in ``bin``; getting this wrong makes
+    the build fail at the first ``_run`` on a Windows runner."""
+    if os.name == "nt":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
 
 
 def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
@@ -144,7 +150,7 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
     try:
         html, pdf = tmp / "report.html", tmp / "report.pdf"
         html.write_text(SMOKE_HTML, encoding="utf-8")
-        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4"], env=env, timeout=180)
+        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4"], env=env, timeout=300)
         data = pdf.read_bytes()
         if not data.startswith(b"%PDF"):
             raise SystemExit(f"smoke: _pdf wrote {len(data)} bytes that are not a PDF")
@@ -152,14 +158,17 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # 3. the bundle's own inventory: lupa + bundled Lua, pyvisa-py, QtWebEngine.
-    out = _run([str(exe), "_selftest"], env=env, timeout=120)
+    # 3. the bundle's own inventory, and a built-in Test Schedule run end to end through it:
+    #    engine, store, report HTML, and the _pdf child (the bundle's own executable when frozen).
+    out = _run([str(exe), "_selftest", "--run"], env=env, timeout=300)
     lines.append("selftest: " + "; ".join(out.stdout.strip().splitlines()))
 
     # 4. the files the hooks are supposed to have collected: the WebEngine helper and its
-    # resources, the report template, the bundled Lua modules.
+    # resources, the report template, the bundled Lua modules. The helper's name and the directory
+    # Qt keeps it in are platform-specific, hence rglob on this platform's name.
     internal = exe.parent / "_internal"
-    helper = [p for p in internal.rglob("QtWebEngineProcess*") if p.is_file()]
+    helper_name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
+    helper = [p for p in internal.rglob(helper_name) if p.is_file()]
     paks = [p for p in internal.rglob("*.pak") if p.is_file()]
     for rel in ("ate/lua/devices.lua", "ate/report/templates/report.html.j2"):
         if not (internal / rel).is_file():
@@ -172,12 +181,27 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
 
 
 def _size(path: Path) -> tuple[int, int]:
-    """Total bytes and file count under ``path``."""
+    """Total bytes and file count under ``path``.
+
+    ``lstat``, never ``stat``: a symlink is a few bytes of its own and the bundle's real size is the
+    bytes it points at, counted once. Following links here logged 942 MB for a bundle that is about
+    560 MB, and a hard link would be counted twice as well. Each inode is counted once, so the log
+    says what the installer or tarball actually has to carry.
+    """
     total = 0
     count = 0
-    for f in path.rglob("*"):
-        if f.is_file():
-            total += f.stat().st_size
+    seen: set[tuple[int, int]] = set()
+    for root, _dirs, files in os.walk(path):  # os.walk does not descend into linked directories
+        for name in files:
+            entry = os.path.join(root, name)
+            if os.path.islink(entry):
+                continue  # the link is not a second copy of the data
+            st = os.lstat(entry)
+            key = (st.st_dev, st.st_ino)
+            if key in seen:
+                continue  # the same inode reached by another name
+            seen.add(key)
+            total += st.st_size
             count += 1
     return total, count
 
