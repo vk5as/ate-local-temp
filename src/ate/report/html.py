@@ -505,11 +505,20 @@ def _run_log_groups(store: RunStore, run_uuid: str, offset: str) -> list[dict]:
     return out
 
 
-def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> dict:
+def _report_context(
+    store: RunStore,
+    run_uuid: str,
+    config: Config,
+    *,
+    include_run_log: bool = True,
+    generated_at: Optional[str] = None,
+) -> dict:
     """Everything the report template needs for one run, as its render context.
 
     Split out from :func:`render_report` so a caller (or a test) can render the same context with a
-    different Jinja environment — for example with autoescape off — and compare the byte output."""
+    different Jinja environment — for example with autoescape off — and compare the byte output.
+    ``generated_at`` freezes the footer's "Report generated ..." stamp (packet 30c): two renders
+    of the same run are then byte-identical even if the wall clock crosses a second between them."""
     row = store.get_test_run(run_uuid)
     if row is None:
         raise ValueError(f"no test run recorded for {run_uuid!r}")
@@ -580,7 +589,7 @@ def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_r
         "run_ftr": _footer_text(
             run_uuid,
             row.get("ate_version"),
-            _local_time(_dt.datetime.now(_dt.timezone.utc).isoformat(), offset) or "",
+            _local_time(generated_at or _dt.datetime.now(_dt.timezone.utc).isoformat(), offset) or "",
         ),
         # Cover — document fields (recorded on test_run by packet 21a).
         "doc_title": row.get("doc_title") or None,
@@ -649,14 +658,24 @@ def _render(context: dict) -> str:
     return env.get_template("report.html.j2").render(**context)
 
 
-def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run_log: bool = True) -> str:
+def render_report(
+    store: RunStore,
+    run_uuid: str,
+    config: Config,
+    *,
+    include_run_log: bool = True,
+    generated_at: Optional[str] = None,
+) -> str:
     """Render the self-contained HTML Test Report for a finished run.
 
     Raises :class:`ValueError` if no run is recorded for ``run_uuid`` — callers that regenerate
     from History only ever render finished runs. Every context value is autoescaped unless it is a
     :class:`markupsafe.Markup`, so the template's deliberate markup (logo data URI, print margins)
-    stays raw while Operator-entered text cannot become markup."""
-    return _render(_report_context(store, run_uuid, config, include_run_log=include_run_log))
+    stays raw while Operator-entered text cannot become markup. ``generated_at`` freezes the footer
+    stamp for byte-deterministic renders (packet 30c)."""
+    return _render(
+        _report_context(store, run_uuid, config, include_run_log=include_run_log, generated_at=generated_at)
+    )
 
 
 def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optional[dict]]:
