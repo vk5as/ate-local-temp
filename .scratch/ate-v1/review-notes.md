@@ -599,3 +599,28 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Leftovers:
   - `test_run.schedule_file` is never written by RunEngine (always NULL; the Cover reads `schedule_instance` seq 0 instead).
   - Parent 29 is fully covered by 29a–29e.
+
+## 27a — PyInstaller build (merged 2026-10-30)
+- User decision: build with CPython 3.13 locally (the only Python here); CI builds 3.14. The recipe is interpreter-agnostic.
+- Implementer (Strata, high, 0 compactions; the first turn ended while a build ran in the background, so I resumed it):
+  - `packaging/pyinstaller/ate.spec`, `ate_entry.py`, `build_pyinstaller.py --smoke`;
+  - a hidden `ate _selftest`;
+  - `ate/version.txt` baked at build time;
+  - a gated build test (`ATE_BUILD_TESTS=1`).
+- Reviews:
+  - Haiku: 1 must-fix — the checkbox claimed 3.14 was "built by CI", but no CI job does a frozen build.
+  - Haiku also found three pre-existing first-run bugs → **new packet 30c**: `<data>` never resolved; `ate db` ignores `--config`; launch-refusal paths drop the QApplication → abort 134. 27c now waits on 30c.
+  - **The Strata review failed twice** (a malformed empty tool call ended the turn both times); no Strata review exists for 27a.
+- Rework (Strata, high, 0 compactions):
+  - honest checkbox (3.13 recipe proven; 3.14 frozen build in 27c);
+  - `_size` counts inodes once (942 → 579 MB true);
+  - Windows layout for QtWebEngineProcess.exe;
+  - `--no-gpu` appended, not clobbered;
+  - `_selftest --run`: a frozen end-to-end run with a real QWebEngine PDF (65 KB);
+  - Qt binding excludes: 579 → 490 MB, 2688 → 448 files.
+- Light review: 1055 passed + 2 skipped ×3 (~159 s); `ATE_BUILD_TESTS=1 pytest -m build` 1 passed (37 s); collection 1043 → 1057, none lost; no build output left.
+- Leftovers / Windows unverified:
+  - QTWEBENGINEPROCESS_PATH on Windows;
+  - whether the excluded QML data is needed by WebEngine on Windows;
+  - the ~76 MB debug .pak on Windows.
+  - Flake: `test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e's footer timestamp. Folded into 30c.

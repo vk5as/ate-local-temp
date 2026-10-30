@@ -17,3 +17,4 @@
 - [ ] Tests: `ate setup --root <tmp>`, then `ate --config <tmp>/config/config.json db status` prints the schema version; then a GUI launch (`exec_=False`) succeeds with no literal `<data>` directory created. Each refusal (missing, older or newer database; invalid config) shows its message and exits 1, run in a subprocess so an abort would fail the test.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/` (`app-config-format.md`, `packaging.md`); the spec is `.scratch/ate-v1/spec.md` (CLI ~220, Config ~190). Keep to this packet's checkboxes.
+- [ ] (added at the 27a merge) `tests/test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e added the "Report generated <local time>" footer: make the comparison exclude or freeze that timestamp so it is deterministic.
