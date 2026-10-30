@@ -21,7 +21,7 @@ import pytest
 from PyQt6.QtCore import QObject, QCoreApplication, Qt
 from PyQt6.QtWidgets import QMessageBox
 
-from ate.app import _pdf_sandbox_box, _pdf_sandbox_dialog
+from ate.app import _pdf_sandbox_box, _pdf_sandbox_dialog, launch
 from ate.cli import main
 from ate.config import read_config
 from ate.history.session import HistorySession
@@ -175,6 +175,40 @@ def test_a_dismissed_dialog_means_no(qapp, monkeypatch):
     assert _pdf_sandbox_box().defaultButton().text() == "Skip PDF"
 
 
+def test_launch_wires_the_flag_and_the_dialog_to_the_session_and_history(tmp_path, monkeypatch, qapp):
+    """The decision built at launch is the one the run session and History ask (packet 30d)."""
+    _as_root(monkeypatch)
+    env = write_ate_env(tmp_path)
+    main(["--config", str(env["config"]), "db", "migrate", "--yes"])
+    asked: list[bool] = []
+
+    outcome = launch(
+        ["--config", str(env["config"])],
+        exec_=False,
+        prompt=lambda _path: True,
+        alert=lambda _msg: None,
+        pdf_dialog=lambda: asked.append(True) or False,
+    )
+    assert outcome.code == 0, outcome
+    window = outcome.window
+    assert window.pdf_choice() == PDF_SKIPPED, "the window does not carry the launch decision"
+    assert window.session._pdf_choice() == PDF_SKIPPED, "the run session was not given the decision"
+    assert window.history_session.pdf_choice() == PDF_SKIPPED, "History was not given the decision"
+    assert len(asked) == 3, "each PDF asks its own question, and the flag was not enough to preset it"
+    window.session.close()
+
+    asked.clear()
+    outcome = launch(
+        ["--config", str(env["config"]), "--allow-unsandboxed-pdf"],
+        exec_=False,
+        prompt=lambda _path: True,
+        pdf_dialog=lambda: asked.append(True) or True,
+    )
+    assert outcome.window.pdf_choice() == PDF_UNSANDBOXED
+    assert asked == [], "the flag presets Yes: no dialog is opened"
+    outcome.window.session.close()
+
+
 def test_the_choice_is_not_read_from_the_environment_by_the_session(monkeypatch):
     """The session and History are given the decision; they do not sniff privilege themselves."""
     _as_root(monkeypatch)
@@ -288,7 +322,7 @@ def test_the_skip_is_written_to_the_application_log(tmp_path, monkeypatch, qapp)
     _pump_events(qapp, lambda: True, 0.5)
     app_log.close()
     text = "\n".join(p.read_text(encoding="utf-8") for p in log_dir.glob("**/*") if p.is_file())
-    assert "skipped" in text.lower() and "sandbox" in text.lower(), text[:400]
+    assert any("skipped" in line.lower() and "sandbox" in line.lower() and session.run_uuid in line for line in text.splitlines()), text[:400]
     session.close()
 
 
@@ -391,7 +425,8 @@ def test_selftest_run_as_root_without_the_flag_fails_and_says_the_flag(capsys, m
     captured = capsys.readouterr()
     out = captured.out + captured.err
     assert code != 0, "a privileged selftest passed without rendering a PDF"
-    assert "skipped" in out.lower() and "--allow-unsandboxed-pdf" in out, out
+    assert "skipped" in out.lower() and "no --allow-unsandboxed-pdf was given" in out, out
+    assert "_selftest --run" in out, "the failure must say how to rerun it"
 
 
 def test_selftest_run_as_root_with_the_flag_before_the_subcommand_renders_a_pdf(capsys, monkeypatch):

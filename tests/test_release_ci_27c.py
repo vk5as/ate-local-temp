@@ -1032,3 +1032,22 @@ def test_the_frozen_entry_point_never_disables_the_sandbox_by_itself(monkeypatch
     entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--unsandboxed"])
     assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ
     assert "--no-sandbox" not in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+
+def test_the_smoke_passes_the_sandbox_flag_because_the_installer_runs_elevated(tmp_path):
+    """Packet 30d: Setup runs elevated, so the selftest it runs has no working Chromium sandbox.
+
+    Without `--allow-unsandboxed-pdf` the selftest reports its PDF as skipped and exits non-zero,
+    which stops the smoke run. A script that forgets the flag fails here, not silently."""
+    _checks, _registry, runner = _smoke(tmp_path)
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_a_selftest_without_the_flag_is_refused_by_an_elevated_runner(tmp_path):
+    """What the fake models, and why the check above matters: an elevated runner asked for a PDF
+    with no decision returns non-zero and names the flag."""
+    app = tmp_path / "ATE"
+    registry = FakeRegistry(value=BASE_PATH + ";" + str(app))
+    runner = FakeInstaller(registry, app, tmp_path / "ProgramData" / "ATE")
+    result = runner.run([str(app / "ate.exe"), "_selftest", "--run"])
+    assert result.returncode != 0 and "--allow-unsandboxed-pdf" in result.output(), result.output()
