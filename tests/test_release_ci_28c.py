@@ -303,14 +303,27 @@ def _stub_ate() -> str:
 
 
 def _fake_bundle(root: Path) -> Path:
-    """A bundle shaped like `dist/ate`: the executable plus an `_internal` directory."""
+    """A bundle shaped like `dist/ate`: the executable, an `_internal` directory, and the parts
+    `packaging/build_pyinstaller.py --verify` requires, so packaging has something to accept."""
     bundle = root / "dist" / "ate"
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
+    internal = bundle / "_internal"
+    (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "ate" / "lua").mkdir(parents=True)
+    (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
     exe.write_text(_stub_ate(), encoding="utf-8")
     exe.chmod(0o755)
-    (bundle / "_internal" / "base_library.zip").write_text("not really a zip", encoding="utf-8")
-    (bundle / "_internal" / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
+    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8")
     return bundle
 
 

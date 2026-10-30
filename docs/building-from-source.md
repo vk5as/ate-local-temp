@@ -284,21 +284,27 @@ refused rather than packaged as `ate__amd64.deb`.
 
 The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, freetype, fontconfig
 and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is the
-system glibc, GL/EGL and a font. The list is not derived from a manifest: `packaging/linux/docker_smoke.py`
-builds the bundle in a `debian:stable` container, installs the `.deb` there with `apt-get`, and runs
-`ate _selftest --run`. With these five packages the run passes. Remove `libgl1` or `libegl1` and the
-selftest dies with `libGL.so.1: cannot open shared object file`; remove the two font packages and the
-report renders as a 1.7 KB PDF with no text in it, which `ate.report.pdf.pdf_has_text` catches.
+system glibc, GL/EGL, the xcb cursor library the X platform plugin needs, and a font. The list is not
+derived from a manifest: `packaging/linux/docker_smoke.py` builds the bundle in a `debian:stable`
+container, installs the `.deb` there with `apt-get`, and runs `ate _selftest --run`. With these
+packages the run passes. Remove `libgl1` or `libegl1` and the selftest dies with `libGL.so.1: cannot
+open shared object file`; remove the two font packages and the report renders as a 1.7 KB PDF with no
+text in it, which `ate.report.pdf.pdf_has_text` catches; and run the same bundle's GUI under
+`xvfb-run` without `libxcb-cursor0` and Qt aborts with "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is
+needed to load the Qt xcb platform plugin" — headless renders never notice, a Station with a screen
+does.
 
 | Depends | Why |
 | --- | --- |
 | `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
 | `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
+| `libxcb-cursor0` | libxcb-cursor.so.0: the xcb platform plugin refuses to load without it, so the GUI does not start |
 | `fontconfig`, `fonts-dejavu-core` | a stock Debian image ships no fonts at all, and QtWebEngine then writes a report PDF with no glyphs |
 
 `libdrm2`, `libxcb1`, `libxcb-dri3-0` and `libwayland-client0` are not listed because apt installs them
-as dependencies of `libgl1`/`libegl1` anyway. The Wayland and extra xcb platform plugins, GTK and CUPS
-are linked against but never opened headless, so they are not depended on either.
+as dependencies of `libgl1`/`libegl1` anyway. The Wayland and the remaining extra xcb platform plugins,
+GTK and CUPS are linked against but never opened: the GUI runs on X, and the render of a Test Report
+is a headless offscreen process.
 
 ### Testing seams
 

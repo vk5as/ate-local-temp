@@ -172,7 +172,9 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     environment; in a container without libGL/libglib the import fails, the hooks are skipped, and
     the bundle ships `QtWebEngineProcess` and its .pak files while `_pdf` dies with "Could not
     find the Qt platform plugin". Checking the helper alone is not enough: the smoke check has to
-    fail on the missing plugin, and pass when one is present.
+    fail on the missing plugin, and pass when one is present. The same check wants the WebEngine
+    resources it is easy to ship without: `icudtl.dat` and the `.pak` files, since the renderer cannot
+    build a page without them.
     """
     bundle = tmp_path / "ate"
     bundle.mkdir()
@@ -194,6 +196,7 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_bytes(b"ELF")
     (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
     (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_bytes(b"icu")
 
     build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
     with pytest.raises(SystemExit) as caught:

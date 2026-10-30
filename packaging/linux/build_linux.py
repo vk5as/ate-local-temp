@@ -11,11 +11,15 @@ the same on any CPython and needs nothing but `dpkg-deb` for the Debian package:
     ate-<version>-linux-x86_64.tar.gz   `ate/` (the bundle) + `install.sh` next to it
     ate_<version>_amd64.deb             the bundle under /opt/ate, /usr/bin/ate linking to it
 
-The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, but not
-the libraries those are *linked* against: the system libc, GL/EGL, and a font, because QtWebEngine
-renders the Test Report through the system's fontconfig and fonts and writes a PDF with no text at
-all when there is none. That is the `Depends` list below, established by running the built bundle in
-a clean `debian:stable` container (packaging/linux/docker_smoke.py), not by reading a manifest.
+The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, and the
+X and GL support libraries those are linked against (libX11, libxcb, libglib, libdbus, libxkbcommon,
+ICU, freetype, fontconfig) as well — they are collected from the machine the bundle was built on,
+and `packaging/build_pyinstaller.py` now refuses a bundle where that collection did not happen. What
+the bundle cannot carry is the system libc, GL/EGL, the xcb cursor library the X platform plugin
+needs, and a font, because QtWebEngine renders the Test Report through the system's fontconfig and
+fonts and writes a PDF with no text at all when there is none. That is the `Depends` list below,
+established by running the built bundle in a clean `debian:stable` container
+(packaging/linux/docker_smoke.py), not by reading a manifest.
 
 The wheel is a different animal: it uses the container's own CPython and PyPI's PyQt6, so it needs
 more system libraries than the bundle does. `WHEEL_SYSTEM_LIBS` is that list, kept here so the
@@ -41,25 +45,40 @@ INSTALL_SH = HERE / "install.sh"
 MAINTAINER = "VK5AS <vk5as.com@gmail.com>"
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
-# What the bundle links against and cannot ship: glibc, GL/EGL, and a font. Everything else Qt is
-# linked against (libX11, libXext, the libxcb family, libXcomposite, libXrandr, libXtst, libglib,
-# libdbus, libxkbcommon, libasound, libnss, ICU, freetype, fontconfig) is inside `_internal`, which
-# is why the package needs no Debian Python or Qt packages at all.
+# What the bundle links against and cannot ship: glibc, GL/EGL, the xcb cursor library, and a font.
+# The rest of what Qt is linked against (libX11, libXext, the libxcb family, libXcomposite,
+# libXrandr, libXtst, libglib, libdbus, libxkbcommon, libasound, libnss, ICU, freetype, fontconfig)
+# is inside `_internal` — collected from the machine the bundle was built on — which is why the
+# package needs no Debian Python or Qt packages at all.
+#
+# That claim is only true of a bundle whose hooks actually ran. On a machine without libGL or
+# libglib, PyInstaller's PyQt6 hooks import nothing, collect nothing, and still write an executable:
+# such a bundle (99 files, 356 MB, built in a bare debian:stable container on 2026-10-31) needs
+# libglib, libdbus, libxkbcommon, libxkbfile, libasound, libXtst, libXrandr, libXfixes, libXdamage
+# and libXcomposite from the system just to import QtGui, and has no platform plugin at all.
+# `verify_bundle` in packaging/build_pyinstaller.py refuses that bundle, so this list stays short.
 #
 # This list is not a guess: `packaging/linux/docker_smoke.py` builds the bundle in a debian:stable
-# container, installs the .deb there with apt-get, and runs `ate _selftest --run`. With these five
-# packages the run passes; drop libgl1 or libegl1 and the selftest dies with
-# "libGL.so.1: cannot open shared object file". libdrm, libxcb and libxkbcommon come in as libegl1's
-# and libgl1's own dependencies, so naming them here would only duplicate apt.
+# container, installs the .deb there with apt-get, and runs `ate _selftest --run`. With these
+# packages the run passes (a 65 KB report PDF that pdftotext reads); drop libgl1 or libegl1 and the
+# selftest dies with "libGL.so.1: cannot open shared object file". libdrm, libxcb and libxkbcommon
+# come in as libegl1's and libgl1's own dependencies, so naming them here would only duplicate apt.
 #
-# fontconfig and fonts-dejavu-core are not a nicety: a Debian container ships no fonts at all, and
-# QtWebEngine then renders the report page with no glyphs — a 1.7 KB PDF with no text in it, which
-# pdftotext reads as empty. With them the same report is a ~66 KB PDF with the words in it. See
+# libxcb-cursor0 is not a nicety either: from Qt 6.5 the xcb platform plugin refuses to load without
+# it. The same bundle installed with only the other four packages aborts under `xvfb-run` with
+# "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed to load the Qt xcb platform plugin" — headless
+# renders (QT_QPA_PLATFORM=offscreen) pass, so the selftest never saw it. A Station with a screen
+# does.
+#
+# fontconfig and fonts-dejavu-core are not a nicety either: a Debian container ships no fonts at all,
+# and QtWebEngine then renders the report page with no glyphs — a 1.7 KB PDF with no text in it,
+# which pdftotext reads as empty. With them the same report is a ~66 KB PDF with the words in it. See
 # ate.report.pdf.pdf_has_text, which the selftest uses to catch exactly this.
 DEPENDS = (
     "libc6",  # libc.so.6, libm, libdl, libpthread, libresolv
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0: Qt's Gui is linked against them
     "libegl1",  # libEGL.so.1, which Qt6Gui and Qt6WebEngineCore both want
+    "libxcb-cursor0",  # libxcb-cursor.so.0: the xcb platform plugin will not load without it
     "fontconfig",  # /etc/fonts: the bundled libfontconfig has no font list to read without it
     "fonts-dejavu-core",  # DejaVu Sans, the smallest font Debian ships that Chromium accepts
 )
@@ -103,6 +122,21 @@ def _build_bundle(dist: Path, work: Path) -> Path:
     """Run 27a's recipe to make ``dist/ate``."""
     _run([sys.executable, str(BUILD_PYINSTALLER), "--dist", str(dist), "--work", str(work)], timeout=3600)
     return dist / "ate"
+
+
+def _verify_bundle(bundle: Path) -> None:
+    """Refuse to package a bundle that cannot render a Test Report (packet 30d review).
+
+    `build_pyinstaller.py --verify` checks the bundle for a Qt platform plugin, the WebEngine helper
+    and its resources. A bundle whose PyQt6 hooks collected nothing has no Qt at all and still has an
+    executable in it: packaging it into a `.deb` ships that as ATE, and the only sign anything is
+    wrong is an abort at the first PDF. This runs on a bundle handed in with `--dist` too, not just
+    one this script built.
+    """
+    exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
+    if not exe.is_file():
+        raise SystemExit(f"{exe} is not a built one-directory bundle (run packaging/build_pyinstaller.py first)")
+    _run([sys.executable, str(BUILD_PYINSTALLER), "--verify", str(exe)], timeout=300)
 
 
 def _bundle_version(bundle: Path) -> str:
@@ -225,6 +259,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{bundle} does not exist; building it with PyInstaller")
         bundle = _build_bundle(dist, Path(args.work))
 
+    # An executable in the directory is not a bundle: a bundle whose hooks collected nothing has no
+    # Qt in it, and packaging it ships a program that aborts at the first Test Report (30d review).
+    _verify_bundle(bundle)
     version = _bundle_version(bundle)
     tarball = _tarball(bundle, version, out)
     deb = _deb(bundle, version, out)
