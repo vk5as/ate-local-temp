@@ -6,6 +6,8 @@
 
 **Blocked by:** 27b (Inno Setup installer), 30c (First run after `ate setup`: its smoke checks the database version)
 
+Release CI must build the frozen bundle with CPython 3.14 using `packaging/build_pyinstaller.py --smoke` (27a).
+
 **Status:** ready-for-agent
 
 - [ ] Tagged releases build the installer and smoke-test it on a clean Windows runner: install, `ate setup`, headless launch that scans a sample Media Release and checks the database version

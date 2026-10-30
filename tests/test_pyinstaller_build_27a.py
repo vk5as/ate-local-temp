@@ -6,16 +6,20 @@ Two kinds of test here:
   ``Analysis``/``PYZ``/``Executable`` so its ``datas`` and ``hiddenimports`` can be read
   without building anything — that catches a resource or a backend quietly dropped from the
   bundle long before CI builds it.
+* Fast, always on: the entry point and the build script, exercised directly (a fake bundle
+  directory, a temporary directory of files) so the platform-specific parts that cannot be
+  built here are still tested.
 * Slow and off by default: the real build. ``ATE_BUILD_TESTS=1`` runs
   ``packaging/build_pyinstaller.py --smoke``, which makes a throwaway venv with the current
   CPython (3.13 here, 3.14 in the release CI), builds ``dist/ate``, and checks that the
   frozen executable prints its version, renders a page to PDF through QWebEngine, and
-  reports its own inventory with ``ate _selftest``.
+  runs a built-in Test Schedule with ``ate _selftest --run``.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -135,6 +139,32 @@ def test_selftest_reports_what_the_source_tree_carries(capsys) -> None:
         assert f"{name}: ok" in out, out
 
 
+def _load_module(path: Path, name: str):
+    """Import a file that is not an installed package: the build script, the spec's entry point."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_ticked_box_claims_only_what_was_built_here() -> None:
+    """27a's checkbox describes the recipe, not a CPython 3.14 bundle nothing here builds.
+
+    The packet was reviewed for overclaiming: the box said "bundling CPython 3.14" and was ticked,
+    while the only build run in this repository is CPython 3.13. The 3.14 bundle is built and
+    smoke-tested by release CI, which is packet 27c.
+    """
+    issues = REPO / ".scratch" / "ate-v1" / "issues"
+    packet = (issues / "27a-pyinstaller-build.md").read_text(encoding="utf-8")
+    box = next((line for line in packet.splitlines() if line.startswith("- [x]")), "")
+    assert "3.14" not in box, f"the ticked box claims a CPython 3.14 bundle: {box}"
+    assert "27c" in packet, "27a must say who builds the 3.14 bundle"
+
+    ci = (issues / "27c-windows-release-ci.md").read_text(encoding="utf-8")
+    assert "build_pyinstaller.py --smoke" in ci and "3.14" in ci, "27c must say CI builds the 3.14 bundle with the 27a recipe"
+    assert not any(line.startswith("- [x]") and "build_pyinstaller" in line for line in ci.splitlines()), "the line belongs in 27c's body, not a checkbox"
+
+
 # Build scratch that must not be left in the checkout by a run.
 def _repo_build_state() -> list[str]:
     """dist/, build/ and any spec scratch in the checkout, as paths."""
@@ -164,6 +194,7 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
         assert result.returncode == 0, f"build failed: {result.stderr[-3000:]}"
         for marker in ("smoke ok: version:", "smoke ok: pdf:", "smoke ok: selftest:", "smoke ok: webengine assets:"):
             assert marker in result.stdout, f"{marker} missing from the build output:\n{result.stdout[-2000:]}"
+        assert "run end-to-end: ok" in result.stdout, "the frozen bundle did not run a Test Schedule end to end"
         assert "MISSING" not in result.stdout, f"the frozen bundle is short something:\n{result.stdout[-2000:]}"
         assert (dist / "ate" / ("ate.exe" if os.name == "nt" else "ate")).is_file()
     finally:
