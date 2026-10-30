@@ -18,15 +18,21 @@
   `ate setup`); `apt remove` keeps config and data, `apt purge` removes config but never the
   database, reports or logs
   Built with `dpkg-deb --root-owner-group --build`. `Depends` is only what the bundle links
-  against and cannot carry: `libc6, libgl1, libegl1, libdrm2, libxcb1, libxcb-dri3-0,
-  libwayland-client0, libwayland-cursor0, libwayland-egl1` (found by `ldd` over a built
-  `_internal`). `/etc/ate/config.json` is not a conffile — setup writes it — so `postrm` removes
-  it on purge. `postinst`/`postrm` honour `ATE_DEB_ROOT` so the tests can run them against a
-  temporary root.
+  against and cannot carry: `libc6, libgl1, libegl1, libdrm2, libxcb1, libxcb-cursor0,
+  libxcb-dri3-0, libwayland-client0, libwayland-cursor0, libwayland-egl1` (found by `ldd` over a
+  built `_internal`; `libxcb-cursor0` is the cursor extension Qt's xcb platform plugin needs to
+  open a display, and the gated test asserts `Depends` covers every soname `ldd` cannot resolve).
+  `/etc/ate/config.json` is not a conffile — setup writes it — so `postrm` removes
+  it on purge. `postinst`/`postrm` have no test seam at all: the tests run a copy of each script
+  with `/opt/ate`, `/etc/ate` and `/var/lib/ate` rewritten to a temporary root.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
 
-**Built here:** CPython 3.13 (the only Python on this machine) — `ATE_BUILD_TESTS=1 pytest -m build -q`
-packaged the real bundle, extracted the `.deb` with `dpkg-deb -x` and ran the extracted
-`/opt/ate/ate --version` and `_selftest`. The 3.14 bundle and the Debian-stable container smoke
-test are 28c's job.
+**Built here:** CPython 3.13 (the only Python on this machine) — `ATE_BUILD_TESTS=1 pytest -m build
+tests/test_linux_packages_28b.py` ran for real: it built the bundle with PyInstaller, packaged it
+both ways (`ate-0.0.0-dev-linux-x86_64.tar.gz` 196,933,904 bytes, `ate_0.0.0~dev_amd64.deb`
+145,504,876 bytes), extracted the `.deb` with `dpkg-deb -x`, ran the extracted `/opt/ate/ate
+--version` and `_selftest`, and checked every soname `ldd` reports as not found over the bundle
+against `Depends`. Nothing has installed the package with dpkg on this machine: no `apt install`
+and no Debian-stable container run. The 3.14 bundle and the Debian-stable container smoke test are
+28c's job.

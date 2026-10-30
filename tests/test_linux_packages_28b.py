@@ -18,12 +18,13 @@ Only one environment variable is test-only, and only the test's stub reads it:
 
 | Variable | What it does |
 | --- | --- |
-| ``ATE_DEB_ROOT`` | Prefixes ``/opt/ate``, ``/etc/ate`` and ``/var/lib/ate`` in ``postinst``/``postrm`` so they can run against a temporary root |
 | ``STUB_LOG`` | File the stub ``ate`` script appends each invocation to |
 
 Slow and off by default: the real build. ``ATE_BUILD_TESTS=1`` builds the bundle with
 ``packaging/build_pyinstaller.py``, packages it both ways, extracts the ``.deb`` with
-``dpkg-deb -x`` and runs ``--version`` and ``_selftest`` from the extracted ``/opt/ate``.
+``dpkg-deb -x``, runs ``--version`` and ``_selftest`` from the extracted ``/opt/ate``, and runs
+``ldd`` over every ``.so`` in it so that ``Depends`` must cover every library the bundle cannot
+resolve on its own.
 """
 
 from __future__ import annotations
@@ -48,7 +49,8 @@ POSTRM = REPO / "packaging" / "linux" / "deb" / "postrm"
 
 # The libraries the bundle cannot carry: glibc, and the GL/X libraries Qt is linked against.
 # Everything else (Qt, ICU, NSS, fontconfig, glib, libX11) is inside ``_internal``, which is why
-# the package needs no Debian Python or Qt packages at all.
+# the package needs no Debian Python or Qt packages at all. ``libxcb-cursor0`` is not optional:
+# libQt6XcbQpa is linked against it and Qt's xcb plugin cannot open a display without it.
 REQUIRED_DEPENDS = {
     "libc6",
     "libgl1",
@@ -205,7 +207,6 @@ def _unresolved_sonames(bundle: Path) -> set[str]:
             if "=> not found" in line or "=> (null)" in line:
                 unresolved.add(line.split("=>")[0].split("(")[0].strip())
     return unresolved
-
 
 
 # The scripts are shipped with the executable bit and must be valid sh: a maintainer script that

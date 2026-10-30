@@ -173,9 +173,12 @@ build machine's ownership leaks into the package:
 - `/etc/ate/config.json` is **not** a conffile. `ate setup` creates it, so it is not in the
   package's file list and dpkg would leave it behind even on purge; `postrm` removes it instead.
 
-The version in `Version` is ATE's version as dpkg will accept it: the untagged `0.0.0-dev` becomes
-`0.0.0~dev` (`~` sorts before an empty string, so a development build precedes 0.0.0), and anything
-outside `[A-Za-z0-9.+~:-]` is rewritten as `-`.
+The version in `Version` is ATE's version as dpkg will accept it. Every prerelease suffix becomes
+`~` — `0.0.0-dev` → `0.0.0~dev`, `1.2.3-rc1` → `1.2.3~rc1`, `1.2.3-beta2` → `1.2.3~beta2` — because
+`~` sorts before everything while a bare `-` sorts after the digits before it, so a prerelease
+precedes the release it is a prerelease of (`dpkg --compare-versions 1.2.3~rc1 lt 1.2.3`). Anything
+outside `[A-Za-z0-9.+~:-]` is rewritten as `-`, and a bundle whose `--version` prints nothing is
+refused rather than packaged as `ate__amd64.deb`.
 
 The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, fontconfig and
 libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is what
@@ -209,7 +212,9 @@ runs `setup`.
 
 The packaged-artifact test is marked `build` like the frozen-build test: with
 `ATE_BUILD_TESTS=1` it builds the bundle, packages it both ways, extracts the `.deb` with
-`dpkg-deb -x` and runs the extracted `/opt/ate/ate --version` and `_selftest`.
+`dpkg-deb -x`, runs the extracted `/opt/ate/ate --version` and `_selftest`, and runs `ldd` over
+every `.so` in the bundle so that each library that does not resolve inside it is named in
+`Depends`.
 
 ## Tests
 
