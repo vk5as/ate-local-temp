@@ -203,7 +203,7 @@ def test_the_linux_runner_is_pinned_to_the_glibc_that_debian_stable_can_run():
 def test_every_script_the_workflow_runs_exists():
     """A step that names a script the repository does not have fails on the runner, not here."""
     for run in _runs(_workflow()):
-        for script in re.findall(r"\bpython3?\s+([^\s{}]+\.py)", run):
+        for script in re.findall(r"\bpython3?\s+([^\s{}]+\.(?:py|sh))", run):
             assert (REPO / script).is_file(), f"the workflow runs {script}, which is not in the repository"
     assert smoke.parser().parse_args(["--kind", "deb", "--dist", "artifacts"]).kind == "deb"
 
@@ -472,7 +472,11 @@ class FakeContainer:
         self._apply_schema()
         if self.installs > 1:
             if not self.upgrade_keeps_data:
-                shutil.rmtree(self.station.data_dir, ignore_errors=True)
+                # The Station's records survive an upgrade; wiping the data is what the check must
+                # find, so the database itself is left in place for the later checks to see.
+                for child in self.station.data_dir.iterdir():
+                    if child.name != "ate.db":
+                        shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink()
             if not self.upgrade_clears_internal:
                 stale = self.station.app_dir / "_internal" / "stale-from-the-previous-build.py"
                 stale.parent.mkdir(parents=True, exist_ok=True)

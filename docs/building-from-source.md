@@ -278,6 +278,11 @@ Only one flag is a seam in the shipped scripts, and it is a real installer flag:
 directly. The test runs a copy of each script with those three paths rewritten to a temporary
 root, so a variable exported on a Station can never change what the installed package does.
 
+`packaging/linux/smoke_linux.py` (28c) never runs on a Station, so its seams are plain flags:
+`--root` and `--home` root `/opt/ate`, `/usr/bin/ate`, `/etc/ate`, `/var/lib/ate` and pipx's
+`~/.local/bin`, and every command the script runs goes through an injected `Runner`. The CI passes
+no `--root`, so in the container the paths are the real ones.
+
 `tests/test_linux_packages_28b.py` runs the scripts against a stub bundle in seconds: it checks
 the tarball and the deb layout, that the maintainer scripts are executable and pass `sh -n`, that
 `purge` never deletes the data directory, and that `install.sh` copies the bundle, links it and
@@ -345,8 +350,68 @@ those things correctly.
 > workflow is checked by reading it (no `actionlint` here, and none was installed to check it).
 > Its first run is the first tag.
 
-The Linux artifacts (the `.tar.gz` and the `.deb`, 28c) have a commented placeholder in the same
-workflow and are not written in this packet.
+The Linux artifacts (the `.tar.gz`, the `.deb` and the wheel, 28c) are built and smoke-tested in
+the same workflow.
+
+### The Linux jobs
+
+`linux-build` runs on `ubuntu-24.04`, and `linux-smoke` runs three times after it — once for each
+of `deb`, `tar` and `wheel` — each in its own `debian:stable` container (`fail-fast: false`, so a
+broken `.deb` does not cancel the wheel's run):
+
+1. `ldd --version | tee dist/glibc-build.txt` — the glibc the bundle will be linked against,
+   recorded so the smoke run can compare it with the container's;
+2. `python packaging/build_pyinstaller.py --smoke` — the bundle and 27a's smoke checks;
+3. `python packaging/linux/build_linux.py --dist dist` — the tarball and the `.deb`;
+4. `python -m build --wheel` — `dist/ate-<version>-py3-none-any.whl`;
+5. one upload of `dist/ate-*-linux-x86_64.tar.gz`, `dist/ate_*_amd64.deb`, `dist/ate-*.whl` and
+   `dist/glibc-build.txt` as `ate-linux-artifacts`, with `if-no-files-found: error`.
+
+Each smoke job then runs `python3 packaging/linux/smoke_linux.py --kind deb|tar|wheel --dist
+artifacts` in a container that has nothing installed, which is the point:
+
+- **`.deb`** — `apt-get install -y ./ate_*.deb`. apt resolving the package's `Depends` on Debian
+  stable is the check, and `postinst` has already run `ate setup`;
+- **`.tar.gz`** — the runtime libraries are installed from the `DEPENDS` list in
+  `packaging/linux/build_linux.py` (read from the script, never copied into the smoke script), then
+  `tar -xzf` and `./install.sh`;
+- **wheel** — `python3`, `python3-venv`, `pipx` and the same GL/X libraries: Debian stable's Python
+  is 3.13, and the wheel pulls PyQt6 and QtWebEngine from PyPI. `pipx install ./ate-*.whl`, then
+  `ate setup`, because a wheel has no postinst.
+
+Every kind has to print a version, leave `/etc/ate/config.json` and the database that config names,
+answer `ate db status` with a schema version, run `ate _selftest --run` headless, and scan the
+shipped example Media Release copied into the configured definitions directory with nothing broken
+and nothing mismatched. The `.deb` run then checks that `apt remove` keeps the config and the data
+and that `apt purge` removes the config while leaving the database, reports and logs; the tarball
+run runs `install.sh` again (an upgrade: the data survives, `_internal` is cleared) and then
+`--uninstall`, which removes the program and nothing else. The container runs as root, so
+`ate setup` really creates the `ate` group and sets the ownership of `/etc/ate` and `/var/lib/ate`;
+`QT_QPA_PLATFORM=offscreen` is set at job level for QtWebEngine.
+
+**Why `ubuntu-24.04`, not `ubuntu-latest`.** A PyInstaller bundle is linked against the glibc of the
+machine that built it, and glibc is only forward compatible: a binary built against 2.39 runs on
+2.41, never the other way round. Ubuntu 24.04 ships glibc 2.39 and Debian stable ships a newer one,
+so artifacts built there start in the smoke container; `ubuntu-latest` will move to a newer Ubuntu,
+and a bundle linked against that glibc would fail to start in Debian. The build writes its own
+version into `dist/glibc-build.txt` and every smoke run reads it back and refuses a container with
+an older glibc — the baseline is checked, not trusted. Move the pin only with a Debian that can run
+it.
+
+`smoke_linux.py` is one script shared by the three runs; it stops at the first failure and names it.
+Every command it runs goes through an injected `Runner`, and `Station(root=…)` roots `/opt/ate`,
+`/usr/bin/ate`, `/etc/ate` and `/var/lib/ate` in a directory, so `tests/test_release_ci_28c.py`
+drives the whole sequence against a fake Debian container on Linux: `apt-get` and `dpkg` are
+modelled, `install.sh` really runs through its `--prefix`/`--bin` seam, and every `ate` call is the
+real source CLI against that container's config and database. Those tests prove the script catches a
+postinst that never ran setup, a database at the wrong schema, a Media Release with broken entries,
+a purge that keeps the config or deletes the records, and an uninstall that loses data — not that a
+real Debian install does any of them.
+
+> **Never run.** No Debian container has ever started on these machines either: `linux-build` and
+> `linux-smoke` have never executed, `dpkg` has never installed `ate` anywhere, and no Debian `pipx`
+> has ever seen the wheel. The workflow is checked by reading it (no `actionlint` here, and none was
+> installed to check it); the first tag is the first run of both the Windows and the Linux jobs.
 
 ## Tests
 
