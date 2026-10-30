@@ -283,22 +283,24 @@ outside `[A-Za-z0-9.+~:-]` is rewritten as `-`, and a bundle whose `--version` p
 refused rather than packaged as `ate__amd64.deb`.
 
 The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, freetype, fontconfig
-and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is the
-system glibc, GL/EGL, the xcb cursor library the X platform plugin needs, and a font. The list is not
-derived from a manifest: `packaging/linux/docker_smoke.py` builds the bundle in a `debian:stable`
+and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot guarantee to
+carry is the system glibc, GL/EGL, the six X libraries the platform plugin needs, and a font. The list
+is not derived from a manifest: `packaging/linux/docker_smoke.py` builds the bundle in a `debian:stable`
 container, installs the `.deb` there with `apt-get`, and runs `ate _selftest --run`. With these
 packages the run passes. Remove `libgl1` or `libegl1` and the selftest dies with `libGL.so.1: cannot
 open shared object file`; remove the two font packages and the report renders as a 1.7 KB PDF with no
 text in it, which `ate.report.pdf.pdf_has_text` catches; and run the same bundle's GUI under
-`xvfb-run` without `libxcb-cursor0` and Qt aborts with "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is
-needed to load the Qt xcb platform plugin" — headless renders never notice, a Station with a screen
-does.
+`xvfb-run` without the six X libraries and Qt aborts with "Could not load the Qt platform plugin xcb"
+(headless renders never notice, a Station with a screen always does). `packaging/build_pyinstaller.py`
+checks the bundle it built — a Qt platform plugin, `QtWebEngineProcess`, `icudtl.dat` and the `.pak`
+resources — before it says the build succeeded, because a bundle whose PyQt6 hooks imported nothing
+looks like a build and is not one.
 
 | Depends | Why |
 | --- | --- |
 | `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
 | `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
-| `libxcb-cursor0` | libxcb-cursor.so.0: the xcb platform plugin refuses to load without it, so the GUI does not start |
+| `libxcb-cursor0`, `libxcb-icccm4`, `libxcb-keysyms1`, `libxcb-shape0`, `libxcb-xkb1`, `libxkbcommon-x11-0` | the xcb platform plugin's own dependencies: without them the GUI does not start |
 | `fontconfig`, `fonts-dejavu-core` | a stock Debian image ships no fonts at all, and QtWebEngine then writes a report PDF with no glyphs |
 
 `libdrm2`, `libxcb1`, `libxcb-dri3-0` and `libwayland-client0` are not listed because apt installs them

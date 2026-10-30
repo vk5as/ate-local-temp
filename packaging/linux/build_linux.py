@@ -11,15 +11,16 @@ the same on any CPython and needs nothing but `dpkg-deb` for the Debian package:
     ate-<version>-linux-x86_64.tar.gz   `ate/` (the bundle) + `install.sh` next to it
     ate_<version>_amd64.deb             the bundle under /opt/ate, /usr/bin/ate linking to it
 
-The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, and the
-X and GL support libraries those are linked against (libX11, libxcb, libglib, libdbus, libxkbcommon,
-ICU, freetype, fontconfig) as well — they are collected from the machine the bundle was built on,
-and `packaging/build_pyinstaller.py` now refuses a bundle where that collection did not happen. What
-the bundle cannot carry is the system libc, GL/EGL, the xcb cursor library the X platform plugin
-needs, and a font, because QtWebEngine renders the Test Report through the system's fontconfig and
-fonts and writes a PDF with no text at all when there is none. That is the `Depends` list below,
-established by running the built bundle in a clean `debian:stable` container
-(packaging/linux/docker_smoke.py), not by reading a manifest.
+The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, and most of
+the libraries those are linked against (libX11, libXext, libglib, libdbus, libxkbcommon, ICU, freetype,
+fontconfig) as well — they are collected from the machine the bundle was built on, and
+`packaging/build_pyinstaller.py` now refuses a bundle where that collection did not happen. What the
+bundle cannot guarantee to carry is the system libc, GL/EGL, the six X libraries the platform plugin
+needs (xcb-cursor, xcb-icccm, xcb-keysyms, xcb-shape, xcb-xkb, xkbcommon-x11), and a font, because
+QtWebEngine renders the Test Report through the system's fontconfig and fonts and writes a PDF with no
+text at all when there is none. That is the `Depends` list below, established by running the built
+bundle in a clean `debian:stable` container (packaging/linux/docker_smoke.py), not by reading a
+manifest.
 
 The wheel is a different animal: it uses the container's own CPython and PyPI's PyQt6, so it needs
 more system libraries than the bundle does. `WHEEL_SYSTEM_LIBS` is that list, kept here so the
@@ -45,30 +46,33 @@ INSTALL_SH = HERE / "install.sh"
 MAINTAINER = "VK5AS <vk5as.com@gmail.com>"
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
-# What the bundle links against and cannot ship: glibc, GL/EGL, the xcb cursor library, and a font.
-# The rest of what Qt is linked against (libX11, libXext, the libxcb family, libXcomposite,
-# libXrandr, libXtst, libglib, libdbus, libxkbcommon, libasound, libnss, ICU, freetype, fontconfig)
-# is inside `_internal` — collected from the machine the bundle was built on — which is why the
-# package needs no Debian Python or Qt packages at all.
+# What the bundle links against and cannot ship: glibc, GL/EGL, and the X libraries the xcb platform
+# plugin needs, plus a font. The rest of what Qt is linked against (libX11, libXext, libglib, libdbus,
+# libxkbcommon, libasound, libnss, ICU, freetype, libfontconfig) is inside `_internal` — collected from
+# the machine the bundle was built on — which is why the package needs no Debian Python or Qt packages
+# at all.
 #
-# That claim is only true of a bundle whose hooks actually ran. On a machine without libGL or
-# libglib, PyInstaller's PyQt6 hooks import nothing, collect nothing, and still write an executable:
-# such a bundle (99 files, 356 MB, built in a bare debian:stable container on 2026-10-31) needs
-# libglib, libdbus, libxkbcommon, libxkbfile, libasound, libXtst, libXrandr, libXfixes, libXdamage
-# and libXcomposite from the system just to import QtGui, and has no platform plugin at all.
-# `verify_bundle` in packaging/build_pyinstaller.py refuses that bundle, so this list stays short.
+# That claim is only true of a bundle whose hooks actually ran, and only of the libraries the build
+# machine had installed: on a machine without libGL or libglib, PyInstaller's PyQt6 hooks import
+# nothing, collect nothing, and still write an executable. Such a bundle (99 files, 356 MB, built in a
+# bare debian:stable container on 2026-10-31) has no platform plugin at all and needs libglib, libdbus,
+# libxkbcommon, libxkbfile, libasound, libXtst, libXrandr, libXfixes, libXdamage and libXcomposite from
+# the system just to import QtGui. `verify_bundle` in packaging/build_pyinstaller.py refuses that
+# bundle, so this list stays about the ones the bundle really cannot carry.
 #
 # This list is not a guess: `packaging/linux/docker_smoke.py` builds the bundle in a debian:stable
-# container, installs the .deb there with apt-get, and runs `ate _selftest --run`. With these
-# packages the run passes (a 65 KB report PDF that pdftotext reads); drop libgl1 or libegl1 and the
-# selftest dies with "libGL.so.1: cannot open shared object file". libdrm, libxcb and libxkbcommon
-# come in as libegl1's and libgl1's own dependencies, so naming them here would only duplicate apt.
+# container, installs the .deb there with apt-get, and runs `ate _selftest --run`. With these packages
+# the run passes (a 65 KB report PDF that pdftotext reads); drop libgl1 or libegl1 and the selftest
+# dies with "libGL.so.1: cannot open shared object file". libdrm and libxcb come in as libegl1's and
+# libgl1's own dependencies, so naming them here would only duplicate apt.
 #
-# libxcb-cursor0 is not a nicety either: from Qt 6.5 the xcb platform plugin refuses to load without
-# it. The same bundle installed with only the other four packages aborts under `xvfb-run` with
-# "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed to load the Qt xcb platform plugin" — headless
-# renders (QT_QPA_PLATFORM=offscreen) pass, so the selftest never saw it. A Station with a screen
-# does.
+# The xcb entries are not a nicety either. The bundle's own `libqxcb.so` — the platform plugin a
+# Station with a screen uses — needs libxcb-cursor, libxcb-icccm, libxcb-keysyms, libxcb-shape,
+# libxcb-xkb and libxkbcommon-x11. Whether they are inside `_internal` depends on what the build
+# machine had installed, so the package asks for them: the bundle built in a debian:stable container
+# and installed with only glibc, GL and a font aborts under `xvfb-run` with "Could not load the Qt
+# platform plugin "xcb"", and starts once these six are installed (2026-10-31). Headless renders
+# (QT_QPA_PLATFORM=offscreen) never touch them, which is why the selftest alone never caught it.
 #
 # fontconfig and fonts-dejavu-core are not a nicety either: a Debian container ships no fonts at all,
 # and QtWebEngine then renders the report page with no glyphs — a 1.7 KB PDF with no text in it,
@@ -78,7 +82,12 @@ DEPENDS = (
     "libc6",  # libc.so.6, libm, libdl, libpthread, libresolv
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0: Qt's Gui is linked against them
     "libegl1",  # libEGL.so.1, which Qt6Gui and Qt6WebEngineCore both want
-    "libxcb-cursor0",  # libxcb-cursor.so.0: the xcb platform plugin will not load without it
+    "libxcb-cursor0",  # libxcb-cursor.so.0: the X platform plugin will not load without it
+    "libxcb-icccm4",  # libxcb-icccm.so.4, part of the xcb platform plugin's own dependencies
+    "libxcb-keysyms1",  # libxcb-keysyms.so.1
+    "libxcb-shape0",  # libxcb-shape.so.0
+    "libxcb-xkb1",  # libxcb-xkb.so.1
+    "libxkbcommon-x11-0",  # libxkbcommon-x11.so.0: XKB keymaps for the X platform plugin
     "fontconfig",  # /etc/fonts: the bundled libfontconfig has no font list to read without it
     "fonts-dejavu-core",  # DejaVu Sans, the smallest font Debian ships that Chromium accepts
 )

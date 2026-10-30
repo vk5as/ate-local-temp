@@ -48,20 +48,28 @@ INSTALL_SH = REPO / "packaging" / "linux" / "install.sh"
 POSTINST = REPO / "packaging" / "linux" / "deb" / "postinst"
 POSTRM = REPO / "packaging" / "linux" / "deb" / "postrm"
 
-# What the bundle cannot carry: glibc, GL/EGL, the xcb cursor library, and a font. Verified by
-# installing the .deb in a clean debian:stable container and running `ate _selftest --run`
+# What the bundle cannot carry: glibc, GL/EGL, the X libraries the platform plugin needs, and a font.
+# Verified by installing the .deb in a clean debian:stable container and running `ate _selftest --run`
 # (packaging/linux/docker_smoke.py): libgl1 and libegl1 are needed (without them the selftest dies on
 # libGL.so.1), and a font is needed (without fontconfig/fonts-dejavu-core the report renders as a
-# 1.7 KB PDF with no text in it). libdrm, libxcb and the rest come in as apt's own dependencies of
-# libgl1/libegl1, so naming them here would only repeat what apt already does. libxcb-cursor0 is not
-# apt's doing: from Qt 6.5 the xcb platform plugin aborts without it, which the headless selftest
-# never hits and a Station with a screen always does (checked with the built bundle under xvfb-run in
-# a debian:stable container on 2026-10-31).
+# 1.7 KB PDF with no text in it). libdrm and libxcb come in as apt's own dependencies of
+# libgl1/libegl1, so naming them here would only repeat what apt already does.
+#
+# The six X libraries are not apt's doing and the selftest cannot see them: they are the xcb platform
+# plugin's own dependencies, which a headless render never loads. The bundle built in a debian:stable
+# container and installed without them aborts under `xvfb-run` with "Could not load the Qt platform
+# plugin \"xcb\"", and starts once they are installed (2026-10-31). Whether they are inside
+# `_internal` depends on the build machine, so the package asks for them.
 REQUIRED_DEPENDS = {
     "libc6",
     "libgl1",
     "libegl1",
     "libxcb-cursor0",
+    "libxcb-icccm4",
+    "libxcb-keysyms1",
+    "libxcb-shape0",
+    "libxcb-xkb1",
+    "libxkbcommon-x11-0",
     "fontconfig",
     "fonts-dejavu-core",
 }
@@ -102,15 +110,20 @@ SONAME_PACKAGES = {
     "libdrm.so.2": "libdrm2",
     "libxcb.so.1": "libxcb1",
     "libxcb-cursor.so.0": "libxcb-cursor0",  # the xcb platform plugin: the GUI will not start without it
+    "libxcb-icccm.so.4": "libxcb-icccm4",
+    "libxcb-keysyms.so.1": "libxcb-keysyms1",
+    "libxcb-shape.so.0": "libxcb-shape0",
+    "libxcb-xkb.so.1": "libxcb-xkb1",
+    "libxkbcommon-x11.so.0": "libxkbcommon-x11-0",
     "libfontconfig.so.1": "fontconfig",
     "libfreetype.so.6": "libfreetype6",
 }
 
-# Libraries the bundle is linked against but never opens: the Wayland and the remaining extra xcb
-# platform plugins (a Station runs the GUI on X, and the Test Report render is an offscreen child
-# process) and the GTK/CUPS print backend. A machine without them still runs the program, which is
-# why they are not in Depends — libxcb-cursor.so.0 is not on this list for that reason: the X plugin
-# the GUI uses needs it, so it is Depends instead.
+# Libraries the bundle is linked against but never opens: the Wayland platform plugins, the extra
+# xcb helpers the X plugin pulls in itself, and the GTK/CUPS print backend. A machine without them
+# still runs the program, which is why they are not in Depends. The six xcb libraries the platform
+# plugin needs directly (cursor, icccm, keysyms, shape, xkb, xkbcommon-x11) are not on this list: a
+# Station with a screen loads them, so the package depends on them.
 NEVER_OPENED = {
     "libatk-1.0.so.0",
     "libcairo-gobject.so.2",
@@ -123,14 +136,9 @@ NEVER_OPENED = {
     "libpangocairo-1.0.so.0",
     "libwayland-cursor.so.0",
     "libwayland-egl.so.1",
-    "libxcb-icccm.so.4",
     "libxcb-image.so.0",
-    "libxcb-keysyms.so.1",
     "libxcb-render-util.so.0",
-    "libxcb-shape.so.0",
     "libxcb-util.so.1",
-    "libxcb-xkb.so.1",
-    "libxkbcommon-x11.so.0",
 }
 
 # The stub stands in for the frozen executable: it prints a version and records every call.

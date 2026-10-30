@@ -352,8 +352,18 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
             timeout=3600,
         )
         assert result.returncode == 0, f"build failed: {result.stderr[-3000:]}"
-        for marker in ("smoke ok: version:", "smoke ok: pdf:", "smoke ok: selftest:", "smoke ok: webengine assets:"):
+        for marker in (
+            "bundle ok: qt platform plugins:",
+            "bundle ok: webengine helper:",
+            "bundle ok: webengine resources:",
+            "smoke ok: version:",
+            "smoke ok: pdf:",
+            "smoke ok: selftest:",
+        ):
             assert marker in result.stdout, f"{marker} missing from the build output:\n{result.stdout[-2000:]}"
+        # The inventory check is part of the build, not of the smoke: it runs before the bundle is
+        # ever executed, so a bundle whose hooks collected nothing never reaches a package.
+        assert result.stdout.index("bundle ok: qt platform plugins") < result.stdout.index("smoke ok: version:"), result.stdout[-1500:]
         assert "run end-to-end: ok" in result.stdout, "the frozen bundle did not run a Test Schedule end to end"
         assert "MISSING" not in result.stdout, f"the frozen bundle is short something:\n{result.stdout[-2000:]}"
         assert (dist / "ate" / ("ate.exe" if os.name == "nt" else "ate")).is_file()
