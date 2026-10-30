@@ -9,13 +9,16 @@ runs the same migration ``ate db migrate`` performs. These tests drive the comma
 """
 
 import json
+import os
 import platform as _platform
 import sqlite3
 import subprocess
+import sys
 import types
 import pytest
 
 from ate.cli import main, _is_root
+from ate import setup as ate_setup
 from ate.permissions import ATE_GROUP, LinuxPermissions, RecordingPermissions, WindowsPermissions
 from ate.setup import SKIP_PERMISSIONS, prepare_station
 from ate.storage import RunStore
@@ -283,6 +286,92 @@ def test_real_windows_command_construction(tmp_path, monkeypatch):
         "icacls", str(config_file), "/inheritance:r", "/grant:r",
         "*S-1-5-32-544:F", "*S-1-5-18:F", "*S-1-5-32-545:R",
     ] in captured
+
+
+def _fake_ctypes(monkeypatch, admin: int) -> types.ModuleType:
+    """A stand-in for ctypes.windll.shell32 so these tests never touch a real Windows API."""
+    fake = types.ModuleType("ctypes")
+    fake.windll = types.SimpleNamespace(shell32=types.SimpleNamespace(IsUserAnAdmin=lambda: admin))
+    monkeypatch.setitem(sys.modules, "ctypes", fake)
+    return fake
+
+
+def test_is_root_asks_windows_for_admin(monkeypatch):
+    """Windows has no euid: elevation is IsUserAnAdmin, not geteuid == 0.
+
+    Patching only os.name and ctypes keeps this true on a Linux runner as well as on Windows.
+    """
+    monkeypatch.setattr(os, "name", "nt")
+
+    _fake_ctypes(monkeypatch, 1)
+    assert _is_root() is True, "an elevated Windows process is root for setup's purposes"
+
+    _fake_ctypes(monkeypatch, 0)
+    assert _is_root() is False, "a plain Windows double-click is not elevated"
+
+
+def test_is_root_is_false_when_the_windows_check_fails(monkeypatch):
+    """No ctypes, no windll: never claim elevation we cannot prove."""
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "ctypes", types.ModuleType("ctypes"))
+    assert _is_root() is False
+
+
+def test_is_root_still_reads_the_euid_on_posix(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    assert _is_root() is True
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
+    assert _is_root() is False
+
+
+def test_an_elevated_windows_ate_applies_the_acl_grants(tmp_path, monkeypatch, capsys):
+    """The installer runs `ate setup` elevated, and that is what grants Users Modify.
+
+    Before the IsUserAnAdmin fix, _is_root() returned False on Windows and every install
+    skipped the ACLs; this drives the real command path with icacls stubbed out.
+    """
+    captured = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "win32")  # pretend this run is on Windows
+    _fake_ctypes(monkeypatch, 1)  # elevated
+    monkeypatch.setattr(ate_setup, "_current_platform", lambda: "windows")
+
+    root = tmp_path / "station"
+    assert main(["setup", "--root", str(root)]) == 0
+    assert "skipping" not in capsys.readouterr().err.lower(), "an elevated setup must not skip the ACLs"
+    grants = [argv for argv in captured if argv and argv[0] == "icacls"]
+    assert grants, f"elevated setup ran no icacls at all: {captured}"
+    modify = [argv for argv in grants if argv[2:4] == ["/grant", "*S-1-5-32-545:(OI)(CI)M"]]
+    assert modify, f"the data directory never got the Users Modify grant: {grants}"
+    assert modify[0][1] == str(root / "data"), f"the grant landed on the wrong directory: {modify}"
+    admin_only = [argv for argv in grants if "/inheritance:r" in argv]
+    assert admin_only, f"config.json was not locked to Administrators: {grants}"
+
+
+def test_unprivileged_ate_still_prepares_without_the_acl_grants(tmp_path, monkeypatch, capsys):
+    """The other half: not elevated means warn and skip, never fail."""
+    captured = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _fake_ctypes(monkeypatch, 0)  # not elevated
+    monkeypatch.setattr(ate_setup, "_current_platform", lambda: "windows")
+
+    root = tmp_path / "station"
+    assert main(["setup", "--root", str(root)]) == 0
+    assert "skipping" in capsys.readouterr().err.lower()
+    assert not [argv for argv in captured if argv and argv[0] == "icacls"], "no ACLs without elevation"
 
 
 def test_setup_no_permissions_skips_privileged_ops(tmp_path, capsys):

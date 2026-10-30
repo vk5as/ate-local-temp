@@ -26,9 +26,12 @@ def _is_root() -> bool:
     run warns and skips them rather than failing. Use ``--no-permissions`` for test runs regardless.
     """
     import os
+    import sys
 
-    if os.name == "nt":
-        # Windows has no euid: an elevated process is one UAC says is an administrator.
+    # Windows has no euid: an elevated process is one UAC says is an administrator. Both spellings
+    # of "Windows" are checked so tests can steer the branch without changing os.name (which
+    # pathlib reads).
+    if sys.platform == "win32" or os.name == "nt":
         return _is_windows_admin()
     try:
         return os.geteuid() == 0
