@@ -1,8 +1,9 @@
 # Building ATE from source
 
-Packet 28a: the wheel and the source build, plus the Linux artifacts (28b). The Windows
-installer is a separate packet; this page covers running ATE from a checkout, building the
-wheel, and packaging the frozen build for Linux.
+Packet 28a: the wheel and the source build, plus the Linux artifacts (28b) and the Windows
+installer (27b). This page covers running ATE from a checkout, building the wheel, the
+frozen PyInstaller build that every artifact starts from, the Windows installer, and the
+Linux packages.
 
 ATE targets CPython **3.13** (Debian stable's system Python) and **3.14** (the
 version the frozen builds bundle). Anything older is refused by
@@ -117,6 +118,57 @@ that temporary directory it touches no Station, database or Test Run.
 reproducible from a clean checkout. The bundle is roughly 490 MB on disk (579 MB before the
 Qt exclusions) — Qt's libraries and QtWebEngine are the bulk of it.
 
+## Windows installer
+
+The installer is `packaging/windows/ate.iss`, compiled by `packaging/windows/build_installer.py`.
+It needs **Windows** and **Inno Setup 6.3 or newer** (`x64compatible` and `createallsubdirs` are
+6.3 features); `iscc` is looked for in `$ISCC`, then on `PATH`, then in
+`C:\Program Files\Inno Setup 6\ISCC.exe`.
+
+```powershell
+python packaging\build_installer.py --dist dist --build      # builds dist\ate first, then the installer
+python packaging\build_installer.py --dist dist              # dist\ate already built
+python packaging\build_installer.py --dry-run                # print the iscc command, compile nothing
+```
+
+`--dry-run` works on any platform, which is how this script is exercised on Linux.
+
+The artifact is `dist\ate-<version>-windows-x64-setup.exe`. What it does:
+
+- Per-machine install under `Program Files\ATE`; `PrivilegesRequired=admin`, and it refuses
+  32-bit Windows because the bundle is 64-bit.
+- Adds `{app}` to the **machine** PATH (`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`,
+  written as `expandsz` so `%VAR%` entries survive) and tells Explorer the environment changed,
+  so `ate` is on the PATH straight after the install. `NeedsAddPath` in the script compares
+  whole `;`-separated entries case-insensitively, so an upgrade never adds the directory twice.
+- Runs `ate setup` at the end. It is run with `Exec` and its exit code checked rather than as a
+  `[Run]` entry, because `[Run]` entries ignore exit codes: if setup fails, the installer says
+  so and names the fix (`ate setup` from an elevated command prompt) instead of reporting a
+  clean install. The program itself stays installed.
+- Upgrades install in place. `[InstallDelete]` clears `{app}\_internal` before the new bundle is
+  copied, so files the new build no longer ships cannot linger. The Station's config and data
+  are in `%PROGRAMDATA%\ATE`, outside `{app}`, so they survive; the uninstaller removes the
+  program and its PATH entry and nothing else, and there is deliberately no `uninsdeletevalue`
+  on the PATH entry, which would wipe the machine's entire PATH.
+
+The AppId GUID in the script is what makes an upgrade an upgrade. Changing it would install a
+second ATE beside the first and leave the old uninstall entry behind.
+
+### Signing
+
+Optional, as the spec's packaging notes say. When **both** `ATE_SIGN_CERT` and
+`ATE_SIGN_PASSWORD` are set, the wrapper compiles with `/DSignEnabled` and
+`/Ssigntool=signtool.exe sign /fd SHA256 /f $q<cert>$q /p $q<password>$q ... $f`, which signs
+the installer, its uninstaller and `ate.exe`. With neither variable set the build is unsigned
+and nothing complains; setting only one is an error rather than a silent unsigned build. The
+password comes from the environment only and is never printed — `--dry-run` shows the command
+with it replaced by `<from ATE_SIGN_PASSWORD>`.
+
+> **Never compiled, never run.** Every machine that has written this script is Linux, with no
+> Inno Setup and no Wine. `--dry-run` and `tests/test_inno_installer_27b.py` (which reads the
+> script's sections and runs the wrapper against a stub bundle) are the only checks so far.
+> The first real compile, install, upgrade and uninstall is release CI's Windows runner (27c).
+
 ## Linux packages
 
 Both Linux artifacts come out of that same `dist/ate` bundle:
@@ -225,6 +277,10 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen pytest -q
 The wheel test builds a wheel from a clean copy into a temporary directory and takes a few
 seconds. The only test marked `slow` is the one that installs the wheel into a fresh venv
 from PyPI: `pytest -m "not slow"` deselects just that one.
+
+The Windows installer test reads `packaging/windows/ate.iss` as text and runs
+`build_installer.py --dry-run` against a stub bundle, so it checks the script's sections and
+the wrapper's command on Linux, without Windows or Inno Setup.
 
 The frozen-build test is marked `build` as well and is skipped unless you ask for it,
 because a PyInstaller build takes minutes:

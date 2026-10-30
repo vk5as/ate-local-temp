@@ -8,6 +8,8 @@
 
 Release CI must build the frozen bundle with CPython 3.14 using `packaging/build_pyinstaller.py --smoke` (27a).
 
+27b's `.iss` has never been compiled: the first CI run must compile it, install silently (`/VERYSILENT /SUPPRESSMSGBOXES`), check `ate` on PATH, check upgrades keep `%PROGRAMDATA%\ATE`, and check uninstall leaves it.
+
 **Status:** ready-for-agent
 
 - [ ] Tagged releases build the installer and smoke-test it on a clean Windows runner: install, `ate setup`, headless launch that scans a sample Media Release and checks the database version
