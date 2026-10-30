@@ -706,3 +706,19 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - the `ci.yml` job name fixed.
   - **Decision to surface to the user:** the Chromium sandbox is disabled (`QTWEBENGINE_DISABLE_SANDBOX` + `--no-sandbox`) only when elevated/root, because Chromium refuses or fails otherwise; ordinary users keep it.
 - Light review: 1203 passed + 3 skipped ×3 (~167 s); collection 1147 → 1206, none lost.
+
+## 28c — Linux release CI (merged 2026-10-31)
+- `release.yml` `linux-build` + `linux-smoke` (deb/tar/wheel in `debian:stable`) **have never run as a workflow**; the checkbox stays `- [ ]` until the first green tag.
+- Implementer (Strata, high, 0 compactions). Reviews: Haiku ran the real packages in Docker for the first time (2 must-fix); Strata desk-checked (3 must-fix). Union:
+  - **blank PDFs on stock Debian** (no fonts in Depends, and the smoke only checked `%PDF`);
+  - **the wheel lacked PyQt6's system libraries**;
+  - **an installed wheel reported `0.0.0-dev`** (git describe; no repo in the venv);
+  - the `_selftest --run` and `--version` smoke checks couldn't fail; purge's "records kept" only proved `ate.db`.
+- Rework (Strata, high, 2 compactions):
+  - `fontconfig` + `fonts-dejavu-core` in Depends; the selftest rejects a fontless PDF;
+  - `WHEEL_SYSTEM_LIBS` (14, each proven needed);
+  - the wheel version comes from metadata;
+  - an `ATE_DOCKER_TESTS=1` gated test.
+  - Real Docker runs passed for deb, tar and wheel, with PDF text read back (66 KB). Bundles were built on 3.13.
+- Light review: collection 1206 → 1270, none lost. Three runs: 1266 passed; 1 failed `test_run_engine.py::test_whole_run_abort_between_steps_...`; 1 failed `test_report_21a.py::test_file_naming_and_content`. Both are pre-existing races in files 28c doesn't touch → moved into 30d. Merged on that basis.
+- Still never run: the workflow itself, the 3.14 build, everything Windows.
