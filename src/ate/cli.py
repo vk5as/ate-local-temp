@@ -20,17 +20,33 @@ from ._version import __version__
 
 
 def _is_root() -> bool:
-    """Whether this process runs as root/admin (POSIX euid 0). Unavailable platforms report False.
+    """Whether this process runs as root/admin. Unavailable platforms report False.
 
     Packagers run ``ate setup`` elevated, so the default applies real permissions; an unprivileged
     run warns and skips them rather than failing. Use ``--no-permissions`` for test runs regardless.
     """
     import os
+    import sys
 
+    # Windows has no euid: an elevated process is one UAC says is an administrator. Both spellings
+    # of "Windows" are checked so tests can steer the branch without changing os.name (which
+    # pathlib reads).
+    if sys.platform == "win32" or os.name == "nt":
+        return _is_windows_admin()
     try:
         return os.geteuid() == 0
     except AttributeError:
-        # Non-POSIX (e.g. Windows): we can't prove elevation here, so don't claim it.
+        # No euid to read here: we can't prove elevation, so don't claim it.
+        return False
+
+
+def _is_windows_admin() -> bool:
+    """``shell32.IsUserAnAdmin`` — True when the process is elevated. False when it can't be asked."""
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
         return False
 
 
