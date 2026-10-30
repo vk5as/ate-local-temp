@@ -1,0 +1,28 @@
+#!/bin/sh
+# postinst for the ATE .deb (packet 28b). dpkg runs this after the bundle has been laid down in
+# /opt/ate; "ate setup" creates the data directories and the config directory, writes a default
+# /etc/ate/config.json only when none exists, and creates or upgrades the database
+# (assets/packaging.md: "Preparing a Station"). setup is idempotent, so this also runs on an
+# upgrade without touching existing config or data.
+#
+# dpkg calls postinst with "configure" on install and on upgrade; "reconfigure" is something an
+# operator invokes by hand, which is not a package operation, so it does nothing here.
+#
+# No test seam on purpose: tests/test_linux_packages_28b.py runs a copy of this script with the
+# paths rewritten to a temporary root, so nothing here can be redirected by an exported variable.
+set -e
+
+if [ "$1" = "configure" ]; then
+    if [ ! -x /opt/ate/ate ]; then
+        echo "postinst: /opt/ate/ate is missing or not executable - the package is broken" >&2
+        exit 1
+    fi
+    if /opt/ate/ate setup; then
+        echo "ate setup: Station prepared"
+    else
+        echo "postinst: 'ate setup' failed; run it by hand as root: /opt/ate/ate setup" >&2
+        exit 1
+    fi
+fi
+
+exit 0
