@@ -646,3 +646,23 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - docs explain `<data>`.
 - Light review: 1089 passed + 2 skipped ×3 (~167 s); collection 1057 → 1091, none lost. Manual probe: setup → `db status` 5; missing default config → clean message, exit 1, nothing created.
 - Leftovers: a hand-edited `<data>` on a `--root` station resolves to the platform dir (the spec doesn't define `<data>` beyond the Location table).
+
+## 28b — Linux tarball and .deb (merged 2026-10-30)
+- Implementer (Strata, high, 0 compactions): `packaging/linux/build_linux.py`, `install.sh`, `postinst`/`postrm`.
+- Reviews: Haiku 2 must-fix, Strata 4 must-fix (union 5):
+  - `Depends` lacked `libxcb-cursor0` (the GUI wouldn't start on clean Debian);
+  - the gated real-build test was dead (NameError);
+  - `install.sh` merged over the old bundle;
+  - `1.2.3-rc1` sorted after `1.2.3`;
+  - `ATE_DEB_ROOT` was overstated in the docs and honoured in production scripts.
+- Rework (Strata, high, 0 compactions):
+  - an ldd→soname→Depends check in the gated test;
+  - `install.sh` clears `ate` and `_internal` before copying;
+  - prerelease `~` mapping;
+  - no seam in the maintainer scripts (tests run a path-substituted copy);
+  - `--uninstall` guards;
+  - a clear message when setup fails;
+  - tar members root-owned, `install.sh` 0755.
+- Light review: 1109 passed + 3 skipped ×3 (~168 s); collection 1091 → 1112, none lost. Real-build test passed per the implementer (186 s); not re-run by me.
+- Artifact sizes: .tar.gz 197 MB, .deb 146 MB.
+- Leftovers: lintian isn't installed here (28c could run it). No `Homepage` in the control file (the repo has no project URL). Purge leaves the `ate` group (spec-consistent).
