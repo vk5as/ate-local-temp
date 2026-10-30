@@ -14,8 +14,8 @@ The run must assert PATH before/after install, upgrade and uninstall: one entry 
 
 **Status:** resolved
 
-- [x] Tagged releases build the installer and smoke-test it on a clean Windows runner: install, `ate setup`, headless launch that scans a sample Media Release and checks the database version — written; never run: first run happens on the first tag
-- [x] The smoke test asserts the machine PATH before install, after install, after an upgrade and after uninstall, and checks the installer's exit code and its `/LOG` file — written; never run: first run happens on the first tag
+- [ ] Tagged releases build the installer and smoke-test it on a clean Windows runner: install, `ate setup`, headless launch that scans a sample Media Release and checks the database version — written; never run; becomes done on the first green tag
+- [ ] The smoke test asserts the machine PATH before install, after install, after an upgrade and after uninstall, and checks the installer's exit code and its `/LOG` file — written; never run; becomes done on the first green tag
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes; neighbouring packets cover the rest of the parent ticket.
 
@@ -33,5 +33,12 @@ Written on a Linux machine with no Windows, no Inno Setup and no way to run a wo
   and the tests drive the whole sequence through a fake registry and a fake installer on Linux.
 - `ate _selftest --scan <dir>` (src/ate/cli.py) — this one does run on Linux, and is tested here
   against the shipped example Media Release.
+- `src/ate/config.py`, `src/ate/setup.py` — the platform default config path. `sys.platform` is
+  `win32`, never `windows`, so the table that keyed on the doc's label gave every Windows install
+  `/etc/ate/config.json`. Both files now read the same `_is_windows()` and expand `%PROGRAMDATA%`.
+  Tested on Linux by monkeypatching `sys.platform` and the environment.
+- `src/ate/report/pdf.py` and `packaging/pyinstaller/ate_entry.py` — Chromium's renderer sandbox is
+  turned off for a root or administrator process, which is what the release runner and an
+  elevated `ate setup` are. Nothing about this has been executed on Windows.
 
 The first time any of the Windows pieces execute is the first tag's release job.
