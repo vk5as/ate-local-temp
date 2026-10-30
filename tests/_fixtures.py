@@ -765,6 +765,9 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
         "database": {"type": "sqlite", "path": str(db)},
         "reports": {"directory": str(reports_dir)},
         "testDefinitions": {"directories": [str(defs_dir)]},
+        # The log directory is spelled out so the default <data>/logs never reaches the real
+        # platform data directory in a test run (packet 30c resolved <data> for real).
+        "log": {"directory": str(tmp_path / "logs")},
     }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")

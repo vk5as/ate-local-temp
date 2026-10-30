@@ -146,7 +146,7 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
         try:
             from .config import build_default_config, write_config
 
-            data = build_default_config(_hostname())
+            data = build_default_config(_hostname(), data_dir=data_dir)  # resolved paths, not <data> placeholders (30c)
             write_config(str(config_dir / "config.json"), data)
             default_written = True
         except OSError as exc:

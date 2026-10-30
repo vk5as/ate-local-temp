@@ -24,12 +24,13 @@ the event loop.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
@@ -315,34 +316,48 @@ class MainWindow(QMainWindow):
                 pass
 
 
+def _dismiss_if_headless(box: QMessageBox) -> None:
+    """Auto-close a dialog when ``ATE_AUTO_DISMISS_DIALOG`` is set.
+
+    The seam for headless subprocess tests (packet 30c): offscreen Qt still blocks in
+    ``exec()``, so tests that want to prove a refusal exits 1 rather than aborts need the
+    dialog to accept itself."""
+    if os.environ.get("ATE_AUTO_DISMISS_DIALOG"):
+        QTimer.singleShot(0, box.accept)
+
+
 def _missing_config_dialog(path: str) -> bool:
     """The Operator's missing-config prompt: create the default config, or abort."""
     # QMessageBox takes a QWidget parent or None, never the QApplication itself (30a review).
-    QApplication.instance() or QApplication([])  # Qt needs an application before any widget
+    app = QApplication.instance() or QApplication([])  # named, not bare: it must outlive the box
     box = QMessageBox()
     box.setWindowTitle("ATE")
     box.setText(f"No config file at {path}")
     box.setInformativeText("Create a default config and launch, or stop?")
     create = box.addButton("Create default config and launch", QMessageBox.ButtonRole.AcceptRole)
     box.addButton("Abort", QMessageBox.ButtonRole.DestructiveRole)
+    _dismiss_if_headless(box)
     box.exec()
     return box.clickedButton() is create
 
 
 def _alert_dialog(message: str) -> None:
     """Show a launch refusal and stop."""
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])  # keep it referenced while the box is up
     # Built (not via QMessageBox.critical) so the exec seam stays visible to callers and tests.
     box = QMessageBox(QMessageBox.Icon.Critical, "ATE", message, QMessageBox.StandardButton.Ok, None)
+    print(f"ATE: {message}", file=sys.stderr)  # the message is on stderr even headless (30c)
+    _dismiss_if_headless(box)
     box.exec()
 
 
 def _close_confirm_dialog(message: str) -> bool:
     """Ask whether to abort a Test Run that is still in progress when closing the window."""
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     box = QMessageBox(QMessageBox.Icon.Warning, "ATE", message)
     abort = box.addButton("Abort the run and quit", QMessageBox.ButtonRole.AcceptRole)
     box.addButton("Keep running", QMessageBox.ButtonRole.RejectRole)
+    _dismiss_if_headless(box)
     box.exec()
     return box.clickedButton() is abort
 

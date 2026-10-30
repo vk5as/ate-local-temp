@@ -284,7 +284,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="ate",
         description="ATE — Automated Test Equipment. With no subcommand, opens the application.",
     )
-    parser.add_argument("--config", metavar="PATH", help="config file for the GUI launch (default: the platform config)")
+    parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
     parser.add_argument("-V", "--version", action="store_true", help="print ATE's version and exit")
 
     sub = parser.add_subparsers(dest="command", metavar="db|setup|definition")
@@ -356,7 +356,7 @@ def main(argv=None) -> int:
 
         return launch(argv).code
     if command == "db":
-        return _cmd_db(_subcommand_args(argv, command))
+        return _cmd_db(_subcommand_args(argv, command), config_path=args.config)
     if command == "setup":
         return _cmd_setup(_subcommand_args(argv, command))
     if command == "definition":
@@ -366,18 +366,30 @@ def main(argv=None) -> int:
     return 1
 
 
-def _cmd_db(argv: list[str]) -> int:
+def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
     """Dispatch ``ate db <status|migrate> [PATH] [--yes]``.
 
     The path is the first non-flag token after the subcommand, so `--yes` may appear anywhere
-    in the db arguments without being taken as the path (30a review item 6)."""
+    in the db arguments without being taken as the path (30a review item 6). With no path the
+    configured database is used — from ``--config`` or the platform default config — so
+    ``ate --config X db migrate --yes`` touches the database that config names, not a stray
+    ``./ate.db`` in the working directory (packet 30c). An explicit path still overrides it."""
     if not argv:
         print("ate db: no subcommand given\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
         return 1
 
     sub = argv[0]
     rest = argv[1:]
-    path = next((token for token in rest if not token.startswith("-")), "ate.db")
+    path = next((token for token in rest if not token.startswith("-")), None)
+    if path is None:
+        from .config import ConfigError, read_config
+
+        try:
+            config = read_config(config_path)
+        except ConfigError as exc:  # missing or invalid config: name it, don't guess a path
+            print(f"ate db: {exc}\nrun 'ate setup' or pass --config PATH first", file=sys.stderr)
+            return 1
+        path = str(config.database_path)
     if sub == "status":
         return _db_status(path)
     if sub == "migrate":

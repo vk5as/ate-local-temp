@@ -18,6 +18,7 @@ environment-variable or ``~`` expansion.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -56,13 +57,15 @@ _SCHEMA: dict[str, dict[str, str]] = {
     "ui": {"theme": "str", "layout": "str", "allowLayoutSwitch": "bool", "allowHistoryDuringRun": "bool"},
 }
 
-# Defaults for every key above, keyed ``section.key``. Paths carry a literal
-# ``<data>`` placeholder that :meth:`Config.from_resolved` resolves against the config
-# file's directory (the data directory is created by ``ate setup``).
+# Defaults for every key above, keyed ``section.key``. Paths carry the ``<data>``
+# placeholder the format documents; :func:`Config_from_resolved` expands it to the
+# platform data directory (``%PROGRAMDATA%\ATE`` on Windows, ``/var/lib/ate`` on Linux)
+# so a config stays portable, while ``ate setup`` writes the paths already resolved
+# against the data directory it created (packet 30c).
 _DEFAULTS: dict[str, Any] = {
     "station.name": "",
     "station.uuid": "",
-    "testDefinitions.directories": [],
+    "testDefinitions.directories": ["<data>/definitions"],  # the format's documented default (30c)
     "database.type": "sqlite",
     "database.path": "<data>/ate.db",
     "database.storeMismatchedFiles": "ask",
@@ -94,6 +97,35 @@ def _platform_default() -> str:
     import sys
 
     return _DEFAULT_PATHS.get(sys.platform, "/etc/ate/config.json")
+
+
+# The only placeholder the config format defines (see ``assets/app-config-format.md``):
+# ``<data>`` stands for the platform data directory from the Location table.
+_DATA = "<data>"
+_PLACEHOLDER_RE = re.compile(r"<[A-Za-z][A-Za-z0-9_]*>")
+
+
+def _platform_data_dir() -> Path:
+    r"""The Station's data directory: ``%PROGRAMDATA%\ATE`` on Windows, ``/var/lib/ate`` on
+    Linux (``assets/app-config-format.md``); ``ate setup`` creates it (``assets/packaging.md``)."""
+    import os
+    import sys
+
+    if sys.platform == "win32" or os.name == "nt":
+        return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ATE"
+    return Path("/var/lib/ate")
+
+
+def _expand_data(value: str, config_file: Path, key: str) -> str:
+    """Replace ``<data>`` with the platform data directory; reject any other placeholder.
+
+    An unknown placeholder (``<whatever>``) is a config error naming the file and key, so a typo
+    never quietly becomes a directory literally called ``<whatever>`` (packet 30c)."""
+    text = str(value)
+    for token in _PLACEHOLDER_RE.findall(text):
+        if token != _DATA:
+            raise ConfigError(f"config file {config_file}: '{key}' has unknown placeholder {token!r}")
+    return text.replace(_DATA, str(_platform_data_dir()))
 
 
 # --- type predicates --------------------------------------------------------
@@ -137,20 +169,25 @@ def _check_type(path: str, full: str, value: Any, expected: str) -> None:
 # --- defaults ---------------------------------------------------------------
 
 
-def build_default_config(hostname: str = "") -> dict[str, Any]:
+def build_default_config(hostname: str = "", data_dir: str | Path | None = None) -> dict[str, Any]:
     """Return the default config as an ordered dict with a fresh ``station.uuid``.
 
     Key order follows ``assets/app-config-format.md``'s example so a freshly created
     file reads naturally. ``hostname`` seeds ``station.name`` (the computer's hostname).
+    With ``data_dir`` the ``<data>`` placeholder is written out already resolved — that is
+    what ``ate setup`` does, so a Station rooted at ``--root`` works wherever setup put it
+    (packet 30c); without it the file keeps the documented ``<data>`` placeholders and the
+    reader resolves them against the platform data directory.
     """
+    data = str(Path(data_dir).resolve()) if data_dir is not None else _DATA
     return {
         "format": 1,
         "station": {"name": str(hostname), "uuid": new_uuid7()},
         "defaultProject": "",
-        "testDefinitions": {"directories": [str(Path("<data>/definitions"))]},
-        "database": {"type": "sqlite", "path": str(Path("<data>/ate.db")), "storeMismatchedFiles": "ask"},
-        "reports": {"directory": str(Path("<data>/reports")), "organisation": "", "logo": None, "paperSize": "A4"},
-        "log": {"directory": str(Path("<data>/logs")), "level": "info"},
+        "testDefinitions": {"directories": [f"{data}/definitions"]},
+        "database": {"type": "sqlite", "path": f"{data}/ate.db", "storeMismatchedFiles": "ask"},
+        "reports": {"directory": f"{data}/reports", "organisation": "", "logo": None, "paperSize": "A4"},
+        "log": {"directory": f"{data}/logs", "level": "info"},
         "devices": {"receiveBufferBytes": 16_777_216},
         "deviceTrace": {"enabled": False, "maxBytes": 256},
         "ui": {"theme": "system", "layout": "staged", "allowLayoutSwitch": True, "allowHistoryDuringRun": True},
@@ -308,11 +345,14 @@ class Config:
 
 
 def Config_from_resolved(config_file: Path, data: dict[str, Any]) -> Config:
-    """Build a :class:`Config` from validated ``data``, resolving every path."""
+    """Build a :class:`Config` from validated ``data``, resolving every path.
+
+    ``<data>`` is expanded to the platform data directory first; remaining relative paths
+    resolve against the config file's directory (``assets/app-config-format.md``)."""
     base = config_file.parent
 
-    def _p(value: str | None) -> Optional[Path]:
-        return _resolve_path(value, base) if value else None
+    def _p(value: str | None, key: str) -> Optional[Path]:
+        return _resolve_path(_expand_data(value, config_file, key), base) if value else None
 
     station = data.get("station") or {}
     database = data.get("database") or {}
@@ -328,15 +368,18 @@ def Config_from_resolved(config_file: Path, data: dict[str, Any]) -> Config:
         station_name=station.get("name", ""),
         station_uuid=station.get("uuid", ""),
         default_project=data.get("defaultProject", ""),
-        test_definition_dirs=[_resolve_path(d, base) for d in (test_definitions.get("directories") or [])],
+        test_definition_dirs=[
+            _resolve_path(_expand_data(d, config_file, "testDefinitions.directories"), base)
+            for d in (test_definitions.get("directories") or [])
+        ],
         database_type=database.get("type", "sqlite"),
-        database_path=_resolve_path(database.get("path", "<data>/ate.db"), base),
+        database_path=_p(database.get("path", _DATA + "/ate.db"), "database.path"),
         store_mismatched_files=database.get("storeMismatchedFiles", "ask"),
-        reports_directory=_resolve_path(reports.get("directory", "<data>/reports"), base),
+        reports_directory=_p(reports.get("directory", _DATA + "/reports"), "reports.directory"),
         reports_organisation=reports.get("organisation", ""),
-        reports_logo=_p(reports.get("logo")),
+        reports_logo=_p(reports.get("logo"), "reports.logo"),
         reports_paper_size=reports.get("paperSize", "A4"),
-        log_directory=_resolve_path(log.get("directory", "<data>/logs"), base),
+        log_directory=_p(log.get("directory", _DATA + "/logs"), "log.directory"),
         log_level=log.get("level", "info"),
         receive_buffer_bytes=devices.get("receiveBufferBytes", 16_777_216),
         device_trace_enabled=device_trace.get("enabled", False),
