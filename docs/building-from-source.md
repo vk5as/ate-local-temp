@@ -80,9 +80,10 @@ What the script does:
 2. installs `.` and `pyinstaller` into it — the network is needed on a fresh venv;
 3. runs `packaging/pyinstaller/ate.spec` with PyInstaller, one-directory, into
    `dist/ate/`: the `ate` executable next to its `_internal` directory;
-4. with `--smoke`, runs the three checks the release CI runs: `dist/ate/ate --version`,
+4. with `--smoke`, runs the checks the release CI runs: `dist/ate/ate --version`,
    `dist/ate/ate _pdf report.html report.pdf` (QtWebEngine rendering, with
-   `QT_QPA_PLATFORM=offscreen`), and `dist/ate/ate _selftest`.
+   `QT_QPA_PLATFORM=offscreen`), `dist/ate/ate _selftest`, and a check that the WebEngine
+   helper and the template/Lua files are inside `_internal`.
 
 The bundle carries CPython and every dependency, plus the things no import reaches: the
 report template and the bundled `ate.` Lua modules, lupa's native Lua runtime, pyvisa-py and

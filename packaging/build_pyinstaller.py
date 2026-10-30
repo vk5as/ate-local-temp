@@ -128,7 +128,7 @@ def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
 
 
 def _run_smoke(exe: Path, expected_version: str) -> list[str]:
-    """Run the three checks a frozen bundle must pass; return one line per check."""
+    """Run the four checks a frozen bundle must pass; return one line per check."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     lines: list[str] = []
 
