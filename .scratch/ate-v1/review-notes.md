@@ -741,3 +741,8 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
   - The Run screen has no report status; a skipped PDF shows only in the app log.
   - Suite time is ~214 s (was ~80 s at 10a).
   - Still never run: `release.yml`, the 3.14 build, everything Windows.
+
+## Rc tag version fix (merged 2026-10-31)
+- Found while preparing the first tag: `v0.1.0-rc1` failed to parse, so builds would have reported `0.0.0-dev`. Strata fix: `0.1.0rc1` (app, wheel), `0.1.0~rc1` (.deb), `0.1.0.0` (Windows); the smoke normalises the expected version. No reviewer pass: small and mutation-proven. Light review: 1321 passed + 4 skipped ×3, none lost.
+- Strata saw one unexplained `Fatal Python error: Aborted` in `tests/test_gui_launch_30a.py`, not reproduced. Watch it.
+- First real GitHub CI (repo made public; private Actions minutes had run out): Linux failed at conftest, `libEGL.so.1` missing. `ci.yml` now installs Qt's system libraries (orchestrator tiny fix).
