@@ -18,7 +18,9 @@ Windows runner.
 Code signing is optional. When `ATE_SIGN_CERT` and `ATE_SIGN_PASSWORD` are both set the
 script is compiled with signing enabled — the installer itself, its uninstaller and
 `ate.exe` are signed — otherwise it is built unsigned and nothing complains. The
-password is read from the environment and never printed.
+password is read from the environment and never printed: it does sit on `iscc`'s command
+line (visible in any process listing on the build machine), so every line this wrapper
+prints, including a failed compile's stdout and stderr, is redacted first.
 """
 
 from __future__ import annotations
@@ -41,6 +43,11 @@ ISCC_LOCATIONS = (
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
 )
+
+
+def _is_windows() -> bool:
+    """Whether this machine can run `iscc` at all."""
+    return os.name == "nt"
 
 
 def _find_iscc() -> str | None:
@@ -93,6 +100,10 @@ def _sign_tool(cert: str, password: str) -> str:
 
     `$f` is the file to sign and `$q` is a quote: Inno substitutes them before running
     the command, so the certificate and the password sit in the command itself.
+
+    That means the password is on `iscc`'s command line and any process listing on the
+    build machine can see it. Nothing here ever logs the real command: everything printed
+    goes through _redact first.
     """
     return f'signtool.exe sign /fd SHA256 /f $q{cert}$q /p $q{password}$q /tr http://timestamp.digicert.com /td SHA256 $f'
 
@@ -113,12 +124,17 @@ def _signing() -> tuple[str, str] | None:
 
 
 def _iscc_command(iscc: str, iss: Path, version: str, source_dir: Path, out: Path, sign: str | None) -> list[str]:
+    # ISCC's documented switches: /D<name>=<value> defines a preprocessor variable,
+    # /S<name>=<command> defines a Sign Tool, /O<path> sets the output directory. All
+    # three take a leading / and the short forms are case-insensitive. Paths must be
+    # absolute: Inno resolves a relative SourceDir or OutputDir against the script's own
+    # folder, not the working directory (see the ate.iss header).
     cmd = [
         iscc,
         f"/DAppVersion={version}",
         f"/DVersionInfoVersion={_windows_version(version)}",
         f"/DSourceDir={source_dir}",
-        f"--output-dir={out}",
+        f"/O{out}",
     ]
     if sign:
         cmd.append("/DSignEnabled")
@@ -127,9 +143,23 @@ def _iscc_command(iscc: str, iss: Path, version: str, source_dir: Path, out: Pat
     return cmd
 
 
+REDACTED = "<from ATE_SIGN_PASSWORD>"
+
+
+def _redact(text: str, secret: str) -> str:
+    """Anything that could be the signing password, replaced before it is printed or logged.
+
+    The password is in the `iscc` command line (and therefore in `iscc`'s own output and
+    any log of the build); a failing compile must not echo it back.
+    """
+    if not secret:
+        return text
+    return text.replace(secret, REDACTED)
+
+
 def _display(command: list[str], secret: str) -> str:
     """The command as it would be typed, with the signing password replaced by its source."""
-    parts = [part.replace(secret, "<from ATE_SIGN_PASSWORD>") if secret else part for part in command]
+    parts = [_redact(part, secret) for part in command]
     return " ".join(f'"{part}"' if " " in part else part for part in parts)
 
 
@@ -144,14 +174,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the iscc command instead of running it")
     args = parser.parse_args(argv)
 
-    dist, out = Path(args.dist), Path(args.out) if args.out else Path(args.dist)
-    iss = Path(args.iss)
+    # Absolute before iscc sees them: Inno resolves a relative SourceDir, Source or
+    # OutputDir against the folder holding ate.iss, not this process's working directory.
+    dist = Path(args.dist).resolve()
+    out = (Path(args.out) if args.out else dist).resolve()
+    iss = Path(args.iss).resolve()
     if not iss.is_file():
         raise SystemExit(f"{iss} does not exist")
 
     iscc = args.iscc or _find_iscc()
     if not args.dry_run:
-        if os.name != "nt":
+        if not _is_windows():
             raise SystemExit(
                 "iscc, the Inno Setup compiler, is a Windows program: the installer can only be built on Windows. "
                 "Use --dry-run to see the exact command from here."
@@ -183,11 +216,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"signing: {'yes' if sign else 'no'}")
         return 0
 
-    print("$ " + _display(command, sign[1] if sign else ""))
+    secret = sign[1] if sign else ""
+    print("$ " + _display(command, secret))
     proc = subprocess.run(command, capture_output=True, text=True)
-    print(proc.stdout)
+    # iscc echoes the Sign Tool command it ran, password and all: redact before printing.
+    print(_redact(proc.stdout, secret))
     if proc.returncode != 0:
-        raise SystemExit(f"iscc failed with exit {proc.returncode}:\n{proc.stderr[-1500:]}")
+        raise SystemExit(f"iscc failed with exit {proc.returncode}:\n{_redact(proc.stderr, secret)[-1500:]}")
     print(f"built {out / f'ate-{version}-windows-x64-setup.exe'} (version {version}, signing {'yes' if sign else 'no'})")
     return 0
 
