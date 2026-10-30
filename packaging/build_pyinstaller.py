@@ -68,10 +68,29 @@ def _build_venv(path: Path) -> Path:
     return python
 
 
-def _install_deps(python: Path) -> None:
+def _build_copy(work: Path) -> Path:
+    """A clean copy of the checkout to install into the venv.
+
+    Installing the checkout itself makes setuptools write ``build/`` into the repo; the copy
+    keeps every scrap of the build under the work directory. Same trick as the wheel test.
+    """
+    copy = work / "checkout"
+    if copy.exists():
+        shutil.rmtree(copy)
+    copy.mkdir(parents=True)
+    for name in ("pyproject.toml", "README.md", "src"):
+        source = REPO / name
+        if source.is_dir():
+            shutil.copytree(source, copy / name, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
+        elif source.exists():
+            shutil.copyfile(source, copy / name)
+    return copy
+
+
+def _install_deps(python: Path, work: Path) -> None:
     """Install ATE and PyInstaller into the build venv. Needs the network on a fresh venv."""
     try:
-        _run([str(python), "-m", "pip", "install", "--quiet", ".", "pyinstaller"], timeout=900)
+        _run([str(python), "-m", "pip", "install", "--quiet", str(_build_copy(work)), "pyinstaller"], cwd=work, timeout=900)
     except SystemExit as exc:
         raise SystemExit(f"could not install ATE and PyInstaller into the build venv: {exc}")
 
@@ -85,19 +104,20 @@ def _version(python: Path) -> str:
 def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
     """Run PyInstaller and return the one-directory bundle (``dist/ate``)."""
     env = dict(os.environ, ATE_BUILD_VERSION_FILE=str(version_file))
-    # PyInstaller puts its scratch in <cwd>/build, which is gitignored; --workpath moves
-    # the analysis/temp files next to the venv so the whole build lives under one directory.
+    # PyInstaller is run from the work directory so its scratch never lands in the checkout.
     _run(
         [
             str(python),
             "-m",
             "PyInstaller",
             str(SPEC),
+            "--noconfirm",  # rebuild over a previous dist/ate
             "--distpath",
             str(dist),
             "--workpath",
             str(work / "pyinstaller-work"),
         ],
+        cwd=work,
         env=env,
     )
     bundle = dist / "ate"
@@ -174,14 +194,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     dist, work = Path(args.dist), Path(args.work)
+    work.mkdir(parents=True, exist_ok=True)
     venv = Path(args.venv) if args.venv else work / "pyinstaller-venv"
     python = sys.executable if args.no_venv else _build_venv(venv)
 
     if not args.skip_install:
-        _install_deps(python)
+        _install_deps(python, work)
     version = _version(python)
 
-    version_file = work / "build_version.txt"
+    version_file = work / "bundle" / "version.txt"  # collected as ate/version.txt in the bundle
     version_file.parent.mkdir(parents=True, exist_ok=True)
     version_file.write_text(version, encoding="utf-8")
 

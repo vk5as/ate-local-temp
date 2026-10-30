@@ -18,8 +18,19 @@ import sys
 
 if getattr(sys, "frozen", False):
     base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    helper = os.path.join(base, "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")
-    if os.path.exists(helper):
+    name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
+    # PyInstaller's Qt hooks put the helper under the bundled Qt tree; point Qt at it
+    # wherever this build's Qt put it.
+    helper = next(
+        (path for path in (
+            os.path.join(base, "PyQt6", "Qt6", "libexec", name),
+            os.path.join(base, "PyQt6", "Qt", "libexec", name),
+            os.path.join(base, "libexec", name),
+            os.path.join(base, name),
+        ) if os.path.exists(path)),
+        None,
+    )
+    if helper:
         os.environ.setdefault("QTWEBENGINEPROCESS_PATH", helper)
     if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-gpu --disable-gpu")

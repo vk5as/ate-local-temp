@@ -57,7 +57,7 @@ def _executed_spec() -> dict:
             return self
 
     namespace = {"SPECPATH": str(SPEC.parent)}
-    for name in ("Analysis", "PYZ", "Executable"):
+    for name in ("Analysis", "PYZ", "EXE", "COLLECT"):
         namespace[name] = _Stub()
     exec(SPEC.read_text(encoding="utf-8"), namespace)  # noqa: S102 - the spec is our own file
     return namespace
@@ -66,7 +66,8 @@ def _executed_spec() -> dict:
 def test_the_spec_bundles_ate_runtime_data() -> None:
     """The report template and the bundled Lua modules are in the bundle."""
     spec = _executed_spec()
-    bundled = {target for _, target in spec["datas"]}
+    # PyInstaller drops each data file into its destination directory.
+    bundled = {str(Path(dest) / Path(src).name) for src, dest in spec["datas"]}
     missing = sorted(REQUIRED_DATA - bundled)
     assert not missing, f"the spec does not bundle {missing}; datas = {sorted(bundled)}"
     # The sweep is what keeps a newly added resource in the bundle without editing the spec.
@@ -134,16 +135,24 @@ def test_selftest_reports_what_the_source_tree_carries(capsys) -> None:
         assert f"{name}: ok" in out, out
 
 
+# Build scratch that must not be left in the checkout by a run.
+def _repo_build_state() -> list[str]:
+    """dist/, build/ and any spec scratch in the checkout, as paths."""
+    junk = [REPO / "dist", REPO / "build"]
+    return sorted(p.relative_to(REPO).as_posix() for p in junk if p.exists())
+
+
 # The build takes minutes and needs the network for a fresh venv, so it is off unless asked for.
 @pytest.mark.build
 @pytest.mark.slow
 def test_the_frozen_build_builds_and_smoke_tests() -> None:
-    """Build dist/ate and run the three smoke checks against the real executable."""
+    """Build dist/ate and run the four smoke checks against the real executable."""
     if os.environ.get("ATE_BUILD_TESTS") != "1":
         pytest.skip("the frozen build takes minutes; set ATE_BUILD_TESTS=1 to run it")
 
     scratch = Path(tempfile.mkdtemp(prefix="ate-frozen-build-"))
     dist, work = scratch / "dist", scratch / "work"
+    before = _repo_build_state()
     try:
         result = subprocess.run(
             [sys.executable, str(BUILD_SCRIPT), "--dist", str(dist), "--work", str(work), "--smoke"],
@@ -160,6 +169,6 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    # Nothing of the build is left in the checkout: dist/ and build/ are gitignored, and
-    # the test never writes into them.
-    assert not (REPO / "dist").exists() and not (REPO / "build").exists(), "the build left output in the repo"
+    # The build writes only under the work/dist directories it was given: dist/ and build/
+    # are gitignored and must not be created in the checkout by a test run.
+    assert before == _repo_build_state(), "the build left output in the checkout"

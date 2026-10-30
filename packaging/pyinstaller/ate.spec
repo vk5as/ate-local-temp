@@ -29,19 +29,21 @@ ENTRY = Path(SPECPATH) / "ate_entry.py"
 # Every non-.py file under src/ate is read at runtime: the Jinja report template, the
 # bundled Lua modules, and anything added later. Derived from the tree on purpose, so
 # a new resource needs no change here (tests/test_pyinstaller_build_27a.py checks the
-# spec still sweeps the tree).
+# spec still sweeps the tree). PyInstaller places a data file *inside* its destination
+# directory, so the destination is the directory, not the file path.
 resources = sorted(
     p
     for p in (SRC / "ate").rglob("*")
     if p.is_file() and p.suffix not in {".py", ".pyc"} and "__pycache__" not in p.parts
 )
-datas = [(str(p), str(p.relative_to(SRC))) for p in resources]
+datas = [(str(p), str(p.parent.relative_to(SRC))) for p in resources]
 
-# The build script writes the tagged version out to build/ and passes its path here, so
-# `ate --version` in a frozen app reports the release it was built from, not the fallback.
+# The build script writes the version it took from the git tag into the work directory and
+# passes its path here, so `ate --version` in a frozen app reports the version the bundle was
+# built from: a frozen app has no git to ask.
 version_file = os.environ.get("ATE_BUILD_VERSION_FILE")
 if version_file and Path(version_file).is_file():
-    datas.append((version_file, "ate/version.txt"))
+    datas.append((version_file, "ate"))  # -> ate/version.txt
 
 # ------------------------------------------------------- QtWebEngine assets ----
 # PyInstaller's own hooks (hook-PyQt6.QtWebEngineCore and friends) collect the Qt libraries
@@ -92,15 +94,32 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = Executable(
+# One-directory (onedir): the executable is separate from the collected libraries and data,
+# which is what the installer, the tarball and the .deb all wrap.
+exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="ate",
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=True,  # ATE is a CLI as well as a GUI; the console is where --version prints
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="ate",
 )

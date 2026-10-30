@@ -128,7 +128,7 @@ def _selftest_checks() -> list[tuple[str, bool, str]]:
 
         manager = pyvisa.ResourceManager("@py")
         manager.close()
-        checks.append(("pyvisa-py", pyvisa_py.WRAPPER_CLASS is not None, f"pyvisa {pyvisa.__version__}, ResourceManager('@py') opened"))
+        checks.append(("pyvisa-py", pyvisa_py.WRAPPER_CLASS is not None, "ResourceManager('@py') opened (pyvisa_py backend)"))
     except Exception as exc:
         checks.append(("pyvisa-py", False, str(exc)))
 
