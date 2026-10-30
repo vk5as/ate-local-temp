@@ -106,11 +106,12 @@ def _local_stamp(iso_utc: Optional[str], offset: str) -> Optional[str]:
 
 
 def _duration(start_iso: Optional[str], end_iso: Optional[str]) -> Optional[str]:
-    """Elapsed run time as "1 h 2 min 3 s" (hours and minutes dropped when zero).
+    """Elapsed run time as "1 h 2 min 3 s": hours dropped under an hour, minutes under a minute.
 
-    The spec's Cover asks for a duration but fixes no format, so whole seconds and the units that
-    are actually used are printed. A run with no end time has no duration: the spec only reports
-    finished runs ("A run still in progress can't be reported"), and the Cover prints "—" for it."""
+    The spec's Cover asks for a duration but fixes no format, so whole seconds and only the units
+    actually used are printed. A run with no end time has no duration: the spec only reports finished
+    runs ("A run still in progress can't be reported"), and the Cover prints "—" for it.
+    """
     if not start_iso or not end_iso:
         return None
     total = int(
