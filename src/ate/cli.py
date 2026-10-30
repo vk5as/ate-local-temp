@@ -62,6 +62,216 @@ def _cmd_pdf_helper(argv: list[str]) -> int:
     return code
 
 
+def _cmd_selftest(argv: list[str]) -> int:
+    """Dispatch ``ate _selftest`` — a bundle checks what it carries (packet 27a).
+
+    Hidden like ``_pdf``. A PyInstaller one-directory build drops everything that no import
+    reaches: the report template, the bundled ``ate.`` Lua modules, QtWebEngine's helper
+    process, lupa's native runtime, pyvisa-py's backends. This prints one line per thing the
+    bundle must carry and exits 1 if any of them is missing, so ``packaging/build_pyinstaller.py
+    --smoke`` and the release CI can see which one failed. It is a build-time inventory, not a
+    feature: it never touches a Station, a database or a Test Run.
+
+    ``--run`` adds one end-to-end check on top of the inventory: a built-in one-step Test
+    Schedule is run headless in a temporary directory (:class:`~ate.run_session.headless.HeadlessRunSession`,
+    its own config and database), and the check fails unless the run wrote its HTML report and
+    the hidden ``_pdf`` child wrote its PDF. That is the only way to prove a frozen bundle can
+    actually run a Test Run rather than merely import its modules.
+    """
+    parser = argparse.ArgumentParser(prog="ate _selftest", add_help=True)
+    parser.add_argument("--run", action="store_true", help="run a built-in one-step Test Schedule head end to end")
+    args, _unknown = parser.parse_known_args(argv)
+
+    results = _selftest_checks()
+    if args.run:
+        results.append(_selftest_end_to_end())
+    for name, ok, detail in results:
+        print(f"{name}: {'ok' if ok else 'MISSING'} - {detail}")
+    return 0 if all(ok for _, ok, _ in results) else 1
+
+
+def _selftest_checks() -> list[tuple[str, bool, str]]:
+    """(what, is present, what was seen) for each thing a frozen bundle must carry."""
+    import importlib.resources
+
+    checks: list[tuple[str, bool, str]] = [
+        (
+            "python",
+            True,
+            f"{sys.version_info[0]}.{sys.version_info[1]} "
+            + ("frozen" if getattr(sys, "frozen", False) else "source"),
+        )
+    ]
+
+    def resource(rel: str) -> bytes:
+        path = importlib.resources.files("ate")
+        for part in rel.split("/"):
+            path = path / part
+        return path.read_bytes()
+
+    # The report template and the bundled Lua modules are data files, not modules.
+    try:
+        template = resource("report/templates/report.html.j2")
+        checks.append(("report template", b"<html" in template, f"{len(template)} bytes at ate/report/templates/report.html.j2"))
+    except Exception as exc:
+        checks.append(("report template", False, str(exc)))
+
+    try:
+        lua = resource("lua/devices.lua")
+        checks.append(("bundled Lua", len(lua) > 0, f"ate.devices ({len(lua)} bytes at ate/lua/devices.lua)"))
+    except Exception as exc:
+        checks.append(("bundled Lua", False, str(exc)))
+
+    # lupa's native runtime, and the builders the bundled module defines.
+    try:
+        import lupa
+
+        runtime = lupa.LuaRuntime()
+        builders = runtime.execute(resource("lua/devices.lua").decode("utf-8"))
+        names = [name for name in ("Tcp", "Serial", "Udp", "Visa", "Read", "Write") if builders[name] is not None]
+        checks.append(("lupa", len(names) == 6, f"Lua {runtime.lua_version[0]}.{runtime.lua_version[1]}, ate.devices builders {', '.join(names)}"))
+    except Exception as exc:
+        checks.append(("lupa", False, str(exc)))
+
+    # pyvisa loads its backend by name at runtime; '@py' is the only one ATE ships.
+    try:
+        import pyvisa
+        import pyvisa_py  # noqa: F401 - the backend pyvisa imports when it is asked for '@py'
+
+        manager = pyvisa.ResourceManager("@py")
+        manager.close()
+        checks.append(("pyvisa-py", pyvisa_py.WRAPPER_CLASS is not None, "ResourceManager('@py') opened (pyvisa_py backend)"))
+    except Exception as exc:
+        checks.append(("pyvisa-py", False, str(exc)))
+
+    # The engine and the report renderer pull in lupa, SQLAlchemy and Jinja2.
+    try:
+        from .engine import lua_host  # noqa: F401
+        from .report import html as report_html  # noqa: F401
+
+        checks.append(("engine + report", hasattr(report_html, "render_report"), "ate.engine.lua_host and ate.report.html import"))
+    except Exception as exc:
+        checks.append(("engine + report", False, str(exc)))
+
+    # QWebEngine: importing the bindings proves they and the Qt libraries are in the bundle;
+    # the _pdf smoke check proves the helper process actually runs. QtWebEngineCore is what
+    # the PDF helper uses; QtWebEngineWidgets is only collected (its hook's attribute must be
+    # set before the first QCoreApplication, so importing it here would fail in a test run).
+    try:
+        from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+
+        checks.append(("QtWebEngine", True, "QWebEnginePage importable"))
+    except Exception as exc:
+        checks.append(("QtWebEngine", False, str(exc)))
+
+    return checks
+
+
+# The schedule ``_selftest --run`` builds: one step that reports PASS. Built into the CLI so the
+# check needs no Media Release on disk — and so the frozen bundle is exercised by the same Lua the
+# engine really loads.
+_SELFTEST_SCHEDULE = """\
+return ScheduleParams("Selftest schedule", "a single step that reports PASS")
+  :setSchedule({
+    StepParams("selftest step"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "selftest ran") end),
+  })
+"""
+
+
+def _selftest_end_to_end() -> tuple[str, bool, str]:
+    """Run a built-in Test Schedule headless and check both reports were written (packet 27a).
+
+    Everything is in a temporary directory with its own config and database: no Station is touched,
+    and the directory is removed again. The run goes through the real seams — Test Definition,
+    :class:`~ate.storage.store.RunStore`, :class:`~ate.engine.run_engine.RunEngine` — and ends with
+    the report writer starting the hidden ``_pdf`` child, which inside a frozen bundle is the bundle's
+    own executable. Returns ``(name, ok, what was seen)`` for ``_selftest``'s output.
+    """
+    import shutil
+    import tempfile
+    import time
+    from pathlib import Path
+
+    def pump(app, predicate, seconds: float) -> bool:
+        """Pump Qt events until ``predicate()`` is true, giving up after ``seconds``."""
+        deadline = time.monotonic() + seconds
+        while not predicate():
+            app.processEvents()
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    work = Path(tempfile.mkdtemp(prefix="ate-selftest-"))
+    try:
+        definitions = work / "definitions"
+        definitions.mkdir(parents=True)
+        schedule = definitions / "selftest.tslua"
+        schedule.write_text(_SELFTEST_SCHEDULE, encoding="utf-8")
+        (definitions / "selftest.atedef").write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "mediaNumber": "SELFTEST",
+                    "name": "Selftest release",
+                    "version": "1.0.0",
+                    "files": [{"path": "selftest.tslua", "sha256": hashlib.sha256(schedule.read_bytes()).hexdigest()}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_file = work / "config.json"  # absolute paths: nothing here uses the <data> placeholder
+        config_file.write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "station": {"name": "selftest", "uuid": "00000000-0000-7000-8000-000000000001"},
+                    "defaultProject": "Selftest",
+                    "testDefinitions": {"directories": [str(definitions)]},
+                    "database": {"type": "sqlite", "path": str(work / "ate.db")},
+                    "reports": {"directory": str(work / "reports")},
+                    "log": {"directory": str(work / "logs")},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        from PyQt6.QtCore import QCoreApplication
+
+        from .config import read_config
+        from .report.pdf import pdf_helper_command
+        from .run_session.headless import HeadlessRunSession, SessionState
+
+        session = HeadlessRunSession(read_config(config_file))
+        written: list[tuple[str, str]] = []
+        try:
+            session.report_written.connect(lambda html, pdf: written.append((html, pdf)))
+            session.select_schedule("Selftest schedule")
+            session.set_operator("selftest")
+            session.set_project("selftest")
+            session.start()
+            app = QCoreApplication.instance() or QCoreApplication([])
+            if not pump(app, lambda: session.state is SessionState.FINISHED, 30.0):
+                return ("run end-to-end", False, "the Test Run never reached FINISHED")
+            if not pump(app, lambda: written, 90.0):
+                return ("run end-to-end", False, "the _pdf helper never reported the report")
+            html_path, pdf_path = written[0]
+            if not pdf_path:
+                return ("run end-to-end", False, "the _pdf helper wrote no PDF")
+            html = Path(html_path).read_bytes()
+            pdf = Path(pdf_path).read_bytes()
+            helper = Path(pdf_helper_command(html_path, pdf_path)[0]).name
+            ok = b"<html" in html and pdf.startswith(b"%PDF")
+            return ("run end-to-end", ok, f"{helper} ran the schedule: {html_path} ({len(html)} bytes HTML), {pdf_path} ({len(pdf)} bytes PDF)")
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 - the selftest reports a failure instead of raising
+        return ("run end-to-end", False, str(exc))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The whole ``ate`` command line, so ``--help`` works at every level (packet 30a).
 
@@ -111,10 +321,13 @@ def main(argv=None) -> int:
     (30a review item 5).
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Hidden helper subcommand (ticket 22): the PDF child process runs `ate _pdf <html> <pdf>`.
-    # It is dispatched before parsing so it is not advertised in --help (30a review item 12).
+    # Hidden helper subcommands, dispatched before parsing so they stay out of --help
+    # (30a review item 12): _pdf is the PDF child process (ticket 22), _selftest is the
+    # frozen bundle's inventory check (packet 27a).
     if argv and argv[0] == "_pdf":
         return _cmd_pdf_helper(argv[1:])
+    if argv and argv[0] == "_selftest":
+        return _cmd_selftest(argv[1:])
     try:
         args, unknown = _build_parser().parse_known_args(argv)
     except SystemExit as exc:

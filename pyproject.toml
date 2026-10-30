@@ -65,6 +65,7 @@ testpaths = ["tests", "examples"]
 addopts = "-ra"
 markers = [
     "slow: seconds of work or a network; deselect with -m 'not slow'",
+    "build: builds the frozen bundle with PyInstaller; skipped unless ATE_BUILD_TESTS=1",
 ]
 # The engine and run session must never import widgets. This is enforced by a
 # dedicated test (see tests/test_architecture_rules.py); keep this note here
