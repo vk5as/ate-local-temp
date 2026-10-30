@@ -19,7 +19,7 @@ from ate.engine.operator_input import OperatorInput
 from ate.storage._uuid import new_uuid7
 from ate.storage.store import RunStore
 
-from ._fixtures import ABORTABLE, ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
+from ._fixtures import ABORTABLE_TWO_INPUTS, ERRORING, FAILING, NEVER_REPORTS, PASSING, _drive
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -174,18 +174,19 @@ def test_run_key_is_uuidv7(app: QCoreApplication) -> None:
 
 
 def _abort_between_steps(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
-    """Drive ``source`` on a fresh engine and request a whole-run abort between steps.
+    """Drive ``source`` on a fresh engine and request a whole-run abort while a step is running.
 
-    The ABORTABLE schedule's first step blocks on an INTEGER input; while it waits the driver
-    supplies its value (so that step completes cleanly) and then requests an abort. The engine
-    therefore stops at the next boundary — recording the blocked step PASS, the following step as
-    ERROR "Aborted by Operator", later steps NOTRUN, and closing ABORTED / FAIL.
+    Packet 30d, applying the 30b lesson: the schedule's first two steps each block on an INTEGER
+    input. The driver answers step 1, then waits until step 2 has *announced* its input — the worker
+    is provably parked inside that step — and only then requests the abort. Answering step 1 and
+    aborting in the same callback used to race: ``supply_input`` wakes the worker at once, so on a
+    loaded machine it ran steps 2 and 3 to PASS before the flag was set, and the rows read back
+    PASS/COMPLETED. The abort reaches the parked step through the shared flag (:meth:`OperatorInput.get_raw`
+    slices its wait and raises "aborted", packet 13b), so the running step records one ERROR Attempt,
+    every later step is NOTRUN and the run closes ABORTED / FAIL.
 
     Driving is a concurrent pump loop rather than a bare ``QThread.wait``: the worker's queued
-    signals (input_asked -> supply/abort) only fire when the application event loop is pumped, and
-    that pumping races with the worker's own step-2 boundary check under a plain wait. Pumping in
-    lock-step with the worker — as :func:`_pump_until_finished` does for Ticket 10 — delivers every
-    queued slot (including FINISHED) deterministically before we inspect rows."""
+    signals only fire when the application event loop is pumped."""
     captured = {}
 
     def _capture(run_uuid: str) -> None:
@@ -201,13 +202,25 @@ def _abort_between_steps(app: QCoreApplication, source: str) -> tuple[RunStore, 
 
         finished = threading.Event()
         engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
+        parked_in_step_2 = threading.Event()
 
         def _on_ask(seq: int, attempt_no: int, index: int) -> None:
-            op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly
-            engine.request_abort()  # then stop between steps before step 2 runs
+            if seq == 0:
+                op.supply_input(index - 1, 5)  # answer step 1 so it records PASS
+            else:
+                parked_in_step_2.set()  # the worker is now waiting inside step 2's ATE.input
 
         engine.input_asked.connect(_on_ask)
         engine.start()
+
+        deadline = time.time() + 10.0
+        while not parked_in_step_2.is_set():
+            app.processEvents()
+            if time.time() > deadline:
+                raise TimeoutError("the run never reached step 2's blocking input within 10 s")
+
+        engine.request_abort()  # the worker is parked in step 2: it cannot run past it
+
         deadline = time.time() + 10.0
         while not finished.is_set():
             app.processEvents()
@@ -219,8 +232,11 @@ def _abort_between_steps(app: QCoreApplication, source: str) -> tuple[RunStore, 
 
 def test_whole_run_abort_between_steps_records_error_notrun_and_aborted(app: QCoreApplication) -> None:
     """Packet 13a checkbox 2: aborting between steps records the running step ERROR 'Aborted by
-    Operator', remaining steps NOTRUN, End Reason ABORTED and result FAIL."""
-    store, row = _abort_between_steps(app, ABORTABLE)
+    Operator', remaining steps NOTRUN, End Reason ABORTED and result FAIL.
+
+    Packet 30d: the abort is requested while the worker is provably parked in step 2's blocking
+    input, so a worker that raced through the schedule cannot make this read PASS/COMPLETED."""
+    store, row = _abort_between_steps(app, ABORTABLE_TWO_INPUTS)
 
     assert row is not None
     # A whole-run abort fails the run with End Reason ABORTED.
