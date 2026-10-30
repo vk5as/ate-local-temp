@@ -12,10 +12,10 @@ the parent decides first (:func:`pdf_sandbox_choice`) and tells this helper with
 ``--unsandboxed`` argument. A helper run directly as root without it refuses.
 
 Public API:
-    pdf_sandbox_choice(allow_unsandboxed, ask, log) -> callable returning a plan  # packet 30d
+    pdf_sandbox_choice(allow_unsandboxed, ask, log) -> callable(report) returning a plan  # 30d
     render_pdf(html_path, pdf_path, paper="A4"|"Letter", unsandboxed=False) -> int  # in the helper
-    pdf_helper_command(html_path, pdf_path, paper="A4", unsandboxed=False) -> (program, args, env)
-    run_pdf_helper(html_path, pdf_path, paper="A4", unsandboxed=False, *, timeout=30.0) -> None
+    pdf_helper_command(html_path, pdf_path, paper="A4", unsandboxed=False, log=None) -> (program, args, env)
+    run_pdf_helper(html_path, pdf_path, paper="A4", unsandboxed=False, *, timeout=30.0, log=None) -> None
 """
 
 from __future__ import annotations
@@ -63,24 +63,35 @@ def pdf_has_text(pdf: bytes) -> bool:
     return False
 
 
-def _is_elevated() -> bool:
-    """Whether this process runs with privileges Chromium's sandbox is known to refuse.
+def _elevation() -> Optional[bool]:
+    """True for root or an administrator, False for an ordinary user, None when it cannot be known.
 
     On Linux the renderer refuses to start as root at all: `ERROR:zygote_host_impl_linux.cc
     Running as root without --no-sandbox is not supported` (crbug.com/638180). On Windows the
     sandbox builds a restricted token for the renderer, and an elevated (High IL) parent has
     been reported to fail that — Electron's `render-process-gone exitCode 18` under
     Administrator is the same failure. ``ate setup`` is run elevated by the installer and by a
-    ``.deb`` postinst, so an admin rendering a Test Report is not hypothetical."""
+    ``.deb`` postinst, so an admin rendering a Test Report is not hypothetical.
+
+    Windows is the only case where the check can fail outright (no `shell32`, no `windll`): the
+    answer is then unknown, not "not elevated", and a failed render says so rather than blaming
+    the sandbox."""
     if os.name == "nt":
         try:
             import ctypes
 
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
-            return False
+            return None
     geteuid = getattr(os, "geteuid", None)
     return geteuid is not None and geteuid() == 0
+
+
+def _is_elevated() -> bool:
+    """Whether this process runs with privileges Chromium's sandbox is known to refuse.
+
+    Unknown counts as not elevated: the sandbox is kept, and the render is the normal one."""
+    return _elevation() is True
 
 
 # The three answers a run-end or a History Regenerate can get (packet 30d). An ordinary user is
@@ -104,11 +115,13 @@ def pdf_sandbox_choice(
     allow_unsandboxed: bool = False,
     ask: Optional[Callable[[], bool]] = None,
     log: Optional[Callable[[str, str, str], None]] = None,
-) -> Callable[[], str]:
+) -> Callable[..., str]:
     """Build the one decision every PDF asks (packet 30d): sandboxed, unsandboxed, or skipped.
 
     Built at launch and handed down to the run session and to History, so neither of them reads the
-    environment or guesses at privilege. Each call answers for one PDF:
+    environment or guesses at privilege. Each call answers for one PDF, and can name it —
+    `decide(html_path)` puts the report file in the log line, so a choice in History can be matched
+    to the run it belongs to (packet 30d review):
 
     * not root and not an administrator — :data:`PDF_SANDBOXED`, nothing is asked;
     * privileged and ``--allow-unsandboxed-pdf`` was given — :data:`PDF_UNSANDBOXED`, no dialog,
@@ -118,51 +131,104 @@ def pdf_sandbox_choice(
     * privileged with no way to ask (headless, ``_selftest --run``) — :data:`PDF_SKIPPED`.
     """
 
-    def decide() -> str:
+    def decide(report: str = "") -> str:
+        """One PDF's answer. `report` is the report file (or any label) named in the log line."""
+        which = f" ({Path(report).name})" if report else ""
         if not _is_elevated():
+            if allow_unsandboxed:
+                _note(log, "INFO", "--allow-unsandboxed-pdf has no effect here: this process is not root or an administrator, so Chromium's sandbox stays on for this Test Report PDF")
             return PDF_SANDBOXED
         if allow_unsandboxed:
-            _note(log, "WARNING", "--allow-unsandboxed-pdf: this Test Report PDF renders without Chromium's sandbox (ATE is running as root or an administrator)")
+            _note(log, "WARNING", f"--allow-unsandboxed-pdf: this Test Report PDF{which} renders without Chromium's sandbox (ATE is running as root or an administrator)")
             return PDF_UNSANDBOXED
         if ask is None:
-            _note(log, "WARNING", "ATE is privileged and there is no dialog to ask and no --allow-unsandboxed-pdf: the Test Report PDF is skipped rather than rendered with the sandbox off")
+            _note(log, "WARNING", f"ATE is privileged and there is no dialog to ask and no --allow-unsandboxed-pdf: the Test Report PDF{which} is skipped rather than rendered with the sandbox off")
             return PDF_SKIPPED
         if ask():
-            _note(log, "WARNING", "the Operator chose to render this Test Report PDF without Chromium's sandbox")
+            _note(log, "WARNING", f"the Operator chose to render this Test Report PDF{which} without Chromium's sandbox")
             return PDF_UNSANDBOXED
-        _note(log, "INFO", "the Operator declined an unsandboxed PDF: the Test Report is HTML only")
+        _note(log, "INFO", f"the Operator declined an unsandboxed PDF for{which or ' this Test Report'}: the Test Report is HTML only")
         return PDF_SKIPPED
 
     return decide
 
 
-def _sandbox_flags(env: dict[str, str], allow_unsandboxed: bool) -> dict[str, str]:
+# The knobs Qt WebEngine reads that switch Chromium's renderer sandbox off. Inheriting either one
+# would render a PDF unsandboxed without anyone choosing it (packet 30d review).
+SANDBOX_OFF_VARIABLES = ("QTWEBENGINE_DISABLE_SANDBOX", "QTWEBENGINE_CHROMIUM_FLAGS")
+NO_SANDBOX_FLAG = "--no-sandbox"
+
+
+def _strip_inherited_sandbox_off(
+    env: dict[str, str],
+    log: Optional[Callable[[str, str, str], None]] = None,
+    where: str = "the PDF helper",
+) -> list[str]:
+    """Take out the sandbox-off settings this render was never chosen to have, and say what went.
+
+    Someone who exports `QTWEBENGINE_DISABLE_SANDBOX=1` or `QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox`
+    for another program would otherwise get an unsandboxed ATE render with no prompt, flag or log.
+    Only `--no-sandbox` is removed from the flags, so every other flag that person set survives.
+    Returns the names of what was removed."""
+    removed: list[str] = []
+    if env.get("QTWEBENGINE_DISABLE_SANDBOX"):
+        env.pop("QTWEBENGINE_DISABLE_SANDBOX")
+        removed.append("QTWEBENGINE_DISABLE_SANDBOX")
+    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    if NO_SANDBOX_FLAG in flags:
+        kept = [flag for flag in flags if flag != NO_SANDBOX_FLAG]
+        if kept:
+            env["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(kept)
+        else:
+            env.pop("QTWEBENGINE_CHROMIUM_FLAGS")
+        removed.append("QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox")
+    if removed:
+        _note(
+            log,
+            "WARNING",
+            f"{where} inherited Chromium's sandbox switched off ({', '.join(removed)}); ATE did not "
+            "choose that, so this Test Report renders with the sandbox on. For an unsandboxed PDF, "
+            "run ATE with --allow-unsandboxed-pdf or answer yes to the dialog.",
+        )
+    return removed
+
+
+def _sandbox_flags(
+    env: dict[str, str], allow_unsandboxed: bool, log: Optional[Callable[[str, str, str], None]] = None
+) -> dict[str, str]:
     """Turn Chromium's sandbox off for one render — only when the choice said yes *and* this
     process is privileged.
 
     A flag handed to an ordinary user is ignored: the sandbox is a real protection and it works
     there, so nothing is given up. Qt WebEngine reads both `QTWEBENGINE_DISABLE_SANDBOX` and
     `QTWEBENGINE_CHROMIUM_FLAGS`; the flags are appended, never replaced, so whatever the packager
-    or CI set is kept."""
-    if not allow_unsandboxed or not _is_elevated():
+    or CI set is kept. When the answer is No, whatever the environment already carried that switches
+    the sandbox off is taken out: the helper's environment has no sandbox-off settings unless the
+    choice was Yes (packet 30d review)."""
+    if allow_unsandboxed and _is_elevated():
+        env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+        flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+        if NO_SANDBOX_FLAG not in flags:
+            flags.append(NO_SANDBOX_FLAG)
+        env["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
         return env
-    env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
-    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
-    if "--no-sandbox" not in flags:
-        flags.append("--no-sandbox")
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    _strip_inherited_sandbox_off(env, log, where="the PDF helper")
     return env
 
 
-def _child_env(allow_unsandboxed: bool = False) -> dict[str, str]:
+def _child_env(
+    allow_unsandboxed: bool = False, log: Optional[Callable[[str, str, str], None]] = None
+) -> dict[str, str]:
     """The helper's environment: the parent's, with the offscreen platform forced, and Chromium's
     sandbox disabled only when this render was chosen unsandboxed (packet 30d).
 
     The helper never shows a window, so it must not depend on a display. Everything else is
-    inherited, which Windows needs (Python won't start without ``SYSTEMROOT`` and friends)."""
+    inherited, which Windows needs (Python won't start without ``SYSTEMROOT`` and friends) —
+    except the sandbox-off settings, which are stripped whenever this render was not chosen
+    unsandboxed, so an exported `QTWEBENGINE_DISABLE_SANDBOX` cannot silently turn the sandbox off."""
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
-    return _sandbox_flags(env, allow_unsandboxed)
+    return _sandbox_flags(env, allow_unsandboxed, log)
 
 
 def _apply_sandbox_decision(unsandboxed: bool) -> bool:
@@ -174,7 +240,16 @@ def _apply_sandbox_decision(unsandboxed: bool) -> bool:
       administrator, and ATE never turns the sandbox off without being asked;
     * told to, and privileged — set the knobs for this one render;
     * told to, but ordinary — warn and keep the sandbox: the flag buys nothing there.
+
+    Every case that keeps the sandbox also removes an inherited `QTWEBENGINE_DISABLE_SANDBOX` or
+    `--no-sandbox` in `QTWEBENGINE_CHROMIUM_FLAGS` from the helper's own environment and says so on
+    stderr: the parent may have exported them, but the helper's decision is its argument (packet 30d
+    review).
     """
+
+    def warn(_level: str, _source: str, message: str) -> None:
+        print(f"ate _pdf WARNING: {message}", file=sys.stderr)
+
     if not unsandboxed:
         if _is_elevated():
             print(
@@ -185,19 +260,42 @@ def _apply_sandbox_decision(unsandboxed: bool) -> bool:
                 file=sys.stderr,
             )
             return True
+        _strip_inherited_sandbox_off(os.environ, warn, where="this helper")
         return False
     if _is_elevated():
         os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
         flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
-        if "--no-sandbox" not in flags:
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags + ["--no-sandbox"])
+        if NO_SANDBOX_FLAG not in flags:
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags + [NO_SANDBOX_FLAG])
         return False
     print(
         "ate _pdf: --unsandboxed ignored: this process is not root or an administrator, so "
         "Chromium's sandbox is kept for this render",
         file=sys.stderr,
     )
+    _strip_inherited_sandbox_off(os.environ, warn, where="this helper")
     return False
+
+
+def _render_failure_hint(unsandboxed: bool) -> str:
+    """What to tell the Operator when a render produced nothing.
+
+    Packet 30d review: on Windows the elevation check itself can fail, and a render that produced no
+    PDF should not blame the sandbox for something ATE could not actually determine."""
+    if _elevation() is None:
+        return (
+            "pdf render failed, and whether this process is elevated is unknown: IsUserAnAdmin could "
+            "not be read, so Chromium may have refused to build a renderer sandbox for an "
+            "administrator. Run ATE as an ordinary user, or with --allow-unsandboxed-pdf if this "
+            "machine really is elevated"
+        )
+    if unsandboxed and _is_elevated():
+        return (
+            "pdf render failed while running elevated with the sandbox off: Chromium cannot build a "
+            "renderer sandbox under root or an administrator, so this render used "
+            "QTWEBENGINE_DISABLE_SANDBOX=1 and --no-sandbox and still produced nothing"
+        )
+    return ""
 
 
 def render_pdf(html_path: str, pdf_path: str, paper: str = "A4", unsandboxed: bool = False) -> int:
@@ -270,18 +368,18 @@ def render_pdf(html_path: str, pdf_path: str, paper: str = "A4", unsandboxed: bo
     app.exec()
     if loaded_ok["value"] and result_ok["value"] and file_ok["value"]:
         return 0
-    if unsandboxed and _is_elevated():
-        print(
-            "pdf render failed while running elevated with the sandbox off: Chromium cannot build a "
-            "renderer sandbox under root or an administrator, so this render used "
-            "QTWEBENGINE_DISABLE_SANDBOX=1 and --no-sandbox and still produced nothing",
-            file=sys.stderr,
-        )
+    hint = _render_failure_hint(unsandboxed)
+    if hint:
+        print(hint, file=sys.stderr)
     return 1
 
 
 def pdf_helper_command(
-    html_path: str, pdf_path: str, paper: str = "A4", unsandboxed: bool = False
+    html_path: str,
+    pdf_path: str,
+    paper: str = "A4",
+    unsandboxed: bool = False,
+    log: Optional[Callable[[str, str, str], None]] = None,
 ) -> tuple[str, list[str], dict[str, str]]:
     """Return ``(program, args, env)`` that runs the hidden ``ate _pdf`` helper for one report.
 
@@ -289,11 +387,12 @@ def pdf_helper_command(
     otherwise it is Python running ``-m ate``, with this package's own ``src`` directory first on
     ``PYTHONPATH`` so the child imports the same ATE as the parent. ``--unsandboxed`` and the
     sandbox-off environment are added only when the caller's decision (packet 30d) was Yes: the
-    helper is told, never left to guess from who started it."""
+    helper is told, never left to guess from who started it. `log` receives a WARNING for any
+    sandbox-off setting inherited from the environment that this render did not choose."""
     tail = ["_pdf", str(html_path), str(pdf_path), "--paper", paper]
     if unsandboxed:
         tail.append(UNSANDBOXED_FLAG)
-    env = _child_env(unsandboxed)
+    env = _child_env(unsandboxed, log)
     if getattr(sys, "frozen", False):
         return sys.executable, tail, env
     src = str(Path(__file__).resolve().parents[2])
@@ -302,7 +401,13 @@ def pdf_helper_command(
 
 
 def run_pdf_helper(
-    html_path: str, pdf_path: str, paper: str = "A4", unsandboxed: bool = False, *, timeout: float = 30.0
+    html_path: str,
+    pdf_path: str,
+    paper: str = "A4",
+    unsandboxed: bool = False,
+    *,
+    timeout: float = 30.0,
+    log: Optional[Callable[[str, str, str], None]] = None,
 ) -> None:
     """Run the helper process to completion, blocking; raise on failure or timeout.
 
@@ -313,7 +418,7 @@ def run_pdf_helper(
     exits non-zero (including a missing HTML file)."""
     import subprocess
 
-    program, args, env = pdf_helper_command(html_path, pdf_path, paper, unsandboxed)
+    program, args, env = pdf_helper_command(html_path, pdf_path, paper, unsandboxed, log)
     try:
         proc = subprocess.run([program, *args], env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:  # subprocess.run kills the child before raising

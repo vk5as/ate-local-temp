@@ -246,8 +246,9 @@ def _report_problem(html: bytes, pdf: bytes) -> str | None:
 def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool, str]:
     """Run a built-in Test Schedule headless and check both reports were written (packet 27a).
 
-    Everything is in a temporary directory with its own config and database: no Station is touched,
-    and the directory is removed again. The run goes through the real seams — Test Definition,
+    Everything is in a temporary directory with its own config and database: no Station is touched. A
+    passing run has that directory removed; a failing one keeps it, so a message that names a report
+    file can be opened (packet 30d review). The run goes through the real seams — Test Definition,
     :class:`~ate.storage.store.RunStore`, :class:`~ate.engine.run_engine.RunEngine` — and ends with
     the report writer starting the hidden ``_pdf`` child, which inside a frozen bundle is the bundle's
     own executable. Returns ``(name, ok, what was seen)`` for ``_selftest``'s output.
@@ -268,6 +269,18 @@ def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool
         return True
 
     work = Path(tempfile.mkdtemp(prefix="ate-selftest-"))
+    kept: Path | None = None
+
+    def _fail(what: str) -> tuple[str, bool, str]:
+        """A failure that names a report must not delete it.
+
+        Packet 30d review: the old code removed the whole temporary directory on return while the
+        message pointed at a file inside it. The packet says the HTML Test Report stays, so the
+        directory is kept and the message says where it is."""
+        nonlocal kept
+        kept = work
+        return ("run end-to-end", False, f"{what} (the selftest directory is kept at {work} so the report can be looked at)")
+
     try:
         definitions = work / "definitions"
         definitions.mkdir(parents=True)
@@ -319,26 +332,28 @@ def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool
             session.start()
             app = QCoreApplication.instance() or QCoreApplication([])
             if not pump(app, lambda: session.state is SessionState.FINISHED, 30.0):
-                return ("run end-to-end", False, "the Test Run never reached FINISHED")
+                return _fail("the Test Run never reached FINISHED")
             if not pump(app, lambda: written, 90.0):
-                return ("run end-to-end", False, "the _pdf helper never reported the report")
+                return _fail("the _pdf helper never reported the report")
             html_path, pdf_path = written[0]
             if not pdf_path:
+                tail = (session.pdf_error or "").strip()
                 if _is_root() and not allow_unsandboxed_pdf:
-                    return (
-                        "run end-to-end",
-                        False,
-                        f"the PDF was skipped: ATE is running as root or an administrator and Chromium "
-                        f"cannot render with the sandbox there, and no --allow-unsandboxed-pdf was given. "
-                        f"The HTML report is at {html_path}; rerun with 'ate --allow-unsandboxed-pdf _selftest --run' to get the PDF",
+                    return _fail(
+                        "the PDF was skipped: ATE is running as root or an administrator and Chromium "
+                        "cannot render with the sandbox there, and no --allow-unsandboxed-pdf was given. "
+                        f"The HTML report is at {html_path}; rerun with 'ate --allow-unsandboxed-pdf _selftest --run' to get the PDF"
                     )
-                return ("run end-to-end", False, "the _pdf helper wrote no PDF")
+                return _fail(
+                    f"the _pdf helper wrote no PDF{f': {tail}' if tail else ''}. "
+                    f"The HTML report is at {html_path}"
+                )
             html = Path(html_path).read_bytes()
             pdf = Path(pdf_path).read_bytes()
             helper = Path(pdf_helper_command(html_path, pdf_path)[0]).name
             problem = _report_problem(html, pdf)
             if problem:
-                return ("run end-to-end", False, f"{helper} ran the schedule but {problem}")
+                return _fail(f"{helper} ran the schedule but {problem}")
             return (
                 "run end-to-end",
                 True,
@@ -348,9 +363,10 @@ def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool
         finally:
             session.close()
     except Exception as exc:  # noqa: BLE001 - the selftest reports a failure instead of raising
-        return ("run end-to-end", False, str(exc))
+        return _fail(str(exc))
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if kept is None:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _selftest_scan(directory: str, config_path: str | None = None) -> tuple[str, bool, str]:

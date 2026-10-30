@@ -267,7 +267,7 @@ class HistorySession:
             # Render from the freshly written HTML (its exact path, including any -2/-3 suffix), so
             # the PDF always sits beside the report that was actually written.
             pdf_path = Path(written["html"]).with_suffix(".pdf")
-            plan = self.pdf_choice()
+            plan = self.pdf_choice(written["html"])
             if plan == PDF_SKIPPED:
                 pdf_skipped = True
             else:
@@ -275,7 +275,7 @@ class HistorySession:
                 from ..report.pdf_job import start_pdf_job
 
                 try:
-                    start_pdf_job(parent, html_path=written["html"], pdf_path=pdf_path, paper=self.config.reports_paper_size, unsandboxed=plan == "unsandboxed", on_done=on_done)
+                    start_pdf_job(parent, html_path=written["html"], pdf_path=pdf_path, paper=self.config.reports_paper_size, unsandboxed=plan == PDF_UNSANDBOXED, on_done=on_done)
                     pdf_started = True
                 except Exception as exc:  # noqa: BLE001 - a PDF-helper error is reported through on_done, never raised into the caller
                     if on_done is not None:

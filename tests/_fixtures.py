@@ -1032,7 +1032,7 @@ def fake_pdf_helper(script: str):
     import os
     import sys
 
-    def command(html_path, pdf_path, paper="A4", unsandboxed=False):  # noqa: ANN001 - mirrors pdf_helper_command
+    def command(html_path, pdf_path, paper="A4", unsandboxed=False, log=None):  # noqa: ANN001 - mirrors pdf_helper_command
         return sys.executable, ["-c", script, str(pdf_path)], dict(os.environ)
 
     return command
@@ -1050,8 +1050,8 @@ def recording_pdf_helper(record: list, script: str = WRITES_PDF):
 
     from ate.report.pdf import pdf_helper_command
 
-    def command(html_path, pdf_path, paper="A4", unsandboxed=False):  # noqa: ANN001 - mirrors pdf_helper_command
-        _program, args, env = pdf_helper_command(html_path, pdf_path, paper, bool(unsandboxed))
+    def command(html_path, pdf_path, paper="A4", unsandboxed=False, log=None):  # noqa: ANN001 - mirrors pdf_helper_command
+        _program, args, env = pdf_helper_command(html_path, pdf_path, paper, bool(unsandboxed), log)
         record.append({"args": args, "env": env})
         return sys.executable, ["-c", script, str(pdf_path)], env
 

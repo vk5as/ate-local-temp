@@ -12,7 +12,9 @@ Elevation is simulated by monkeypatching `os.geteuid` — nothing here ever runs
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Callable
@@ -28,8 +30,11 @@ from ate.history.session import HistorySession
 from ate.report import pdf
 from ate.report.pdf import PDF_SANDBOXED, PDF_SKIPPED, PDF_UNSANDBOXED, pdf_sandbox_choice
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.storage.store import RunStore
 
 from ._fixtures import PASSING, recording_pdf_helper, write_ate_env
+
+ATE_ENTRY = Path(__file__).resolve().parents[1] / "packaging" / "pyinstaller" / "ate_entry.py"
 
 
 def _as_root(monkeypatch) -> None:
@@ -318,8 +323,12 @@ def test_the_skip_is_written_to_the_application_log(tmp_path, monkeypatch, qapp)
     app_log = open_app_log(log_dir)
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", recording_pdf_helper([]))
     session = HeadlessRunSession(env["config"], app_log=app_log, pdf_choice=pdf_sandbox_choice(log=app_log.log))
+    reported: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf_path: reported.append((html, pdf_path)), Qt.ConnectionType.QueuedConnection)
     _run_to_finish(session, qapp)
-    _pump_events(qapp, lambda: True, 0.5)
+    # Packet 30d review: the report is written on a zero timer after FINISHED, so the pump has to
+    # wait for it rather than run for a fixed time.
+    assert _pump_events(qapp, lambda: reported), "the run-end report never reported"
     app_log.close()
     text = "\n".join(p.read_text(encoding="utf-8") for p in log_dir.glob("**/*") if p.is_file())
     assert any("skipped" in line.lower() and "sandbox" in line.lower() and session.run_uuid in line for line in text.splitlines()), text[:400]
@@ -442,3 +451,287 @@ def test_selftest_run_as_root_with_the_flag_before_the_subcommand_renders_a_pdf(
 def test_docs_advertise_the_flag():
     doc = Path(__file__).resolve().parents[1] / "docs" / "building-from-source.md"
     assert "--allow-unsandboxed-pdf" in doc.read_text(encoding="utf-8")
+
+
+# --- an environment that already switched the sandbox off (30d review) -------------
+
+
+INHERITED_FLAGS = "--no-sandbox --disable-process-per-site"
+
+
+def _inherit_sandbox_off(monkeypatch) -> None:
+    """The Operator exported Chromium's sandbox-off knobs for some other program."""
+    monkeypatch.setenv("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", INHERITED_FLAGS)
+
+
+def _entry_point():
+    """The frozen entry point, loaded without a frozen bundle (packet 27c seam)."""
+    spec = importlib.util.spec_from_file_location("ate_entry_30d", ATE_ENTRY)
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    return entry
+
+
+def test_an_inherited_off_setting_is_stripped_for_an_ordinary_user(monkeypatch):
+    """An exported --no-sandbox is not an ATE decision: the child gets no sandbox-off settings."""
+    _as_ordinary_user(monkeypatch)
+    _inherit_sandbox_off(monkeypatch)
+    logs: list[tuple[str, str]] = []
+    _program, args, env = pdf.pdf_helper_command(
+        "a.html", "a.pdf", "A4", False, log=lambda level, _source, text: logs.append((level, text))
+    )
+    assert pdf.UNSANDBOXED_FLAG not in args
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, env
+    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    assert "--no-sandbox" not in flags, f"the inherited --no-sandbox survived: {flags}"
+    assert "--disable-process-per-site" in flags, f"the flags the user set were thrown away: {flags}"
+    assert any(
+        level == "WARNING" and "QTWEBENGINE_DISABLE_SANDBOX" in text and "--no-sandbox" in text
+        for level, text in logs
+    ), logs
+    assert "QTWEBENGINE_DISABLE_SANDBOX" in os.environ, "the parent scrubbed its own environment, not the child's"
+
+
+def test_an_inherited_off_setting_is_stripped_for_an_elevated_run_that_answered_no(monkeypatch):
+    """Root with a declined dialog: the helper's environment has nothing that switches the sandbox off."""
+    _as_root(monkeypatch)
+    _inherit_sandbox_off(monkeypatch)
+    logs: list[str] = []
+    plan = pdf_sandbox_choice(ask=lambda: False, log=lambda _level, _source, text: logs.append(text))()
+    assert plan == PDF_SKIPPED
+    _program, _args, env = pdf.pdf_helper_command("a.html", "a.pdf", "A4", plan == PDF_UNSANDBOXED, log=lambda _l, _s, text: logs.append(text))
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, env
+    assert "--no-sandbox" not in env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""), env
+    assert any("inherited" in text for text in logs), logs
+
+
+def test_a_yes_decision_keeps_the_sandbox_off_knobs_and_says_nothing_about_inheritance(monkeypatch):
+    """Yes is Yes: the knobs are set, the user's other flags survive, and nothing is removed."""
+    _as_root(monkeypatch)
+    _inherit_sandbox_off(monkeypatch)
+    logs: list[str] = []
+    plan = pdf_sandbox_choice(True, log=lambda _level, _source, text: logs.append(text))()
+    assert plan == PDF_UNSANDBOXED
+    _program, args, env = pdf.pdf_helper_command("a.html", "a.pdf", "A4", plan == PDF_UNSANDBOXED, log=lambda _l, _s, text: logs.append(text))
+    assert pdf.UNSANDBOXED_FLAG in args
+    assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    assert "--no-sandbox" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--disable-process-per-site" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert not any("inherited" in text for text in logs), logs
+
+
+def test_the_helper_scrubs_its_own_inherited_environment(monkeypatch, capsys):
+    """`ate _pdf` decides from its argument, not from what the environment already carried."""
+    _as_ordinary_user(monkeypatch)
+    _inherit_sandbox_off(monkeypatch)
+    assert pdf._apply_sandbox_decision(False) is False
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ
+    assert "--no-sandbox" not in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    assert "--disable-process-per-site" in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "QTWEBENGINE_DISABLE_SANDBOX" in err, err
+
+
+def test_the_frozen_entry_point_scrubs_an_inherited_off_setting_before_qt_starts(monkeypatch, capsys):
+    """In the bundle, QtWebEngine reads the environment before `render_pdf` runs, so the entry point
+    is where an inherited sandbox-off setting has to go (packet 30d review)."""
+    entry = _entry_point()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    for elevated in (True, False):
+        _inherit_sandbox_off(monkeypatch)
+        monkeypatch.setattr(os, "geteuid", lambda: 0 if elevated else 1000)
+        entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf"])
+        assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, f"root={elevated}"
+        assert "--no-sandbox" not in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""), f"root={elevated}"
+        assert "--disable-process-per-site" in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        assert "inherited" in capsys.readouterr().err.lower(), f"removing it was not reported (root={elevated})"
+
+    monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", INHERITED_FLAGS)
+    entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--unsandboxed"])
+    assert os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1", "the parent's Yes was not honoured"
+    assert "--no-sandbox" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "inherited" not in capsys.readouterr().err.lower(), "a chosen unsandboxed render was warned about"
+
+
+# --- FINISHED comes before the question (30d review) --------------------------------
+
+
+def test_the_question_is_asked_after_finished_is_announced_and_the_html_is_written(tmp_path, monkeypatch, qapp):
+    """Order is FINISHED → HTML on disk → question, and report_written fires exactly once."""
+    _as_root(monkeypatch)
+    env = write_ate_env(tmp_path)
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", recording_pdf_helper([]))
+    seen: list[tuple[SessionState, bool, int, bool]] = []
+    session = HeadlessRunSession(
+        env["config"],
+        pdf_choice=pdf_sandbox_choice(
+            ask=lambda: seen.append(
+                (session.state, session._engine is None, len(list(env["reports_dir"].rglob("*.html"))), session._report_written)
+            ) or False
+        ),
+    )
+    events: list[tuple[str, str]] = []
+    session.report_written.connect(lambda html, pdf_path: events.append((html, pdf_path)), Qt.ConnectionType.QueuedConnection)
+    _run_to_finish(session, qapp)
+    assert _pump_events(qapp, lambda: seen), "the Operator was never asked about the sandbox"
+    state, engine_released, html_files, already_reported = seen[0]
+    assert state is SessionState.FINISHED, f"the box opened while the session still said {state.value}"
+    assert engine_released, "the finished worker was still held when the question was asked"
+    assert html_files == 1, "the HTML Test Report was not on disk when the question was asked"
+    assert not already_reported, "report_written fired before the decision was made"
+    assert _pump_events(qapp, lambda: events), "report_written never fired after the decision"
+    assert len(events) == 1, events
+    session.close()
+
+
+def test_the_run_screen_is_finished_when_the_pdf_question_is_asked(tmp_path, monkeypatch, qapp):
+    """The Run screen must have seen FINISHED before the dialog opens: Abort off, New run on."""
+    _as_root(monkeypatch)
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", recording_pdf_helper([]))
+    seen: list[tuple[SessionState, bool, bool]] = []
+
+    def ask() -> bool:
+        screen = window.run_screen
+        view = getattr(screen, "run_view", screen)
+        seen.append((screen.state, view.abort_button.isEnabled(), view.new_run_button.isEnabled()))
+        return False
+
+    outcome = launch(
+        ["--config", str(env["config"])],
+        exec_=False,
+        prompt=lambda _path: True,
+        alert=lambda _msg: None,
+        pdf_dialog=ask,
+    )
+    window = outcome.window
+    session = window.session
+    session.select_schedule("Passing schedule")
+    session.set_operator("Ada")
+    session.set_project("Power board")
+    session.set_uut_type("PSU")
+    session.set_uut_serial("PS-1")
+    session.start()
+    assert _pump_events(qapp, lambda: session.state is SessionState.FINISHED), "the run never finished"
+    assert _pump_events(qapp, lambda: seen), "the sandbox question was never asked"
+    state, abort_enabled, new_run_enabled = seen[0]
+    assert state is SessionState.FINISHED, f"the dialog opened while the Run screen said {state.value}"
+    assert not abort_enabled, "Abort is still enabled while the PDF question is up"
+    assert new_run_enabled, "the finished run is not offered as finished while the question is up"
+    session.close()
+
+
+def test_a_session_closed_right_after_finishing_still_writes_its_html(tmp_path, monkeypatch, qapp):
+    """The report write is deferred by a timer, so closing a session must not drop it (spec 21a)."""
+    _as_root(monkeypatch)
+    env = write_ate_env(tmp_path)
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", recording_pdf_helper([]))
+    session = HeadlessRunSession(env["config"], pdf_choice=pdf_sandbox_choice(ask=lambda: False))
+    _run_to_finish(session, qapp)
+    session.close()
+    assert list(env["reports_dir"].rglob("*.html")), "closing the session lost the run-end report"
+    from ate.report.pdf_job import _live_pdf_jobs
+
+    assert not _live_pdf_jobs, "a session that is closing left a PDF helper running"
+
+
+def test_the_decision_log_names_the_report_it_decided_about(monkeypatch, tmp_path, qapp):
+    """History's choices can only be matched to a run if the line says which report it is about."""
+    _as_root(monkeypatch)
+    logs: list[str] = []
+    decide = pdf_sandbox_choice(ask=lambda: True, log=lambda _level, _source, text: logs.append(text))
+    assert decide("Test_Report-2026-10-31-1a2b3c.html") == PDF_UNSANDBOXED
+    assert any("Test_Report-2026-10-31-1a2b3c.html" in text for text in logs), logs
+
+    env = write_ate_env(tmp_path)
+    run_logs: list[str] = []
+    session, events = _run_session(
+        tmp_path, monkeypatch, qapp, pdf_sandbox_choice(ask=lambda: True, log=lambda _l, _s, text: run_logs.append(text)), [], run_logs
+    )
+    html_name = Path(events[-1][0]).name
+    assert any(html_name in text for text in run_logs), run_logs
+    session.close()
+
+
+# --- the selftest keeps what it names (30d review) ----------------------------------
+
+
+def test_selftest_failure_keeps_the_directory_it_names(capsys, monkeypatch):
+    """The message points at a report; deleting the directory would leave the name pointing nowhere."""
+    _as_root(monkeypatch)
+    code = main(["_selftest", "--run"])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert code != 0, out
+    assert "kept at" in out, out
+    kept = Path(out.split("kept at ", 1)[1].split(" so the report", 1)[0].strip())
+    assert kept.is_dir(), f"the failure named {kept}, which is gone"
+    assert list(kept.rglob("*.html")), f"{kept} holds no report"
+    shutil.rmtree(kept, ignore_errors=True)
+
+
+def test_selftest_reports_what_the_failed_helper_said(capsys, monkeypatch):
+    """A helper that writes no PDF must say why, not just that it wrote nothing."""
+    _as_ordinary_user(monkeypatch)
+    monkeypatch.setattr(
+        "ate.report.pdf_job.pdf_helper_command",
+        recording_pdf_helper([], "import sys; sys.stderr.write('Chromium found no fonts'); sys.exit(1)"),
+    )
+    code = main(["_selftest", "--run"])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert code != 0, out
+    assert "Chromium found no fonts" in out, out
+    kept = Path(out.split("kept at ", 1)[1].split(" so the report", 1)[0].strip())
+    shutil.rmtree(kept, ignore_errors=True)
+
+
+def test_an_ordinary_user_with_the_flag_is_told_it_has_no_effect(capsys, monkeypatch):
+    """The flag cannot take the sandbox away from someone who never lost it."""
+    _as_ordinary_user(monkeypatch)
+    logs: list[str] = []
+    assert pdf_sandbox_choice(True, log=lambda _level, _source, text: logs.append(text))() == PDF_SANDBOXED
+    assert any("no effect" in text for text in logs), logs
+    code = main(["--allow-unsandboxed-pdf", "_selftest", "--run"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "no effect" in out, out
+
+
+# --- the dialog's wording and the elevation check ------------------------------------
+
+
+def test_the_dialog_warns_and_asks_in_two_sentences():
+    """A question, the consequence, the icon, and Skip as the default (packet 30d review)."""
+    box = _pdf_sandbox_box()
+    text = (box.text() + " " + box.informativeText()).lower()
+    assert "sandbox" in text and ("root" in text or "administrator" in text)
+    assert "html" in text, "the dialog must say the HTML report is already saved"
+    assert "render the pdf without the sandbox?" in text, box.text()
+    assert "affect this computer" in text, "the consequence of turning the sandbox off is not stated"
+    assert box.windowTitle() == "Render PDF without sandbox?", box.windowTitle()
+    assert box.icon() == QMessageBox.Icon.Warning, box.icon()
+    labels = [button.text() for button in box.buttons()]
+    assert "Generate PDF without sandbox" in labels and "Skip PDF" in labels
+    assert box.defaultButton().text() == "Skip PDF", labels
+
+
+def test_an_unreadable_admin_check_leaves_the_sandbox_on_and_says_so(monkeypatch):
+    """IsUserAnAdmin can fail; a failed render must not blame the sandbox for a guess."""
+    monkeypatch.setattr(os, "name", "nt")
+    assert pdf._elevation() is None, "the Windows check should report that it could not tell"
+    assert pdf._is_elevated() is False, "unknown elevation must not disable the sandbox"
+    hint = pdf._render_failure_hint(False)
+    assert "elevated is unknown" in hint, hint
+    assert "IsUserAnAdmin" in hint
+    # On Linux the check cannot fail, so the hint stays the sandbox one.
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert "elevated is unknown" not in pdf._render_failure_hint(True)
+    assert "sandbox" in pdf._render_failure_hint(True)
+    assert pdf._render_failure_hint(False) == "", "an ordinary user's failure is not an elevation story"

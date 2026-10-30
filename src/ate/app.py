@@ -380,11 +380,15 @@ def _pdf_sandbox_box() -> QMessageBox:
     answers No. Kept separate from :func:`_pdf_sandbox_dialog` so the wording and the default can be
     inspected — and screenshotted — without running a modal loop."""
     box = QMessageBox()
-    box.setWindowTitle("ATE")
-    box.setText("Chromium's sandbox keeps the PDF renderer from touching the rest of the machine.")
+    box.setWindowTitle("Render PDF without sandbox?")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(
+        "Chromium's sandbox limits what the PDF renderer can touch. Without it, a fault in the "
+        "renderer could affect this computer."
+    )
     box.setInformativeText(
-        "ATE is running as root or an administrator, so this PDF can only be rendered with the "
-        "sandbox off. The HTML Test Report is already saved."
+        "Chromium cannot use its sandbox as root or as an administrator. The HTML Test Report is "
+        "already saved. Render the PDF without the sandbox?"
     )
     without = box.addButton("Generate PDF without sandbox", QMessageBox.ButtonRole.AcceptRole)
     skip = box.addButton("Skip PDF", QMessageBox.ButtonRole.RejectRole)
@@ -400,7 +404,7 @@ def _pdf_sandbox_dialog() -> bool:
     the run's recording is already closed and the helper is a separate process, so the box blocks
     nothing but the Operator. A dismissed box (`ATE_AUTO_DISMISS_DIALOG`, packet 30c) clicks no
     button and therefore answers No."""
-    QApplication.instance() or QApplication([])  # keep an application alive while the box is up
+    app = QApplication.instance() or QApplication([])  # named, not bare: the box needs an application to live on
     box = _pdf_sandbox_box()
     _dismiss_if_headless(box)
     box.exec()

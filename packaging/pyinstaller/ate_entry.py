@@ -87,13 +87,46 @@ def _chromium_flags(allow_unsandboxed: bool = False) -> str:
     return " ".join(flags)
 
 
+def _strip_inherited_sandbox_off(where: str) -> list[str]:
+    """Remove sandbox-off settings this process was never chosen to have.
+
+    Written out here as well as in `ate.report.pdf` because the frozen entry point runs before ATE
+    is imported at all: QtWebEngine reads `QTWEBENGINE_DISABLE_SANDBOX` and
+    `QTWEBENGINE_CHROMIUM_FLAGS` when the first QCoreApplication starts and when it spawns
+    `QtWebEngineProcess`, which is before `render_pdf` ever gets a chance to decide. Scrubbing them
+    here means an exported `QTWEBENGINE_DISABLE_SANDBOX=1` cannot silently render a Test Report
+    without Chromium's sandbox (packet 30d review). Only `--no-sandbox` is dropped from the flags,
+    so every other flag the person set survives."""
+    removed: list[str] = []
+    if os.environ.get("QTWEBENGINE_DISABLE_SANDBOX"):
+        os.environ.pop("QTWEBENGINE_DISABLE_SANDBOX")
+        removed.append("QTWEBENGINE_DISABLE_SANDBOX")
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    if "--no-sandbox" in flags:
+        kept = [flag for flag in flags if flag != "--no-sandbox"]
+        if kept:
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(kept)
+        else:
+            os.environ.pop("QTWEBENGINE_CHROMIUM_FLAGS")
+        removed.append("QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox")
+    if removed:
+        print(
+            f"ate WARNING: {where} inherited Chromium's sandbox switched off ({', '.join(removed)}); "
+            "ATE did not choose that, so a Test Report PDF here renders with the sandbox on. For an "
+            "unsandboxed PDF, run ATE with --allow-unsandboxed-pdf or answer yes to the dialog.",
+            file=sys.stderr,
+        )
+    return removed
+
+
 def _prepare_webengine_env(argv: list[str] | None = None) -> None:
     """Set the environment a frozen ATE needs before QtWebEngine starts.
 
     Only the frozen entry point calls it, but it is a function so the tests can run it without a
     frozen bundle. A headless render has no GPU to look for; the renderer sandbox is disabled only
     for a process the parent explicitly told to render unsandboxed (packet 30d), never because this
-    process happens to be root or an administrator."""
+    process happens to be root or an administrator, and never because the environment already said
+    so: inherited sandbox-off settings are removed first, in the same breath, so Qt never sees them."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
     helper = _webengine_process(base, name)
@@ -102,6 +135,8 @@ def _prepare_webengine_env(argv: list[str] | None = None) -> None:
     elif os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         print(f"ate: no bundled {name} found under {base}", file=sys.stderr)
     allow_unsandboxed = _decision_yes(list(sys.argv[1:] if argv is None else argv)) and _elevated()
+    if not allow_unsandboxed:
+        _strip_inherited_sandbox_off("this ATE process")
     if allow_unsandboxed:
         # The parent's decision, carried in as --unsandboxed: the renderer sandbox cannot be built
         # under root or an administrator, so this one render runs without it.

@@ -173,12 +173,14 @@ def _fake_pdf_helper(request, monkeypatch):
     claims the report was rendered: packet 27a's `ate _selftest --run` and 22a's real-report test use
     the real helper, because "the PDF has text in it" is only provable against a PDF that was printed.
     Packet 30d's privileged `--run` is on that list too: it has to render for real to prove the
-    unsandboxed choice reaches the child.
+    unsandboxed choice reaches the child, and so does the ordinary-user case, which has to show that
+    the flag changes nothing for someone who keeps the sandbox.
     """
     if request.node.name in (
         "test_run_end_writes_real_pdf_report",
         "test_selftest_run_executes_a_schedule_and_writes_both_reports",
         "test_selftest_run_as_root_with_the_flag_before_the_subcommand_renders_a_pdf",
+        "test_an_ordinary_user_with_the_flag_is_told_it_has_no_effect",
     ):
         return
     from tests._fixtures import WRITES_PDF, fake_pdf_helper
