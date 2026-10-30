@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,7 @@ SMOKE = REPO / "packaging" / "windows" / "smoke_installer.py"
 ISS = REPO / "packaging" / "windows" / "ate.iss"
 BUILD_INSTALLER = REPO / "packaging" / "windows" / "build_installer.py"
 PYINSTALLER = REPO / "packaging" / "build_pyinstaller.py"
+ATE_ENTRY = REPO / "packaging" / "pyinstaller" / "ate_entry.py"
 EXAMPLE = REPO / "examples" / "media-release"
 SRC = str(REPO / "src")
 
@@ -899,3 +901,72 @@ def test_ci_workflow_job_name_uses_a_real_expression():
     assert "${matrix.python-version}" not in name, f"unexpanded expression in the job name: {name!r}"
     assert "{{ matrix.python-version }}" in name and "{{ matrix.os }}" in name, name
     assert "offscreen" in str(doc["jobs"]["test"]["env"]["QT_QPA_PLATFORM"]), "CI needs the offscreen platform too"
+
+
+# --- the frozen `_pdf` on a privileged runner: Chromium refuses a sandbox there ----------------
+
+
+def test_pdf_helper_disables_the_sandbox_when_running_as_root(monkeypatch):
+    """Chromium's Linux renderer refuses to start sandboxed as root (crbug.com/638180).
+
+    A Station administered with `sudo`, and any run started by a root process, would otherwise
+    die before the report is written."""
+    from ate.report import pdf
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    env = pdf._child_env()
+    assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    assert "--no-sandbox" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+    assert pdf._child_env()["QTWEBENGINE_CHROMIUM_FLAGS"] == "--disable-gpu --no-sandbox", "the caller's flags are thrown away"
+
+
+def test_pdf_helper_disables_the_sandbox_for_a_windows_administrator(monkeypatch):
+    """The installer runs `ate setup` elevated, and Chromium's Windows sandbox has been
+    reported to fail for an elevated parent (Electron's `launch-failed exitCode 18`)."""
+    import ctypes
+
+    from ate.report import pdf
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(
+        ctypes, "windll", types.SimpleNamespace(shell32=types.SimpleNamespace(IsUserAnAdmin=lambda: True)), raising=False
+    )
+    env = pdf._child_env()
+    assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    assert "--no-sandbox" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+
+def test_pdf_helper_leaves_the_sandbox_on_for_an_ordinary_user(monkeypatch):
+    """Turning the sandbox off is a real loss of isolation: only a privileged process needs it."""
+    from ate.report import pdf
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    env = pdf._child_env()
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in env
+    assert "--no-sandbox" not in env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_the_frozen_entry_point_sets_the_sandbox_for_a_privileged_runner(monkeypatch):
+    """The frozen bundle decides this before QtWebEngine starts, so it has to be right here."""
+    spec = importlib.util.spec_from_file_location("ate_entry_27c", ATE_ENTRY)
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    entry._prepare_webengine_env()
+    assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, "an ordinary user keeps the sandbox"
+    assert "--no-sandbox" not in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--no-gpu" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    entry._prepare_webengine_env()
+    assert os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    assert "--no-sandbox" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
