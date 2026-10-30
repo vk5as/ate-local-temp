@@ -1,0 +1,38 @@
+#!/bin/sh
+# postrm for the ATE .deb (packet 28b).
+#
+# dpkg has already removed every file the package installed (/opt/ate and the /usr/bin/ate
+# symlink) before this runs, so the only thing left to decide is what happens to what setup
+# created - which is not package content, and so not dpkg's to delete:
+#
+#   remove  keep /etc/ate/config.json and /var/lib/ate: the operator's Station survives.
+#   purge   remove the config, never the data. Test Runs are records: the database, its WAL
+#           files, reports and logs stay whatever the operator decides to do with them.
+#
+# /etc/ate/config.json is deliberately NOT a conffile: setup writes it, so dpkg knows nothing
+# about it and would leave it behind even on purge. It is removed here.
+#
+# Test seam: ATE_DEB_ROOT prefixes every path below so a test can run this against a temporary
+# root. Unset, the real paths are used.
+set -e
+
+ROOT=${ATE_DEB_ROOT:-}
+CONFIG="$ROOT/etc/ate"
+DATA="$ROOT/var/lib/ate"
+
+case "$1" in
+    remove)
+        # Config and data stay: apt remove removes only the program.
+        exit 0
+        ;;
+    purge)
+        rm -f "$CONFIG/config.json"
+        # Only the config directory itself, and only if nothing else is in it.
+        rmdir "$CONFIG" 2>/dev/null || true
+        # Never $DATA: no database, no reports, no logs, ever.
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac
