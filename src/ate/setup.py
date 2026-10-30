@@ -99,7 +99,7 @@ def _migrate_database(path: str) -> int:
 
     result = check_database_at_launch(path)
     if result.status == DbLaunchStatus.TOO_OLD:
-        print(f"database {path}: {result.message}", file=sys.stderr)
+        print(result.message, file=sys.stderr)
         return 1
 
     store = RunStore(path)  # creates the tables if missing and sets the schema version
@@ -115,11 +115,15 @@ def _migrate_database(path: str) -> int:
 def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> dict[str, Any]:
     """Create the Station's directories and default config, then migrate its database.
 
-    Creates ``data_dir`` with ``reports`` and ``logs`` under it and ``config_dir``, writes a
-    default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
+    Creates ``data_dir`` with ``reports``, ``logs`` and ``definitions`` under it and ``config_dir``,
+    writes a default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
     overwriting one — and runs the shared migration against ``<data_dir>/ate.db``. Returns a report
     describing what was created versus already present; raises :class:`SetupError` if anything could
     not be created or written (for example, an unwritable target) or if applying permissions failed.
+
+    ``definitions`` is created because the default config lists ``<data>/definitions`` as a Test
+    Definition directory, and a directory that does not exist is a warning on the Run screen at
+    every scan (packet 30c review): setup leaves the Station quiet until a definition is dropped in.
 
     After creating the directories and config, :func:`prepare_station` applies the filesystem/
     permissions treatment through ``permissions`` (:mod:`ate.permissions`). ``None`` uses the real
@@ -132,7 +136,7 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
     # 1. Create every directory ATE needs (parents included). Idempotent: an existing directory is
     # left untouched so re-running setup never errors on an already-prepared Station.
     created_dirs: list[str] = []
-    for directory in (data_dir, data_dir / "reports", data_dir / "logs", config_dir):
+    for directory in (data_dir, data_dir / "reports", data_dir / "logs", data_dir / "definitions", config_dir):
         if not directory.exists():
             try:
                 directory.mkdir(parents=True, exist_ok=True)

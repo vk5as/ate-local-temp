@@ -472,8 +472,9 @@ def test_db_migrate_yes_without_path_does_not_take_yes_as_the_path(capsys, tmp_p
     (tmp_path / "station").mkdir()
     assert main(["--config", str(config), "db", "migrate", "--yes"]) == 0
     assert (tmp_path / "station" / "ate.db").exists(), capsys.readouterr().err
+    assert not (tmp_path / "ate.db").exists(), "db migrate created a stray ./ate.db in the cwd"
     assert not (tmp_path / "--yes").exists(), "the --yes flag was parsed as the database path"
-    assert "created or upgraded database at" in capsys.readouterr().out
+    assert f"created or upgraded database at {tmp_path / 'station' / 'ate.db'}" in capsys.readouterr().out
 
 
 def test_help_does_not_advertise_the_hidden_pdf_helper(capsys):

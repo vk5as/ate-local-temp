@@ -35,7 +35,7 @@ from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
-from .config import Config, ConfigError, MissingConfigError, read_config
+from .config import Config, ConfigError, MissingConfigError, config_hint, config_path, read_config
 from .history.session import HistorySession
 from .log import LogError, open_app_log
 from .run_session.headless import HeadlessRunSession, SessionError, SessionState
@@ -321,8 +321,14 @@ def _dismiss_if_headless(box: QMessageBox) -> None:
 
     The seam for headless subprocess tests (packet 30c): offscreen Qt still blocks in
     ``exec()``, so tests that want to prove a refusal exits 1 rather than aborts need the
-    dialog to accept itself."""
-    if os.environ.get("ATE_AUTO_DISMISS_DIALOG"):
+    dialog to close on its own. It closes by clicking the dialog's default button, which is
+    *not* always "yes": the missing-config prompt answers "Create default config and launch",
+    the close confirmation answers "Abort the run and quit", and an alert answers OK.
+    ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"`` mean unset, so a test that sets it
+    conditionally still sees the real dialog. Documented in ``docs/building-from-source.md``.
+    """
+    value = os.environ.get("ATE_AUTO_DISMISS_DIALOG", "").strip().lower()
+    if value and value not in ("0", "false", "no", "off"):
         QTimer.singleShot(0, box.accept)
 
 
@@ -385,30 +391,54 @@ def launch(
     prompt = prompt or _missing_config_dialog
     alert = alert or _alert_dialog
 
+    config_file = config_path(args.config)
+
+    def refuse(message: str) -> LaunchOutcome:
+        """Show one refusal and stop: exit 1, no traceback (packet 30c review).
+
+        Every launch step that touches the filesystem goes through here, so an unwritable
+        Station refuses with its path instead of dying in :class:`~ate.log.AppLog`."""
+        alert(message)
+        return LaunchOutcome(1)
+
     try:
         config = read_config(args.config, on_missing_prompt=prompt)
     except MissingConfigError as exc:
         # The Operator chose Abort at the prompt: one clear line, not a re-worded restatement (30a review).
-        alert(str(exc))
-        return LaunchOutcome(1)
+        return refuse(str(exc))
     except ConfigError as exc:
-        alert(str(exc))
-        return LaunchOutcome(1)
+        return refuse(str(exc))
+
+    # `ate setup` creates the Station's directories. A launch that cannot create them — an
+    # unprivileged Operator, a data directory that does not exist — refuses with the path and
+    # the fix rather than raising (packet 30c review). ``assets/app-config-format.md`` only
+    # refuses on a failed config write, so a config this launch completed is kept: it is
+    # complete (:func:`write_config` stages it before moving it into place), and the message
+    # below says exactly what an admin has to make writable.
+    for directory in (config.log_directory, config.reports_directory):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return refuse(
+                f"cannot create {directory}: {exc}. Run 'ate setup' as admin, or point the "
+                f"config (log.directory, reports.directory) at a writable location. Config: {config_file}"
+            )
 
     try:
         app_log = open_app_log(config.log_directory, level=config.log_level)
-    except LogError as exc:
-        alert(str(exc))
-        return LaunchOutcome(1)
+    except (LogError, OSError) as exc:
+        return refuse(
+            f"cannot open the application log at {config.log_directory}: {exc}. Run 'ate setup' "
+            f"as admin, or point log.directory at a writable location. Config: {config_file}"
+        )
     app_log.log("INFO", "ate", f"ATE {__version__} launched with config {config.path}")
 
-    refusal = check_database_at_launch(config.database_path)
+    refusal = check_database_at_launch(config.database_path, config_file=config_hint(config.path))
     if refusal.status is not DbLaunchStatus.OK:
         # Spec 22/23: the GUI never migrates; it stops and says what to do.
         app_log.log("ERROR", "ate", f"launch refused: {refusal.message}")
         app_log.close()
-        alert(refusal.message)
-        return LaunchOutcome(1)
+        return refuse(refusal.message)
 
     # The session reuses this launch's config and application log: one read, one log (30a review).
     session = HeadlessRunSession(config, app_log=app_log)

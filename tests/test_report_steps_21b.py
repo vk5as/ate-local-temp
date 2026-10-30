@@ -437,6 +437,10 @@ def test_generated_stamp_is_frozen_not_wall_clock(tmp_path: Path, monkeypatch) -
     class _Dt:
         datetime = _SecondCrossingDateTime
         timedelta = _datetime.timedelta
+        # A real timezone: if the ``generated_at`` seam is ever dropped, ``_dt.now(_dt.timezone.utc)``
+        # runs against the second-crossing clock and the equality assertion below catches it,
+        # instead of the fake module blowing up with an AttributeError (30c review).
+        timezone = _datetime.timezone
 
     monkeypatch.setattr("ate.report.html._dt", _Dt)
     first = render_report(store, run_uuid, config, generated_at=GENERATED_AT)

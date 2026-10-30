@@ -18,6 +18,7 @@ environment-variable or ``~`` expansion.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,11 +93,20 @@ _DEFAULT_PATHS = {
 }
 
 
-def _platform_default() -> str:
-    """The platform default config path; overridden by ``--config``."""
+def _platform_default() -> Path:
+    r"""The platform default config file as a :class:`~pathlib.Path`.
+
+    ``--config <path>`` beats it on the command line, and ``ATE_DEFAULT_CONFIG`` overrides it
+    only here: it exists so tests can exercise "no config at the default location" in a real
+    subprocess without writing to ``/etc/ate`` (packet 30c). No other part of ATE reads it —
+    config values still get no environment expansion (``assets/app-config-format.md``).
+    """
     import sys
 
-    return _DEFAULT_PATHS.get(sys.platform, "/etc/ate/config.json")
+    override = os.environ.get("ATE_DEFAULT_CONFIG", "").strip()
+    if override:
+        return Path(override)
+    return Path(_DEFAULT_PATHS.get(sys.platform, "/etc/ate/config.json"))
 
 
 # The only placeholder the config format defines (see ``assets/app-config-format.md``):
@@ -107,10 +117,15 @@ _PLACEHOLDER_RE = re.compile(r"<[A-Za-z][A-Za-z0-9_]*>")
 
 def _platform_data_dir() -> Path:
     r"""The Station's data directory: ``%PROGRAMDATA%\ATE`` on Windows, ``/var/lib/ate`` on
-    Linux (``assets/app-config-format.md``); ``ate setup`` creates it (``assets/packaging.md``)."""
-    import os
+    Linux (``assets/app-config-format.md``); ``ate setup`` creates it (``assets/packaging.md``).
+
+    ``ATE_DATA_DIR`` overrides it, for tests only (packet 30c): it is read nowhere else, so a
+    config's own paths still get no environment expansion."""
     import sys
 
+    override = os.environ.get("ATE_DATA_DIR", "").strip()
+    if override:
+        return Path(override)
     if sys.platform == "win32" or os.name == "nt":
         return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ATE"
     return Path("/var/lib/ate")
@@ -195,8 +210,23 @@ def build_default_config(hostname: str = "", data_dir: str | Path | None = None)
 
 
 def write_config(path: str | Path, data: Mapping[str, Any]) -> None:
-    """Write ``data`` to ``path`` as pretty JSON (key order preserved)."""
-    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    """Write ``data`` to ``path`` as pretty JSON (key order preserved).
+
+    The text is staged in a sibling temporary file and moved into place, so a failed write
+    (full disk, unwritable directory) never leaves a half-written config behind for the next
+    launch to choke on — the file is either the old one or the new one (packet 30c review)."""
+    target = Path(path)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    staged = target.with_name(target.name + ".tmp")
+    try:
+        staged.write_text(text, encoding="utf-8")
+        os.replace(staged, target)
+    except OSError:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _hostname() -> str:
@@ -391,6 +421,22 @@ def Config_from_resolved(config_file: Path, data: dict[str, Any]) -> Config:
     )
 
 
+def config_path(config_path: str | Path | None = None) -> Path:
+    """The config file one launch reads: ``--config`` when given, else the platform default."""
+    return Path(config_path) if config_path is not None else _platform_default()
+
+
+def config_hint(config_file: str | Path | None) -> Optional[Path]:
+    """The config to name in a CLI hint, or ``None`` when the platform default is in use.
+
+    ``ate db migrate`` needs ``--config <path>`` only when the Station is not reading the
+    platform default config file (packet 30c review); otherwise the bare command is enough."""
+    if config_file is None:
+        return None
+    path = Path(config_file).resolve()
+    return None if path == _platform_default().resolve() else path
+
+
 def read_config(config_path: str | Path | None = None, on_missing_prompt: Optional[Callable[[str], bool]] = None) -> Config:
     """Read and fully validate the application config for one launch.
 
@@ -407,8 +453,7 @@ def read_config(config_path: str | Path | None = None, on_missing_prompt: Option
     its own dialog here (mirroring how :meth:`RunStore.close_interrupted_runs` takes an
     injectable logger).
     """
-    raw_path = Path(config_path) if config_path is not None else _platform_default()
-    config_file = raw_path.resolve()
+    config_file = (Path(config_path) if config_path is not None else _platform_default()).resolve()
 
     try:
         text = config_file.read_text(encoding="utf-8")

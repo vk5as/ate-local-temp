@@ -381,8 +381,9 @@ def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
     sub = argv[0]
     rest = argv[1:]
     path = next((token for token in rest if not token.startswith("-")), None)
+    hint = None  # the config to name in the migrate hint, when one is not the platform default
     if path is None:
-        from .config import ConfigError, read_config
+        from .config import ConfigError, config_hint, read_config
 
         try:
             config = read_config(config_path)
@@ -390,21 +391,25 @@ def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
             print(f"ate db: {exc}\nrun 'ate setup' or pass --config PATH first", file=sys.stderr)
             return 1
         path = str(config.database_path)
+        hint = config_hint(config.path)
     if sub == "status":
-        return _db_status(path)
+        return _db_status(path, hint)
     if sub == "migrate":
-        return _db_migrate(path, rest)
+        return _db_migrate(path, rest, hint)
     print(f"ate db: unknown command '{sub}'\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
     return 1
 
 
-def _db_status(path: str) -> int:
-    """Print the database's schema version (PRAGMA user_version); read-only."""
+def _db_status(path: str, hint: Path | None = None) -> int:
+    """Print the database's schema version (PRAGMA user_version); read-only.
+
+    The refusal names the database and, when a non-default config is in use, the ``--config``
+    to migrate it through (packet 30c review)."""
     from .storage import DbLaunchStatus, check_database_at_launch
 
-    result = check_database_at_launch(path)
+    result = check_database_at_launch(path, config_file=hint)
     if result.status != DbLaunchStatus.OK:
-        print(f"database {path}: {result.message}", file=sys.stderr)
+        print(result.message, file=sys.stderr)
         return 1
     conn = __import__("sqlite3").connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -415,7 +420,7 @@ def _db_status(path: str) -> int:
     return 0
 
 
-def _db_migrate(path: str, extra: list[str]) -> int:
+def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
     """Create or upgrade the database at ``path`` after confirmation.
 
     ``--yes``/``-y`` skips the interactive prompt (for automation and tests). A database
@@ -434,11 +439,11 @@ def _db_migrate(path: str, extra: list[str]) -> int:
 
     from .storage import DbLaunchStatus, RunStore, check_database_at_launch
 
-    result = check_database_at_launch(path)
+    result = check_database_at_launch(path, config_file=hint)
     # Only a database built by a newer ATE must be refused; a missing or older one is
     # exactly what migrate exists to create or upgrade.
     if result.status == DbLaunchStatus.TOO_OLD:
-        print(f"database {path}: {result.message}", file=sys.stderr)
+        print(result.message, file=sys.stderr)
         return 1
 
     store = RunStore(path)  # creates the tables if missing and sets the schema version
