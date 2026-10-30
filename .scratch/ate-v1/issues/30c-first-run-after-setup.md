@@ -9,12 +9,12 @@
 
 **Blocked by:** 30a (GUI launch), 26b (`ate setup`: permissions)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `<data>` (and any other placeholder the config format defines) is resolved to the data directory the spec defines for the platform, or the one `ate setup --root` chose. `ate setup` writes either resolved paths or placeholders that the reader resolves; the spec decides which. Paths in a config written by `ate setup` work when `ate` starts.
-- [ ] `ate db status` and `ate db migrate` use the configured database when no path is given (`--config`, or the default config location); an explicit path still overrides it.
-- [ ] Every launch-refusal path shows its dialog and exits 1, with no abort. The QApplication is kept alive for the whole launch.
-- [ ] Tests: `ate setup --root <tmp>`, then `ate --config <tmp>/config/config.json db status` prints the schema version; then a GUI launch (`exec_=False`) succeeds with no literal `<data>` directory created. Each refusal (missing, older or newer database; invalid config) shows its message and exits 1, run in a subprocess so an abort would fail the test.
+- [x] `<data>` (and any other placeholder the config format defines) is resolved to the data directory the spec defines for the platform, or the one `ate setup --root` chose. `ate setup` writes either resolved paths or placeholders that the reader resolves; the spec decides which. Paths in a config written by `ate setup` work when `ate` starts.
+- [x] `ate db status` and `ate db migrate` use the configured database when no path is given (`--config`, or the default config location); an explicit path still overrides it.
+- [x] Every launch-refusal path shows its dialog and exits 1, with no abort. The QApplication is kept alive for the whole launch.
+- [x] Tests: `ate setup --root <tmp>`, then `ate --config <tmp>/config/config.json db status` prints the schema version; then a GUI launch (`exec_=False`) succeeds with no literal `<data>` directory created. Each refusal (missing, older or newer database; invalid config) shows its message and exits 1, run in a subprocess so an abort would fail the test.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/` (`app-config-format.md`, `packaging.md`); the spec is `.scratch/ate-v1/spec.md` (CLI ~220, Config ~190). Keep to this packet's checkboxes.
-- [ ] (added at the 27a merge) `tests/test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e added the "Report generated <local time>" footer: make the comparison exclude or freeze that timestamp so it is deterministic.
+- [x] (added at the 27a merge) `tests/test_report_steps_21b.py::test_autoescape_does_not_change_the_cover_bytes` is time-dependent since 29e added the "Report generated <local time>" footer: make the comparison exclude or freeze that timestamp so it is deterministic.
