@@ -4,7 +4,7 @@
 
 **What to build:** Every tagged release builds and smoke-tests the installer.
 
-**Blocked by:** 27b (Inno Setup installer)
+**Blocked by:** 27b (Inno Setup installer), 30c (First run after `ate setup`: its smoke checks the database version)
 
 **Status:** ready-for-agent
 
