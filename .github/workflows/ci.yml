@@ -15,6 +15,12 @@ jobs:
   test:
     name: pytest (${{ matrix.os }}, Python ${matrix.python-version})
     runs-on: ${{ matrix.os }}
+    env:
+      # conftest.py builds the shared QApplication with no `platform=` kwarg (this PyQt6 build's
+      # binding does not accept one), so Qt's offscreen platform has to come from the environment:
+      # without it every test that needs `app` fails on a headless runner. Job level, so both the
+      # Ubuntu and Windows matrix entries get it.
+      QT_QPA_PLATFORM: offscreen
     strategy:
       fail-fast: false
       matrix:

@@ -22,6 +22,7 @@ from typing import Any, Mapping, Optional
 from jinja2 import Environment, PackageLoader, select_autoescape
 from markupsafe import Markup
 
+from .._version import __version__
 from ..config import Config
 from ..storage.store import RunStore
 from .log_export import owner_keys
@@ -102,6 +103,51 @@ def _local_stamp(iso_utc: Optional[str], offset: str) -> Optional[str]:
     dt = _dt.datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))  # already tz-aware UTC
     local = (dt + _offset_delta(offset)).replace(microsecond=0)
     return local.strftime("%Y%m%d-%H%M%S")
+
+
+def _duration(start_iso: Optional[str], end_iso: Optional[str]) -> Optional[str]:
+    """Elapsed run time as "1 h 2 min 3 s": hours dropped under an hour, minutes under a minute.
+
+    The spec's Cover asks for a duration but fixes no format, so whole seconds and only the units
+    actually used are printed. A run with no end time has no duration: the spec only reports finished
+    runs ("A run still in progress can't be reported"), and the Cover prints "—" for it.
+    """
+    if not start_iso or not end_iso:
+        return None
+    total = int(
+        (_dt.datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+         - _dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00"))).total_seconds()
+    )
+    if total < 0:
+        return None
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours} h {minutes} min {seconds} s"
+    if minutes:
+        return f"{minutes} min {seconds} s"
+    return f"{seconds} s"
+
+
+def _footer_text(run_uuid: str, recorded_version: Optional[str], generated_local: str) -> str:
+    """Every page's footer, before the "Page X of Y" box: the run UUID and the two ATE versions.
+
+    "Run recorded by" is the ATE version stamped on the run row; "Report generated ... by" is the
+    ATE rendering this report, which differs when History regenerates an old run with a newer
+    template (spec: Producing reports)."""
+    return (
+        f"{run_uuid} · Run recorded by ATE {recorded_version or 'unknown'}"
+        f" · Report generated {generated_local} by ATE {__version__}"
+    )
+
+
+def _header_line(org: str, doc_title: Optional[str], doc_id: Optional[str], doc_rev: Optional[str]) -> str:
+    """The page header text — organisation, doc title, doc id, revision — joined with " · ".
+
+    Blank parts are dropped rather than joined, so a run with no `reports.organisation` never starts
+    the header with a stray separator, and a missing revision never prints a bare "rev"."""
+    parts = [part for part in (org, doc_title, doc_id, f"rev {doc_rev}" if doc_rev else "") if part]
+    return " · ".join(parts)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -307,6 +353,28 @@ def _equipment_rows(store: RunStore, run_uuid: str) -> list[dict]:
     ]
 
 
+def _top_level_release(store: RunStore, run_uuid: str) -> dict:
+    """The run's top-level Media Release row (``seq`` 0), or ``{}`` when the run has none.
+
+    `test_run` stores only the Media Number; the name and version live in `media_release`, so the
+    Cover's "Media Release" line reads them from there."""
+    for rel in store.media_releases(run_uuid):
+        if int(rel.get("seq") or 0) == 0:
+            return rel
+    return {}
+
+
+def _schedule_file_of_top_instance(store: RunStore, run_uuid: str) -> str:
+    """The top-level schedule's `.tslua` path from its `schedule_instance` row (instance 0).
+
+    `test_run` has a `schedule_file` column but the run engine never writes it, so the Cover reads
+    the path off the instance table, which the engine does fill (packet 15b)."""
+    for instance in store.schedule_instances(run_uuid):
+        if int(instance.get("instance_seq") or 0) == 0 and (instance.get("file") or ""):
+            return instance["file"]
+    return ""
+
+
 def _media_release_rows(store: RunStore, run_uuid: str) -> list[dict]:
     """Only the Media Releases this run used: the top-level one plus every release that supplied
     a file the run loaded (spec Configuration). Chain order (`seq`) is kept; an unused dependency
@@ -493,6 +561,7 @@ def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_r
     interrupted = row.get("end_reason") == "INTERRUPTED"
     checksum_mismatch = any(f.get("mismatch") for f in store.run_files(run_uuid))
     pretest_error, posttest_error = _phase_errors(store, run_uuid)
+    release = _top_level_release(store, run_uuid)
 
     ctx = {
         # Shared with the PDF helper's QPageLayout so CSS and print margins can't drift. Both of
@@ -504,6 +573,15 @@ def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_r
         # ever emitted.
         "logo": Markup(_logo_data_uri(config.reports_logo)),
         "paper": config.reports_paper_size,
+        # Every page's header and footer (spec Format). header_line drops empty parts so a run
+        # with no reports.organisation has no leading " · ".
+        "header_line": _header_line(config.reports_organisation, row.get("doc_title"), row.get("doc_id"), row.get("doc_rev")),
+        "run_uuid": run_uuid,
+        "run_ftr": _footer_text(
+            run_uuid,
+            row.get("ate_version"),
+            _local_time(_dt.datetime.now(_dt.timezone.utc).isoformat(), offset) or "",
+        ),
         # Cover — document fields (recorded on test_run by packet 21a).
         "doc_title": row.get("doc_title") or None,
         "doc_id": row.get("doc_id") or None,
@@ -515,16 +593,19 @@ def _report_context(store: RunStore, run_uuid: str, config: Config, *, include_r
         "station": row.get("station_name") or "",
         "start_local": _local_time(start_iso, offset),
         "end_local": _local_time(end_iso, offset),
-        "duration": None,
+        "duration": _duration(start_iso, end_iso),
         "ate_version": row.get("ate_version") or "",
         "stop_on_fail": bool(row.get("stop_on_fail")),
-        # Schedule.
+        # Schedule. test_run holds the name, description and Media Number only: the file comes from
+        # the top-level schedule_instance row, the release name and version from media_release seq 0.
         "schedule_name": row.get("schedule_name") or "",
         "schedule_description": row.get("schedule_description") or "",
-        "schedule_file": None,
-        "media_number": row.get("media_number") or "",
-        "media_name": None,
-        "media_version": None,
+        "schedule_file": _schedule_file_of_top_instance(store, run_uuid) or None,
+        # test_run only carries the Media Number; the name and version come from media_release seq 0,
+        # whose number is used when the run row has none.
+        "media_number": row.get("media_number") or release.get("media_number") or "",
+        "media_name": release.get("name") or "",
+        "media_version": release.get("version") or "",
         # Result banner + warnings.
         "result": (row.get("result") or "").upper(),
         "end_reason": row.get("end_reason") or "",
@@ -579,7 +660,12 @@ def render_report(store: RunStore, run_uuid: str, config: Config, *, include_run
 
 
 def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optional[dict]]:
-    """Return the errored Pre-test/Post-test Action as ``{"name", "error"}`` or ``None``."""
+    """Return the errored Pre-test/Post-test Action as ``{"name", "error"}`` or ``None``.
+
+    The Cover names the schedule whose Action failed (spec rule 44), so the name is the instance's
+    `ScheduleParams` name, with its include prefix when the schedule came in through `setInclude`
+    — a run with no instance rows (a bare schedule test) keeps the plain phase name."""
+    instances = {int(row["instance_seq"]): row for row in store.schedule_instances(run_uuid) if row.get("instance_seq") is not None}
     pretest_error = None
     posttest_error = None
     for action in store.actions(run_uuid):
@@ -587,6 +673,11 @@ def _phase_errors(store: RunStore, run_uuid: str) -> tuple[Optional[dict], Optio
             continue
         phase = action.get("phase")
         name = "Post-test Action" if phase == "post" else "Pre-test Action"
+        instance = instances.get(int(action.get("instance_seq") or 0))
+        schedule = (instance or {}).get("schedule_name") or ""
+        prefix = (instance or {}).get("prefix") or ""
+        if schedule:
+            name = f"{name} in {schedule}" + (f" (prefix {prefix})" if prefix else "")
         entry = {"name": name, "error": action.get("error") or ""}
         if phase == "pre" and pretest_error is None:
             pretest_error = entry

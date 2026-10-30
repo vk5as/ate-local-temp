@@ -1,4 +1,4 @@
-"""CI harness for the example Media Release (packets 29a, 29b and 29c).
+"""CI harness for the example Media Release (packets 29a-29e).
 
 Every visible Test Schedule in ``examples/media-release/`` runs headless through the seam-1 run
 session with scripted Operator answers, and its recorded Test Run is checked here: the Test
@@ -13,7 +13,11 @@ different keyvals and prefixes, a nested include, a disabled header, and modules
 includes. Packet 29d adds the Device schedule: every Device Type run against the simulator peers
 `examples/harness/peers.py` starts, with its partial reads, timed-out reads, onError handlers,
 per-call overrides, Device opened in a Pre-test Action, and the Device trace lines the harness
-config turns on.
+config turns on. Packet 29e closes the example out as a regression suite: every run writes its
+Test Report (name, PDF beside it, Cover/Steps/Equipment/Configuration/Run log in the HTML), the
+Cover shows every Run detail, Schedule and Media Release field and the Summary's seven counts, the
+footer names the run UUID and both ATE versions, the Run log carries every INFO/WARNING/ERROR line
+grouped by owner, and every visible schedule has a run that ends PASS.
 
 Run it on its own with `pytest examples/`, or as part of the regular suite (`pytest`):
 `testpaths` in pyproject.toml collects `examples` too.
@@ -23,6 +27,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import datetime, timedelta
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -115,12 +123,17 @@ def test_example_release_scans_with_no_broken_entries_and_no_mismatches() -> Non
 def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[str, Any]]) -> None:
     """Each example schedule runs to a recorded Test Run through the headless session.
 
-    Six schedules, eleven runs: Stop on fail is run twice (Continue and Abort), Example basics twice
-    (its optional step left disabled, then enabled by the Operator), Flow and retry twice (Stop on
-    Fail with a Retry, and with Stop on Fail switched off), and the Device schedule three times (as
-    written, with its disabled-by-default `onError` returns nil step enabled, and with its SCPI peer
-    unreachable), so the record count is the schedule count plus those five extra runs."""
-    assert len(records) == len(visible_schedules()) + 5
+    schedules, thirteen runs: Stop on fail three times (Continue, Abort, and with its failing
+    steps disabled so the schedule has a green run), Example basics twice (its optional step left
+    disabled, then enabled by the Operator), Flow and retry twice (Stop on Fail with a Retry, and
+    with Stop on Fail switched off), Report every Result twice (as written, and with its FAIL/ERROR
+    steps disabled), and the Device schedule three times (as written, with its disabled-by-default
+    `onError` returns nil step enabled, and with its SCPI peer unreachable). The extra runs are the
+    `RUNS` entries that repeat a schedule, so a new planned run is counted here rather than the
+    total being hard-coded."""
+    extra_runs = len(RUNS) - len({entry["schedule"] for entry in RUNS})
+    assert len(records) == len(visible_schedules()) + extra_runs, \
+        f"{len(RUNS)} runs planned, {len(records)} recorded"
     assert {entry["schedule"] for entry in RUNS} == set(visible_schedules())
     for record in records.values():
         run = record["run"]
@@ -147,6 +160,419 @@ def test_every_visible_example_schedule_runs_headless(records: dict[str, dict[st
         # Every prompt was one the harness scripted: a schedule that pauses when it does not say it
         # will is a bug, not something to answer.
         assert record["unexpected_prompts"] == [], f"{run['schedule_name']} paused unexpectedly"
+
+
+#: The Test Report's sections in the order the spec lists them
+#: (.scratch/ate-v1-wayfinding/assets/test-report-format.md): Cover, Steps, Equipment,
+#: Configuration, Run log. The Cover is everything before the first <h2>.
+REPORT_SECTIONS = ("Steps", "Equipment", "Configuration", "Run log")
+
+#: The Summary counts every Result value, zeros included, in the order the Cover prints them.
+SUMMARY_LABELS = ("PASS", "FAIL", "ERROR", "NOREPORT", "SKIPPED", "FORCED_NOTRUN", "NOTRUN")
+
+#: The Cover's Run-details labels, exactly as the template prints them.
+COVER_LABELS = ("UUT Type", "Serial", "Project", "Station", "Start", "End", "Duration",
+                "ATE version", "Stop on Fail", "Schedule", "Media Release")
+
+#: How long a Duration cell looks: "45 s", "3 min 7 s" or "1 h 2 min 3 s".
+DURATION_RE = re.compile(r"(?:\d+ h \d+ min \d+ s|\d+ min \d+ s|\d+ s)")
+
+#: A time the report shows: local wall-clock with the Station's UTC offset beside it.
+LOCAL_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}")
+
+
+class _ReportParser(HTMLParser):
+    """The Test Report's structure: every <h2> section, its <h3> groups and their table rows.
+
+    Replaces the regex split on `<h2>`, which a heading with attributes, a tag nested inside a
+    heading, or an escaped `&lt;h2&gt;` in a log line could all corrupt. Text is unescaped as it is
+    collected, so an escaped heading stays text and never opens a section:
+
+    * `sections` — heading -> the text under it, in document order, with "Cover" first;
+    * `rows` — section -> every table row of that section as a list of cell texts;
+    * `groups` — the current section's <h3> groups, each a (label, rows) pair.
+    """
+
+    COVER = "Cover"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sections: dict[str, str] = {self.COVER: ""}
+        self.rows: dict[str, list[list[str]]] = {}
+        self.groups: list[tuple[str, list[list[str]]]] = []
+        self._section = self.COVER
+        self._heading: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._row: list[str] = []
+
+    @staticmethod
+    def _text(parts: list[str]) -> str:
+        return " ".join("".join(parts).split())
+
+    def _note(self, text: str) -> None:
+        self.sections[self._section] += text + " "
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("h2", "h3"):
+            self._heading = []
+        elif tag == "td" or tag == "th":
+            self._cell = []
+        elif tag == "tr":
+            self._row = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "h2":
+            name = self._text(self._heading or [])
+            self._section = name
+            self.sections.setdefault(name, "")
+            self.groups = []
+            self._heading = None
+        elif tag == "h3":
+            name = self._text(self._heading or [])
+            self._note(name)
+            self.groups.append((name, []))
+            self._heading = None
+        elif tag == "td" or tag == "th":
+            cell = self._text(self._cell or [])
+            self._row.append(cell)
+            self._note(cell)
+            self._cell = None
+        elif tag == "tr":
+            if self._row:
+                self.rows.setdefault(self._section, []).append(self._row)
+                if self.groups:
+                    self.groups[-1][1].append(self._row)
+            self._row = []
+
+    def handle_data(self, data: str) -> None:
+        if self._heading is not None:
+            self._heading.append(data)
+        elif self._cell is not None:
+            self._cell.append(unescape(data))
+        else:
+            self._note(unescape(data))
+
+
+def _report_sections(text: str) -> dict[str, str]:
+    """The report split on its <h2> headings, keyed by heading, in document order.
+
+    The first chunk, before any <h2>, is the Cover."""
+    return _parse_report(text).sections
+
+
+def _parse_report(text: str) -> _ReportParser:
+    """Parse one report's HTML into sections, rows and <h3> groups."""
+    parser = _ReportParser()
+    parser.feed(text)
+    return parser
+
+
+def _cover_fields(rows: list[list[str]]) -> dict[str, str]:
+    """The Cover's Run-details table as {label: value}."""
+    return {row[0]: " ".join(row[1:]) for row in rows if row and row[0] in COVER_LABELS}
+
+
+def test_report_sections_are_parsed_and_not_split_on_heading_markup() -> None:
+    """A heading with attributes, a tag nested in it, and an escaped `<h2>` in a log line all survive."""
+    html = """<!DOCTYPE html><html><body>
+      <h1>Test Report</h1>
+      <h2 class="page-break">Steps</h2>
+      <table class="steps"><thead><tr><th>Step Number</th><th>Step Name / message</th></tr></thead>
+      <tbody><tr><td>1.</td><td>A step that logged &lt;h2&gt;Failures&lt;/h2&gt;</td></tr></tbody></table>
+      <h2 class="x"><span>Run log</span></h2>
+      <h3>Run</h3>
+      <table class="log"><thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Text</th></tr></thead>
+      <tbody><tr><td>2026-10-17 14:03:22 +10:30</td><td>INFO</td><td>ate</td><td>&lt;h2&gt;Failures</td></tr></tbody></table>
+    </body></html>"""
+    parser = _parse_report(html)
+
+    assert list(parser.sections) == ["Cover", "Steps", "Run log"], f"sections are {list(parser.sections)}"
+    assert "Test Report" in parser.sections["Cover"], "the text before the first heading is not the Cover"
+    assert "<h2>Failures</h2>" in parser.sections["Steps"], "the escaped heading in a cell is not kept as text"
+    assert "Failures" not in parser.sections, "an escaped <h2> in a log line opened a section"
+    assert parser.groups == [("Run", [["Time", "Level", "Source", "Text"],
+                                     ["2026-10-17 14:03:22 +10:30", "INFO", "ate", "<h2>Failures"]])], parser.groups
+
+
+def _expected_run_log(record: dict[str, Any]) -> list[tuple[tuple[str, ...], list[str]]]:
+    """The Run log the spec defines, built straight from the record.
+
+    Groups in order: the run as a whole, then each Pre-test and Post-test Action in the order its
+    Actions ran, then each step Attempt in tree order; every group in time (recorded) order. A line's
+    owner is its `node_seq`/`attempt_no`, its `action_seq` (the owning instance), or nothing.
+    `DEBUG` lines and the Device trace stay in the database and never reach a report."""
+    logs = record["logs"]
+    actions = record["actions"]
+    instances = {row["instance_seq"]: row for row in record["schedule_instances"]}
+    steps = {row["node_seq"]: row for row in record["nodes"] if row["kind"] == "step"}
+
+    step_positions = [i for i, line in enumerate(logs) if line["node_seq"] is not None]
+    first_step = step_positions[0] if step_positions else None
+    last_step = step_positions[-1] if step_positions else None
+    pre_instances = {a["instance_seq"] for a in actions if a["phase"] == "pre"}
+    post_instances = {a["instance_seq"] for a in actions if a["phase"] == "post"}
+    last_pre_row = max((a["seq"] for a in actions if a["phase"] == "pre" and a["seq"] is not None), default=None)
+
+    def owner(line: dict[str, Any], index: int) -> tuple:
+        if line["node_seq"] is not None:
+            return ("step", line["node_seq"], int(line["attempt_no"] or 0))
+        action_seq = line["action_seq"]
+        if action_seq is None:
+            return ("run",)
+        if first_step is not None and index < first_step:
+            return ("pre", action_seq)
+        if last_step is not None and index > last_step:
+            return ("post", action_seq)
+        # A phase Action's lines recorded between the steps: settled by which phase owns the
+        # instance, and by the action rows when an instance is in both phases.
+        if action_seq in pre_instances and action_seq not in post_instances:
+            return ("pre", action_seq)
+        if action_seq in post_instances and action_seq not in pre_instances:
+            return ("post", action_seq)
+        if last_pre_row is not None and line["seq"] < last_pre_row:
+            return ("pre", action_seq)
+        return ("post", action_seq)
+
+    grouped: dict[tuple, list[str]] = {}
+    for index, line in enumerate(logs):
+        if line["level"] in ("INFO", "WARNING", "ERROR"):
+            # HTML collapses the newlines of a multi-line log line into spaces.
+            grouped.setdefault(owner(line, index), []).append(" ".join((line["text"] or "").split()))
+
+    def phase_order(phase: str) -> list[int]:
+        return [a["instance_seq"] for a in sorted((a for a in actions if a["phase"] == phase),
+                                                 key=lambda a: (a["run_order"] or 0, a["instance_seq"] or 0))]
+
+    out: list[tuple[tuple[str, ...], list[str]]] = []
+    if ("run",) in grouped:
+        out.append((("Run",), grouped[("run",)]))
+    for phase in ("pre", "post"):
+        phrase = "Pre-test" if phase == "pre" else "Post-test"
+        more_than_one = sum(1 for a in actions if a["phase"] == phase) > 1
+        for instance_seq in phase_order(phase):
+            key = (phase, instance_seq)
+            if key in grouped:
+                label = (phrase,) + ((instances[instance_seq]["schedule_name"], str(instance_seq)) if more_than_one else ())
+                out.append((label, grouped[key]))
+    for node_seq, node in steps.items():  # the record returns the tree in order
+        for attempt in sorted(k[2] for k in grouped if k[0] == "step" and k[1] == node_seq):
+            label = ("Step", node["step_number"], node["step_name"], f"attempt {attempt}")
+            out.append((label, grouped[("step", node_seq, attempt)]))
+    return out
+
+
+def _check_run_log(parser: _ReportParser, record: dict[str, Any], key: str) -> None:
+    """Every INFO/WARNING/ERROR line of the run is in the report, in the spec's groups, in time order."""
+    groups = [(label, [row for row in rows if row[:1] != ["Time"]]) for label, rows in parser.groups]
+    expected = _expected_run_log(record)
+    logged = [line for line in record["logs"] if line["level"] in ("INFO", "WARNING", "ERROR")]
+    assert sum(len(texts) for _, texts in expected) == len(logged), \
+        f"{key}: the record has {len(logged)} reportable lines, the groups hold {sum(len(t) for _, t in expected)}"
+    assert len(groups) == len(expected), f"{key}: the Run log has {len(groups)} groups, expected {len(expected)}"
+    for (label, rows), (need, texts) in zip(groups, expected):
+        assert all(part in label for part in need), f"{key}: run log group {label!r} is not {need}"
+        assert [row[3] for row in rows] == texts, f"{key}: {label} lines are {rows!r}, not {texts!r}"
+        times = [row[0] for row in rows]
+        assert times == sorted(times), f"{key}: {label} lines are not in time order"
+        assert all(row[1] in ("INFO", "WARNING", "ERROR") for row in rows), f"{key}: {label} has a level a report never prints"
+
+
+def _offset_delta(offset: str) -> timedelta:
+    """The run's stored UTC offset ("+10:30", "-05:00") as a timedelta."""
+    body = (offset or "+00:00").strip()
+    sign = -1 if body.startswith("-") else 1
+    hours, minutes = (int(part) for part in body.lstrip("+-").split(":"))
+    return sign * timedelta(hours=hours, minutes=minutes)
+
+
+def _local_text(iso: str, offset: str) -> str:
+    """The stored UTC instant as the report prints it: local wall-clock with the offset."""
+    delta = _offset_delta(offset)
+    local = datetime.fromisoformat(iso.replace("Z", "+00:00")) + delta
+    sign = "-" if delta < timedelta(0) else "+"
+    hours, minutes = divmod(abs(int(delta.total_seconds())), 3600)
+    return f"{local:%Y-%m-%d %H:%M:%S} {sign}{hours:02d}:{minutes:02d}"
+
+
+def _local_start_stamp(run: dict[str, Any]) -> str:
+    """The run's local start as ``yyyymmdd-HHMMSS``, the stamp the report file name carries."""
+    start = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00")) + _offset_delta(run["utc_offset"])
+    return start.strftime("%Y%m%d-%H%M%S")
+
+
+def test_every_example_run_writes_its_test_report(records: dict[str, dict[str, Any]]) -> None:
+    """Every example run writes its Test Report at run end - PASS, FAIL or PRETEST_FAILED alike.
+
+    The harness waits on the session's `report_written` signal rather than sleeping (see
+    `run_examples.run_schedule`), so this test only ever sees finished runs. Each report is the
+    spec's `<reports.directory>/<UUT Type>/<UUT Type>_<serial>_<local start>_<PASS|FAIL>.html` with
+    the PDF beside it, and the HTML carries this run's UUT, serial, schedule, result and End Reason
+    and all five sections in the order the spec gives them."""
+    seen: dict[str, int] = {}  # stem -> how many runs already used it, in run order
+    for key, record in records.items():
+        run = record["run"]
+        written = record["reports"]
+        assert len(written) == 1, f"{key}: one report per run, got {written}"
+        html_path, pdf_path = written[0]
+        assert html_path and pdf_path, f"{key}: report_written emitted {html_path!r}, {pdf_path!r}"
+        html, pdf = Path(html_path), Path(pdf_path)
+        assert html.exists(), f"{key}: the HTML report is not on disk: {html}"
+        assert pdf.exists(), f"{key}: the PDF report is not on disk: {pdf}"
+        assert pdf.with_suffix(".html") == html, f"{key}: {pdf.name} is not the PDF of {html.name}"
+        assert pdf.stat().st_size, f"{key}: {pdf.name} is empty"
+
+        # Naming: the UUT Type is the directory, the file is UUT Type, serial, local start, result.
+        # A report is never overwritten, so runs that start in the same second and end the same way
+        # take the first free -2, -3 ... suffix (spec: File names).
+        assert html.parent.name == run["uut_type"], f"{key}: {html.parent.name!r} is not the UUT Type folder"
+        assert html.parent.parent.name == "reports", f"{key}: {html.parent.parent} is not reports.directory"
+        stem = f"{run['uut_type']}_{run['uut_serial']}_{_local_start_stamp(run)}_{run['result']}"
+        taken = seen.get(stem, 0) + 1
+        seen[stem] = taken
+        wanted = f"{stem}.html" if taken == 1 else f"{stem}-{taken}.html"
+        assert html.name == wanted, f"{key}: {html.name!r} is not the spec's name {wanted!r}"
+
+        raw = html.read_text(encoding="utf-8")
+        parser = _parse_report(raw)
+        sections = parser.sections
+        for value in (run["uut_type"], run["uut_serial"], run["schedule_name"], run["result"], run["end_reason"]):
+            assert value in raw, f"{key}: the report never mentions {value!r}"
+
+        # Cover -> Steps -> Equipment -> Configuration -> Run log.
+        assert [name for name in sections if name in REPORT_SECTIONS] == list(REPORT_SECTIONS), \
+            f"{key}: sections are {list(sections)}"
+        cover = sections["Cover"]
+        assert (run["doc_title"] or run["schedule_name"]) in cover, f"{key}: the Cover has no document title"
+        assert {"Summary", "Operator"} <= set(sections), f"{key}: the Cover has no Summary or Operator"
+        assert list(sections).index("Summary") < list(sections).index("Steps"), \
+            f"{key}: the Cover must come before the Steps"
+        if run["end_reason"] == "PRETEST_FAILED":
+            assert "failed:" in cover, f"{key}: the Cover does not name the failed Pre-test Action"
+
+        # Steps: every step of the expanded tree, disabled ones included, with its Result.
+        steps = sections["Steps"]
+        for node in record["nodes"]:
+            if node["kind"] == "step":
+                assert node["step_name"] in steps, f"{key}: step {node['step_name']!r} is not in the Steps table"
+
+        # Failures are on the Cover, and only when there are any.
+        failed = [n for n in record["nodes"]
+                  if n["kind"] == "step" and n["result"] in ("FAIL", "ERROR", "NOREPORT")]
+        assert ("Failures" in sections) == bool(failed), f"{key}: the Failures section does not match the run"
+        for node in failed:
+            assert node["step_name"] in sections["Failures"], f"{key}: {node['step_name']!r} missing from Failures"
+
+        equipment = sections["Equipment"]
+        if record["equipment"]:
+            for item in record["equipment"]:
+                assert item["name"] in equipment, f"{key}: equipment {item['name']!r} is not in the report"
+        else:
+            assert "No equipment declared" in equipment, f"{key}: the empty Equipment section says nothing"
+
+        configuration = sections["Configuration"]
+        assert run["media_number"] in configuration, f"{key}: the Configuration section omits the release"
+        for file in record["run_files"]:
+            assert file["path"] in configuration, f"{key}: {file['path']!r} is not listed in Configuration"
+
+        # A report written at run end always carries the Run log, and never the DEBUG lines or the
+        # Device trace, which stay in the database.
+        assert "Run log left out" not in sections["Run log"], f"{key}: a run-end report left the Run log out"
+        _check_run_log(parser, record, key)
+        assert "DEBUG" not in raw, f"{key}: DEBUG lines leaked into the report"
+
+
+def test_every_example_report_cover_shows_the_run_and_its_footer(records: dict[str, dict[str, Any]]) -> None:
+    """The Cover's Run details, Schedule and Media Release, the Summary counts, and every page's footer.
+
+    Every value the Cover prints comes from the Test Run record (`test-run-record.md`): the Duration
+    is computed from start and end, the schedule file is the top-level instance's path (the `test_run`
+    column the record defines is never written by the engine), and the release's name and version come
+    from `media_release` row 0. Times are the Station's local time with the offset shown, and the
+    footer names the run UUID, the ATE that recorded it and the ATE that generated the report."""
+    for key, record in records.items():
+        run = record["run"]
+        raw = Path(record["reports"][0][0]).read_text(encoding="utf-8")
+        parser = _parse_report(raw)
+        fields = _cover_fields(parser.rows["Cover"])
+        missing = [label for label in COVER_LABELS if label not in fields]
+        assert not missing, f"{key}: the Cover is missing {missing}"
+
+        assert fields["UUT Type"] == run["uut_type"] and fields["Serial"] == run["uut_serial"]
+        assert fields["Project"] == run["project"], f"{key}: no Project on the Cover"
+        assert fields["Station"] == run["station_name"], f"{key}: no Station on the Cover"
+        assert fields["Start"] == _local_text(run["started_at"], run["utc_offset"]), f"{key}: Start is {fields['Start']!r}"
+        assert fields["End"] == _local_text(run["ended_at"], run["utc_offset"]), f"{key}: End is {fields['End']!r}"
+        assert LOCAL_TIME_RE.search(fields["Start"]) and LOCAL_TIME_RE.search(fields["End"]), \
+            f"{key}: the times show no UTC offset"
+        assert DURATION_RE.fullmatch(fields["Duration"]), f"{key}: Duration is {fields['Duration']!r}, not an elapsed time"
+        assert fields["ATE version"] == run["ate_version"], f"{key}: no ATE version on the Cover"
+        assert fields["Stop on Fail"] == ("on" if run["stop_on_fail"] else "off"), f"{key}: Stop on Fail is {fields['Stop on Fail']!r}"
+
+        schedule = fields["Schedule"]
+        assert run["schedule_name"] in schedule, f"{key}: the Cover omits the schedule name"
+        assert (run["schedule_description"] or "") in schedule, f"{key}: the Cover omits the schedule description"
+        top = next(i for i in record["schedule_instances"] if i["instance_seq"] == 0)
+        assert top["file"] in schedule, f"{key}: the Cover omits the schedule file {top['file']!r}"
+
+        release = fields["Media Release"]
+        assert run["media_number"] in release, f"{key}: the Cover omits the Media Number"
+        top_release = next(r for r in record["media_releases"] if r["seq"] == 0)
+        assert top_release["name"] in release, f"{key}: the Cover omits the release name {top_release['name']!r}"
+        assert f"v{top_release['version']}" in release, f"{key}: the Cover omits the release version"
+
+        # Summary: all seven Result counts, zeros included, then retries and Operator overrides.
+        counts = [row for row in parser.rows.get("Summary", []) if len(row) == len(SUMMARY_LABELS)]
+        assert len(counts) == 2, f"{key}: the Summary has no count table"
+        assert counts[0] == list(SUMMARY_LABELS), f"{key}: the Summary counts {counts[0]}"
+        tally: dict[str, int] = {label: 0 for label in SUMMARY_LABELS}
+        for node in record["nodes"]:
+            if node["kind"] != "header":
+                tally[node["result"] or "NOTRUN"] += 1
+        assert [int(value) for value in counts[1]] == [tally[label] for label in SUMMARY_LABELS], \
+            f"{key}: the Summary says {counts[1]}, the record says {[tally[label] for label in SUMMARY_LABELS]}"
+        retried = sum(1 for node in record["nodes"]
+                      if node["kind"] != "header" and (node["attempt_count"] or 0) > 1)
+        overrides = sum(1 for node in record["nodes"]
+                        if node["kind"] != "header" and bool(node["default_enabled"]) != bool(node["enabled"]))
+        assert f"Retried steps: {retried}" in parser.sections["Summary"], f"{key}: no retried-step count"
+        assert f"Operator enable overrides: {overrides}" in parser.sections["Summary"], f"{key}: no override count"
+
+        # The footer every page carries: run UUID, recording ATE, generating ATE, page numbers.
+        footer = re.search(r"@bottom-left\s*\{[^}]*content: \"([^\"]*)\"", raw)
+        assert footer, f"{key}: the report has no footer box"
+        text = footer.group(1)
+        assert run["run_uuid"] in text, f"{key}: the footer carries no run UUID"
+        assert f"Run recorded by ATE {run['ate_version'] or 'unknown'}" in text, f"{key}: footer says {text!r}"
+        assert re.search(r"Report generated \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2} by ATE \d+\.\d+\.\d+", text), \
+            f"{key}: footer says {text!r}"
+        assert "counter(page)" in raw and "counter(pages)" in raw, f"{key}: no Page X of Y footer"
+
+        # A run with no organisation has no empty part at the start of the page header.
+        header = re.search(r"@top-center\s*\{[^}]*content: \"([^\"]*)\"", raw)
+        assert header, f"{key}: the report has no page header box"
+        assert not header.group(1).startswith(" ·"), f"{key}: the header starts with a stray separator: {header.group(1)!r}"
+
+        if run["end_reason"] == "PRETEST_FAILED":
+            failed = next(a for a in record["actions"] if a["phase"] == "pre" and a["outcome"] == "error")
+            instance = next(i for i in record["schedule_instances"] if i["instance_seq"] == failed["instance_seq"])
+            banners = re.findall(r'<div class="banner">(.*?)</div>', raw)
+            assert any(instance["schedule_name"] in b and failed["error"] in b for b in banners), \
+                f"{key}: no banner names the schedule {instance['schedule_name']!r} and its error {failed['error']!r}: {banners}"
+            if instance["prefix"]:
+                assert any(instance["prefix"] in b for b in banners), f"{key}: the banner omits the include prefix"
+
+
+def test_every_visible_example_schedule_has_a_green_run(records: dict[str, dict[str, Any]]) -> None:
+    """Every schedule the catalog makes visible runs green in CI: at least one PASS/COMPLETED run.
+
+    The schedules that exist to fail keep their failing runs; they just also need a run where the
+    Operator disables the failing steps. The list comes from the catalog, so a new example schedule
+    with no green run fails here rather than being quietly skipped."""
+    green = {record["run"]["schedule_name"] for record in records.values()
+             if record["run"]["result"] == "PASS" and record["run"]["end_reason"] == "COMPLETED"}
+    missing = set(visible_schedules()) - green
+    assert not missing, f"visible schedules with no PASS/COMPLETED run: {sorted(missing)}"
+
 
 
 def test_basics_records_metadata_steps_equipment_and_log_levels(records: dict[str, dict[str, Any]]) -> None:

@@ -14,7 +14,7 @@
   size: {{ paper }} portrait;
   margin: {{ page_margin_css }};
   @top-left   { content: url("{{ logo }}"); vertical-align: middle; width: 32mm; }
-  @top-center { content: "{{ org ~ ' · ' ~ (doc_title or '') ~ ' · ' ~ (doc_id or '') ~ ' rev ' ~ (doc_rev or '') }}"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
+  @top-center { content: "{{ header_line }}"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
   @top-right  { content: "{{ uut_type }} {{ uut_serial }}"; font: bold 9pt sans-serif; border-bottom: none; }
   @bottom-left{ content: "{{ run_ftr }}"; font: 7pt sans-serif; color: #555; width: 150mm; }
   @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt sans-serif; }
@@ -71,7 +71,7 @@ table.log td:nth-child(3), table.log th:nth-child(3) { width: 18mm; }
 <div class="screen-only">
   <table><tr>
     <td style="width: 34mm"><img src="{{ logo }}" style="height: 9mm"></td>
-    <td>{{ org }} · {{ doc_title or '' }} · {{ doc_id or '' }} rev {{ doc_rev or '' }}</td>
+    <td>{{ header_line }}</td>
     <td style="text-align: right; font-weight: bold">{{ uut_type }} {{ uut_serial }}</td>
   </tr></table>
 </div>
@@ -98,8 +98,8 @@ table.log td:nth-child(3), table.log th:nth-child(3) { width: 18mm; }
       <tr><th>Duration</th><td>{{ duration or '—' }}</td></tr>
       <tr><th>ATE version</th><td>{{ ate_version }}</td></tr>
       <tr><th>Stop on Fail</th><td>{{ 'on' if stop_on_fail else 'off' }}</td></tr>
-      <tr><th>Schedule</th><td>{{ schedule_name }}{% if schedule_description %}<br><span class="small">{{ schedule_description }}<br>{{ schedule_file or '' }}</span>{% endif %}</td></tr>
-      <tr><th>Media Release</th><td>{{ media_number }}{% if media_name %} — {{ media_name }} v{{ media_version }}{% endif %}</td></tr>
+      <tr><th>Schedule</th><td>{{ schedule_name }}{% if schedule_description or schedule_file %}<br><span class="small">{% if schedule_description %}{{ schedule_description }}<br>{% endif %}{{ schedule_file or '' }}</span>{% endif %}</td></tr>
+      <tr><th>Media Release</th><td>{{ media_number }}{% if media_name or media_version %} — {{ media_name or '—' }}{% if media_version %} v{{ media_version }}{% endif %}{% endif %}</td></tr>
     </table>
   </td>
   <td style="width: 40%">
