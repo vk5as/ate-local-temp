@@ -298,6 +298,7 @@ class FakeInstaller:
         self.installs = 0
         self.calls: list[list[str]] = []
         self.log_paths: list[str] = []
+        self.log_existed: list[bool] = []
 
     def run(self, argv: list[str], env: dict[str, str] | None = None) -> smoke.CommandResult:
         exe = argv[0]
@@ -357,6 +358,10 @@ class FakeInstaller:
         if not log_path.is_absolute():
             raise AssertionError(f"/LOG= must be an absolute path; Inno resolves a relative one against its own working directory: {log_arg}")
         self.log_paths.append(str(log_path))
+        # Inno's /LOG= overwrites the file it is given, but Setup only creates it if it can:
+        # a log left in the runner's workspace by the previous install is still there if the
+        # script does not delete it first, and the checks read whatever is on disk.
+        self.log_existed.append(log_path.exists())
         log_lines = ["- Setup logging started.", "- Installing file ate.exe"]
         if not self.flags["no_selftest_line"]:
             log_lines.append("- " + smoke.SETUP_LOG_LINE + ": ate.exe setup")
@@ -683,11 +688,15 @@ def test_smoke_fails_loudly_when_the_uninstall_never_clears_the_path(tmp_path):
 
 
 def test_a_stale_install_log_is_deleted_before_each_install(tmp_path):
-    r"""/LOG= appends: the upgrade's check must not pass on the first install's lines."""
+    r"""Setup writes a fresh log, but the script must not read one that is already on disk.
+
+    A log left by a previous install (or the first install of this run) is what the upgrade's
+    check would otherwise be looking at."""
     log = tmp_path / "install.log"
     log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8")
     checks, registry, runner = _smoke(tmp_path)
     assert any("clean /LOG" in check for check in checks), "the first run's log was still there"
+    assert not any(runner.log_existed), f"Setup ran with a log already on disk: {runner.log_existed}"
     assert "exited with code 1" not in log.read_text(encoding="utf-8")
     assert len(runner.log_paths) == 2, "each install gets its own log"
 

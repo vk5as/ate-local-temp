@@ -257,8 +257,11 @@ def run_smoke(
         return [*INSTALL_FLAGS, f"/LOG={log}"]
 
     def install() -> CommandResult:
-        """Run Setup, after deleting the log: /LOG= appends, so the upgrade's check would
-        otherwise pass on the lines the first install wrote."""
+        """Run Setup, after deleting the log.
+
+        `/LOG=` overwrites the file it is given, but only if Setup can create it, and the first
+        install of this run leaves a log the upgrade's check would otherwise be reading. Deleting
+        it first makes each stage's log that stage's own."""
         try:
             log.unlink()
         except FileNotFoundError:
