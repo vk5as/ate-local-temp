@@ -559,16 +559,25 @@ def test_dry_run_paths_are_absolute(tmp_path: Path) -> None:
     """Inno resolves a relative SourceDir against the script's folder, not the cwd.
 
     `--dist dist` from some other directory must reach the absolute dist path, or the
-    compiler would look for `packaging\\windows\\dist\\ate`.
+    compiler would look for `packaging\\windows\\dist\\ate`. The same for `--out`.
     """
     bundle = _stub_bundle(tmp_path, "0.0.0-dev")
-    output = _dry_run(bundle, env=dict(os.environ, ISCC="", PATH=tempfile.mkdtemp()),
-                      cwd=str(tmp_path), extra=["--dist", "dist"])
+    env = dict(os.environ, ISCC="", PATH=tempfile.mkdtemp())
+
+    output = _dry_run(bundle, env=env, cwd=str(tmp_path), extra=["--dist", "dist"])
     source = re.search(r"/DSourceDir=(\S+)", output).group(1)
     out_dir = re.search(r"/O(\S+)", output).group(1)
     assert source == str(Path(tmp_path, "dist", "ate").resolve()), f"SourceDir must be absolute: {source}"
     assert out_dir == str(Path(tmp_path, "dist").resolve()), f"the output path must be absolute: {out_dir}"
     assert not source.startswith("dist") and not out_dir.startswith("dist"), "relative paths reach the wrong folder"
+
+    output = _dry_run(bundle, env=env, cwd=str(tmp_path), extra=["--dist", "dist", "--out", "installer"])
+    out_dir = re.search(r"/O(\S+)", output).group(1)
+    assert out_dir == str(Path(tmp_path, "installer").resolve()), f"--out must be resolved too: {out_dir}"
+
+    output = _dry_run(bundle, env=env, cwd=str(REPO), extra=["--iss", "packaging/windows/ate.iss", "--dist", "dist"])
+    iss_path = output.strip().splitlines()[0].split()[-1]
+    assert Path(iss_path).is_absolute(), f"the script path handed to iscc is relative: {iss_path}"
 
 
 def test_dry_run_with_a_certificate_configures_signing(tmp_path: Path) -> None:
