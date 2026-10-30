@@ -2,8 +2,8 @@
 
 Packet 28a: the wheel and the source build, plus the Linux artifacts (28b) and the Windows
 installer (27b). This page covers running ATE from a checkout, building the wheel, the
-frozen PyInstaller build that every artifact starts from, the Windows installer, and the
-Linux packages.
+frozen PyInstaller build that every artifact starts from, the Windows installer, the Linux
+packages, and the release CI that builds and smoke-tests them on a tag (27c).
 
 ATE targets CPython **3.13** (Debian stable's system Python) and **3.14** (the
 version the frozen builds bundle). Anything older is refused by
@@ -111,8 +111,11 @@ only removes bindings and their data.
 bundle must carry and exits 1 if any is missing. With `--run` it adds one end-to-end check: a
 built-in one-step Test Schedule is run headless through `HeadlessRunSession` in a temporary
 directory with its own config and database, and the check passes only if the run wrote its HTML
-report and the `_pdf` child (the bundle's own executable when frozen) wrote the PDF. Apart from
-that temporary directory it touches no Station, database or Test Run.
+report and the `_pdf` child (the bundle's own executable when frozen) wrote the PDF. With
+`--scan <dir>` (27c) it reads the Station config, refuses a database that is not at this ATE's
+schema version, and lists the Test Schedules in a Test Definition directory, reporting broken
+entries and checksum mismatches. Apart from that temporary directory it touches no Station,
+database or Test Run.
 
 `build/` and `dist/` are gitignored: build output is never committed, and the build is
 reproducible from a clean checkout. The bundle is roughly 490 MB on disk (579 MB before the
@@ -285,6 +288,65 @@ The packaged-artifact test is marked `build` like the frozen-build test: with
 `dpkg-deb -x`, runs the extracted `/opt/ate/ate --version` and `_selftest`, and runs `ldd` over
 every `.so` in the bundle so that each library that does not resolve inside it is named in
 `Depends`.
+
+## Release CI
+
+`.github/workflows/release.yml` runs on a tag (`v*`) and on a manual run — never on an ordinary
+push, because an artifact is only ever made for a release. The per-push test matrix is
+`.github/workflows/ci.yml`.
+
+```bash
+git tag v1.2.3 && git push --tags     # that is what starts the release job; nothing else does
+```
+
+The `windows-installer` job, on `windows-latest`:
+
+1. checks out with `fetch-depth: 0` — ATE's version is the tag (`src/ate/_version.py` runs
+   `git describe --tags`), and a shallow clone would stamp `0.0.0-dev`;
+2. sets up **CPython 3.14**, the version the frozen artifacts are required to bundle;
+3. installs Inno Setup (pinned to 6.7.1; the runner's own copy is used if it is already there);
+4. `python packaging/build_pyinstaller.py --smoke` — the bundle and 27a's smoke checks;
+5. `python packaging/windows/build_installer.py` — signed only when `ATE_SIGN_CERT` and
+   `ATE_SIGN_PASSWORD` are set in the repository; an unset secret arrives as an empty string and
+   the build is unsigned;
+6. `python packaging/windows/smoke_installer.py` — installs, upgrades and uninstalls;
+7. uploads `dist/ate-*-windows-x64-setup.exe` to `actions/upload-artifact`. Publishing a GitHub
+   Release is not part of this packet.
+
+`smoke_installer.py` is the part that proves the installer is worth shipping. It asserts, at
+install, upgrade and uninstall:
+
+- the installer's exit code is 0 and its `/LOG=install.log` contains no failure line. Under
+  `/VERYSILENT` those are the only signs that `ate setup` inside the installer failed
+  (`GetCustomSetupExitCode` in `ate.iss` is what makes the exit code non-zero);
+- the machine PATH has exactly one `{app}` entry after an install and after an upgrade, none after
+  an uninstall, every other entry unchanged, and the value is still `REG_EXPAND_SZ` so `%VAR%`
+  entries in it keep expanding;
+- `ate --version` runs in a new process started with that refreshed PATH;
+- the installer left a Station: `%PROGRAMDATA%\ATE\config.json` and the database are there,
+  `ate db status` prints a schema version, and `ate _selftest --run` runs a Test Schedule;
+- a headless launch scans the example Media Release: `ate _selftest --scan <dir>` (a hidden
+  subcommand like `_pdf`) reads the config, refuses a database that is not at this ATE's schema
+  version, and reports the schedules it found, the broken entries and the checksum mismatches;
+- an upgrade keeps `%PROGRAMDATA%\ATE` (a marker file written before the upgrade is still there)
+  and clears `{app}\_internal` (a stale file planted before the upgrade is gone);
+- uninstalling removes the program and its PATH entry and nothing else — the uninstaller re-spawns
+  itself, so the script polls until `{app}` is gone and fails loudly if it never is.
+
+The PATH comparisons are plain functions over values (`packaging/windows/smoke_installer.py`), and
+`tests/test_release_ci_27c.py` runs the whole sequence against a fake registry and a fake
+installer on Linux. That fake models what `ate.iss` promises, so those tests prove the smoke script
+catches a duplicate PATH entry, a PATH entry left behind, a `REG_SZ` write, a wiped data
+directory, a stale `_internal`, and a non-zero installer exit — not that the installer does any of
+those things correctly.
+
+> **Never run.** No Windows machine has ever executed `release.yml`, `ate.iss` or
+> `smoke_installer.py`: every machine that wrote them is Linux, and no tag has been cut. The
+> workflow is checked by reading it (no `actionlint` here, and none was installed to check it).
+> Its first run is the first tag.
+
+The Linux artifacts (the `.tar.gz` and the `.deb`, 28c) have a commented placeholder in the same
+workflow and are not written in this packet.
 
 ## Tests
 

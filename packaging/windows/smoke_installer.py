@@ -157,8 +157,7 @@ def check_install_log(result: CommandResult, log_text: str, stage: str) -> None:
 
 
 def check_ate_runs(config_path: Path, ate_result: CommandResult, app_dir: str) -> None:
-    """`ate --version` works in a new process with the refreshed PATH, and `ate db status` prints a
-    schema version for a database that exists."""
+    """`ate --version` runs in a new process holding the refreshed PATH, and setup left a config."""
     if ate_result.returncode != 0:
         fail(f"ate is not runnable from the machine PATH ({app_dir}): exit {ate_result.returncode}: {ate_result.output()[-300:]}")
     if not ate_result.stdout.strip():
