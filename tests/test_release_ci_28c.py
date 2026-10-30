@@ -941,6 +941,25 @@ def test_the_selftest_refuses_a_pdf_with_no_fonts() -> None:
     assert _report_problem(b"<html>", NOT_A_PDF) == "the file the _pdf helper wrote is not a PDF"
 
 
+def test_the_selftest_run_reports_a_fontless_pdf_as_a_failure(capsys, monkeypatch) -> None:
+    """The check is wired into the run, not just sitting next to it.
+
+    `ate _selftest --run` is what the release CI's smoke step runs, so the PDF check has to be on the
+    path that decides its exit code. Here the `--run` goes through the real seams with a helper that
+    writes exactly what a fontless container writes: a valid PDF whose page is empty. The run must
+    exit non-zero and say why.
+    """
+    from ate.cli import main
+    from tests._fixtures import fake_pdf_helper
+
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(f"import sys; open(sys.argv[1], 'wb').write({BLANK_PDF!r})"))
+    code = main(["_selftest", "--run"])
+    out = capsys.readouterr().out
+    assert code != 0, f"the selftest accepted a PDF with nothing in it: {out}"
+    assert "no fonts" in out, out
+    assert "fontconfig" in out, out
+
+
 def test_the_package_and_the_tarball_install_a_font() -> None:
     """A stock Debian image ships no fonts: without these Depends the report PDF is empty."""
     assert {"fontconfig", "fonts-dejavu-core"} <= set(packaging.DEPENDS), packaging.DEPENDS
