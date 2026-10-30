@@ -156,22 +156,43 @@ def apt(runner: Runner, *args: str) -> CommandResult:
     return result
 
 
+def _packaging_module():
+    spec = importlib.util.spec_from_file_location("ate_build_linux", BUILD_LINUX)
+    if spec is None or spec.loader is None:
+        fail(f"cannot read {BUILD_LINUX}: the runtime library lists have to come from the packaging script")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def runtime_libs() -> tuple[str, ...]:
     """The `.deb`'s `Depends`, read from build_linux.py rather than copied into this script.
 
-    The tarball and the wheel need exactly the libraries the package declares: glibc and the GL/X
-    libraries the bundle is linked against but cannot carry. Copying the list here would let the
-    two drift apart, and a smoke run that installs the wrong list proves nothing.
+    The tarball needs exactly the libraries the package declares: glibc, the GL/X libraries the
+    bundle is linked against but cannot carry, and a font, because a Debian container ships no
+    fonts and QtWebEngine then renders a PDF with no text in it. Copying the list here would let
+    the two drift apart, and a smoke run that installs the wrong list proves nothing.
     """
-    spec = importlib.util.spec_from_file_location("ate_build_linux", BUILD_LINUX)
-    if spec is None or spec.loader is None:
-        fail(f"cannot read {BUILD_LINUX}: the Depends list has to come from the packaging script")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    depends = tuple(getattr(module, "DEPENDS", ()))
+    depends = tuple(getattr(_packaging_module(), "DEPENDS", ()))
     if not depends:
         fail(f"{BUILD_LINUX} defines no DEPENDS: the runtime libraries cannot be installed")
     return depends
+
+
+def wheel_libs() -> tuple[str, ...]:
+    """The system libraries PyPI's PyQt6 and QtWebEngine need — more than the bundle's own Qt.
+
+    The wheel runs on the container's CPython with PyQt6 from PyPI, which is linked against a
+    wider set of X, GL, NSS and font libraries than the frozen bundle carries. The list lives in
+    `packaging/linux/build_linux.py` (`WHEEL_SYSTEM_LIBS`) so the smoke run and
+    docs/building-from-source.md install the same set. It was established in a fresh
+    `debian:stable` container: with only the `.deb`'s Depends, `ate _selftest --run` dies there
+    with "cannot open shared object file".
+    """
+    libs = tuple(getattr(_packaging_module(), "WHEEL_SYSTEM_LIBS", ()))
+    if not libs:
+        fail(f"{BUILD_LINUX} defines no WHEEL_SYSTEM_LIBS: the wheel's system libraries cannot be installed")
+    return libs
 
 
 def find_artifact(dist: Path, kind: str) -> Path:
@@ -215,13 +236,27 @@ def check_glibc(runner: Runner, dist: Path) -> None:
     print(f"glibc: built against {'.'.join(map(str, built))}, container has {'.'.join(map(str, container))}")
 
 
-def check_ate_runs(runner: Runner, ate: str) -> None:
+def check_ate_runs(runner: Runner, ate: str, expect_version: str | None = None) -> None:
+    """The installed program runs, and prints the version the tag built it with.
+
+    `--version` is the only thing an installed artifact can say about itself. The frozen bundle
+    carries the tag in `ate/version.txt` (packet 27a) and the wheel in its own metadata
+    (`importlib.metadata`), so an artifact built from tag `v1.2.3` must answer `1.2.3` here. A
+    wheel built from a tagged checkout that still prints `0.0.0-dev` is a wheel that baked nothing.
+    """
     result = runner.run([ate, "--version"])
     if result.returncode != 0:
         fail(f"ate is not runnable as {ate} (exit {result.returncode}): {result.output()[-300:]}")
-    if not result.stdout.strip():
+    printed = result.stdout.strip()
+    if not printed:
         fail(f"{ate} --version printed nothing")
-    print(f"ate --version: {result.stdout.strip()}")
+    if expect_version and printed != expect_version:
+        fail(
+            f"{ate} --version prints {printed!r}, but this artifact was built for {expect_version!r}: "
+            f"the version comes from the tag and is stamped into the bundle and the wheel at build time "
+            "(assets/packaging.md, 'Version')"
+        )
+    print(f"ate --version: {printed}")
 
 
 def check_station_prepared(runner: Runner, station: Station, ate: str) -> dict[str, object]:
@@ -321,9 +356,9 @@ def install_tar(runner: Runner, station: Station, artifact: Path) -> tuple[str, 
 
 
 def install_wheel(runner: Runner, station: Station, artifact: Path) -> str:
-    """pipx installs the wheel; PyQt6 and QtWebEngine come from PyPI, so the GL/X libraries must be there."""
+    """pipx installs the wheel; PyQt6 and QtWebEngine come from PyPI, so their system libraries must be there."""
     apt(runner, "update")
-    apt(runner, "install", "-y", "python3", "python3-venv", "pipx", *runtime_libs())
+    apt(runner, "install", "-y", "python3", "python3-venv", "pipx", *wheel_libs())
     result = runner.run(["pipx", "install", str(artifact)])
     if result.returncode != 0:
         fail(f"pipx install {artifact.name} failed (exit {result.returncode}): {result.output()[-400:]}")
@@ -422,55 +457,64 @@ def lifecycle_wheel(runner: Runner, station: Station, ate: str) -> None:
         fail("running 'ate setup' again rewrote the Station's config: setup writes a default only when none exists")
 
 
-def run_smoke(kind: str, dist: Path, runner: Runner, station: Station, sample: Path) -> list[str]:
+def run_smoke(kind: str, dist: Path, runner: Runner, station: Station, sample: Path, expect_version: str | None = None) -> list[str]:
     """Install one artifact and prove it runs. Returns the checks that passed."""
     if kind not in KINDS:
         fail(f"unknown --kind {kind!r}: it is one of {', '.join(KINDS)}")
     passed: list[str] = []
+    work: Path | None = None
 
     def note(name: str) -> None:
         passed.append(name)
         print(f"ok: {name}")
 
-    artifact = find_artifact(dist, kind)
-    note(f"the {kind} artifact is there: {artifact.name}")
-    check_glibc(runner, dist)
-    note("this container's glibc is not older than the one the bundle was linked against")
+    try:
+        artifact = find_artifact(dist, kind)
+        note(f"the {kind} artifact is there: {artifact.name}")
 
-    if kind == "deb":
-        ate = install_deb(runner, station, artifact)
-        note("apt-get installed the .deb: its Depends resolved on Debian stable")
-    elif kind == "tar":
-        ate, work = install_tar(runner, station, artifact)
-        note("install.sh installed the bundle from the tarball and ran 'ate setup'")
-    else:
-        ate = install_wheel(runner, station, artifact)
-        note("pipx installed the wheel and pulled PyQt6 from PyPI")
+        # The glibc pin only matters for the frozen bundle: the wheel runs on the container's own
+        # CPython, so nothing it links against was built on the packaging machine.
+        if kind in ("deb", "tar"):
+            check_glibc(runner, dist)
+            note("this container's glibc is not older than the one the bundle was linked against")
 
-    check_ate_runs(runner, ate)
-    note("ate runs from where it was installed")
+        if kind == "deb":
+            ate = install_deb(runner, station, artifact)
+            note("apt-get installed the .deb: its Depends resolved on Debian stable")
+        elif kind == "tar":
+            ate, work = install_tar(runner, station, artifact)
+            note("install.sh installed the bundle from the tarball and ran 'ate setup'")
+        else:
+            ate = install_wheel(runner, station, artifact)
+            note("pipx installed the wheel and pulled PyQt6 from PyPI")
 
-    result = runner.run([ate, "_selftest", "--run"])
-    if result.returncode != 0:
-        fail(f"ate _selftest --run failed (exit {result.returncode}): {result.output()[-600:]}")
-    note("the bundle ran a Test Schedule end to end headless")
+        check_ate_runs(runner, ate, expect_version)
+        note("ate runs from where it was installed, printing the version the tag built")
 
-    prepared = check_station_prepared(runner, station, ate)
-    note("setup left a config and a database at this ATE's schema version")
-    check_scan(runner, station, ate, prepared, sample)
-    note("a headless launch scanned the example Media Release")
+        result = runner.run([ate, "_selftest", "--run"])
+        if result.returncode != 0:
+            fail(f"ate _selftest --run failed (exit {result.returncode}): {result.output()[-600:]}")
+        note("the bundle ran a Test Schedule end to end headless, and the PDF it wrote has text in it")
 
-    if kind == "deb":
-        lifecycle_deb(runner, station, prepared)
-        note("apt remove keeps the Station; apt purge removes the config and keeps the records")
-    elif kind == "tar":
-        lifecycle_tar(runner, station, prepared, work)
-        note("an upgrade in place kept the data, and uninstalling removed only the program")
-    else:
-        lifecycle_wheel(runner, station, ate)
-        note("running 'ate setup' again left the config alone")
+        prepared = check_station_prepared(runner, station, ate)
+        note("setup left a config and a database at this ATE's schema version")
+        check_scan(runner, station, ate, prepared, sample)
+        note("a headless launch scanned the example Media Release")
 
-    return passed
+        if kind == "deb":
+            lifecycle_deb(runner, station, prepared)
+            note("apt remove keeps the Station; apt purge removes the config and keeps the records")
+        elif kind == "tar":
+            lifecycle_tar(runner, station, prepared, work)
+            note("an upgrade in place kept the data, and uninstalling removed only the program")
+        else:
+            lifecycle_wheel(runner, station, ate)
+            note("running 'ate setup' again left the config alone")
+
+        return passed
+    finally:
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -480,6 +524,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default=None, help="the container's filesystem root (tests root it in a temporary directory)")
     p.add_argument("--home", default=None, help="the home directory pipx installs into (default: $HOME)")
     p.add_argument("--sample", default=str(SAMPLE_RELEASE), help="the Media Release to copy into the definitions directory")
+    p.add_argument(
+        "--expect-version",
+        default=None,
+        help="the version the tag built the artifact with; `ate --version` must print exactly this",
+    )
     return p
 
 
@@ -491,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     runner = SubprocessRunner()
     try:
-        passed = run_smoke(args.kind, Path(args.dist), runner, station, Path(args.sample))
+        passed = run_smoke(args.kind, Path(args.dist), runner, station, Path(args.sample), args.expect_version)
     except SmokeError as exc:
         print(f"SMOKE FAILED ({args.kind}): {exc}", file=sys.stderr)
         return 1

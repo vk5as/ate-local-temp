@@ -10,13 +10,24 @@ This module is the single source of truth for ATE's version:
 * A frozen build (packet 27a) has no git, so the build script writes the tag into
   ``ate/version.txt`` and the bundle carries it as package data.
 
-The value comes from ``git describe --tags`` when a tag is reachable; otherwise
-it falls back to a deterministic dev version so an untagged checkout — or one on
-a machine without git — never fails to build.
+The value is looked up in the order a build records it:
+
+1. frozen bundle: ``ate/version.txt`` written by ``packaging/build_pyinstaller.py``;
+2. installed distribution: the version in the wheel's own metadata
+   (``importlib.metadata``), which is the tag the wheel was built from;
+3. a source checkout: ``git describe --tags``;
+4. otherwise a deterministic dev version, so an untagged checkout — or a machine
+   without git — never fails to build.
+
+Step 2 is what makes a released wheel honest. An installed wheel has no repository
+next to it, so ``git describe`` finds nothing and the version would print
+``0.0.0-dev`` even for a tagged release — which the release CI checks against the
+tag (packet 28c), and which every Test Run and report footer records.
 """
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.resources
 import os
 import re
@@ -86,12 +97,31 @@ def _frozen_version() -> str | None:
     return text or None
 
 
+def _metadata_version() -> str | None:
+    """The version this ATE was *built* with, from the installed distribution's metadata.
+
+    A wheel records its version in its ``*.dist-info/METADATA`` at build time, and that is the tag
+    the release was cut from. An installed wheel has no repository beside it, so without this the
+    version would fall through to ``git describe`` (nothing) and print ``0.0.0-dev``. Returns
+    ``None`` when ATE is not an installed distribution — a plain source checkout with
+    ``PYTHONPATH=src``, which is how the suite runs.
+    """
+    try:
+        text = importlib.metadata.version("ate").strip()
+    except (importlib.metadata.PackageNotFoundError, ValueError):
+        return None
+    return text or None
+
+
 def _compute_version() -> str:
     """The ATE version string for this checkout."""
     if getattr(sys, "frozen", False):
         # Frozen: there is no repository here, and ``git describe`` would read whatever
         # repository the operator's working directory happens to be in.
         return _frozen_version() or FALLBACK
+    metadata = _metadata_version()
+    if metadata:
+        return metadata
     describe = _describe()
     if not describe:
         return FALLBACK

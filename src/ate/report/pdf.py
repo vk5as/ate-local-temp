@@ -15,11 +15,46 @@ Public API:
 from __future__ import annotations
 
 import os
+import re
 import sys
+import zlib
 from pathlib import Path
 from typing import Optional
 
 from .html import REPORT_PAGE_MARGINS_MM
+
+# A text-showing operator in a content stream: `Tj` shows a string, `TJ` a string array, and the
+# quote/double-quote operators are shorthand for a line break plus a string.
+_TEXT_OPERATORS = re.compile(rb"(?:T[Jj]|'|\")")
+_STREAM = re.compile(rb"stream\r?\n(.*?)endstream", re.DOTALL)
+
+
+def pdf_has_text(pdf: bytes) -> bool:
+    r"""Whether a PDF really contains text, not just a PDF header.
+
+    QtWebEngine prints the report through Chromium, which embeds the glyphs it draws as a font
+    program (`/FontFile`, `/FontFile2`, `/FontFile3`). A stock Debian container has no fonts at
+    all, so Chromium finds none, draws no glyphs, and the file is a page with an empty content
+    stream: 1.7 KB, a valid `%PDF` header, and nothing a reader can see. A report that is a valid
+    PDF but has no text in it is a packaging failure, not a rendering failure, so `ate _selftest
+    --run` checks this rather than trusting the header.
+
+    Two layers: an embedded font program is conclusive; otherwise every stream is inflated and
+    searched for text operators, which also catches a PDF that draws text with a font it did not
+    embed.
+    """
+    if not pdf.startswith(b"%PDF"):
+        return False
+    if b"/FontFile" in pdf:  # /FontFile, /FontFile2 and /FontFile3 all start with this
+        return True
+    for raw in _STREAM.findall(pdf):
+        try:
+            data = zlib.decompress(raw)
+        except zlib.error:
+            data = raw
+        if b"/FontFile" in data or _TEXT_OPERATORS.search(data):
+            return True
+    return False
 
 
 def _is_elevated() -> bool:

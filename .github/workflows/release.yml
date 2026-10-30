@@ -175,10 +175,9 @@ jobs:
 
     steps:
       - name: Checkout
+        # No fetch-depth: 0 here. The smoke container has no git and the script reads no history:
+        # `git describe` runs in the build job, where the artifacts get their names and versions.
         uses: actions/checkout@v4
-        with:
-          # examples/media-release is the release the scan is run against.
-          fetch-depth: 0
 
       - name: Install the interpreter and tar the container needs to run the smoke script
         run: |
@@ -194,4 +193,9 @@ jobs:
       - name: Smoke-test the ${{ matrix.kind }}
         # Never run: no Debian container has ever started on these machines. install.sh is called
         # with its documented --prefix/--bin seam so the smoke script's root is the container's.
-        run: python3 packaging/linux/smoke_linux.py --kind ${{ matrix.kind }} --dist artifacts
+        # --expect-version is the tag the release was cut from: the bundle carries it in
+        # ate/version.txt and the wheel in its metadata, so `ate --version` must print it.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_NAME}" = "${tag}" ]; then tag=""; fi
+          python3 packaging/linux/smoke_linux.py --kind ${{ matrix.kind }} --dist artifacts --expect-version "$tag"

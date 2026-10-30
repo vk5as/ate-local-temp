@@ -11,9 +11,15 @@ the same on any CPython and needs nothing but `dpkg-deb` for the Debian package:
     ate-<version>-linux-x86_64.tar.gz   `ate/` (the bundle) + `install.sh` next to it
     ate_<version>_amd64.deb             the bundle under /opt/ate, /usr/bin/ate linking to it
 
-The `.deb` is self-contained: everything ATE runs on (CPython, Qt, QtWebEngine, lupa, pyvisa-py,
-ICU, NSS, fontconfig, libX11) is inside `_internal`. What it cannot carry is the system's own
-libc and the GL/X libraries the Qt bundle is *linked* against, which is the whole `Depends` list.
+The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, but not
+the libraries those are *linked* against: the system libc, the GL/X libraries Qt's platform plugins
+need, and a font, because QtWebEngine renders the Test Report with the system's fontconfig and
+fonts and writes a PDF with no text at all when there is none. That is the `Depends` list below,
+established by `ldd` over a built bundle's `_internal` plus the render that needs a font.
+
+The wheel is a different animal: it uses the container's own CPython and PyPI's PyQt6, so it needs
+more system libraries than the bundle does. `WHEEL_SYSTEM_LIBS` is that list, kept here so the
+smoke run and the docs install the same set.
 """
 
 from __future__ import annotations
@@ -35,10 +41,15 @@ INSTALL_SH = HERE / "install.sh"
 MAINTAINER = "VK5AS <vk5as.com@gmail.com>"
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
-# What the bundle links against and cannot ship: glibc, GL/EGL, and the X libraries Qt's platform
-# plugins need. Determined by ldd over a built bundle's _internal: everything else resolves inside
-# the bundle. libdrm and libxcb-dri3 are what QtWebEngine uses for its GPU path; the wayland
-# libraries are only reached when the desktop is Wayland rather than X.
+# What the bundle links against and cannot ship: glibc, GL/EGL, the X libraries Qt's platform
+# plugins need, and a font. Determined by ldd over a built bundle's _internal: everything else
+# resolves inside the bundle. libdrm and libxcb-dri3 are what QtWebEngine uses for its GPU path;
+# the wayland libraries are only reached when the desktop is Wayland rather than X.
+#
+# fontconfig and fonts-dejavu-core are not a nicety: a Debian container ships no fonts at all, and
+# QtWebEngine then renders the report page with no glyphs — a 1.7 KB PDF with no text in it, which
+# pdftotext reads as empty. With them the same report is a ~66 KB PDF with the words in it. See
+# ate.report.pdf.pdf_has_text, which the selftest uses to catch exactly this.
 DEPENDS = (
     "libc6",  # libc.so.6, libm, libdl, libpthread, libresolv
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0
@@ -51,6 +62,37 @@ DEPENDS = (
     "libwayland-client0",
     "libwayland-cursor0",
     "libwayland-egl1",
+    "fontconfig",  # the font matcher QtWebEngine/Chromium uses to find a font at all
+    "fonts-dejavu-core",  # DejaVu Sans, the smallest font Debian ships that Chromium accepts
+)
+
+# The wheel uses the container's own CPython and PyPI's PyQt6/QtWebEngine, so the system libraries
+# it needs are not the bundle's: PyPI's Qt is linked against a wider set of X and GL libraries than
+# the bundle's own Qt. Verified in a fresh debian:stable container: drop one of these and
+# `ate _selftest --run` dies with "cannot open shared object file".
+WHEEL_SYSTEM_LIBS = (
+    "libxkbcommon0",
+    "libxkbfile1",
+    "libxkbcommon-x11-0",
+    "libxcb-icccm4",
+    "libxcb-keysyms1",
+    "libxcb-shape0",
+    "libxcb-xkb1",
+    "libglib2.0-0t64",
+    "libdbus-1-3",
+    "libfreetype6",
+    "libfontconfig1",
+    "libgssapi-krb5-2",
+    "libbrotli1",
+    "libnss3",
+    "libasound2t64",
+    "libpulse0",
+    "libxtst6",
+    "libxrandr2",
+    "libxfixes3",
+    "libxdamage1",
+    "libxcomposite1",
+    "libpcsclite1",
 )
 
 

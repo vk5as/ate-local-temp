@@ -25,6 +25,7 @@ is published anywhere: the artifacts only ever go to `actions/upload-artifact`.
 
 from __future__ import annotations
 
+import importlib.metadata
 import fnmatch
 import importlib.util
 import json
@@ -34,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -43,12 +45,24 @@ REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / ".github" / "workflows" / "release.yml"
 SMOKE = REPO / "packaging" / "linux" / "smoke_linux.py"
 BUILD_LINUX = REPO / "packaging" / "linux" / "build_linux.py"
+DOCKER_SMOKE = REPO / "packaging" / "linux" / "docker_smoke.py"
 INSTALL_SH = REPO / "packaging" / "linux" / "install.sh"
 POSTINST = REPO / "packaging" / "linux" / "deb" / "postinst"
 POSTRM = REPO / "packaging" / "linux" / "deb" / "postrm"
 EXAMPLE = REPO / "examples" / "media-release"
 SRC = REPO / "src"
 UPLOAD_NAME = "ate-linux-artifacts"
+
+from ate import _version as version_module
+from ate.cli import _report_problem
+from ate.report.pdf import pdf_has_text, run_pdf_helper
+
+try:  # pragma: no cover - depends on the environment's installs
+    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+
+    WEBENGINE_AVAILABLE = True
+except Exception:
+    WEBENGINE_AVAILABLE = False
 
 
 def _load(name: str, path: Path):
@@ -169,9 +183,17 @@ def test_the_smoke_jobs_need_the_build_and_run_in_debian_stable():
     assert kinds == ["deb", "tar", "wheel"], f"one smoke run per artifact: {kinds}"
     assert job["strategy"].get("fail-fast") is False, "a broken .deb must not cancel the wheel's run"
     assert job["env"]["QT_QPA_PLATFORM"] == "offscreen"
-    runs = [step["run"] for step in job["steps"] if step.get("run", "").strip().startswith("python3")]
+    checkout = next(step for step in job["steps"] if "actions/checkout" in str(step.get("uses", "")))
+    assert "fetch-depth" not in (checkout.get("with") or {}), (
+        "the smoke container has no git and reads no history: fetching tags there buys nothing "
+        "and the comment claiming it does is false"
+    )
+    assert "fetch-depth" not in str(checkout), "the smoke job's checkout must not fetch history"
+    runs = [step["run"] for step in job["steps"] if "smoke_linux.py" in step.get("run", "")]
     assert len(runs) == 1, runs
     assert "--kind ${{ matrix.kind }}" in runs[0] and "--dist artifacts" in runs[0], runs[0]
+    assert "--expect-version" in runs[0], "the smoke run has to check the artifact reports the tag it was built from"
+    assert "GITHUB_REF_NAME" in runs[0], "the expected version comes from the tag, not a hard-coded string"
 
 
 def test_the_smoke_jobs_download_exactly_what_the_build_uploads():
@@ -297,6 +319,7 @@ DEBIAN_STABLE = {
     "tar",
     "dpkg",
     *packaging.DEPENDS,
+    *packaging.WHEEL_SYSTEM_LIBS,
 }
 DEBIAN_STABLE_GLIBC = "ldd (Debian GLIBC 2.41-6) 2.41"
 
@@ -319,29 +342,43 @@ class FakeContainer:
         *,
         glibc: str = DEBIAN_STABLE_GLIBC,
         available: set[str] | None = None,
+        version: str = "0.0.0-dev",
         postinst_runs_setup: bool = True,
         schema: int | None = None,
         remove_keeps_config: bool = True,
+        remove_removes_program: bool = True,
         purge_removes_config: bool = True,
-        purge_keeps_records: bool = True,
+        purge_keeps_database: bool = True,
+        purge_keeps_reports: bool = True,
+        purge_keeps_logs: bool = True,
         upgrade_keeps_data: bool = True,
         upgrade_clears_internal: bool = True,
         uninstall_keeps_records: bool = True,
         install_exit: int = 0,
+        version_exit: int = 0,
+        selftest_exit: int = 0,
+        selftest_output: str = "run end-to-end: ok - _pdf wrote the report\n",
     ) -> None:
         self.root = Path(root)
         self.station = station
         self.glibc = glibc
         self.available = set(available) if available is not None else set(DEBIAN_STABLE)
+        self.version = version
         self.postinst_runs_setup = postinst_runs_setup
         self.schema = schema
         self.remove_keeps_config = remove_keeps_config
+        self.remove_removes_program = remove_removes_program
         self.purge_removes_config = purge_removes_config
-        self.purge_keeps_records = purge_keeps_records
+        self.purge_keeps_database = purge_keeps_database
+        self.purge_keeps_reports = purge_keeps_reports
+        self.purge_keeps_logs = purge_keeps_logs
         self.upgrade_keeps_data = upgrade_keeps_data
         self.upgrade_clears_internal = upgrade_clears_internal
         self.uninstall_keeps_records = uninstall_keeps_records
         self.install_exit = install_exit
+        self.version_exit = version_exit
+        self.selftest_exit = selftest_exit
+        self.selftest_output = selftest_output
         self.installs = 0
         self.calls: list[list[str]] = []
         self.env = dict(
@@ -438,9 +475,12 @@ class FakeContainer:
         return self._subprocess(["/bin/sh", str(copy), action])
 
     def _remove_package(self, *, purge: bool) -> None:
-        shutil.rmtree(self.station.app_dir, ignore_errors=True)
-        if self.station.bin.exists() or self.station.bin.is_symlink():
-            self.station.bin.unlink()
+        # `remove_removes_program=False` models dpkg leaving the bundle and its link behind after
+        # `apt remove`, which `check_remove_keeps_the_station` is supposed to notice.
+        if self.remove_removes_program:
+            shutil.rmtree(self.station.app_dir, ignore_errors=True)
+            if self.station.bin.exists() or self.station.bin.is_symlink():
+                self.station.bin.unlink()
         result = self._maintainer("postrm", "purge" if purge else "remove")
         if result.returncode != 0:
             return
@@ -448,8 +488,13 @@ class FakeContainer:
             if not self.purge_removes_config:
                 self.station.config_dir.mkdir(parents=True, exist_ok=True)
                 self.station.config.write_text('{"format": 1}', encoding="utf-8")
-            if not self.purge_keeps_records:
-                shutil.rmtree(self.station.data_dir, ignore_errors=True)
+            # Each record is a separate promise: purge may delete none of them.
+            if not self.purge_keeps_database:
+                self.station.data_dir.joinpath("ate.db").unlink(missing_ok=True)
+            if not self.purge_keeps_reports:
+                shutil.rmtree(self.station.data_dir / "reports", ignore_errors=True)
+            if not self.purge_keeps_logs:
+                shutil.rmtree(self.station.data_dir / "logs", ignore_errors=True)
         elif not self.remove_keeps_config:
             shutil.rmtree(self.station.config_dir, ignore_errors=True)
 
@@ -505,10 +550,16 @@ class FakeContainer:
 
     def _ate(self, argv: list[str]) -> smoke.CommandResult:
         args = argv[1:]
+        if args and args[0] in ("--version", "-V"):
+            # The version an installed artifact prints is the one stamped into it at build time;
+            # the fake prints `version`, and `version_exit` makes the program unrunnable.
+            if self.version_exit:
+                return smoke.CommandResult(self.version_exit, "", "ate: the installed program would not start")
+            return smoke.CommandResult(0, f"{self.version}\n", "")
         if args[:2] == ["_selftest", "--run"]:
             # The frozen bundle's end-to-end run needs QtWebEngine; the CI runs it, the fake says
-            # what 27a's smoke prints when it passes.
-            return smoke.CommandResult(0, "run end-to-end: ok - _pdf wrote the report\n", "")
+            # what 27a's smoke prints when it passes, and `selftest_exit` makes it fail.
+            return smoke.CommandResult(self.selftest_exit, self.selftest_output, "")
         return self._subprocess(argv)
 
 
@@ -598,7 +649,7 @@ def test_wheel_happy_path(tmp_path: Path) -> None:
     assert station.wheel_bin.is_file() and station.config.is_file()
     installed = next(c for c in runner.calls if c[:2] == ["apt-get", "install"])
     assert {"python3", "python3-venv", "pipx"} <= set(installed[2:]), installed
-    assert set(packaging.DEPENDS) <= set(installed[2:]), "PyQt6 from PyPI needs the GL/X libraries too"
+    assert set(packaging.WHEEL_SYSTEM_LIBS) <= set(installed[2:]), "PyQt6 from PyPI needs its own system libraries"
 
 
 def test_a_missing_artifact_fails_loudly(tmp_path: Path) -> None:
@@ -690,6 +741,229 @@ def test_a_container_with_an_older_glibc_than_the_build_fails(tmp_path: Path) ->
     runner, station = _container(tmp_path, glibc="ldd (Debian GLIBC 2.36-8) 2.36")
     with pytest.raises(smoke.SmokeError, match="linked against glibc 2.39"):
         smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+
+
+def test_the_glibc_check_does_not_apply_to_the_wheel(tmp_path: Path) -> None:
+    """The wheel runs on the container's own CPython: nothing it links against came from the build.
+
+    A wheel is not a frozen binary, so a container with an older glibc than the one the bundle was
+    built against still runs it: the glibc pin guards the frozen artifacts only.
+    """
+    runner, station = _container(tmp_path, glibc="ldd (Debian GLIBC 2.36-8) 2.36")
+    passed = smoke.run_smoke("wheel", _artifacts(), runner, station, EXAMPLE)
+    assert "this container's glibc is not older than the one the bundle was linked against" not in passed, passed
+    assert len(passed) == 7, passed  # eight checks for the frozen kinds, minus the glibc one
+
+
+def test_selftest_run_that_fails_is_reported(tmp_path: Path) -> None:
+    """`ate _selftest --run` exiting non-zero stops the run, whatever it printed."""
+    runner, station = _container(tmp_path, selftest_exit=1, selftest_output="run end-to-end: MISSING - the PDF has no fonts\n")
+    with pytest.raises(smoke.SmokeError, match="ate _selftest --run failed"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert any(c[1:] == ["_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_an_ate_that_will_not_start_is_reported(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, version_exit=127)
+    with pytest.raises(smoke.SmokeError, match="ate is not runnable"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+
+
+def test_ate_printing_no_version_is_reported(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, version="")
+    with pytest.raises(smoke.SmokeError, match="--version printed nothing"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+
+
+def test_a_version_that_is_not_the_tag_fails_every_kind(tmp_path: Path) -> None:
+    """The tag the release was cut from is the version the artifact must report, for all three kinds."""
+    for kind in smoke.KINDS:
+        runner, station = _container(tmp_path, version="0.0.0-dev")
+        with pytest.raises(smoke.SmokeError, match="was built for '1.2.3'"):
+            smoke.run_smoke(kind, _artifacts(), runner, station, EXAMPLE, expect_version="1.2.3")
+        assert kind in "deb tar wheel"
+
+
+def test_the_expected_version_is_checked_when_it_is_given(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, version="1.2.3")
+    passed = smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE, expect_version="1.2.3")
+    assert any("printing the version the tag built" in name for name in passed), passed
+
+
+def test_purge_that_removes_the_reports_fails(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, purge_keeps_reports=False)
+    with pytest.raises(smoke.SmokeError, match="purge removed the reports"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert not (station.data_dir / "reports").exists(), "the fake deleted them, and the run said so"
+
+
+def test_purge_that_removes_the_logs_fails(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, purge_keeps_logs=False)
+    with pytest.raises(smoke.SmokeError, match="purge removed the logs"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert not (station.data_dir / "logs").exists(), "the fake deleted them, and the run said so"
+
+
+def test_purge_that_removes_the_database_fails(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path, purge_keeps_database=False)
+    with pytest.raises(smoke.SmokeError, match="purge removed the database"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert not station.data_dir.joinpath("ate.db").exists(), "the records went, and the run said so"
+
+
+def test_remove_that_leaves_the_program_behind_fails(tmp_path: Path) -> None:
+    """`apt remove` must actually remove the bundle and its `/usr/bin/ate` link."""
+    runner, station = _container(tmp_path, remove_removes_program=False)
+    with pytest.raises(smoke.SmokeError, match="apt remove left .* behind"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert (station.app_dir / "ate").exists() and station.bin.exists(), "the program stayed, which is what the check found"
+
+
+def test_the_tarball_extraction_directory_is_removed(tmp_path: Path, monkeypatch) -> None:
+    """The smoke run unpacks the tarball in a temporary directory and takes it away when it is done."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    runner, station = _container(tmp_path)
+    smoke.run_smoke("tar", _artifacts(), runner, station, EXAMPLE)
+    leftover = [p for p in tmp_path.iterdir() if p.name.startswith("ate-smoke-")]
+    assert not leftover, f"the extraction directory was left in {tmp_path}: {leftover}"
+
+
+# --- fonts: a Debian container has none, and Chromium writes a PDF with nothing in it ------------
+
+
+def _page_pdf(content: bytes, font: bytes = b"") -> bytes:
+    """A one-page PDF with `content` as its content stream, and `font` appended as an extra object."""
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >> endobj\n"
+        b"4 0 obj << /Length " + str(len(content)).encode() + b" >> stream\n" + content + b"\nendstream endobj\n"
+        + font
+        + b"trailer << /Root 1 0 R >>\n"
+    )
+
+
+def _flate_page_pdf(text_operators: bytes) -> bytes:
+    """The same one-page PDF with the content stream compressed, and no font object at all."""
+    raw = zlib.compress(text_operators)
+    return _page_pdf(b"", b"") if not raw else (
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >> endobj\n"
+        b"4 0 obj << /Length " + str(len(raw)).encode() + b" /Filter /FlateDecode >> stream\n" + raw + b"\nendstream endobj\n"
+        b"trailer << /Root 1 0 R >>\n"
+    )
+
+
+# What QtWebEngine writes when the system has no font: a page with an empty content stream. The
+# bytes below are that shape, hand-built so the check can be tested without a container.
+BLANK_PDF = _page_pdf(b"")
+BLANK_PDF_WITH_GRAPHICS = _page_pdf(b"q 1 0 0 1 20 700 cm 100 20 re f Q")
+TEXT_PDF = _page_pdf(b"BT /F1 12 Tf 20 700 Td (ATE Test Report) Tj ET", b"6 0 obj << /Type /Font /BaseFont /Helvetica /FontDescriptor 7 0 R >> endobj\n7 0 obj << /Type /FontDescriptor /FontFile 8 0 R >> endobj\n")
+COMPRESSED_TEXT_PDF = _flate_page_pdf(b"BT /F1 12 Tf (ATE Test Report) Tj ET")
+COMPRESSED_BLANK_PDF = _flate_page_pdf(b"q 1 0 0 1 0 0 cm 5 5 re f Q")
+NOT_A_PDF = b"PK\x03\x04 this is a zip, not a PDF"
+
+
+def test_pdf_has_text_tells_a_blank_page_from_a_rendered_report() -> None:
+    assert pdf_has_text(TEXT_PDF), "a PDF with an embedded font program is text"
+    assert pdf_has_text(COMPRESSED_TEXT_PDF), "text in a compressed content stream is still text"
+    assert not pdf_has_text(BLANK_PDF), "an empty content stream is not a report"
+    assert not pdf_has_text(BLANK_PDF_WITH_GRAPHICS), "a drawn rectangle is not a report"
+    assert not pdf_has_text(COMPRESSED_BLANK_PDF), "a compressed empty page is not a report either"
+    assert not pdf_has_text(NOT_A_PDF), "not a PDF at all"
+
+
+@pytest.mark.skipif(not WEBENGINE_AVAILABLE, reason="PyQt6-WebEngine not installed")
+def test_pdf_has_text_accepts_a_real_webengine_report(tmp_path: Path) -> None:
+    """The real thing QtWebEngine prints passes the check, so it never fails a good build."""
+    html = tmp_path / "report.html"
+    html.write_text("<html><body><h1>Test Report</h1><p>1. Check the fuse: PASS</p></body></html>", encoding="utf-8")
+    pdf = tmp_path / "report.pdf"
+    run_pdf_helper(html, pdf, "A4")
+    data = pdf.read_bytes()
+    assert data.startswith(b"%PDF") and pdf_has_text(data), f"the check rejected a real report PDF ({len(data)} bytes)"
+
+
+def test_the_selftest_refuses_a_pdf_with_no_fonts() -> None:
+    """The check the release CI depends on: a valid PDF with nothing in it is a failure."""
+    assert _report_problem(b"<html><body>Report</body></html>", TEXT_PDF) is None, "a real report must pass"
+    problem = _report_problem(b"<html><body>Report</body></html>", BLANK_PDF)
+    assert problem and "no fonts" in problem and "fontconfig" in problem, problem
+    assert _report_problem(b"<html>", COMPRESSED_BLANK_PDF) is not None, "a compressed empty page is caught too"
+    assert _report_problem(b"", TEXT_PDF) == "the HTML report is not HTML"
+    assert _report_problem(b"<html>", NOT_A_PDF) == "the file the _pdf helper wrote is not a PDF"
+
+
+def test_the_package_and_the_tarball_install_a_font() -> None:
+    """A stock Debian image ships no fonts: without these Depends the report PDF is empty."""
+    assert {"fontconfig", "fonts-dejavu-core"} <= set(packaging.DEPENDS), packaging.DEPENDS
+
+
+def test_a_deb_that_does_not_depend_on_a_font_installs_into_a_fontless_container(tmp_path: Path) -> None:
+    """If the Depends stop naming a font, apt is content and the run installs a bundle that writes a blank PDF."""
+    runner, station = _container(tmp_path, available=DEBIAN_STABLE - {"fontconfig", "fonts-dejavu-core"})
+    with pytest.raises(smoke.SmokeError, match="unable to satisfy Depends: fontconfig"):
+        smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+
+
+def test_the_tarball_installs_the_font_too(tmp_path: Path) -> None:
+    runner, station = _container(tmp_path)
+    smoke.install_tar(runner, station, smoke.find_artifact(_artifacts(), "tar"))
+    installed = next(c for c in runner.calls if c[:2] == ["apt-get", "install"] and not c[2].endswith(".deb"))
+    assert {"fontconfig", "fonts-dejavu-core"} <= set(installed[3:]), installed
+
+
+def test_runtime_libs_are_read_from_the_packaging_script():
+    assert smoke.runtime_libs() == packaging.DEPENDS, "the tarball installs the .deb's Depends, not a copy of them"
+
+
+def test_wheel_libs_are_read_from_the_packaging_script():
+    assert smoke.wheel_libs() == packaging.WHEEL_SYSTEM_LIBS, "the wheel installs the list in build_linux.py, not a copy"
+    assert packaging.WHEEL_SYSTEM_LIBS, "the wheel needs its own system library list"
+    assert "libfontconfig1" in packaging.WHEEL_SYSTEM_LIBS, "PyPI's QtWebEngine renders text through the system fontconfig"
+
+
+def test_the_wheel_needs_libraries_the_deb_does_not() -> None:
+    """PyPI's PyQt6 is linked against more than the bundle's own Qt, so the two lists differ."""
+    assert set(packaging.WHEEL_SYSTEM_LIBS) - set(packaging.DEPENDS), "the wheel uses the container's Python, not the bundle"
+    assert "libnss3" in packaging.WHEEL_SYSTEM_LIBS and "libxkbcommon0" in packaging.WHEEL_SYSTEM_LIBS
+
+
+def test_ate_reports_the_version_baked_into_the_wheel(tmp_path: Path) -> None:
+    """An installed wheel knows the tag it was built from: it is in the wheel's own metadata.
+
+    `git describe` finds nothing beside an installed wheel, so without the metadata lookup a
+    released wheel prints `0.0.0-dev` while its METADATA says the tag's version.
+    """
+    site = tmp_path / "site"
+    (site / "ate-1.2.3.dist-info").mkdir(parents=True)
+    (site / "ate-1.2.3.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: ate\nVersion: 1.2.3\n", encoding="utf-8")
+    sys.path.insert(0, str(site))
+    try:
+        assert version_module._metadata_version() == "1.2.3", "the version is read from the installed distribution"
+        assert version_module._compute_version() == "1.2.3", "the metadata beats git describe"
+    finally:
+        sys.path.remove(str(site))
+
+
+def test_the_version_of_a_plain_source_checkout_still_comes_from_git(monkeypatch) -> None:
+    """Nothing installed, a tag reachable: the checkout's tag is the version.
+
+    The metadata lookup must not replace `git describe` for a source run, and the git branch must
+    not be dropped either: with the metadata missing and the tag reachable, the version is the tag.
+    """
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: (_ for _ in ()).throw(importlib.metadata.PackageNotFoundError(name)),
+    )
+    monkeypatch.setattr(version_module, "_describe", lambda: "v1.2.3-4-gabc1234")
+    assert version_module._compute_version() == "1.2.3.dev4+gabc1234", "the version still comes from the tag"
+    monkeypatch.setattr(version_module, "_describe", lambda: None)
+    assert version_module._compute_version() == version_module.FALLBACK, "no git and nothing installed is a dev version"
 
 
 def test_the_glibc_marker_is_required(tmp_path: Path) -> None:

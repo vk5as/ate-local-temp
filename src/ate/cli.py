@@ -204,6 +204,29 @@ return ScheduleParams("Selftest schedule", "a single step that reports PASS")
 """
 
 
+def _report_problem(html: bytes, pdf: bytes) -> str | None:
+    r"""Why the reports this run wrote are not readable, or `None` if they are.
+
+    A Test Report that is a valid PDF but has nothing in it is a packaging failure, not a rendering
+    one: on a Debian container with no fonts installed Chromium finds no font, draws no glyphs, and
+    prints a valid empty page. The selftest has to say so in terms an operator can act on, because
+    `%PDF` alone proves only that a file was written.
+    """
+    from .report.pdf import pdf_has_text
+
+    if b"<html" not in html:
+        return "the HTML report is not HTML"
+    if not pdf.startswith(b"%PDF"):
+        return "the file the _pdf helper wrote is not a PDF"
+    if not pdf_has_text(pdf):
+        return (
+            f"the PDF has no fonts: {len(pdf)} bytes with no text in it. "
+            "Install fontconfig and a font (for example fonts-dejavu-core) so QtWebEngine has "
+            "something to draw with"
+        )
+    return None
+
+
 def _selftest_end_to_end() -> tuple[str, bool, str]:
     """Run a built-in Test Schedule headless and check both reports were written (packet 27a).
 
@@ -265,7 +288,7 @@ def _selftest_end_to_end() -> tuple[str, bool, str]:
         from PyQt6.QtCore import QCoreApplication
 
         from .config import read_config
-        from .report.pdf import pdf_helper_command
+        from .report.pdf import pdf_helper_command, pdf_has_text
         from .run_session.headless import HeadlessRunSession, SessionState
 
         session = HeadlessRunSession(read_config(config_file))
@@ -287,8 +310,15 @@ def _selftest_end_to_end() -> tuple[str, bool, str]:
             html = Path(html_path).read_bytes()
             pdf = Path(pdf_path).read_bytes()
             helper = Path(pdf_helper_command(html_path, pdf_path)[0]).name
-            ok = b"<html" in html and pdf.startswith(b"%PDF")
-            return ("run end-to-end", ok, f"{helper} ran the schedule: {html_path} ({len(html)} bytes HTML), {pdf_path} ({len(pdf)} bytes PDF)")
+            problem = _report_problem(html, pdf)
+            if problem:
+                return ("run end-to-end", False, f"{helper} ran the schedule but {problem}")
+            return (
+                "run end-to-end",
+                True,
+                f"{helper} ran the schedule: {html_path} ({len(html)} bytes HTML), "
+                f"{pdf_path} ({len(pdf)} bytes PDF, with text)",
+            )
         finally:
             session.close()
     except Exception as exc:  # noqa: BLE001 - the selftest reports a failure instead of raising
