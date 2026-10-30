@@ -85,6 +85,8 @@ def _version(python: Path) -> str:
 def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
     """Run PyInstaller and return the one-directory bundle (``dist/ate``)."""
     env = dict(os.environ, ATE_BUILD_VERSION_FILE=str(version_file))
+    # PyInstaller puts its scratch in <cwd>/build, which is gitignored; --workpath moves
+    # the analysis/temp files next to the venv so the whole build lives under one directory.
     _run(
         [
             str(python),
@@ -95,8 +97,6 @@ def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
             str(dist),
             "--workpath",
             str(work / "pyinstaller-work"),
-            "--buildpath",
-            str(work / "pyinstaller-build"),
         ],
         env=env,
     )
@@ -135,6 +135,19 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
     # 3. the bundle's own inventory: lupa + bundled Lua, pyvisa-py, QtWebEngine.
     out = _run([str(exe), "_selftest"], env=env, timeout=120)
     lines.append("selftest: " + "; ".join(out.stdout.strip().splitlines()))
+
+    # 4. the files the hooks are supposed to have collected: the WebEngine helper and its
+    # resources, the report template, the bundled Lua modules.
+    internal = exe.parent / "_internal"
+    helper = [p for p in internal.rglob("QtWebEngineProcess*") if p.is_file()]
+    paks = [p for p in internal.rglob("*.pak") if p.is_file()]
+    for rel in ("ate/lua/devices.lua", "ate/report/templates/report.html.j2"):
+        if not (internal / rel).is_file():
+            raise SystemExit(f"smoke: {rel} is not in the bundle")
+    if not helper or not paks:
+        raise SystemExit(f"smoke: QtWebEngine assets missing (helper={len(helper)}, pak={len(paks)})")
+    lines.append(f"webengine assets: {helper[0].name}, {len(paks)} .pak resources")
+
     return lines
 
 

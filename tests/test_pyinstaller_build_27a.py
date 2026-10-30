@@ -73,13 +73,17 @@ def test_the_spec_bundles_ate_runtime_data() -> None:
     assert any(target.startswith("ate/") for target in bundled), "the spec stopped sweeping src/ate"
 
 
-def test_the_spec_bundles_qtwebengine_helper_and_data() -> None:
-    """QtWebEngine's helper process and its resource files reach the bundle."""
-    spec = _executed_spec()
-    bundled = {target for _, target in spec["datas"]}
-    assert any("QtWebEngineProcess" in target for target in bundled), "QtWebEngineProcess is not bundled"
-    assert any(target.endswith(".pak") for target in bundled), "the WebEngine .pak resources are not bundled"
-    assert "icudtl.dat" in bundled and "v8_context_snapshot.bin" in bundled, "ICU/V8 data is missing"
+def test_the_spec_bundles_qtwebengine_and_names_the_helper() -> None:
+    """QtWebEngine is collected by PyInstaller's Qt hooks; the entry points at its helper.
+
+    The bindings are only reached through the PDF helper and the GUI, so the spec names them
+    explicitly, and the stub the frozen executable runs tells Qt where the bundled
+    ``QtWebEngineProcess`` lives.
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    assert "PyQt6.QtWebEngineCore" in text and "PyQt6.QtWebEngineWidgets" in text
+    entry = ENTRY.read_text(encoding="utf-8")
+    assert "QtWebEngineProcess" in entry and "QTWEBENGINEPROCESS_PATH" in entry
 
 
 def test_the_spec_declares_the_dynamic_backends() -> None:
@@ -149,7 +153,7 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
             timeout=3600,
         )
         assert result.returncode == 0, f"build failed: {result.stderr[-3000:]}"
-        for marker in ("smoke ok: version:", "smoke ok: pdf:", "smoke ok: selftest:"):
+        for marker in ("smoke ok: version:", "smoke ok: pdf:", "smoke ok: selftest:", "smoke ok: webengine assets:"):
             assert marker in result.stdout, f"{marker} missing from the build output:\n{result.stdout[-2000:]}"
         assert "MISSING" not in result.stdout, f"the frozen bundle is short something:\n{result.stdout[-2000:]}"
         assert (dist / "ate" / ("ate.exe" if os.name == "nt" else "ate")).is_file()

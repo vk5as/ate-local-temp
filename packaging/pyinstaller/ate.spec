@@ -19,7 +19,6 @@ What the bundle carries:
 """
 
 import os
-import sys
 from pathlib import Path
 
 REPO = Path(SPECPATH).parents[1]  # packaging/pyinstaller/ate.spec -> repository root
@@ -45,9 +44,11 @@ if version_file and Path(version_file).is_file():
     datas.append((version_file, "ate/version.txt"))
 
 # ------------------------------------------------------- QtWebEngine assets ----
-# The PyQt6 hook collects the Qt libraries, but QtWebEngine spawns a separate helper
-# process and reads data files that no import touches. Find them wherever this Qt puts
-# them (PyQt6/Qt6 on Linux, PyQt6/Qt on Windows).
+# PyInstaller's own hooks (hook-PyQt6.QtWebEngineCore and friends) collect the Qt libraries
+# plus QtWebEngine's `QtWebEngineProcess` helper, its `.pak` resources, ICU data and
+# translations, so the spec only has to make sure those modules are actually reached: the
+# PDF helper imports QtWebEngineCore, and the GUI imports QtWebEngineWidgets. NI-VISA is
+# never bundled; pyvisa-py is, so TCPIP and USBTMC work with nothing installed.
 hiddenimports = [
     "PyQt6.QtWebEngineCore",
     "PyQt6.QtWebEngineWidgets",
@@ -72,34 +73,6 @@ hiddenimports = [
     "pyvisa_py.protocols.vxi11",
     "pyvisa_py.protocols.xdrlib",
 ]
-
-try:
-    import PyQt6
-except ImportError:  # the build venv always has it; keep the spec importable standalone
-    qt_root = None
-else:
-    qt_root = Path(PyQt6.__file__).parent
-
-if qt_root is not None:
-    _webengine_data = {"icudtl.dat", "v8_context_snapshot.bin"}
-    for path in qt_root.rglob("*"):
-        if not path.is_file():
-            continue
-        name = path.name
-        if name in {"QtWebEngineProcess", "QtWebEngineProcess.exe"} or name.endswith(".pak") or name in _webengine_data:
-            datas.append((str(path), name))
-        elif path.parts[-2:] == ("resources", "locales") and name.endswith(".pak"):
-            datas.append((str(path), f"qtwebengine_locales/{name}"))
-
-    # Qt's own translations, for the WebEngine UI strings.
-    translations = qt_root / "translations"
-    if translations.is_dir():
-        datas.append((str(translations), "translations"))
-
-    # QProcess/QWebEngine need the Qt plugin directory (offscreen platform included).
-    plugins = qt_root / "Qt6" / "plugins" if (qt_root / "Qt6" / "plugins").is_dir() else qt_root / "Qt" / "plugins"
-    if plugins.is_dir():
-        datas.append((str(plugins), "plugins"))
 
 excludes = []  # nothing excluded: pyvisa imports its NI-VISA-only resources statically,
 # and ATE simply never installs NI-VISA (see packaging.md), so pyvisa falls back to pyvisa-py.
