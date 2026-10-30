@@ -555,35 +555,32 @@ def test_smoke_fails_when_no_config_is_left_behind(tmp_path):
     assert "config" in str(exc.value)
 
 
-def test_smoke_prints_install_log_when_it_fails(tmp_path):
-    """main()'s failure path: the message plus the log, and a non-zero exit."""
-    registry = FakeRegistry()
-    app, data = tmp_path / "ATE", tmp_path / "ProgramData" / "ATE"
-    installer = tmp_path / "dist" / "ate-1.2.3-windows-x64-setup.exe"
-    installer.parent.mkdir(parents=True, exist_ok=True)
+def test_smoke_prints_install_log_when_it_fails(tmp_path, capsys):
+    """main()'s failure path: the message, then the log, then exit 1."""
+    log = tmp_path / "install.log"
+    log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8")
+    installer = tmp_path / "ate-1.2.3-windows-x64-setup.exe"
     installer.write_text("setup", encoding="utf-8")
-    runner = FakeInstaller(registry, app, data, install_exit=1)
-    try:
-        smoke.run_smoke(
-            installer=installer,
-            app_dir=app,
-            data_dir=data,
-            registry=registry,
-            runner=runner,
-            sample_dir=EXAMPLE,
-            install_log=tmp_path / "install.log",
-            sleep=runner.clock,
-            poll_limit=10,
-        )
-    except smoke.SmokeError as exc:
-        print(f"smoke test failed: {exc}", file=sys.stderr)
-        log = tmp_path / "install.log"
-        if log.is_file():
-            print(log.read_text(encoding="utf-8"), file=sys.stderr)
-        assert "exited 1" in str(exc)
-        assert "ate.exe" in (tmp_path / "install.log").read_text()
-    else:
-        pytest.fail("run_smoke should have raised")
+
+    def boom(**_kwargs):
+        raise smoke.SmokeError("install: the installer exited 1")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(smoke, "IS_WINDOWS", True)
+    monkeypatch.setattr(smoke, "run_smoke", boom)
+    code = smoke.main(["--installer", str(installer), "--install-log", str(log)])
+    monkeypatch.undo()
+    captured = capsys.readouterr().err
+    assert code == 1
+    assert "smoke test failed: install: the installer exited 1" in captured
+    assert '"ate setup" exited with code 1' in captured, "a failure without the log is not diagnosable"
+
+
+def test_smoke_refuses_to_run_where_setup_exe_cannot_run(tmp_path, capsys):
+    assert smoke.IS_WINDOWS is False, "these tests run on Linux"
+    code = smoke.main(["--installer", str(tmp_path / "does-not-exist.exe")])
+    assert code == 1
+    assert "release CI" in capsys.readouterr().err
 
 
 def test_release_workflow_parses_as_yaml_when_yaml_is_available():
