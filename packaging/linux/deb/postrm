@@ -12,13 +12,12 @@
 # /etc/ate/config.json is deliberately NOT a conffile: setup writes it, so dpkg knows nothing
 # about it and would leave it behind even on purge. It is removed here.
 #
-# Test seam: ATE_DEB_ROOT prefixes every path below so a test can run this against a temporary
-# root. Unset, the real paths are used.
+# No test seam on purpose: tests/test_linux_packages_28b.py runs a copy of this script with the
+# paths rewritten to a temporary root, so an exported variable cannot change what the installed
+# package does.
 set -e
 
-ROOT=${ATE_DEB_ROOT:-}
-CONFIG="$ROOT/etc/ate"
-DATA="$ROOT/var/lib/ate"
+CONFIG=/etc/ate
 
 case "$1" in
     remove)
@@ -29,7 +28,7 @@ case "$1" in
         rm -f "$CONFIG/config.json"
         # Only the config directory itself, and only if nothing else is in it.
         rmdir "$CONFIG" 2>/dev/null || true
-        # Never $DATA: no database, no reports, no logs, ever.
+        # Never /var/lib/ate: no database, no reports, no logs, ever.
         exit 0
         ;;
     *)

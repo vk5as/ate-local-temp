@@ -5,22 +5,22 @@
 # (assets/packaging.md: "Preparing a Station"). setup is idempotent, so this also runs on an
 # upgrade without touching existing config or data.
 #
-# Test seam: ATE_DEB_ROOT prefixes every path below so a test can run this script against a
-# temporary root instead of the real /opt, /etc and /var. Unset, the real paths are used.
+# dpkg calls postinst with "configure" on install and on upgrade; "reconfigure" is something an
+# operator invokes by hand, which is not a package operation, so it does nothing here.
+#
+# No test seam on purpose: tests/test_linux_packages_28b.py runs a copy of this script with the
+# paths rewritten to a temporary root, so nothing here can be redirected by an exported variable.
 set -e
 
-ROOT=${ATE_DEB_ROOT:-}
-ATE="$ROOT/opt/ate/ate"
-
-if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ]; then
-    if [ ! -x "$ATE" ]; then
-        echo "postinst: $ATE is missing or not executable - the package is broken" >&2
+if [ "$1" = "configure" ]; then
+    if [ ! -x /opt/ate/ate ]; then
+        echo "postinst: /opt/ate/ate is missing or not executable - the package is broken" >&2
         exit 1
     fi
-    if "$ATE" setup; then
+    if /opt/ate/ate setup; then
         echo "ate setup: Station prepared"
     else
-        echo "postinst: 'ate setup' failed; run it by hand as root: $ATE setup" >&2
+        echo "postinst: 'ate setup' failed; run it by hand as root: /opt/ate/ate setup" >&2
         exit 1
     fi
 fi

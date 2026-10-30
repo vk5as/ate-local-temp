@@ -45,6 +45,8 @@ DEPENDS = (
     "libegl1",  # libEGL.so.1, which every Qt6 Gui-linked library wants
     "libdrm2",  # libdrm.so.2, needed by Qt6WebEngineCore
     "libxcb1",  # libxcb.so.1, the X connection Qt's xcb platform plugin uses
+    "libxcb-cursor0",  # libxcb-cursor.so.0, the cursor shape extension libQt6XcbQpa needs: without
+    # it Qt's xcb platform plugin cannot open a display, so the GUI refuses to start on a clean box.
     "libxcb-dri3-0",  # libxcb-dri3.so.0, QtWebEngine's direct rendering
     "libwayland-client0",
     "libwayland-cursor0",
@@ -77,18 +79,24 @@ def _bundle_version(bundle: Path) -> str:
     if proc.returncode != 0:
         print(f"warning: {exe} --version failed ({proc.returncode}); using 0.0.0-dev", file=sys.stderr)
         return "0.0.0-dev"
-    return proc.stdout.strip()
+    text = proc.stdout.strip()
+    if not text:
+        # An empty version would name the artifacts "ate--linux-x86_64.tar.gz" and "ate__amd64.deb":
+        # better to stop than to ship something nobody can identify.
+        raise SystemExit(f"{exe} --version printed nothing: cannot package a bundle with no version")
+    return text
 
 
 def _deb_version(version: str) -> str:
     """Turn the version ATE prints into one dpkg will accept.
 
-    Debian version strings are ``[A-Za-z0-9.+:-]`` with ``~`` sorting before everything, so the
-    untagged ``0.0.0-dev`` fallback becomes ``0.0.0~dev``: a development build then sorts *before*
-    0.0.0, which is what a prerelease means.
+    Debian version strings are ``[A-Za-z0-9.+:-]`` with ``~`` sorting before everything, while a
+    bare ``-`` sorts *after* the digits before it. So every prerelease suffix becomes ``~``:
+    ``0.0.0-dev`` -> ``0.0.0~dev``, ``1.2.3-rc1`` -> ``1.2.3~rc1``. A prerelease then precedes the
+    release it is a prerelease of, which is what it means.
     """
     text = (version or "").strip() or "0.0.0"
-    text = text.replace("-dev", "~dev")
+    text = re.sub(r"-(?:dev|pre|alpha|beta|rc)\d*", lambda m: "~" + m.group(0)[1:], text, flags=re.IGNORECASE)
     text = re.sub(r"[^A-Za-z0-9.+~:-]", "-", text)
     return text if any(ch.isdigit() for ch in text) else "0.0.0"
 
@@ -105,12 +113,25 @@ def _disk_bytes(path: Path) -> int:
     return total
 
 
+def _root_member(member: tarfile.TarInfo, mode: int | None = None) -> tarfile.TarInfo:
+    """Root-own a tar member: a tarball extracted on a Station must not carry the build machine's uid."""
+    member.uid = 0
+    member.gid = 0
+    member.uname = "root"
+    member.gname = "root"
+    if mode is not None:
+        member.mode = mode
+    return member
+
+
 def _tarball(bundle: Path, version: str, out: Path) -> Path:
     """``ate-<version>-linux-x86_64.tar.gz``: the bundle as ``ate/``, with install.sh beside it."""
     artifact = out / f"ate-{version}-linux-x86_64.tar.gz"
     with tarfile.open(artifact, "w:gz") as tar:
-        tar.add(bundle, arcname="ate")
-        tar.add(INSTALL_SH, arcname="install.sh")
+        tar.add(bundle, arcname="ate", filter=_root_member)
+        # install.sh is 0755 in the artifact whatever the checkout's bits say, so extracting the
+        # tarball and running ./install.sh never lands on a permission denied.
+        tar.add(INSTALL_SH, arcname="install.sh", filter=lambda member: _root_member(member, 0o755))
     return artifact
 
 
@@ -134,6 +155,8 @@ def _deb(bundle: Path, version: str, out: Path) -> Path:
         control.joinpath("control").write_text(
             "Package: ate\n"
             f"Version: {_deb_version(version)}\n"
+            "Section: science\n"
+            "Priority: optional\n"
             "Architecture: amd64\n"
             f"Maintainer: {MAINTAINER}\n"
             f"Installed-Size: {max(1, _disk_bytes(stage / 'opt' / 'ate') // 1024)}\n"

@@ -143,11 +143,17 @@ tar -xzf ate-0.0.0-dev-linux-x86_64.tar.gz
 ./install.sh --uninstall              # removes the program only
 ```
 
-`install.sh` is idempotent: re-running it replaces the bundle in the prefix and runs `ate setup`
-again, which never overwrites an existing config. Nothing under `/etc/ate` or `/var/lib/ate` is
-touched, so an upgrade keeps the config, the database, the reports and the logs. As root the link
-goes to `/usr/bin/ate`; unprivileged it goes to `<prefix>/bin/ate` instead, and setup skips the
-group/ownership steps. `--uninstall` removes the prefix and the link, the same as `apt remove`.
+`install.sh` is idempotent: re-running it clears the bundle's own contents (`ate` and `_internal`)
+in the prefix and writes the new copy, so nothing from the previous version survives — a plain
+`cp -a` merge would leave the old `_internal` files behind. `--prefix` or `--bin` with no value is
+a usage error. As root the link goes to `/usr/bin/ate`; unprivileged it goes to `<prefix>/bin/ate`
+instead, and `ate setup` then cannot create the `ate` group or set the ownership of `/etc/ate` and
+`/var/lib/ate`: the program is installed, and the Station is finished with `sudo ate setup`. If
+setup fails, install.sh says so and exits 1 rather than pretending the install is complete.
+Nothing under `/etc/ate` or `/var/lib/ate` is ever touched, so an upgrade keeps the config, the
+database, the reports and the logs. `--uninstall` refuses `/`, an empty prefix, and any prefix
+that has no `ate` executable in it; otherwise it removes the bundle and the link, and the prefix
+only if it is empty afterwards — the same as `apt remove`.
 
 ### The .deb
 
@@ -155,8 +161,12 @@ Built with `dpkg-deb --root-owner-group --build` from a staging directory, so no
 build machine's ownership leaks into the package:
 
 - `/opt/ate/…` is the whole bundle, and `/usr/bin/ate` is a symlink to `/opt/ate/ate`.
+- Upgrading a `.deb` needs no cleanup code: dpkg removes every file the package installed before
+  `postinst` runs, so the new bundle replaces `/opt/ate` completely. Only what `ate setup`
+  creates is outside dpkg's file list, which is why `postrm` decides what happens to it.
 - `postinst` runs `/opt/ate/ate setup` on `configure` — the same command the installer and
-  `install.sh` run (see the spec's Packaging section).
+  `install.sh` run (see the spec's Packaging section). `dpkg-reconfigure ate` does nothing:
+  re-running setup is not a package operation.
 - `postrm`: on `remove` it does nothing, so the Station's config and data survive; on `purge` it
   deletes `/etc/ate/config.json` and the config directory if it is empty, and **never** touches
   `/var/lib/ate` — the database, its WAL files, the reports and the logs are records.
@@ -177,17 +187,20 @@ a built bundle's `_internal` and keeping only the libraries that resolve to the 
 | `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
 | `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
 | `libdrm2`, `libxcb-dri3-0` | QtWebEngine's GPU/direct-rendering path |
-| `libxcb1` | libxcb, used by Qt's xcb platform plugin |
+| `libxcb1`, `libxcb-cursor0` | libxcb and its cursor-shape extension: Qt's xcb platform plugin needs both, and without `libxcb-cursor0` it aborts, so the GUI never opens on a clean Debian box |
 | `libwayland-client0`, `libwayland-cursor0`, `libwayland-egl1` | only reached when the desktop is Wayland rather than X |
 
 ### Testing seams
 
-Only these exist, and only the packaging scripts read them:
+Only one flag is a seam in the shipped scripts, and it is a real installer flag:
 
 | Variable / flag | What it does |
 | --- | --- |
-| `ATE_DEB_ROOT` | Prefixes `/opt/ate`, `/etc/ate` and `/var/lib/ate` in `postinst` and `postrm` so they can run against a temporary root without dpkg or root |
 | `install.sh --prefix` / `--bin` | Aim the install at a temporary directory instead of `/opt/ate` and `/usr/bin/ate` |
+
+`postinst` and `postrm` have **no** test seam: they name `/opt/ate`, `/etc/ate` and `/var/lib/ate`
+directly. The test runs a copy of each script with those three paths rewritten to a temporary
+root, so a variable exported on a Station can never change what the installed package does.
 
 `tests/test_linux_packages_28b.py` runs the scripts against a stub bundle in seconds: it checks
 the tarball and the deb layout, that the maintainer scripts are executable and pass `sh -n`, that
