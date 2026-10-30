@@ -687,3 +687,22 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Orchestrator tiny fix after the merge: `;` comments in `[Code]` → `//`.
 - Light review: 1144 passed + 3 skipped ×3 (~166 s); collection 1112 → 1147, none lost.
 - Leftovers: `ate.exe` is `console=True`, so the Start-menu shortcut opens a console beside the GUI.
+
+## 27c — Windows release CI (merged 2026-10-30)
+- **Written, never run.** `release.yml`, `smoke_installer.py` and `ate.iss` first execute on the first `v*` tag. The two checkboxes stay `- [ ]`; Status is `resolved` only because `frontier.py` needs that exact token.
+- Implementer (Strata, high, 0 compactions). `ate _selftest --scan <dir>` added for the headless check.
+- Reviews (a desk check): Haiku 3 must-fix, Strata 4 must-fix (union 6):
+  - **product bug: the default config path was wrong on every Windows install** (`sys.platform` is `win32`, not `windows`; `%PROGRAMDATA%` never expanded);
+  - `ate` resolved against the runner's stale PATH;
+  - the Inno path check missed `Program Files (x86)`;
+  - the uninstall wait raced the PATH cleanup;
+  - unexpected exceptions skipped the log dump;
+  - the workflow tests were too weak (PyYAML skipped in CI; 4 damaging mutations passed).
+- Rework (Strata, high, 1 compaction): all fixed.
+  - `shutil.which` on the expanded registry PATH, and the fake runner refuses bare names;
+  - PyYAML in `[test]`;
+  - parsed-workflow assertions; `permissions: contents: read`; `if-no-files-found: error`;
+  - PyInstaller timeout 1800 s;
+  - the `ci.yml` job name fixed.
+  - **Decision to surface to the user:** the Chromium sandbox is disabled (`QTWEBENGINE_DISABLE_SANDBOX` + `--no-sandbox`) only when elevated/root, because Chromium refuses or fails otherwise; ordinary users keep it.
+- Light review: 1203 passed + 3 skipped ×3 (~167 s); collection 1147 → 1206, none lost.
