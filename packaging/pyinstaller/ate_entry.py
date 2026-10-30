@@ -10,12 +10,32 @@ that the plain CLI does not:
   on Linux and ``Qt6/bin`` on Windows (``QtWebEngineProcess.exe`` there).
 * Headless runs (``QT_QPA_PLATFORM=offscreen``, the PDF helper) have no GPU to show a page
   on; Chromium is told not to look for one. The GUI is unaffected.
+* Chromium will not build a renderer sandbox under root or an administrator, and the CI runner
+  and the installer's ``ate setup`` are both privileged: ``--no-sandbox`` and
+  ``QTWEBENGINE_DISABLE_SANDBOX=1`` are set for a privileged process so the report renders
+  instead of dying in the zygote host.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+
+def _elevated() -> bool:
+    """Root on Linux, an administrator on Windows.
+
+    Written out here rather than imported from ``ate.report.pdf`` because this module runs
+    before ATE is imported, and a frozen bundle must set these knobs before QtWebEngine starts."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
 
 
 def _webengine_process(base: str, name: str) -> str | None:
@@ -44,16 +64,23 @@ def _chromium_flags() -> str:
     """Chromium flags for a headless render, added to whatever the caller already set.
 
     ``setdefault`` would throw away flags the packager or CI set; appending keeps them and makes
-    ``--no-gpu`` apply whatever else is in there.
-    """
+    ``--no-gpu`` apply whatever else is in there. A privileged process gets ``--no-sandbox``:
+    Chromium's renderer sandbox does not start under root or an administrator."""
     flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
     for flag in ("--no-gpu", "--disable-gpu"):
         if flag not in flags:
             flags.append(flag)
+    if _elevated() and "--no-sandbox" not in flags:
+        flags.append("--no-sandbox")
     return " ".join(flags)
 
 
-if getattr(sys, "frozen", False):
+def _prepare_webengine_env() -> None:
+    """Set the environment a frozen ATE needs before QtWebEngine starts.
+
+    Only the frozen entry point calls it, but it is a function so the tests can run it without
+    a frozen bundle. Root or an administrator cannot build Chromium's renderer sandbox, and a
+    headless render has no GPU to look for."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
     helper = _webengine_process(base, name)
@@ -61,8 +88,18 @@ if getattr(sys, "frozen", False):
         os.environ["QTWEBENGINEPROCESS_PATH"] = helper
     elif os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         print(f"ate: no bundled {name} found under {base}", file=sys.stderr)
+    if _elevated():
+        # Root or administrator: the renderer sandbox cannot be built at all.
+        os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+        if "--no-sandbox" not in flags:
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags + ["--no-sandbox"])
     if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _chromium_flags()
+
+
+if getattr(sys, "frozen", False):
+    _prepare_webengine_env()
 
 from ate.cli import main
 

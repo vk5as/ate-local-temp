@@ -56,8 +56,12 @@ def _python_in(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
-def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a command, printing it, and exit loudly on failure."""
+def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None, timeout: int = 1800) -> subprocess.CompletedProcess:
+    """Run a command, printing it, and exit loudly on failure.
+
+    1800 s, not 600: a onedir build that bundles QtWebEngine takes well over ten minutes on a
+    shared CI runner, especially the Windows one, and a timeout that fires mid-build reads as a
+    PyInstaller failure rather than a slow machine."""
     print("$ " + " ".join(str(part) for part in cmd))
     proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:

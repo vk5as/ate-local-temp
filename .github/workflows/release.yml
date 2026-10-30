@@ -1,0 +1,106 @@
+name: Release
+
+# Every tagged release builds and smoke-tests the Windows installer on a clean runner
+# (assets/packaging.md, "CI"). Tags and a manual run are the only triggers: an artifact is
+# only ever made for a release, so an ordinary push to a branch must not start this job.
+# The per-push test matrix is .github/workflows/ci.yml.
+#
+# NEVER RUN. This file was written on Linux machines with no Windows and no Inno Setup, and no
+# tag of this repository has been cut, so neither this workflow nor `packaging/windows/ate.iss`
+# has ever executed. The first real compile, silent install, upgrade and uninstall of the
+# installer is this job's first run; `tests/test_release_ci_27c.py` checks the workflow's shape
+# and the smoke script's logic, never the installer itself.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Nothing here needs to write to the repository: the job reads the tag and uploads an artifact.
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    name: Windows installer (build and smoke)
+    runs-on: windows-latest
+    env:
+      # Qt needs a platform with no display, exactly as in ci.yml: the bundle's _pdf helper and
+      # the smoke script's `ate` calls both start QtWebEngine.
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # ATE's version is the git tag (src/ate/_version.py runs `git describe --tags`), so a
+          # shallow clone would stamp 0.0.0-dev into the installer.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          # The frozen builds bundle CPython 3.14 (assets/packaging.md); the build script has no
+          # way to choose an interpreter, so this is where 3.14 is decided.
+          python-version: "3.14"
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          # Pinned: `x64compatible` in ate.iss needs Inno 6.3 or newer.
+          # Chocolatey installs Inno Setup 6 under "C:\Program Files (x86)\Inno Setup 6", so this
+          # step does not test one directory — that check fails on a clean runner. iscc lands on
+          # PATH, and packaging/windows/build_installer.py resolves it from $ISCC, then PATH, then
+          # both standard locations.
+          choco install innosetup --no-progress -y --version=6.7.1
+          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue)) {
+            Write-Error "iscc.exe is not on PATH after installing Inno Setup: the installer cannot be compiled"
+            exit 1
+          }
+          iscc --version
+
+      - name: Build the frozen bundle (27a smoke checks)
+        run: python packaging/build_pyinstaller.py --smoke
+
+      - name: Compile the installer
+        # Signing is optional (assets/packaging.md, "Code signing"): an unset secret arrives as an
+        # empty string, and build_installer.py builds unsigned when either variable is empty.
+        # Before real signing secrets are configured, put this job behind a protected
+        # `environment:` so only approved tags and reviewers can reach them.
+        env:
+          ATE_SIGN_CERT: ${{ secrets.ATE_SIGN_CERT }}
+          ATE_SIGN_PASSWORD: ${{ secrets.ATE_SIGN_PASSWORD }}
+        run: python packaging/windows/build_installer.py --dist dist
+
+      - name: Smoke-test the installer
+        # Installs silently, checks the machine PATH and the /LOG file and the exit code, runs
+        # ate setup, scans the example Media Release headless, upgrades, then uninstalls.
+        # Never executed anywhere: no Windows runner has ever run this workflow.
+        run: python packaging/windows/smoke_installer.py
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ate-windows-installer
+          path: dist/ate-*-windows-x64-setup.exe
+          # A glob that matches nothing is a build that quietly produced no artifact.
+          if-no-files-found: error
+
+  # The Linux artifacts are packet 28c's job and are deliberately not written here. This is where
+  # they go, built from the same dist/ate bundle and smoke-tested in a Debian stable container:
+  #
+  #   linux-artifacts:
+  #     name: Linux artifacts (tarball and .deb)
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #         with:
+  #           fetch-depth: 0
+  #       - run: python packaging/linux/build_linux.py --dist dist --build
+  #       - uses: actions/upload-artifact@v4
+  #         with:
+  #           name: ate-linux-artifacts
+  #           path: |
+  #             dist/ate-*-linux-x86_64.tar.gz
+  #             dist/ate_*_amd64.deb

@@ -85,12 +85,55 @@ _DEFAULTS: dict[str, Any] = {
     "ui.allowHistoryDuringRun": True,
 }
 
-# The platform default config path (see ``assets/app-config-format.md``). Overridden by
+# The platform default config path (see ``assets/app-config-format.md``), for the case the
+# table used to get wrong: ``sys.platform`` is ``win32``, never ``windows``, so a lookup keyed
+# on the doc's label fell through to the Linux path on every Windows install. Overridden by
 # ``--config`` on the command line.
-_DEFAULT_PATHS = {
-    "linux": "/etc/ate/config.json",
-    "windows": r"%PROGRAMDATA%\ATE\config.json",
-}
+LINUX_CONFIG_PATH = "/etc/ate/config.json"
+# The Windows location as the format document writes it. It is expanded, never used as a
+# literal: a path containing `%PROGRAMDATA%` is a directory named `%PROGRAMDATA%`.
+WINDOWS_DATA_DIR = r"%PROGRAMDATA%\ATE"
+PROGRAMDATA_FALLBACK = r"C:\ProgramData"
+
+
+def _is_windows() -> bool:
+    """Whether this process is on Windows — the one platform test used everywhere.
+
+    ``sys.platform`` is the value a platform branch has to read; ``os.name`` is the belt for a
+    stripped interpreter. Neither is ever the string ``"windows"``, which is only a label in
+    the docs and in ``StationLayout.platform``."""
+    import sys
+
+    return sys.platform == "win32" or os.name == "nt"
+
+
+def _expand_env(value: str) -> str:
+    r"""Expand ``%VAR%`` in a platform location (``%PROGRAMDATA%\ATE``).
+
+    ``os.path.expandvars`` knows ``$VAR`` and ``${VAR}`` only, so a raw ``%PROGRAMDATA%``
+    becomes a directory literally named ``%PROGRAMDATA%``. Windows expands a value that
+    itself holds a variable, so this repeats until the string stops changing. A variable with
+    nothing behind it falls back to the documented location. This is the only place ATE
+    expands the environment for a path: config *values* still get no expansion
+    (``assets/app-config-format.md``)."""
+    def replace(match: re.Match) -> str:
+        name = match.group(1)
+        return os.environ.get(name) or (PROGRAMDATA_FALLBACK if name == "PROGRAMDATA" else match.group(0))
+
+    while True:
+        expanded = os.path.expandvars(re.sub(r"%([A-Za-z0-9_]+)%", replace, value))
+        if expanded == value:
+            return value
+        value = expanded
+
+
+def _windows_data_dir() -> Path:
+    r"""``%PROGRAMDATA%\ATE`` — the Station's data and config directory on Windows.
+
+    ``PROGRAMDATA`` is set on every real Windows; the fallback covers an environment without
+    it (a service, a stripped CI shell), so the default is never a relative path or a literal
+    ``%PROGRAMDATA%`` directory."""
+    return Path(_expand_env(WINDOWS_DATA_DIR))
 
 
 def _platform_default() -> Path:
@@ -101,12 +144,12 @@ def _platform_default() -> Path:
     subprocess without writing to ``/etc/ate`` (packet 30c). No other part of ATE reads it —
     config values still get no environment expansion (``assets/app-config-format.md``).
     """
-    import sys
-
     override = os.environ.get("ATE_DEFAULT_CONFIG", "").strip()
     if override:
         return Path(override)
-    return Path(_DEFAULT_PATHS.get(sys.platform, "/etc/ate/config.json"))
+    if _is_windows():
+        return Path(f"{_windows_data_dir()}\\config.json")
+    return Path(LINUX_CONFIG_PATH)
 
 
 # The only placeholder the config format defines (see ``assets/app-config-format.md``):
@@ -121,13 +164,11 @@ def _platform_data_dir() -> Path:
 
     ``ATE_DATA_DIR`` overrides it, for tests only (packet 30c): it is read nowhere else, so a
     config's own paths still get no environment expansion."""
-    import sys
-
     override = os.environ.get("ATE_DATA_DIR", "").strip()
     if override:
         return Path(override)
-    if sys.platform == "win32" or os.name == "nt":
-        return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ATE"
+    if _is_windows():
+        return _windows_data_dir()
     return Path("/var/lib/ate")
 
 

@@ -55,36 +55,49 @@ class StationLayout:
         root = Path(root) if root is not None else Path(".")
         return StationLayout(data_dir=root / "data", config_dir=root / "config", platform=_current_platform())
 
+    def _child(self, base: Path, *parts: str) -> Path:
+        r"""A path under ``base``, joined with the separator this platform uses.
+
+        ``Path / name`` uses the host's separator, so a Windows layout evaluated on a Linux
+        host (the test suite) would read ``C:\ProgramData\ATE/reports`` — a path no directory
+        on Windows matches."""
+        sep = "\\" if self.platform == "windows" else "/"
+        return Path(sep.join((str(base), *parts)))
+
     @property
     def database_path(self) -> Path:
         """The SQLite database file, created by ``ate db migrate``."""
-        return self.data_dir / "ate.db"
+        return self._child(self.data_dir, "ate.db")
 
     @property
     def reports_dir(self) -> Path:
         """Where Test Reports are written."""
-        return self.data_dir / "reports"
+        return self._child(self.data_dir, "reports")
 
     @property
     def log_dir(self) -> Path:
         """Where the application log is written."""
-        return self.data_dir / "logs"
+        return self._child(self.data_dir, "logs")
 
     @property
     def config_file(self) -> Path:
         """The machine-wide ``config.json`` (admin-only)."""
-        return self.config_dir / "config.json"
+        return self._child(self.config_dir, "config.json")
 
 
 def default_layout() -> StationLayout:
-    """The platform's real directories. Overridden by ``--root`` for automation and tests."""
-    import os
+    r"""The platform's real directories. Overridden by ``--root`` for automation and tests.
 
-    if os.name == "nt":
-        base = (Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ATE").resolve()
-        return StationLayout(data_dir=base, config_dir=base)
+    The platform test is ``ate.config._is_windows``, not ``os.name == "nt"`` alone: the config
+    reader, the ``<data>`` placeholder and setup have to agree on ``%PROGRAMDATA%\ATE``, and
+    ``sys.platform`` is the value a Windows machine actually reports (``win32``)."""
+    from .config import _is_windows, _windows_data_dir
+
+    if _is_windows():
+        base = _windows_data_dir()
+        return StationLayout(data_dir=base, config_dir=base, platform="windows")
     # Linux: a separate admin-only config directory and a user-writable data directory.
-    return StationLayout(data_dir=Path("/var/lib/ate"), config_dir=Path("/etc/ate"))
+    return StationLayout(data_dir=Path("/var/lib/ate"), config_dir=Path("/etc/ate"), platform="linux")
 
 
 def _migrate_database(path: str) -> int:

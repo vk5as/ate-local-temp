@@ -9,10 +9,12 @@ No mocks: each test builds a temp config and reads the result back out of it.
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 
 import pytest
 
+from ate import config
 from ate.config import (
     Config,
     ConfigError,
@@ -20,6 +22,11 @@ from ate.config import (
     build_default_config,
     read_config,
 )
+
+# conftest.py replaces `_platform_data_dir` for the session so `<data>` lands under pytest's
+# basetemp instead of `/var/lib/ate`. Collection happens before that fixture runs, so this is
+# the real platform function the Windows tests below need.
+_real_platform_data_dir = config._platform_data_dir
 
 
 # --- missing file -----------------------------------------------------------
@@ -281,6 +288,73 @@ def test_custom_config_path_overrides_the_default(tmp_path):
     cfg.write_text(json.dumps({"format": 1, "station": {"name": "X", "uuid": "u"}}), encoding="utf-8")
     loaded = read_config(cfg)
     assert loaded.path == cfg.resolve()
+
+
+def _pretend_windows(monkeypatch, programdata: str | None = r"C:\ProgramData") -> None:
+    """Make this Linux process look like a Windows one: `sys.platform` is `win32` on every
+    real Windows, and `PROGRAMDATA` is set there. Only the platform branches change.
+
+    `conftest.py` redirects `_platform_data_dir` to pytest's basetemp for the session so no
+    test writes under `/var/lib`; the real function is captured at import time, before that
+    fixture ran, and put back here."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(config, "_platform_data_dir", _real_platform_data_dir)
+    if programdata is None:
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+    else:
+        monkeypatch.setenv("PROGRAMDATA", programdata)
+
+
+def test_the_windows_default_config_is_programdata_not_etc(monkeypatch):
+    r"""The platform default config on Windows is `%PROGRAMDATA%\ATE\config.json`.
+
+    `sys.platform` is `win32`, never `windows`, so a table keyed on the doc's label falls
+    through to `/etc/ate/config.json`: bare `ate` and `ate db status` would look in
+    `C:\etc\ate\` while `ate setup` wrote in ProgramData (packet 27c review)."""
+    _pretend_windows(monkeypatch)
+
+    assert str(config._platform_default()) == r"C:\ProgramData\ATE\config.json"
+    # A bare `ate db status` on Linux still reads /etc/ate, and nothing writes to ProgramData.
+    monkeypatch.undo()
+    assert str(config._platform_default()) == "/etc/ate/config.json"
+
+
+def test_programdata_is_expanded_and_falls_back_when_unset(monkeypatch):
+    """`%PROGRAMDATA%` is expanded; a stripped environment still gives the documented path."""
+    _pretend_windows(monkeypatch, programdata=r"D:\StationData")
+    assert str(config._windows_data_dir()) == r"D:\StationData\ATE"
+    # A Windows env value can itself hold `%VAR%`: REG_EXPAND_SZ is stored unexpanded.
+    monkeypatch.setenv("PROGRAMDATA", r"%USERPROFILE%\AppData")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\Operator")
+    assert str(config._windows_data_dir()) == r"C:\Users\Operator\AppData\ATE"
+    _pretend_windows(monkeypatch, programdata=None)
+    assert str(config._windows_data_dir()) == r"C:\ProgramData\ATE"
+    # Not Windows after the monkeypatch is undone: the Linux default is untouched, and nothing
+    # on a Linux machine points at ProgramData.
+    monkeypatch.undo()
+    assert not config._is_windows()
+    assert str(config._platform_default()) == "/etc/ate/config.json"
+
+
+def test_config_default_data_dir_and_ate_setup_all_agree_on_windows(monkeypatch):
+    r"""`ate`, `ate db status` and `ate setup` must point at the same %PROGRAMDATA%\ATE.
+
+    Three places decide the location (the config default, the `<data>` placeholder and
+    setup's layout); if one of them keys on a different platform test, the Station is
+    prepared in one directory and read from another."""
+    _pretend_windows(monkeypatch)
+    from ate.setup import default_layout
+
+    data = config._platform_data_dir()
+    layout = default_layout()
+    assert str(data) == r"C:\ProgramData\ATE"
+    assert layout.data_dir == data, "setup prepares a different directory than the config expects"
+    assert layout.config_dir == data, "setup writes config.json where nothing reads it"
+    assert layout.config_file == config._platform_default()
+    assert str(layout.config_file) == r"C:\ProgramData\ATE\config.json"
+    assert str(layout.database_path) == r"C:\ProgramData\ATE\ate.db"
+    assert layout.platform == "windows"
+    assert config._expand_data("<data>/ate.db", Path("config.json"), "database.path").replace("\\", "/") == "C:/ProgramData/ATE/ate.db"
 
 
 @pytest.mark.parametrize("value", [0, -1])

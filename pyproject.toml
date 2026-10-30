@@ -39,9 +39,10 @@ version = {attr = "ate._version.__version__"}
 # setuptools and build are here because a fresh venv ships pip only: the wheel test
 # builds a wheel with --no-isolation and docs/building-from-source.md says
 # `python -m build --wheel`, and both fail with a bare `pip install -e ".[test]"`
-# without them.
+# without them. PyYAML is here because tests/test_release_ci_27c.py parses
+# .github/workflows/release.yml rather than grepping it.
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-qt", "setuptools>=64", "build>=1.0"]
+test = ["pytest>=7", "pytest-qt", "PyYAML>=6", "setuptools>=64", "build>=1.0"]
 
 [project.scripts]
 ate = "ate.cli:main"

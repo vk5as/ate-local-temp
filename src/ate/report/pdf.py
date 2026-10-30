@@ -22,14 +22,50 @@ from typing import Optional
 from .html import REPORT_PAGE_MARGINS_MM
 
 
+def _is_elevated() -> bool:
+    """Whether this process runs with privileges Chromium's sandbox is known to refuse.
+
+    On Linux the renderer refuses to start as root at all: `ERROR:zygote_host_impl_linux.cc
+    Running as root without --no-sandbox is not supported` (crbug.com/638180). On Windows the
+    sandbox builds a restricted token for the renderer, and an elevated (High IL) parent has
+    been reported to fail that — Electron's `render-process-gone exitCode 18` under
+    Administrator is the same failure. ``ate setup`` is run elevated by the installer and by a
+    ``.deb`` postinst, so an admin rendering a Test Report is not hypothetical."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
+def _sandbox_flags(env: dict[str, str]) -> dict[str, str]:
+    """Turn Chromium's sandbox off for an elevated/root render, and say which knob did it.
+
+    Qt WebEngine reads both `QTWEBENGINE_DISABLE_SANDBOX` and `QTWEBENGINE_CHROMIUM_FLAGS`; the
+    flags are appended, never replaced, so whatever the packager or CI set is kept."""
+    if not _is_elevated():
+        return env
+    env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+    if "--no-sandbox" not in flags:
+        flags.append("--no-sandbox")
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    return env
+
+
 def _child_env() -> dict[str, str]:
-    """The helper's environment: the parent's, with the offscreen platform forced.
+    """The helper's environment: the parent's, with the offscreen platform forced and, when
+    this process is privileged, Chromium's sandbox disabled.
 
     The helper never shows a window, so it must not depend on a display. Everything else is
     inherited, which Windows needs (Python won't start without ``SYSTEMROOT`` and friends)."""
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
-    return env
+    return _sandbox_flags(env)
 
 
 def render_pdf(html_path: str, pdf_path: str, paper: str = "A4") -> int:
@@ -43,6 +79,14 @@ def render_pdf(html_path: str, pdf_path: str, paper: str = "A4") -> int:
 
     # Headless-friendly: prefer the offscreen platform when no display is attached (tests, CI).
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if _is_elevated():
+        # `ate _pdf` can be started directly by an operator, so the sandbox knobs are set here
+        # as well as in the parent's env: Chromium will not sandbox a renderer whose parent is
+        # root or an administrator.
+        os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
+        if "--no-sandbox" not in flags:
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags + ["--no-sandbox"])
 
     from PyQt6.QtCore import QMarginsF, QUrl, QTimer
     from PyQt6.QtGui import QPageLayout, QPageSize
@@ -93,7 +137,15 @@ def render_pdf(html_path: str, pdf_path: str, paper: str = "A4") -> int:
     QTimer.singleShot(30_000, app.quit)
 
     app.exec()
-    return 0 if loaded_ok["value"] and result_ok["value"] and file_ok["value"] else 1
+    if loaded_ok["value"] and result_ok["value"] and file_ok["value"]:
+        return 0
+    if _is_elevated():
+        print(
+            "pdf render failed while running elevated: Chromium cannot build a renderer sandbox "
+            "under root or an administrator (ATE sets QTWEBENGINE_DISABLE_SANDBOX=1 and --no-sandbox)",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def pdf_helper_command(html_path: str, pdf_path: str, paper: str = "A4") -> tuple[str, list[str], dict[str, str]]:

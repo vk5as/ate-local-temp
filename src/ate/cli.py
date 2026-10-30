@@ -93,14 +93,23 @@ def _cmd_selftest(argv: list[str]) -> int:
     its own config and database), and the check fails unless the run wrote its HTML report and
     the hidden ``_pdf`` child wrote its PDF. That is the only way to prove a frozen bundle can
     actually run a Test Run rather than merely import its modules.
+
+    ``--scan DIR`` is release CI's headless launch (packet 27c): it reads the config the
+    installer's `ate setup` wrote, refuses a database that is not at this ATE's schema version,
+    and scans a Test Definition directory — the shipped example Media Release, copied into the
+    configured definitions directory — reporting the schedules it found and the broken entries.
     """
     parser = argparse.ArgumentParser(prog="ate _selftest", add_help=True)
     parser.add_argument("--run", action="store_true", help="run a built-in one-step Test Schedule head end to end")
+    parser.add_argument("--scan", metavar="DIR", help="scan a Test Definition directory headless and check the database version")
+    parser.add_argument("--config", metavar="PATH", help="config file for --scan (default: the platform config)")
     args, _unknown = parser.parse_known_args(argv)
 
     results = _selftest_checks()
     if args.run:
         results.append(_selftest_end_to_end())
+    if args.scan:
+        results.append(_selftest_scan(args.scan, args.config))
     for name, ok, detail in results:
         print(f"{name}: {'ok' if ok else 'MISSING'} - {detail}")
     return 0 if all(ok for _, ok, _ in results) else 1
@@ -286,6 +295,43 @@ def _selftest_end_to_end() -> tuple[str, bool, str]:
         return ("run end-to-end", False, str(exc))
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _selftest_scan(directory: str, config_path: str | None = None) -> tuple[str, bool, str]:
+    """Scan one Test Definition directory against the Station's own config and database (27c).
+
+    This is the headless launch the release CI is required to make work: a frozen bundle that can
+    read the config `ate setup` wrote, open the database it created, and list the schedules of a
+    Media Release. It writes nothing and runs no Test Run. Fails on a database whose schema version
+    is not this ATE's, on a directory with no ``.atedef`` in it, and on any broken Media Release or
+    schedule the scan reports — a shipped example that scans broken is a packaging bug.
+
+    Returns ``(name, ok, what was seen)`` for ``_selftest``'s output.
+    """
+    from .catalog import definition_mismatches, find_definitions, list_schedule_rows
+    from .config import ConfigError, config_hint, read_config
+    from .storage import DbLaunchStatus, SCHEMA_VERSION, check_database_at_launch
+
+    try:
+        config = read_config(config_path)
+    except ConfigError as exc:
+        return ("scan", False, f"config: {exc}")
+
+    status = check_database_at_launch(config.database_path, config_file=config_hint(config.path))
+    if status.status is not DbLaunchStatus.OK:
+        return ("scan", False, f"database {config.database_path}: {status.message}")
+
+    rows = list_schedule_rows(directory)
+    broken = [row for row in rows if row.error]
+    mismatched = sum(1 for definition in find_definitions(directory) if not definition.broken and definition_mismatches(definition))
+    if not rows:
+        return ("scan", False, f"no Test Definitions found in {directory}")
+    ok = not broken and not mismatched
+    detail = (
+        f"{directory}: {len(rows) - len(broken)} schedules, {len(broken)} broken, "
+        f"{mismatched} mismatched (schema {status.user_version} == {SCHEMA_VERSION})"
+    )
+    return ("scan", ok, detail)
 
 
 def _build_parser() -> argparse.ArgumentParser:
