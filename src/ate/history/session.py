@@ -16,6 +16,7 @@ from ..report.html import report_stem_and_directory
 from ..report.html import result_label
 from ..report.html import write_report
 from ..report.log_export import export_log
+from ..report.pdf import PDF_SKIPPED, PDF_UNSANDBOXED, pdf_sandbox_choice
 from ..storage import HISTORY_SORT_KEYS
 from ..storage import RunStore
 
@@ -27,14 +28,25 @@ class HistorySession:
     database stays fast (rows still load page by page). Changing the filters or sort order resets
     to the first page. An optional ``config`` supplies report settings (the reports directory and
     paper size) for :meth:`regenerate` and the project prefill of :meth:`new_run_prefill`; it is not
-    required for browsing, sorting, filtering or summarising."""
+    required for browsing, sorting, filtering or summarising. ``pdf_choice`` is the packet 30d
+    decision the launch built; without one a privileged History Regenerate skips the PDF rather than
+    quietly turning Chromium's sandbox off."""
 
-    def __init__(self, store: RunStore, *, page_size: int = 100, config: Optional[Config] = None) -> None:
+    def __init__(
+        self,
+        store: RunStore,
+        *,
+        page_size: int = 100,
+        config: Optional[Config] = None,
+        pdf_choice: Optional[Callable[[], str]] = None,
+    ) -> None:
         if page_size <= 0:
             raise ValueError("page_size must be positive")
         self.store = store
         self.page_size = page_size
         self.config = config
+        # Asked once per Regenerate, never read from the environment by this class.
+        self.pdf_choice = pdf_choice or pdf_sandbox_choice()
         # Sort order defaults to newest first.
         self.sort_key = "started_at"
         self.descending = True
@@ -230,7 +242,12 @@ class HistorySession:
         The HTML is written now; a PDF (if requested) renders in the helper process without blocking.
         ``parent`` owns that QProcess and receives completion through ``on_done(error_or_None)`` when
         it finishes — both are optional so the synchronous HTML path stays testable without Qt. Raises
-        if no config was supplied."""
+        if no config was supplied.
+
+        Packet 30d: before a PDF is attempted the launch's ``pdf_choice`` is asked, and the answer is
+        one of `sandboxed` (render normally), `unsandboxed` (the helper is told with ``--unsandboxed``)
+        or `skipped` (privileged and nobody said yes): the HTML is still written, no PDF is started,
+        and the result says so with ``pdf_skipped``."""
         if self.config is None:
             raise ValueError("regenerate needs a HistorySession constructed with a config")
         written: dict[str, Any] = {"html": None}
@@ -245,21 +262,26 @@ class HistorySession:
             return written
 
         pdf_started = False
-        if pdf and html:
+        pdf_skipped = False
+        if pdf and written["html"]:
             # Render from the freshly written HTML (its exact path, including any -2/-3 suffix), so
             # the PDF always sits beside the report that was actually written.
             pdf_path = Path(written["html"]).with_suffix(".pdf")
-            # Imported here so history.session stays Qt-free at load time; only needed for a PDF job.
-            from ..report.pdf_job import start_pdf_job
+            plan = self.pdf_choice()
+            if plan == PDF_SKIPPED:
+                pdf_skipped = True
+            else:
+                # Imported here so history.session stays Qt-free at load time; only needed for a PDF job.
+                from ..report.pdf_job import start_pdf_job
 
-            try:
-                start_pdf_job(parent, html_path=written["html"], pdf_path=pdf_path, paper=self.config.reports_paper_size, on_done=on_done)
-                pdf_started = True
-            except Exception as exc:  # noqa: BLE001 - a PDF-helper error is reported through on_done, never raised into the caller
-                if on_done is not None:
-                    on_done(str(exc))
+                try:
+                    start_pdf_job(parent, html_path=written["html"], pdf_path=pdf_path, paper=self.config.reports_paper_size, unsandboxed=plan == "unsandboxed", on_done=on_done)
+                    pdf_started = True
+                except Exception as exc:  # noqa: BLE001 - a PDF-helper error is reported through on_done, never raised into the caller
+                    if on_done is not None:
+                        on_done(str(exc))
 
-        return {"html": written["html"], "pdf_started": pdf_started}
+        return {"html": written["html"], "pdf_started": pdf_started, "pdf_skipped": pdf_skipped}
 
     def uut_filter(self, run_uuid: str) -> dict[str, Any]:
         """Filters selecting every run of this run's UUT Type and serial ("Show all runs of this UUT")."""

@@ -32,6 +32,7 @@ from ..engine.run_engine import RunEngine, RunStatus
 from ..engine.step_inputs import value_error
 from ..log import AppLog, LogError, open_app_log
 from ..report.html import write_report as _write_run_report
+from ..report.pdf import PDF_SKIPPED, PDF_UNSANDBOXED, pdf_sandbox_choice
 from ..report.pdf_job import start_pdf_job, stop_pdf_jobs
 from ..storage.store import RunStore
 
@@ -73,12 +74,21 @@ class HeadlessRunSession(QObject):
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
     report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
-    def __init__(self, config: Config | str | Path | None = None, app_log: Optional[AppLog] = None) -> None:
+    def __init__(
+        self,
+        config: Config | str | Path | None = None,
+        app_log: Optional[AppLog] = None,
+        pdf_choice: Optional[Callable[[], str]] = None,
+    ) -> None:
         super().__init__()
         # Accept an already-read Config (the GUI launch reads the file once, spec "read once at
         # launch") or the path form used by existing callers (30a review).
         self._config = config if isinstance(config, Config) else (read_config(config) if config is not None else None)
         self._store = RunStore(self._config.database_path) if self._config is not None else None
+        # Packet 30d: the launch hands this session the decision about Chromium's sandbox — it is
+        # asked for every PDF, and the session never reads the environment itself. Without one, a
+        # privileged session skips its PDF rather than silently disabling the sandbox.
+        self._pdf_choice = pdf_choice or pdf_sandbox_choice()
         self._selected_name: Optional[str] = None
         # The selected schedule's declared Stop on Fail default, captured when it is chosen;
         # ``None`` until a schedule has been selected. Prefills the Steps stage radio (True when
@@ -226,30 +236,48 @@ class HeadlessRunSession(QObject):
         """Write this run's HTML report at run end, then render its PDF without blocking the run.
 
         The HTML is written synchronously (spec 21a); the PDF follows in the helper process (see
-        :meth:`_start_pdf`), so FINISHED never waits for it. A failure here never raises."""
+        :meth:`_start_pdf`), so FINISHED never waits for it. Packet 30d: the sandbox question is asked
+        *after* the HTML is on disk, so an Operator who declines an unsandboxed PDF still has the HTML
+        report and :attr:`report_written` still fires (with no PDF path) instead of leaving the UI or
+        the harness waiting. A failure here never raises."""
         config = self._config
         if config is None or self._run_uuid is None or self._store is None:
             return
         try:
             html_path = _write_run_report(self._store, self._run_uuid, config)
         except Exception as exc:  # noqa: BLE001 - a report failure must not crash the run
-            self._log_error(f"Failed to write Test Report for {self._run_uuid}: {exc}")
+            self._log("ERROR", f"Failed to write Test Report for {self._run_uuid}: {exc}")
             return
 
-        self._start_pdf(Path(html_path), config.reports_paper_size)
+        plan = self._pdf_choice()
+        if plan == PDF_SKIPPED:
+            self._log(
+                "WARNING",
+                f"Test Report PDF skipped for {self._run_uuid}: ATE is privileged and the choice was "
+                f"No, so nothing was rendered without Chromium's sandbox. HTML report: {html_path}",
+            )
+            self.report_written.emit(str(html_path), "")
+            return
 
-    def _log_error(self, msg: str) -> None:
+        self._start_pdf(Path(html_path), config.reports_paper_size, plan == PDF_UNSANDBOXED)
+
+    def _log(self, level: str, msg: str) -> None:
+        """One line in the application log (ticket 08), or on stdout when there is no log."""
         if self.on_log is not None:
-            self.on_log("ERROR", "ate", msg)
+            self.on_log(level, "ate", msg)
         else:
             print(msg)
 
-    def _start_pdf(self, html_path: Path, paper: str) -> None:
+    def _log_error(self, msg: str) -> None:
+        self._log("ERROR", msg)
+
+    def _start_pdf(self, html_path: Path, paper: str, unsandboxed: bool) -> None:
         """Render ``html_path`` to a PDF beside it in the helper process, without waiting for it.
 
         The QProcess logic lives in :func:`ate.report.pdf_job.start_pdf_job` (shared with any other
         caller); here we only translate its completion into this session's ``report_written`` signal —
         both paths on success, an empty pdf path plus an ERROR log line when the helper fails (spec 22b).
+        ``unsandboxed`` is this PDF's packet 30d decision, passed to the child as an argument.
         Nothing here raises into the run."""
         pdf_path = html_path.with_suffix(".pdf")
         run_uuid = self._run_uuid
@@ -258,10 +286,10 @@ class HeadlessRunSession(QObject):
             if error is None:
                 self.report_written.emit(str(html_path), str(pdf_path))
             else:
-                self._log_error(f"Failed to write Test Report PDF for {run_uuid}: {error}")
+                self._log("ERROR", f"Failed to write Test Report PDF for {run_uuid}: {error}")
                 self.report_written.emit(str(html_path), "")
 
-        start_pdf_job(self, html_path, pdf_path, paper, on_done=on_done)
+        start_pdf_job(self, html_path, pdf_path, paper, unsandboxed, on_done=on_done)
 
 
     @property

@@ -57,28 +57,35 @@ def _print_version() -> int:
 
 
 def _cmd_pdf_helper(argv: list[str]) -> int:
-    """Dispatch ``ate _pdf <html> <pdf> --paper A4|Letter`` — render a saved HTML report to PDF.
+    """Dispatch ``ate _pdf <html> <pdf> --paper A4|Letter [--unsandboxed]`` — render a saved HTML report to PDF.
 
     Runs inside the helper child process; :func:`render_pdf` returns the intended exit code (0 on
     success, non-zero on any failure). Any unexpected error is reported and turned into a non-zero
-    exit so the GUI side can raise."""
+    exit so the GUI side can raise. Packet 30d: the sandbox is never turned off on its own — the
+    parent says so with ``--unsandboxed``, and a privileged helper run without it refuses.
+    """
     parser = argparse.ArgumentParser(prog="ate _pdf", add_help=True)
     parser.add_argument("html", help="path to the saved HTML report")
     parser.add_argument("pdf", help="path to write the PDF")
     parser.add_argument("--paper", choices=["A4", "Letter"], default="A4", help="paper size (default: A4)")
+    parser.add_argument(
+        "--unsandboxed",
+        action="store_true",
+        help="the parent's packet 30d choice: render this PDF with Chromium's sandbox off (privileged only)",
+    )
     args, _unknown = parser.parse_known_args(argv)
 
     from .report.pdf import render_pdf
 
     try:
-        code = render_pdf(args.html, args.pdf, args.paper)
+        code = render_pdf(args.html, args.pdf, args.paper, args.unsandboxed)
     except Exception as exc:  # a bare traceback would leak into the GUI's error channel
         print(f"pdf helper error: {exc}", file=sys.stderr)
         return 1
     return code
 
 
-def _cmd_selftest(argv: list[str]) -> int:
+def _cmd_selftest(argv: list[str], allow_unsandboxed_pdf: bool = False) -> int:
     """Dispatch ``ate _selftest`` — a bundle checks what it carries (packet 27a).
 
     Hidden like ``_pdf``. A PyInstaller one-directory build drops everything that no import
@@ -94,6 +101,10 @@ def _cmd_selftest(argv: list[str]) -> int:
     the hidden ``_pdf`` child wrote its PDF. That is the only way to prove a frozen bundle can
     actually run a Test Run rather than merely import its modules.
 
+    Packet 30d: a privileged ``--run`` renders its PDF only with ``--allow-unsandboxed-pdf``; without
+    it there is no dialog to ask, so the PDF is skipped and the check fails with that said plainly.
+    An ordinary user renders the PDF with the sandbox on and needs no flag.
+
     ``--scan DIR`` is release CI's headless launch (packet 27c): it reads the config the
     installer's `ate setup` wrote, refuses a database that is not at this ATE's schema version,
     and scans a Test Definition directory — the shipped example Media Release, copied into the
@@ -103,11 +114,16 @@ def _cmd_selftest(argv: list[str]) -> int:
     parser.add_argument("--run", action="store_true", help="run a built-in one-step Test Schedule head end to end")
     parser.add_argument("--scan", metavar="DIR", help="scan a Test Definition directory headless and check the database version")
     parser.add_argument("--config", metavar="PATH", help="config file for --scan (default: the platform config)")
+    parser.add_argument(
+        "--allow-unsandboxed-pdf",
+        action="store_true",
+        help="for --run as root or an administrator: render the Test Report PDF without Chromium's sandbox",
+    )
     args, _unknown = parser.parse_known_args(argv)
 
     results = _selftest_checks()
     if args.run:
-        results.append(_selftest_end_to_end())
+        results.append(_selftest_end_to_end(args.allow_unsandboxed_pdf or allow_unsandboxed_pdf))
     if args.scan:
         results.append(_selftest_scan(args.scan, args.config))
     for name, ok, detail in results:
@@ -227,7 +243,7 @@ def _report_problem(html: bytes, pdf: bytes) -> str | None:
     return None
 
 
-def _selftest_end_to_end() -> tuple[str, bool, str]:
+def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool, str]:
     """Run a built-in Test Schedule headless and check both reports were written (packet 27a).
 
     Everything is in a temporary directory with its own config and database: no Station is touched,
@@ -288,10 +304,12 @@ def _selftest_end_to_end() -> tuple[str, bool, str]:
         from PyQt6.QtCore import QCoreApplication
 
         from .config import read_config
-        from .report.pdf import pdf_helper_command, pdf_has_text
+        from .report.pdf import pdf_helper_command, pdf_has_text, pdf_sandbox_choice
         from .run_session.headless import HeadlessRunSession, SessionState
 
-        session = HeadlessRunSession(read_config(config_file))
+        # Packet 30d: a headless run has no dialog, so the PDF renders unsandboxed only if the flag
+        # said so; otherwise the HTML is written and the PDF is skipped.
+        session = HeadlessRunSession(read_config(config_file), pdf_choice=pdf_sandbox_choice(allow_unsandboxed_pdf))
         written: list[tuple[str, str]] = []
         try:
             session.report_written.connect(lambda html, pdf: written.append((html, pdf)))
@@ -306,6 +324,14 @@ def _selftest_end_to_end() -> tuple[str, bool, str]:
                 return ("run end-to-end", False, "the _pdf helper never reported the report")
             html_path, pdf_path = written[0]
             if not pdf_path:
+                if _is_root() and not allow_unsandboxed_pdf:
+                    return (
+                        "run end-to-end",
+                        False,
+                        f"the PDF was skipped: ATE is running as root or an administrator and Chromium "
+                        f"cannot render with the sandbox there, and no --allow-unsandboxed-pdf was given. "
+                        f"The HTML report is at {html_path}; rerun with 'ate --allow-unsandboxed-pdf _selftest --run' to get the PDF",
+                    )
                 return ("run end-to-end", False, "the _pdf helper wrote no PDF")
             html = Path(html_path).read_bytes()
             pdf = Path(pdf_path).read_bytes()
@@ -377,6 +403,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="ATE — Automated Test Equipment. With no subcommand, opens the application.",
     )
     parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
+    parser.add_argument(
+        "--allow-unsandboxed-pdf",
+        action="store_true",
+        help="when ATE runs as root or an administrator, render Test Report PDFs without Chromium's sandbox instead of asking (or skipping them)",
+    )
     parser.add_argument("-V", "--version", action="store_true", help="print ATE's version and exit")
 
     sub = parser.add_subparsers(dest="command", metavar="db|setup|definition")
@@ -415,11 +446,15 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Hidden helper subcommands, dispatched before parsing so they stay out of --help
     # (30a review item 12): _pdf is the PDF child process (ticket 22), _selftest is the
-    # frozen bundle's inventory check (packet 27a).
-    if argv and argv[0] == "_pdf":
-        return _cmd_pdf_helper(argv[1:])
-    if argv and argv[0] == "_selftest":
-        return _cmd_selftest(argv[1:])
+    # frozen bundle's inventory check (packet 27a). Packet 30d's flag belongs to `ate`, so
+    # it is read off argv here too: `ate --allow-unsandboxed-pdf _selftest --run` is the same
+    # decision as `ate _selftest --run --allow-unsandboxed-pdf`.
+    allow_unsandboxed_pdf = "--allow-unsandboxed-pdf" in argv
+    hidden = [token for token in argv if token != "--allow-unsandboxed-pdf"]
+    if hidden and hidden[0] == "_pdf":
+        return _cmd_pdf_helper(hidden[1:])
+    if hidden and hidden[0] == "_selftest":
+        return _cmd_selftest(hidden[1:], allow_unsandboxed_pdf)
     try:
         args, unknown = _build_parser().parse_known_args(argv)
     except SystemExit as exc:

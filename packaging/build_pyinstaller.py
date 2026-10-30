@@ -149,12 +149,14 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
         raise SystemExit(f"smoke: --version printed {version!r}, not a semver")
     lines.append(f"version: {version} (build expected {expected_version})")
 
-    # 2. QWebEngine renders a page to PDF inside the frozen bundle.
+    # 2. QWebEngine renders a page to PDF inside the frozen bundle. Packet 30d: the helper is told
+    #    explicitly to render unsandboxed (the build runners are root); an ordinary user's `_pdf`
+    #    ignores the flag and keeps the sandbox.
     tmp = Path(tempfile.mkdtemp(prefix="ate-smoke-"))
     try:
         html, pdf = tmp / "report.html", tmp / "report.pdf"
         html.write_text(SMOKE_HTML, encoding="utf-8")
-        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4"], env=env, timeout=300)
+        _run([str(exe), "_pdf", str(html), str(pdf), "--paper", "A4", "--unsandboxed"], env=env, timeout=300)
         data = pdf.read_bytes()
         if not data.startswith(b"%PDF"):
             raise SystemExit(f"smoke: _pdf wrote {len(data)} bytes that are not a PDF")
@@ -164,7 +166,8 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
 
     # 3. the bundle's own inventory, and a built-in Test Schedule run end to end through it:
     #    engine, store, report HTML, and the _pdf child (the bundle's own executable when frozen).
-    out = _run([str(exe), "_selftest", "--run"], env=env, timeout=300)
+    #    The flag (packet 30d) is what lets a privileged runner's schedule produce a PDF at all.
+    out = _run([str(exe), "--allow-unsandboxed-pdf", "_selftest", "--run"], env=env, timeout=300)
     lines.append("selftest: " + "; ".join(out.stdout.strip().splitlines()))
 
     # 4. the files the hooks are supposed to have collected: the WebEngine helper and its

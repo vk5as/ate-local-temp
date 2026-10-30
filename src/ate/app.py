@@ -38,6 +38,7 @@ from ._version import __version__
 from .config import Config, ConfigError, MissingConfigError, config_hint, config_path, read_config
 from .history.session import HistorySession
 from .log import LogError, open_app_log
+from .report.pdf import pdf_sandbox_choice
 from .run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .storage.store import DbLaunchStatus, check_database_at_launch
 from .ui.history_screen import HistoryScreen
@@ -76,18 +77,22 @@ class MainWindow(QMainWindow):
         history_screen: Optional[HistoryScreen] = None,
         app_log=None,
         confirm_close: Optional[Callable[[str], bool]] = None,
+        pdf_choice: Optional[Callable[[], str]] = None,
     ) -> None:
         super().__init__()
         self.session = session
         self.config = config
         self.app_log = app_log
+        # Packet 30d: the same decision the run session was given, so History's Regenerate asks the
+        # same question instead of reaching for the environment.
+        self.pdf_choice = pdf_choice
         # Injectable "abort the run and quit?" answer so tests never block on a modal box (30a item 10).
         self._confirm_close = confirm_close or _close_confirm_dialog
         self._run_active = False
         self._released = False
         self.setWindowTitle(f"ATE {__version__} — {config.station_name}")
 
-        self.history_session = HistorySession(session.store, config=session.config)
+        self.history_session = HistorySession(session.store, config=session.config, pdf_choice=pdf_choice)
 
         # The two layouts, both bound to this session from the start (packet 25b).
         self.staged_screen = run_screen if isinstance(run_screen, StagedRunScreen) else StagedRunScreen(session)
@@ -368,6 +373,40 @@ def _close_confirm_dialog(message: str) -> bool:
     return box.clickedButton() is abort
 
 
+def _pdf_sandbox_box() -> QMessageBox:
+    """The unsandboxed-PDF question, built but not shown (packet 30d).
+
+    One or two plain lines and two buttons; "Skip PDF" is the default button so an untouched dialog
+    answers No. Kept separate from :func:`_pdf_sandbox_dialog` so the wording and the default can be
+    inspected — and screenshotted — without running a modal loop."""
+    box = QMessageBox()
+    box.setWindowTitle("ATE")
+    box.setText("Chromium's sandbox keeps the PDF renderer from touching the rest of the machine.")
+    box.setInformativeText(
+        "ATE is running as root or an administrator, so this PDF can only be rendered with the "
+        "sandbox off. The HTML Test Report is already saved."
+    )
+    without = box.addButton("Generate PDF without sandbox", QMessageBox.ButtonRole.AcceptRole)
+    skip = box.addButton("Skip PDF", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(skip)  # No is the default: an untouched dialog skips the PDF
+    box._unsandbox_button = without
+    return box
+
+
+def _pdf_sandbox_dialog() -> bool:
+    """Ask the Operator whether this Test Report PDF may render without Chromium's sandbox (30d).
+
+    Called on the GUI thread for one PDF at a time — at run end and on History's Regenerate — while
+    the run's recording is already closed and the helper is a separate process, so the box blocks
+    nothing but the Operator. A dismissed box (`ATE_AUTO_DISMISS_DIALOG`, packet 30c) clicks no
+    button and therefore answers No."""
+    QApplication.instance() or QApplication([])  # keep an application alive while the box is up
+    box = _pdf_sandbox_box()
+    _dismiss_if_headless(box)
+    box.exec()
+    return box.clickedButton() is getattr(box, "_unsandbox_button", None)
+
+
 def launch(
     argv: Optional[list[str]] = None,
     *,
@@ -375,17 +414,25 @@ def launch(
     prompt: Optional[Callable[[str], bool]] = None,
     alert: Optional[Callable[[str], None]] = None,
     confirm_close: Optional[Callable[[str], bool]] = None,
+    pdf_dialog: Optional[Callable[[], bool]] = None,
 ) -> LaunchOutcome:
     """Open the application from ``ate``'s arguments. Returns the exit code and the window.
 
     ``prompt`` answers the missing-config dialog (True creates the defaults), ``alert`` reports a
-    refusal, and ``confirm_close`` answers the "abort the run and quit?" question when the window
-    is closed while a Test Run is in progress. With ``exec_=False`` the window is built but
+    refusal, ``confirm_close`` answers the "abort the run and quit?" question when the window
+    is closed while a Test Run is in progress, and ``pdf_dialog`` answers the packet 30d question
+    asked before every PDF when ATE runs as root or an administrator (True renders it without
+    Chromium's sandbox). With ``exec_=False`` the window is built but
     neither shown nor looped — the tests use that; the real launch shows it and enters the loop.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="ate", description="Open the ATE application")
     parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
+    parser.add_argument(
+        "--allow-unsandboxed-pdf",
+        action="store_true",
+        help="when ATE runs as root or an administrator, render Test Report PDFs without Chromium's sandbox without asking",
+    )
     args, _unknown = parser.parse_known_args(argv)
 
     prompt = prompt or _missing_config_dialog
@@ -440,12 +487,18 @@ def launch(
         app_log.close()
         return refuse(refusal.message)
 
+    # Packet 30d: the decision every PDF asks, built once here and passed down. The run session and
+    # History both ask it; neither looks at the environment or at who started ATE.
+    pdf_choice = pdf_sandbox_choice(args.allow_unsandboxed_pdf, ask=pdf_dialog or _pdf_sandbox_dialog, log=app_log.log)
+    if args.allow_unsandboxed_pdf:
+        app_log.log("INFO", "ate", "--allow-unsandboxed-pdf given: Test Report PDFs may render without Chromium's sandbox when ATE is privileged")
+
     # The session reuses this launch's config and application log: one read, one log (30a review).
-    session = HeadlessRunSession(config, app_log=app_log)
+    session = HeadlessRunSession(config, app_log=app_log, pdf_choice=pdf_choice)
     session.store.close_interrupted_runs(on_log=session.on_log)  # spec 98, logged by the store itself
 
     app = QApplication.instance() or QApplication([])  # reused when a test already has one
-    window = MainWindow(session, config, app_log=app_log, confirm_close=confirm_close)
+    window = MainWindow(session, config, app_log=app_log, confirm_close=confirm_close, pdf_choice=pdf_choice)
     if not exec_:
         # Keep the application referenced: a local QApplication dying here would take the
         # window (and the session's store) with it (30a review item 2).

@@ -10,16 +10,27 @@ that the plain CLI does not:
   on Linux and ``Qt6/bin`` on Windows (``QtWebEngineProcess.exe`` there).
 * Headless runs (``QT_QPA_PLATFORM=offscreen``, the PDF helper) have no GPU to show a page
   on; Chromium is told not to look for one. The GUI is unaffected.
-* Chromium will not build a renderer sandbox under root or an administrator, and the CI runner
-  and the installer's ``ate setup`` are both privileged: ``--no-sandbox`` and
-  ``QTWEBENGINE_DISABLE_SANDBOX=1`` are set for a privileged process so the report renders
-  instead of dying in the zygote host.
+* Chromium will not build a renderer sandbox under root or an administrator, but this entry
+  point never turns it off on its own (packet 30d). Only a process the parent told it to —
+  the ``_pdf`` helper started with ``--unsandboxed`` after the Operator or the
+  ``--allow-unsandboxed-pdf`` flag said yes — gets the sandbox-off knobs. An ordinary user
+  keeps the sandbox, and a privileged ATE that was never asked renders no PDF at all.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+# The helper argument that carries the packet 30d decision. Written out here rather than
+# imported from ate.report.pdf because this module runs before ATE is imported, and a frozen
+# bundle must set these knobs before QtWebEngine starts.
+UNSANDBOXED_FLAG = "--unsandboxed"
+
+
+def _decision_yes(argv: list[str]) -> bool:
+    """True only when the parent explicitly asked this process to render without the sandbox."""
+    return UNSANDBOXED_FLAG in argv
 
 
 def _elevated() -> bool:
@@ -60,27 +71,29 @@ def _webengine_process(base: str, name: str) -> str | None:
     return None
 
 
-def _chromium_flags() -> str:
+def _chromium_flags(allow_unsandboxed: bool = False) -> str:
     """Chromium flags for a headless render, added to whatever the caller already set.
 
     ``setdefault`` would throw away flags the packager or CI set; appending keeps them and makes
-    ``--no-gpu`` apply whatever else is in there. A privileged process gets ``--no-sandbox``:
-    Chromium's renderer sandbox does not start under root or an administrator."""
+    ``--no-gpu`` apply whatever else is in there. ``--no-sandbox`` is added only when the packet 30d
+    decision said yes for this process and it is privileged: a renderer under root or an
+    administrator cannot build a sandbox, and nothing here turns it off on its own."""
     flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
     for flag in ("--no-gpu", "--disable-gpu"):
         if flag not in flags:
             flags.append(flag)
-    if _elevated() and "--no-sandbox" not in flags:
+    if allow_unsandboxed and _elevated() and "--no-sandbox" not in flags:
         flags.append("--no-sandbox")
     return " ".join(flags)
 
 
-def _prepare_webengine_env() -> None:
+def _prepare_webengine_env(argv: list[str] | None = None) -> None:
     """Set the environment a frozen ATE needs before QtWebEngine starts.
 
-    Only the frozen entry point calls it, but it is a function so the tests can run it without
-    a frozen bundle. Root or an administrator cannot build Chromium's renderer sandbox, and a
-    headless render has no GPU to look for."""
+    Only the frozen entry point calls it, but it is a function so the tests can run it without a
+    frozen bundle. A headless render has no GPU to look for; the renderer sandbox is disabled only
+    for a process the parent explicitly told to render unsandboxed (packet 30d), never because this
+    process happens to be root or an administrator."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
     helper = _webengine_process(base, name)
@@ -88,14 +101,16 @@ def _prepare_webengine_env() -> None:
         os.environ["QTWEBENGINEPROCESS_PATH"] = helper
     elif os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         print(f"ate: no bundled {name} found under {base}", file=sys.stderr)
-    if _elevated():
-        # Root or administrator: the renderer sandbox cannot be built at all.
+    allow_unsandboxed = _decision_yes(list(sys.argv[1:] if argv is None else argv)) and _elevated()
+    if allow_unsandboxed:
+        # The parent's decision, carried in as --unsandboxed: the renderer sandbox cannot be built
+        # under root or an administrator, so this one render runs without it.
         os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
         flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
         if "--no-sandbox" not in flags:
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags + ["--no-sandbox"])
     if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _chromium_flags()
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _chromium_flags(allow_unsandboxed)
 
 
 if getattr(sys, "frozen", False):

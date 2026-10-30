@@ -600,10 +600,19 @@ class FakeContainer:
             if self.version_exit:
                 return smoke.CommandResult(self.version_exit, "", "ate: the installed program would not start")
             return smoke.CommandResult(0, f"{self.version}\n", "")
-        if args[:2] == ["_selftest", "--run"]:
+        if args[:1] == ["--allow-unsandboxed-pdf"] and args[1:3] == ["_selftest", "--run"]:
             # The frozen bundle's end-to-end run needs QtWebEngine; the CI runs it, the fake says
             # what 27a's smoke prints when it passes, and `selftest_exit` makes it fail.
             return smoke.CommandResult(self.selftest_exit, self.selftest_output, "")
+        if args[:2] == ["_selftest", "--run"]:
+            # Packet 30d: this container is root, so a selftest that was not given the flag reports
+            # its PDF as skipped and exits non-zero. A smoke run that forgets the flag fails here.
+            return smoke.CommandResult(
+                1,
+                "run end-to-end: MISSING - the PDF was skipped: ATE is running as root or an "
+                "administrator and no --allow-unsandboxed-pdf was given\n",
+                "",
+            )
         return self._subprocess(argv)
 
 
@@ -804,7 +813,16 @@ def test_selftest_run_that_fails_is_reported(tmp_path: Path) -> None:
     runner, station = _container(tmp_path, selftest_exit=1, selftest_output="run end-to-end: MISSING - the PDF has no fonts\n")
     with pytest.raises(smoke.SmokeError, match="ate _selftest --run failed"):
         smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
-    assert any(c[1:] == ["_selftest", "--run"] for c in runner.calls), runner.calls
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
+
+
+def test_the_smoke_passes_the_sandbox_flag_because_the_container_is_root(tmp_path: Path) -> None:
+    """Packet 30d: the container runs as root, so a selftest without the flag reports its PDF as
+    skipped and exits non-zero. If the smoke script stopped passing the flag, this run would fail
+    before it ever printed the selftest line."""
+    runner, station = _container(tmp_path)
+    smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
+    assert any(c[1:] == ["--allow-unsandboxed-pdf", "_selftest", "--run"] for c in runner.calls), runner.calls
 
 
 def test_an_ate_that_will_not_start_is_reported(tmp_path: Path) -> None:

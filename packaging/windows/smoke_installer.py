@@ -297,7 +297,9 @@ def run_smoke(
         fail(f"ate db status did not print a schema version: exit {result.returncode}: {result.output()[-300:]}")
     note(f"database at {database} reports schema version {result.stdout.strip()}")
 
-    result = runner.run([ate_exe, "_selftest", "--run"], env=env)
+    # Packet 30d: the runner is privileged, so the PDF is rendered with Chromium's sandbox off only
+    # because this script said so; without the flag a privileged run skips the PDF and fails.
+    result = runner.run([ate_exe, "--allow-unsandboxed-pdf", "_selftest", "--run"], env=env)
     if result.returncode != 0:
         fail(f"ate _selftest --run failed: {result.output()[-600:]}")
     note("the frozen bundle runs a Test Schedule end to end")

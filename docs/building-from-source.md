@@ -50,6 +50,35 @@ rooted Station reads and writes inside `DIR` and never touches the platform data
 
 On Windows the venv paths are `.venv\Scripts\activate` instead.
 
+## Running ATE as root or as an administrator (packet 30d)
+
+Chromium's renderer sandbox does not start under root or an elevated Windows
+administrator, so a Test Report PDF rendered there can only be printed with the
+sandbox off. ATE never does that silently:
+
+* an ordinary user is never asked and never loses the sandbox, with or without the flag;
+* an elevated user is asked before **each** PDF — at run end and on History's
+  *Regenerate* — with a dialog whose buttons are "Generate PDF without sandbox" and
+  "Skip PDF", the latter being the default. Skipping writes no PDF: the HTML Test
+  Report is already on disk, the skip is logged in the application log, and the run-end
+  flow still completes;
+* the start-up flag `--allow-unsandboxed-pdf` presets Yes for a privileged run with no
+  dialog, and logs that it did:
+  `ate --allow-unsandboxed-pdf _selftest --run`;
+* with no flag and no way to ask (headless, `ate _selftest --run`, a dialog dismissed by
+  `ATE_AUTO_DISMISS_DIALOG`) the answer is No and no PDF is written. `ate _selftest --run`
+  then reports the PDF as skipped and fails, naming the flag.
+
+The decision is passed to the hidden `ate _pdf` child as an argument (`--unsandboxed`) and
+through the child's environment; nothing in `ate.report.pdf`, the run session or the frozen
+entry point decides it from who started ATE. Run `ate _pdf` directly as root without the
+argument and it refuses with a non-zero exit. Handed to an unprivileged process, the
+argument is ignored with a warning: the sandbox is kept.
+
+The release smoke scripts pass the flag, because their containers and runners are
+privileged.
+
+
 ## Building the wheel
 
 ```bash
