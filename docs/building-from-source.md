@@ -82,22 +82,28 @@ What the script does:
    `dist/ate/`: the `ate` executable next to its `_internal` directory;
 4. with `--smoke`, runs the checks the release CI runs: `dist/ate/ate --version`,
    `dist/ate/ate _pdf report.html report.pdf` (QtWebEngine rendering, with
-   `QT_QPA_PLATFORM=offscreen`), `dist/ate/ate _selftest`, and a check that the WebEngine
+   `QT_QPA_PLATFORM=offscreen`), `dist/ate/ate _selftest --run`, and a check that the WebEngine
    helper and the template/Lua files are inside `_internal`.
 
 The bundle carries CPython and every dependency, plus the things no import reaches: the
 report template and the bundled `ate.` Lua modules, lupa's native Lua runtime, pyvisa-py and
 its protocols (pyvisa picks a backend by name at runtime), and QtWebEngine's
 `QtWebEngineProcess` helper with its `.pak`, ICU and V8 data. NI-VISA is never bundled;
-pyvisa falls back to pyvisa-py for TCPIP and USBTMC.
+pyvisa falls back to pyvisa-py for TCPIP and USBTMC. The Qt bindings ATE never import
+(QML/Quick, Qt3D, QtMultimedia, QtBluetooth and the rest) are excluded from the bundle:
+the shared libraries QtWebEngine is linked against are still collected, so the exclusion
+only removes bindings and their data.
 
 `ate _selftest` is a hidden subcommand (like `ate _pdf`) that prints one line per thing the
-bundle must carry and exits 1 if any is missing. It is a build-time inventory, not a feature:
-it touches no Station, database or Test Run.
+bundle must carry and exits 1 if any is missing. With `--run` it adds one end-to-end check: a
+built-in one-step Test Schedule is run headless through `HeadlessRunSession` in a temporary
+directory with its own config and database, and the check passes only if the run wrote its HTML
+report and the `_pdf` child (the bundle's own executable when frozen) wrote the PDF. Apart from
+that temporary directory it touches no Station, database or Test Run.
 
 `build/` and `dist/` are gitignored: build output is never committed, and the build is
-reproducible from a clean checkout. The bundle is roughly 550 MB on disk — Qt's libraries
-and QtWebEngine are the bulk of it.
+reproducible from a clean checkout. The bundle is roughly 490 MB on disk (579 MB before the
+Qt exclusions) — Qt's libraries and QtWebEngine are the bulk of it.
 
 ## Tests
 

@@ -165,7 +165,20 @@ def test_the_ticked_box_claims_only_what_was_built_here() -> None:
     assert not any(line.startswith("- [x]") and "build_pyinstaller" in line for line in ci.splitlines()), "the line belongs in 27c's body, not a checkbox"
 
 
-# Build scratch that must not be left in the checkout by a run.
+def test_selftest_run_executes_a_schedule_and_writes_both_reports(capsys) -> None:
+    """``_selftest --run`` runs a built-in Test Schedule and proves both reports were written.
+
+    The PDF comes from the hidden ``_pdf`` child — the bundle's own executable when frozen — so this
+    is the end-to-end proof a frozen ATE can run a Test Run, not just import its modules.
+    """
+    from ate.cli import main
+
+    assert main(["_selftest", "--run"]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "run end-to-end: ok" in out, out
+    assert "bytes HTML" in out and "bytes PDF" in out, out
+
+
 def _repo_build_state() -> list[str]:
     """dist/, build/ and any spec scratch in the checkout, as paths."""
     junk = [REPO / "dist", REPO / "build"]
