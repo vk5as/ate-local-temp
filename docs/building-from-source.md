@@ -1,8 +1,8 @@
 # Building ATE from source
 
-Packet 28a: the wheel and the source build. The `.deb`, the `.tar.gz` with
-`install.sh` and the Windows installer are separate packets; this page covers
-running ATE from a checkout and building the wheel.
+Packet 28a: the wheel and the source build, plus the Linux artifacts (28b). The Windows
+installer is a separate packet; this page covers running ATE from a checkout, building the
+wheel, and packaging the frozen build for Linux.
 
 ATE targets CPython **3.13** (Debian stable's system Python) and **3.14** (the
 version the frozen builds bundle). Anything older is refused by
@@ -116,6 +116,87 @@ that temporary directory it touches no Station, database or Test Run.
 `build/` and `dist/` are gitignored: build output is never committed, and the build is
 reproducible from a clean checkout. The bundle is roughly 490 MB on disk (579 MB before the
 Qt exclusions) — Qt's libraries and QtWebEngine are the bulk of it.
+
+## Linux packages
+
+Both Linux artifacts come out of that same `dist/ate` bundle:
+
+```bash
+python packaging/linux/build_linux.py --dist dist --build   # builds dist/ate first if needed
+```
+
+They land in `--out` (default the `--dist` directory):
+
+| Artifact | Name |
+| --- | --- |
+| tarball | `ate-<version>-linux-x86_64.tar.gz` |
+| Debian package | `ate_<version>_amd64.deb` |
+
+### The tarball
+
+Inside it are the bundle as `ate/` and `install.sh` next to it:
+
+```bash
+tar -xzf ate-0.0.0-dev-linux-x86_64.tar.gz
+./install.sh                          # /opt/ate, /usr/bin/ate, then "ate setup"
+./install.sh --prefix /opt/ate        # or PREFIX=...; --bin puts the link somewhere else
+./install.sh --uninstall              # removes the program only
+```
+
+`install.sh` is idempotent: re-running it replaces the bundle in the prefix and runs `ate setup`
+again, which never overwrites an existing config. Nothing under `/etc/ate` or `/var/lib/ate` is
+touched, so an upgrade keeps the config, the database, the reports and the logs. As root the link
+goes to `/usr/bin/ate`; unprivileged it goes to `<prefix>/bin/ate` instead, and setup skips the
+group/ownership steps. `--uninstall` removes the prefix and the link, the same as `apt remove`.
+
+### The .deb
+
+Built with `dpkg-deb --root-owner-group --build` from a staging directory, so nothing on the
+build machine's ownership leaks into the package:
+
+- `/opt/ate/…` is the whole bundle, and `/usr/bin/ate` is a symlink to `/opt/ate/ate`.
+- `postinst` runs `/opt/ate/ate setup` on `configure` — the same command the installer and
+  `install.sh` run (see the spec's Packaging section).
+- `postrm`: on `remove` it does nothing, so the Station's config and data survive; on `purge` it
+  deletes `/etc/ate/config.json` and the config directory if it is empty, and **never** touches
+  `/var/lib/ate` — the database, its WAL files, the reports and the logs are records.
+- `/etc/ate/config.json` is **not** a conffile. `ate setup` creates it, so it is not in the
+  package's file list and dpkg would leave it behind even on purge; `postrm` removes it instead.
+
+The version in `Version` is ATE's version as dpkg will accept it: the untagged `0.0.0-dev` becomes
+`0.0.0~dev` (`~` sorts before an empty string, so a development build precedes 0.0.0), and anything
+outside `[A-Za-z0-9.+~:-]` is rewritten as `-`.
+
+The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, fontconfig and
+libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is what
+it links against at runtime, which is the entire `Depends` list — established by running `ldd` over
+a built bundle's `_internal` and keeping only the libraries that resolve to the system:
+
+| Depends | Why |
+| --- | --- |
+| `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
+| `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
+| `libdrm2`, `libxcb-dri3-0` | QtWebEngine's GPU/direct-rendering path |
+| `libxcb1` | libxcb, used by Qt's xcb platform plugin |
+| `libwayland-client0`, `libwayland-cursor0`, `libwayland-egl1` | only reached when the desktop is Wayland rather than X |
+
+### Testing seams
+
+Only these exist, and only the packaging scripts read them:
+
+| Variable / flag | What it does |
+| --- | --- |
+| `ATE_DEB_ROOT` | Prefixes `/opt/ate`, `/etc/ate` and `/var/lib/ate` in `postinst` and `postrm` so they can run against a temporary root without dpkg or root |
+| `install.sh --prefix` / `--bin` | Aim the install at a temporary directory instead of `/opt/ate` and `/usr/bin/ate` |
+
+`tests/test_linux_packages_28b.py` runs the scripts against a stub bundle in seconds: it checks
+the tarball and the deb layout, that the maintainer scripts are executable and pass `sh -n`, that
+`purge` never deletes the data directory, and that `install.sh` copies the bundle, links it and
+runs `setup`.
+
+The packaged-artifact test is marked `build` like the frozen-build test: with
+`ATE_BUILD_TESTS=1` it builds the bundle, packages it both ways, extracts the `.deb` with
+`dpkg-deb -x` and runs the extracted `/opt/ate/ate --version` and `_selftest`.
 
 ## Tests
 
