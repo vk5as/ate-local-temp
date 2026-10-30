@@ -253,18 +253,23 @@ precedes the release it is a prerelease of (`dpkg --compare-versions 1.2.3~rc1 l
 outside `[A-Za-z0-9.+~:-]` is rewritten as `-`, and a bundle whose `--version` prints nothing is
 refused rather than packaged as `ate__amd64.deb`.
 
-The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, fontconfig and
-libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is what
-it links against at runtime, which is the entire `Depends` list — established by running `ldd` over
-a built bundle's `_internal` and keeping only the libraries that resolve to the system:
+The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, freetype, fontconfig
+and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot carry is the
+system glibc, GL/EGL and a font. The list is not derived from a manifest: `packaging/linux/docker_smoke.py`
+builds the bundle in a `debian:stable` container, installs the `.deb` there with `apt-get`, and runs
+`ate _selftest --run`. With these five packages the run passes. Remove `libgl1` or `libegl1` and the
+selftest dies with `libGL.so.1: cannot open shared object file`; remove the two font packages and the
+report renders as a 1.7 KB PDF with no text in it, which `ate.report.pdf.pdf_has_text` catches.
 
 | Depends | Why |
 | --- | --- |
 | `libc6` | libc, libm, libdl, libpthread, libresolv: the bundled CPython and Qt are linked against the system glibc |
 | `libgl1`, `libegl1` | libGL/libGLX/libGLdispatch and libEGL: every Qt6 Gui-linked library wants them |
-| `libdrm2`, `libxcb-dri3-0` | QtWebEngine's GPU/direct-rendering path |
-| `libxcb1`, `libxcb-cursor0` | libxcb and its cursor-shape extension: Qt's xcb platform plugin needs both, and without `libxcb-cursor0` it aborts, so the GUI never opens on a clean Debian box |
-| `libwayland-client0`, `libwayland-cursor0`, `libwayland-egl1` | only reached when the desktop is Wayland rather than X |
+| `fontconfig`, `fonts-dejavu-core` | a stock Debian image ships no fonts at all, and QtWebEngine then writes a report PDF with no glyphs |
+
+`libdrm2`, `libxcb1`, `libxcb-dri3-0` and `libwayland-client0` are not listed because apt installs them
+as dependencies of `libgl1`/`libegl1` anyway. The Wayland and extra xcb platform plugins, GTK and CUPS
+are linked against but never opened headless, so they are not depended on either.
 
 ### Testing seams
 
@@ -277,6 +282,11 @@ Only one flag is a seam in the shipped scripts, and it is a real installer flag:
 `postinst` and `postrm` have **no** test seam: they name `/opt/ate`, `/etc/ate` and `/var/lib/ate`
 directly. The test runs a copy of each script with those three paths rewritten to a temporary
 root, so a variable exported on a Station can never change what the installed package does.
+
+`packaging/linux/smoke_linux.py` (28c) never runs on a Station, so its seams are plain flags:
+`--root` and `--home` root `/opt/ate`, `/usr/bin/ate`, `/etc/ate`, `/var/lib/ate` and pipx's
+`~/.local/bin`, and every command the script runs goes through an injected `Runner`. The CI passes
+no `--root`, so in the container the paths are the real ones.
 
 `tests/test_linux_packages_28b.py` runs the scripts against a stub bundle in seconds: it checks
 the tarball and the deb layout, that the maintainer scripts are executable and pass `sh -n`, that
@@ -345,8 +355,97 @@ those things correctly.
 > workflow is checked by reading it (no `actionlint` here, and none was installed to check it).
 > Its first run is the first tag.
 
-The Linux artifacts (the `.tar.gz` and the `.deb`, 28c) have a commented placeholder in the same
-workflow and are not written in this packet.
+The Linux artifacts (the `.tar.gz`, the `.deb` and the wheel, 28c) are built and smoke-tested in
+the same workflow.
+
+### The Linux jobs
+
+`linux-build` runs on `ubuntu-24.04`, and `linux-smoke` runs three times after it — once for each
+of `deb`, `tar` and `wheel` — each in its own `debian:stable` container (`fail-fast: false`, so a
+broken `.deb` does not cancel the wheel's run):
+
+1. `ldd --version | tee dist/glibc-build.txt` — the glibc the bundle will be linked against,
+   recorded so the smoke run can compare it with the container's;
+2. `python packaging/build_pyinstaller.py --smoke` — the bundle and 27a's smoke checks;
+3. `python packaging/linux/build_linux.py --dist dist` — the tarball and the `.deb`;
+4. `python -m build --wheel` — `dist/ate-<version>-py3-none-any.whl`;
+5. one upload of `dist/ate-*-linux-x86_64.tar.gz`, `dist/ate_*_amd64.deb`, `dist/ate-*.whl` and
+   `dist/glibc-build.txt` as `ate-linux-artifacts`, with `if-no-files-found: error`.
+
+Each smoke job then runs `python3 packaging/linux/smoke_linux.py --kind deb|tar|wheel --dist
+artifacts --expect-version "$tag"` in a container that has nothing installed, which is the point
+(`--expect-version` is the tag: the bundle carries it in `ate/version.txt` and the wheel in its
+metadata, so `ate --version` has to print it):
+
+- **`.deb`** — `apt-get install -y ./ate_*.deb`. apt resolving the package's `Depends` on Debian
+  stable is the check, and `postinst` has already run `ate setup`;
+- **`.tar.gz`** — the runtime libraries are installed from the `DEPENDS` list in
+  `packaging/linux/build_linux.py` (read from the script, never copied into the smoke script), then
+  `tar -xzf` and `./install.sh`;
+- **wheel** — `python3`, `python3-venv`, `pipx` and `WHEEL_SYSTEM_LIBS` from the same script: Debian
+  stable's Python is 3.13, and the wheel pulls PyQt6 and QtWebEngine from PyPI, so it needs the
+  libraries PyPI's Qt is linked against rather than the bundle's own. `pipx install ./ate-*.whl`,
+  then `ate setup`, because a wheel has no postinst:
+
+  ```bash
+  apt-get install -y --no-install-recommends python3 python3-venv pipx \
+    libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libxtst6 libxkbcommon0 libxkbfile1 libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core
+  pipx install dist/ate-1.2.3-py3-none-any.whl
+  ```
+
+  Each of those was found by taking the list apart one package at a time in a fresh container: every
+  removal makes `ate _selftest --run` fail with "cannot open shared object file".
+
+Every kind has to print a version, leave `/etc/ate/config.json` and the database that config names,
+answer `ate db status` with a schema version, run `ate _selftest --run` headless, and scan the
+shipped example Media Release copied into the configured definitions directory with nothing broken
+and nothing mismatched. The `.deb` run then checks that `apt remove` keeps the config and the data
+and that `apt purge` removes the config while leaving the database, reports and logs; the tarball
+run runs `install.sh` again (an upgrade: the data survives, `_internal` is cleared) and then
+`--uninstall`, which removes the program and nothing else. The container runs as root, so
+`ate setup` really creates the `ate` group and sets the ownership of `/etc/ate` and `/var/lib/ate`;
+`QT_QPA_PLATFORM=offscreen` is set at job level for QtWebEngine.
+
+**Why `ubuntu-24.04`, not `ubuntu-latest`.** A PyInstaller bundle is linked against the glibc of the
+machine that built it, and glibc is only forward compatible: a binary built against 2.39 runs on
+2.41, never the other way round. Ubuntu 24.04 ships glibc 2.39 and Debian stable ships a newer one,
+so artifacts built there start in the smoke container; `ubuntu-latest` will move to a newer Ubuntu,
+and a bundle linked against that glibc would fail to start in Debian. The build writes its own
+version into `dist/glibc-build.txt` and every smoke run reads it back and refuses a container with
+an older glibc — the baseline is checked, not trusted. Move the pin only with a Debian that can run
+it.
+
+`smoke_linux.py` is one script shared by the three runs; it stops at the first failure and names it.
+Every command it runs goes through an injected `Runner`, and `Station(root=…)` roots `/opt/ate`,
+`/usr/bin/ate`, `/etc/ate` and `/var/lib/ate` in a directory, so `tests/test_release_ci_28c.py`
+drives the whole sequence against a fake Debian container on Linux: `apt-get` and `dpkg` are
+modelled, `install.sh` really runs through its `--prefix`/`--bin` seam, and every `ate` call is the
+real source CLI against that container's config and database. Those tests prove the script catches a
+postinst that never ran setup, a database at the wrong schema, a Media Release with broken entries,
+a purge that keeps the config or deletes the records, and an uninstall that loses data — not that a
+real Debian install does any of them.
+
+The real thing is `packaging/linux/docker_smoke.py`, which needs Docker and network:
+
+```bash
+python packaging/linux/docker_smoke.py                                   # build, then deb, tar, wheel
+python packaging/linux/docker_smoke.py --kinds deb --skip-build --out /tmp/ate-docker
+ATE_DOCKER_TESTS=1 pytest -m build -q                                    # the same run as a test
+```
+
+It tags a copy of the checkout `v1.2.3`, builds the bundle with the container's own `/usr/bin/python3`
+(3.13 on Debian stable), packages the tarball, the `.deb` and the wheel, and then runs the smoke
+script — the exact command the release job runs — in three *fresh* `debian:stable` containers. Each
+one also renders a page with the installed `ate` and reads the PDF back with `pdftotext`, because a
+valid PDF with no glyphs is exactly the failure the release CI is meant to catch.
+
+> **Never run.** `linux-build` and `linux-smoke` in `release.yml` have still never executed: no tag of
+> this repository has been cut, so GitHub Actions has never started them, and the workflow is checked
+> by reading it (no `actionlint` here, and none was installed). What *has* run is the same artifact
+> trio in the same `debian:stable` image, through `packaging/linux/docker_smoke.py`: `dpkg` has
+> installed the `.deb`, `install.sh` has installed the tarball, and `pipx` has installed the wheel.
+> The Windows jobs, `ate.iss` and `smoke_installer.py` have still never run anywhere.
 
 ## Tests
 

@@ -11,9 +11,15 @@ the same on any CPython and needs nothing but `dpkg-deb` for the Debian package:
     ate-<version>-linux-x86_64.tar.gz   `ate/` (the bundle) + `install.sh` next to it
     ate_<version>_amd64.deb             the bundle under /opt/ate, /usr/bin/ate linking to it
 
-The `.deb` is self-contained: everything ATE runs on (CPython, Qt, QtWebEngine, lupa, pyvisa-py,
-ICU, NSS, fontconfig, libX11) is inside `_internal`. What it cannot carry is the system's own
-libc and the GL/X libraries the Qt bundle is *linked* against, which is the whole `Depends` list.
+The `.deb` carries its own CPython, Qt, QtWebEngine, lupa and pyvisa-py inside `_internal`, but not
+the libraries those are *linked* against: the system libc, GL/EGL, and a font, because QtWebEngine
+renders the Test Report through the system's fontconfig and fonts and writes a PDF with no text at
+all when there is none. That is the `Depends` list below, established by running the built bundle in
+a clean `debian:stable` container (packaging/linux/docker_smoke.py), not by reading a manifest.
+
+The wheel is a different animal: it uses the container's own CPython and PyPI's PyQt6, so it needs
+more system libraries than the bundle does. `WHEEL_SYSTEM_LIBS` is that list, kept here so the
+smoke run and the docs install the same set.
 """
 
 from __future__ import annotations
@@ -35,22 +41,52 @@ INSTALL_SH = HERE / "install.sh"
 MAINTAINER = "VK5AS <vk5as.com@gmail.com>"
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
-# What the bundle links against and cannot ship: glibc, GL/EGL, and the X libraries Qt's platform
-# plugins need. Determined by ldd over a built bundle's _internal: everything else resolves inside
-# the bundle. libdrm and libxcb-dri3 are what QtWebEngine uses for its GPU path; the wayland
-# libraries are only reached when the desktop is Wayland rather than X.
+# What the bundle links against and cannot ship: glibc, GL/EGL, and a font. Everything else Qt is
+# linked against (libX11, libXext, the libxcb family, libXcomposite, libXrandr, libXtst, libglib,
+# libdbus, libxkbcommon, libasound, libnss, ICU, freetype, fontconfig) is inside `_internal`, which
+# is why the package needs no Debian Python or Qt packages at all.
+#
+# This list is not a guess: `packaging/linux/docker_smoke.py` builds the bundle in a debian:stable
+# container, installs the .deb there with apt-get, and runs `ate _selftest --run`. With these five
+# packages the run passes; drop libgl1 or libegl1 and the selftest dies with
+# "libGL.so.1: cannot open shared object file". libdrm, libxcb and libxkbcommon come in as libegl1's
+# and libgl1's own dependencies, so naming them here would only duplicate apt.
+#
+# fontconfig and fonts-dejavu-core are not a nicety: a Debian container ships no fonts at all, and
+# QtWebEngine then renders the report page with no glyphs — a 1.7 KB PDF with no text in it, which
+# pdftotext reads as empty. With them the same report is a ~66 KB PDF with the words in it. See
+# ate.report.pdf.pdf_has_text, which the selftest uses to catch exactly this.
 DEPENDS = (
     "libc6",  # libc.so.6, libm, libdl, libpthread, libresolv
+    "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0: Qt's Gui is linked against them
+    "libegl1",  # libEGL.so.1, which Qt6Gui and Qt6WebEngineCore both want
+    "fontconfig",  # /etc/fonts: the bundled libfontconfig has no font list to read without it
+    "fonts-dejavu-core",  # DejaVu Sans, the smallest font Debian ships that Chromium accepts
+)
+
+# The wheel uses the container's own CPython and PyPI's PyQt6/QtWebEngine, so the system libraries
+# it needs are not the bundle's: PyPI's Qt is linked against a wider set of X and GL libraries than
+# the bundle's own Qt, and it carries no fonts either. Established in a fresh debian:stable
+# container by installing the wheel with pipx and then removing one package at a time: each entry
+# below makes `ate _selftest --run` die with "cannot open shared object file". libdrm, libxcb and
+# libxkbcommon come in as libgl1's and libegl1's own dependencies, so they are not repeated here;
+# libnss, libgssapi, libpulse, libpcsclite and the rest of the xcb family turned out not to be
+# needed at all by a headless report render.
+WHEEL_SYSTEM_LIBS = (
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0
-    "libegl1",  # libEGL.so.1, which every Qt6 Gui-linked library wants
-    "libdrm2",  # libdrm.so.2, needed by Qt6WebEngineCore
-    "libxcb1",  # libxcb.so.1, the X connection Qt's xcb platform plugin uses
-    "libxcb-cursor0",  # libxcb-cursor.so.0, the cursor shape extension libQt6XcbQpa needs: without
-    # it Qt's xcb platform plugin cannot open a display, so the GUI refuses to start on a clean box.
-    "libxcb-dri3-0",  # libxcb-dri3.so.0, QtWebEngine's direct rendering
-    "libwayland-client0",
-    "libwayland-cursor0",
-    "libwayland-egl1",
+    "libegl1",  # libEGL.so.1
+    "libglib2.0-0t64",  # libglib-2.0.so.0 and libgthread-2.0.so.0: Qt6 Core/Gui/Network/DBus all want them
+    "libdbus-1-3",  # libdbus-1.so.3, Qt6 Gui/DBus and Chromium's session bus probe
+    "libxcomposite1",
+    "libxdamage1",
+    "libxfixes3",
+    "libxrandr2",
+    "libxtst6",
+    "libxkbcommon0",
+    "libxkbfile1",  # Qt6WebEngineCore's X plumbing
+    "libasound2t64",  # libasound.so.2, Qt6WebEngineCore
+    "libfontconfig1",  # libfontconfig.so.1, the font matcher PyPI's Qt is linked against
+    "fonts-dejavu-core",  # without a font the report PDF renders with no text in it at all
 )
 
 

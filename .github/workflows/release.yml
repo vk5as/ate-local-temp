@@ -1,15 +1,18 @@
 name: Release
 
-# Every tagged release builds and smoke-tests the Windows installer on a clean runner
-# (assets/packaging.md, "CI"). Tags and a manual run are the only triggers: an artifact is
-# only ever made for a release, so an ordinary push to a branch must not start this job.
-# The per-push test matrix is .github/workflows/ci.yml.
+# Every tagged release builds and smoke-tests the Windows installer on a clean runner and the
+# Linux artifacts in a clean Debian stable container (assets/packaging.md, "CI"). Tags and a
+# manual run are the only triggers: an artifact is only ever made for a release, so an ordinary
+# push to a branch must not start this job. The per-push test matrix is .github/workflows/ci.yml.
 #
-# NEVER RUN. This file was written on Linux machines with no Windows and no Inno Setup, and no
-# tag of this repository has been cut, so neither this workflow nor `packaging/windows/ate.iss`
-# has ever executed. The first real compile, silent install, upgrade and uninstall of the
-# installer is this job's first run; `tests/test_release_ci_27c.py` checks the workflow's shape
-# and the smoke script's logic, never the installer itself.
+# NEVER RUN HERE. This file was written on Linux machines with no Windows and no Inno Setup, and no
+# tag of this repository has been cut, so neither this workflow nor `packaging/windows/ate.iss` nor
+# `packaging/windows/smoke_installer.py` has ever executed. The Linux side has run, but not through
+# Actions: `packaging/linux/docker_smoke.py` builds the bundle, the `.deb`, the tarball and the wheel
+# in a `debian:stable` container and runs `packaging/linux/smoke_linux.py` in three fresh ones. The
+# first tag is this workflow's first run. `tests/test_release_ci_27c.py` and
+# `tests/test_release_ci_28c.py` check the workflow's shape and the smoke scripts' logic, never an
+# installed program.
 
 on:
   push:
@@ -87,20 +90,126 @@ jobs:
           # A glob that matches nothing is a build that quietly produced no artifact.
           if-no-files-found: error
 
-  # The Linux artifacts are packet 28c's job and are deliberately not written here. This is where
-  # they go, built from the same dist/ate bundle and smoke-tested in a Debian stable container:
+  # Linux artifacts (28c): the same bundle the Windows installer carries, packaged as a tarball
+  # and a .deb, plus the wheel, each smoke-tested in its own clean Debian stable container.
   #
-  #   linux-artifacts:
-  #     name: Linux artifacts (tarball and .deb)
-  #     runs-on: ubuntu-latest
-  #     steps:
-  #       - uses: actions/checkout@v4
-  #         with:
-  #           fetch-depth: 0
-  #       - run: python packaging/linux/build_linux.py --dist dist --build
-  #       - uses: actions/upload-artifact@v4
-  #         with:
-  #           name: ate-linux-artifacts
-  #           path: |
-  #             dist/ate-*-linux-x86_64.tar.gz
-  #             dist/ate_*_amd64.deb
+  # Why `ubuntu-24.04` and not `ubuntu-latest`: a PyInstaller bundle is linked against the glibc of
+  # the machine that built it, and glibc is only forward compatible — a binary built against 2.39
+  # runs on 2.41, never the other way round. Ubuntu 24.04 ships glibc 2.39 and Debian stable ships a
+  # newer one, so artifacts built here start in the smoke container. ubuntu-latest will move to a
+  # newer Ubuntu, and a bundle linked against that glibc would fail to start in Debian. The build
+  # writes its own glibc into dist/glibc-build.txt and every smoke run reads it back, so the
+  # baseline is checked rather than trusted: move the pin only with a Debian that can run it.
+  linux-build:
+    name: Linux artifacts (build)
+    runs-on: ubuntu-24.04
+    env:
+      # The bundle's `_pdf` helper and `ate _selftest --run` both start QtWebEngine, and a runner
+      # has no display (the same as in ci.yml).
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # ATE's version is the git tag (src/ate/_version.py runs `git describe --tags`), so a
+          # shallow clone would stamp 0.0.0-dev into the artifact names.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          # The frozen builds bundle CPython 3.14 (assets/packaging.md); the build script has no
+          # way to choose an interpreter, so this is where 3.14 is decided.
+          python-version: "3.14"
+
+      - name: Record the glibc this build links against
+        run: |
+          mkdir -p dist
+          ldd --version | head -n 1 | tee dist/glibc-build.txt
+
+      - name: Install the libraries PyInstaller's Qt hooks need
+        # The hooks for PyQt6.QtWebEngineCore collect QtWebEngineProcess, its .pak resources and the
+        # Qt platform plugins only if PyQt6 can be *imported* in the build environment. In a bare
+        # container the import fails on libGL/libglib, the hooks are skipped silently, and the
+        # bundle ships a renderer that cannot start: `ate _pdf` then dies with "Could not find the
+        # Qt platform plugin offscreen". A debian:stable container proved this (packaging/linux/
+        # docker_smoke.py), and the 27a smoke check for the helper and the platform plugin is what
+        # catches it. Install the same libraries the artifacts themselves need.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxtst6 libxkbcommon0 libxkbfile1 \
+            libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core
+
+      - name: Build the frozen bundle (27a smoke checks)
+        run: python packaging/build_pyinstaller.py --smoke
+
+      - name: Package the tarball and the .deb
+        # Needs dpkg-deb, which every Ubuntu runner has. Both artifacts carry the same bundle.
+        run: python packaging/linux/build_linux.py --dist dist
+
+      - name: Build the wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Upload the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ate-linux-artifacts
+          path: |
+            dist/ate-*-linux-x86_64.tar.gz
+            dist/ate_*_amd64.deb
+            dist/ate-*.whl
+            dist/glibc-build.txt
+          # A glob that matches nothing is a build that quietly produced no artifact.
+          if-no-files-found: error
+
+  # One smoke run per artifact, each in its own untouched Debian stable container: nothing is
+  # preinstalled, so apt-get resolving the .deb's Depends and pipx's PyQt6 finding libGL are real
+  # checks. The runner only hosts the container; the glibc the smoke script compares against is
+  # Debian's, and the container runs as root, so `ate setup` really creates the ate group and sets
+  # the ownership of /etc/ate and /var/lib/ate.
+  #
+  # fail-fast: false: a broken .deb must not cancel the wheel's run, because the tag needs to show
+  # which artifact failed.
+  linux-smoke:
+    name: Linux smoke (${{ matrix.kind }})
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:stable
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [deb, tar, wheel]
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Checkout
+        # No fetch-depth: 0 here. The smoke container has no git and the script reads no history:
+        # `git describe` runs in the build job, where the artifacts get their names and versions.
+        uses: actions/checkout@v4
+
+      - name: Install the interpreter and tar the container needs to run the smoke script
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 tar
+
+      - name: Download the artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ate-linux-artifacts
+          path: artifacts
+
+      - name: Smoke-test the ${{ matrix.kind }}
+        # Never run: no Debian container has ever started on these machines. install.sh is called
+        # with its documented --prefix/--bin seam so the smoke script's root is the container's.
+        # --expect-version is the tag the release was cut from: the bundle carries it in
+        # ate/version.txt and the wheel in its metadata, so `ate --version` must print it.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_NAME}" = "${tag}" ]; then tag=""; fi
+          python3 packaging/linux/smoke_linux.py --kind ${{ matrix.kind }} --dist artifacts --expect-version "$tag"

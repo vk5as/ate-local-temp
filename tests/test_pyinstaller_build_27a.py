@@ -165,6 +165,48 @@ def test_the_ticked_box_claims_only_what_was_built_here() -> None:
     assert not any(line.startswith("- [x]") and "build_pyinstaller" in line for line in ci.splitlines()), "the line belongs in 27c's body, not a checkbox"
 
 
+def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> None:
+    """A bundle with the WebEngine helper and no platform plugin has no Qt at all.
+
+    PyInstaller's Qt hooks only collect the plugins when PyQt6 can be imported in the build
+    environment; in a container without libGL/libglib the import fails, the hooks are skipped, and
+    the bundle ships `QtWebEngineProcess` and its .pak files while `_pdf` dies with "Could not
+    find the Qt platform plugin". Checking the helper alone is not enough: the smoke check has to
+    fail on the missing plugin, and pass when one is present.
+    """
+    bundle = tmp_path / "ate"
+    bundle.mkdir()
+    internal = bundle / "_internal"
+    exe = bundle / "ate"
+    exe.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo 1.2.3; exit 0; fi\n'
+        'if [ "$1" = "_pdf" ]; then printf "%%PDF-1.4 words\\n" > "$3"; exit 0; fi\n'
+        "echo 'selftest ok'\nexit 0\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o755)
+    (internal / "ate" / "lua").mkdir(parents=True)
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8")
+    (internal / "ate" / "report" / "templates").mkdir(parents=True)
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8")
+    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_bytes(b"ELF")
+    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
+
+    build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
+    with pytest.raises(SystemExit) as caught:
+        build._run_smoke(exe, "1.2.3")
+    assert "platform plugin" in str(caught.value), f"the smoke check only looked at the helper: {caught.value}"
+
+    plugin = internal / "PyQt6" / "Qt6" / "plugins" / "platforms"
+    plugin.mkdir(parents=True)
+    (plugin / "libqoffscreen.so").write_bytes(b"ELF")
+    lines = build._run_smoke(exe, "1.2.3")
+    assert any("platform plugin" in line for line in lines), lines
+
+
 def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
     """The logged bundle size is the bytes it holds, not the bytes behind every link.
 
