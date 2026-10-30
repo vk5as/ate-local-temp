@@ -309,13 +309,17 @@ def test_pause_keeps_both_timers_running(qapp, tmp_path):
         screen._timer.timeout.emit()  # a QTimer tick, delivered without waiting for real seconds
         qapp.processEvents()
     after = (_secs(total.text()), _secs(current.text()))
-    assert after[0] > before[0], f"the Run timer froze during the pause: {before} -> {after}"
-    assert after[1] > before[1], f"the Current timer froze during the pause: {before} -> {after}"
+    # Three ticks of the injected clock are three seconds, and a tick can never go backwards: the
+    # assertion is exact rather than "greater than", so a frozen timer cannot pass it by luck.
+    assert after[0] >= before[0] + 3, f"the Run timer froze during the pause: {before} -> {after}"
+    assert after[1] >= before[1] + 3, f"the Current timer froze during the pause: {before} -> {after}"
     assert label.text() == "Paused"
 
+    # The label is read straight after the choice, before pumping: a run that finishes in the very
+    # next event cycle would otherwise leave "Finished" on the bar and this assertion would flake
+    # depending on how fast the worker's thread got scheduled.
     screen._on_prompt_choice("CONTINUE")
-    qapp.processEvents()
-    assert screen.run_view.status_label.text() == "Running"
+    assert screen.run_view.status_label.text() == "Running", "the bar never came back off the pause"
     assert _wait_finished(qapp, session)
     assert screen.run_view.status_label.text() == "Finished"
 

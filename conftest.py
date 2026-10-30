@@ -165,10 +165,17 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _fake_pdf_helper(request, monkeypatch):
-    """Every finished run with a config starts the PDF helper; outside the one real end-to-end test,
-    run a trivial stand-in process instead of QWebEngine. Tests wanting other helper behaviour patch
-    ``ate.report.pdf_job.pdf_helper_command`` again themselves."""
-    if request.node.name.endswith("test_run_end_writes_real_pdf_report"):
+    """Every finished run with a config starts the PDF helper; outside the real end-to-end tests, run
+    a trivial stand-in process instead of QWebEngine. Tests wanting other helper behaviour patch
+    ``ate.report.pdf_job.pdf_helper_command`` again themselves.
+
+    The stand-in writes a 13-byte stub, which is fine for the signal plumbing but not for a test that
+    claims the report was rendered: packet 27a's `ate _selftest --run` and 22a's real-report test use
+    the real helper, because "the PDF has text in it" is only provable against a PDF that was printed.
+    """
+    if request.node.name.endswith(
+        ("test_run_end_writes_real_pdf_report", "test_selftest_run_executes_a_schedule_and_writes_both_reports")
+    ):
         return
     from tests._fixtures import WRITES_PDF, fake_pdf_helper
 

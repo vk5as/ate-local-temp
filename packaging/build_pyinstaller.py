@@ -181,6 +181,16 @@ def _run_smoke(exe: Path, expected_version: str) -> list[str]:
         raise SystemExit(f"smoke: QtWebEngine assets missing (helper={len(helper)}, pak={len(paks)})")
     lines.append(f"webengine assets: {helper[0].name}, {len(paks)} .pak resources")
 
+    # 5. a Qt platform plugin. PyInstaller's PyQt6 hooks collect the plugins only when PyQt6 can be
+    # imported in the build environment; on a machine without libGL/libglib the import fails, the
+    # hooks are skipped quietly, and the bundle ships the helper and its .pak files but no
+    # `qoffscreen` — every `_pdf` then dies with "Could not find the Qt platform plugin". The helper
+    # being present is not enough: without a plugin there is no Qt to run it.
+    plugins = [p for p in internal.rglob("*") if "platforms" in p.parts and p.suffix in (".so", ".dll") and p.is_file()]
+    if not plugins:
+        raise SystemExit("smoke: no Qt platform plugin in the bundle: the Qt hooks collected nothing")
+    lines.append(f"qt platform plugins: {len(plugins)} files, one per platform Qt can open")
+
     return lines
 
 

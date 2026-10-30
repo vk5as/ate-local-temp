@@ -47,26 +47,43 @@ INSTALL_SH = REPO / "packaging" / "linux" / "install.sh"
 POSTINST = REPO / "packaging" / "linux" / "deb" / "postinst"
 POSTRM = REPO / "packaging" / "linux" / "deb" / "postrm"
 
-# The libraries the bundle cannot carry: glibc, and the GL/X libraries Qt is linked against.
-# Everything else (Qt, ICU, NSS, fontconfig, glib, libX11) is inside ``_internal``, which is why
-# the package needs no Debian Python or Qt packages at all. ``libxcb-cursor0`` is not optional:
-# libQt6XcbQpa is linked against it and Qt's xcb plugin cannot open a display without it.
+# What the bundle cannot carry: glibc, GL/EGL, and a font. Verified by installing the .deb in a
+# clean debian:stable container and running `ate _selftest --run` (packaging/linux/docker_smoke.py):
+# libgl1 and libegl1 are needed (without them the selftest dies on libGL.so.1), and a font is needed
+# (without fontconfig/fonts-dejavu-core the report renders as a 1.7 KB PDF with no text in it).
+# libdrm, libxcb and the rest come in as apt's own dependencies of libgl1/libegl1, so naming them
+# here would only repeat what apt already does.
 REQUIRED_DEPENDS = {
     "libc6",
     "libgl1",
     "libegl1",
+    "fontconfig",
+    "fonts-dejavu-core",
+}
+
+# What apt installs on top of those five in debian:stable. `test_libraries_the_bundle_cannot_resolve`
+# uses it to check that every library the bundle links against but does not ship is still present on
+# a machine that installed the package.
+APT_INSTALLS = {
     "libdrm2",
+    "libglx",
     "libxcb1",
-    "libxcb-cursor0",
     "libxcb-dri3-0",
+    "libxcb-render0",
+    "libxcb-shm0",
+    "libx11-6",
+    "libxext6",
     "libwayland-client0",
-    "libwayland-cursor0",
-    "libwayland-egl1",
+    "libxkbcommon0",
+    "libfreetype6",
+    "libpng16-16t64",
+    "mesa-libgallium",
 }
 
 # soname -> the Debian package that provides it, for every library a `ldd` over the real bundle
-# could report as `not found`. `test_libraries_the_bundle_cannot_resolve` derives the unresolved
-# set from the built bundle itself, so a Depends list that no longer covers the bundle fails.
+# reports as `not found` even with `_internal` on the search path. `test_libraries_the_bundle_cannot_
+# resolve` derives the set from the built bundle itself, so a Depends list that no longer covers the
+# libraries the bundle actually loads fails.
 SONAME_PACKAGES = {
     "libc.so.6": "libc6",
     "libm.so.6": "libc6",
@@ -74,16 +91,39 @@ SONAME_PACKAGES = {
     "libpthread.so.0": "libc6",
     "libresolv.so.2": "libc6",
     "libGL.so.1": "libgl1",
-    "libGLX.so.0": "libgl1",
-    "libGLdispatch.so.0": "libgl1",
+    "libGLX.so.0": "mesa-libgallium",
+    "libGLdispatch.so.0": "mesa-libgallium",
     "libEGL.so.1": "libegl1",
     "libdrm.so.2": "libdrm2",
     "libxcb.so.1": "libxcb1",
-    "libxcb-cursor.so.0": "libxcb-cursor0",
-    "libxcb-dri3.so.0": "libxcb-dri3-0",
-    "libwayland-client.so.0": "libwayland-client0",
-    "libwayland-cursor.so.0": "libwayland-cursor0",
-    "libwayland-egl.so.1": "libwayland-egl1",
+    "libfontconfig.so.1": "fontconfig",
+    "libfreetype.so.6": "libfreetype6",
+}
+
+# Libraries the bundle is linked against but never opens: the Wayland and extra xcb platform plugins
+# (this Station runs headless, QT_QPA_PLATFORM=offscreen) and the GTK/CUPS print backend. A machine
+# without them still runs the program, which is why they are not in Depends.
+NEVER_OPENED = {
+    "libatk-1.0.so.0",
+    "libcairo-gobject.so.2",
+    "libcups.so.2",
+    "libgdk-3.so.0",
+    "libgdk_pixbuf-2.0.so.0",
+    "libgtk-3.so.0",
+    "libharfbuzz.so.0",
+    "libpango-1.0.so.0",
+    "libpangocairo-1.0.so.0",
+    "libwayland-cursor.so.0",
+    "libwayland-egl.so.1",
+    "libxcb-cursor.so.0",
+    "libxcb-icccm.so.4",
+    "libxcb-image.so.0",
+    "libxcb-keysyms.so.1",
+    "libxcb-render-util.so.0",
+    "libxcb-shape.so.0",
+    "libxcb-util.so.1",
+    "libxcb-xkb.so.1",
+    "libxkbcommon-x11.so.0",
 }
 
 # The stub stands in for the frozen executable: it prints a version and records every call.
@@ -116,11 +156,17 @@ def _fake_bundle(root: Path, script: str = STUB_ATE) -> Path:
     return bundle
 
 
-def _package(bundle: Path, out: Path) -> tuple[Path, Path]:
-    """Run the packaging script on ``bundle`` and return ``(tarball, deb)``."""
+def _package(bundle: Path, out: Path, *, tmpdir: Path | None = None) -> tuple[Path, Path]:
+    """Run the packaging script on ``bundle`` and return ``(tarball, deb)``.
+
+    ``tmpdir`` aims the subprocess's `TMPDIR` at the test's own directory, so a staging directory
+    the script forgets to remove is a leftover this test can see rather than one in the shared `/tmp`.
+    """
+    env = dict(os.environ, TMPDIR=str(tmpdir)) if tmpdir else dict(os.environ)
     proc = subprocess.run(
         [sys.executable, str(BUILD_LINUX), "--dist", str(bundle.parent), "--out", str(out)],
         cwd=REPO,
+        env=env,
         capture_output=True,
         text=True,
         timeout=300,
@@ -198,11 +244,17 @@ def _run_script(script: Path, arg: str, root: Path, log: Path | None = None) -> 
 
 
 def _unresolved_sonames(bundle: Path) -> set[str]:
-    """Every soname `ldd` reports as not found over the bundle: what the package must depend on."""
+    """Every soname `ldd` reports as not found with the bundle's own `_internal` on the search path.
+
+    `_internal` is on the path so a library the bundle ships counts as resolved: what is left is
+    exactly what has to come from the system, which is what Depends and apt have to supply.
+    """
+    internal = bundle / "_internal"
     targets = [bundle / "ate"] + [p for p in bundle.rglob("*") if p.is_file() and ".so" in p.name]
+    env = dict(os.environ, LD_LIBRARY_PATH=str(internal))
     unresolved: set[str] = set()
     for target in targets:
-        proc = subprocess.run(["ldd", str(target)], capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(["ldd", str(target)], capture_output=True, text=True, timeout=120, env=env)
         for line in proc.stdout.splitlines():
             if "=> not found" in line or "=> (null)" in line:
                 unresolved.add(line.split("=>")[0].split("(")[0].strip())
@@ -487,8 +539,9 @@ def test_the_deb_control_fields_are_the_package_we_ship(tmp_path: Path) -> None:
     assert control.get("Section") in ("science", "electronics"), control
     assert control.get("Priority") == "optional", control
     depends = {d.strip() for d in control["Depends"].split(",")}
+    extra = sorted(depends - REQUIRED_DEPENDS)
     missing = sorted(REQUIRED_DEPENDS - depends)
-    assert not missing, f"Depends is missing {missing}; got {sorted(depends)}"
+    assert not missing and not extra, f"Depends is {sorted(depends)}, expected {sorted(REQUIRED_DEPENDS)}"
     assert "Installed-Size" in control, "the package does not say how big it is"
 
 
@@ -666,15 +719,21 @@ def test_postrm_is_a_no_op_for_other_invocations(tmp_path: Path) -> None:
 
 
 def test_packaging_writes_only_where_it_was_told(tmp_path: Path) -> None:
-    """The build writes into --out and a staging directory it removes; the checkout stays as it is."""
+    """The build writes into --out and a staging directory it removes; the checkout stays as it is.
+
+    The staging directory is looked for in this test's own temporary directory, not in the shared
+    `/tmp`: another test or another run in progress puts its own `ate-deb-` directory there, and a
+    scan of the shared directory would then fail this test for someone else's leftover. Remove the
+    `finally: shutil.rmtree(stage)` in `_deb` and the leftover is visible here.
+    """
     def snapshot() -> set[str]:
         return {str(p.relative_to(REPO)) for p in REPO.rglob("*") if ".git" not in p.parts}
 
     before = snapshot()
-    _package(_fake_bundle(tmp_path), tmp_path / "out")
+    _package(_fake_bundle(tmp_path), tmp_path / "out", tmpdir=tmp_path)
     assert snapshot() == before, "packaging wrote into the checkout"
-    leftover = [p for p in Path(tempfile.gettempdir()).iterdir() if p.name.startswith("ate-deb-")]
-    assert not leftover, f"the .deb staging directory was left behind: {leftover}"
+    leftover = [p for p in tmp_path.iterdir() if p.name.startswith("ate-deb-")]
+    assert not leftover, f"the .deb staging directory was left behind in {tmp_path}: {leftover}"
 
 
 @pytest.mark.build
@@ -732,16 +791,19 @@ def test_the_real_bundle_packages_and_runs_from_the_deb() -> None:
         assert "MISSING" not in selftest.stdout, selftest.stdout
 
         depends = {d.strip() for d in control["Depends"].split(",")}
-        assert REQUIRED_DEPENDS <= depends, f"the real package's Depends is {sorted(depends)}"
+        assert depends == REQUIRED_DEPENDS, f"the real package's Depends is {sorted(depends)}"
 
-        # Every library the bundle links against but cannot carry has to be in Depends. Run ldd over
-        # the whole extracted bundle and let the unresolved sonames prove the list covers them:
-        # drop libxcb-cursor0 from Depends and this fails, because Qt's xcb plugin needs it.
+        # Every library the bundle links against but does not carry has to be present on the machine
+        # that installed the package: either apt brings it in as part of the five Depends, or the
+        # bundle never opens it (the Wayland/xcb extras and the GTK print backend, with the Station
+        # running headless). Run ldd over the whole extracted bundle with its own `_internal` on the
+        # search path: cut `libegl1` from Depends and this fails, because libEGL.so.1 is then
+        # unresolved and nothing else in the package supplies it.
         unresolved = _unresolved_sonames(extracted / "opt" / "ate")
         print(f"REAL BUILD UNRESOLVED LIBRARIES: {sorted(unresolved)}")
-        unmapped = sorted(u for u in unresolved if u not in SONAME_PACKAGES)
-        assert not unmapped, f"ldd cannot resolve {unmapped}; add them to SONAME_PACKAGES and to Depends"
-        uncovered = sorted({SONAME_PACKAGES[u] for u in unresolved} - depends)
-        assert not uncovered, f"Depends does not cover the bundle: {uncovered} unresolved as {sorted(unresolved)}"
+        unmapped = sorted(u for u in unresolved if u not in SONAME_PACKAGES and u not in NEVER_OPENED)
+        assert not unmapped, f"nothing maps {unmapped}: add the Debian package to SONAME_PACKAGES or explain in NEVER_OPENED why the bundle never opens it"
+        uncovered = sorted({SONAME_PACKAGES[u] for u in unresolved} - depends - APT_INSTALLS)
+        assert not uncovered, f"Depends does not bring in {uncovered}: {sorted(unresolved)}"
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

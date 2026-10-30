@@ -1,20 +1,23 @@
 """Packet 28c: the Linux release CI.
 
-Two things are checked here, and neither is the thing that ultimately matters:
+Three things are checked here, and only one of them is the thing that ultimately matters:
 
 * `.github/workflows/release.yml` — parsed with PyYAML and checked for the jobs, what they need,
   the container they run in, the artifact names that go up and come back down, and the fact that
   every script the workflow names is a script that exists. **No job has ever run**: no tag of this
-  repository has been cut, and no Debian container has ever started on these machines.
+  repository has been cut, so GitHub Actions has never started this workflow.
 * `packaging/linux/smoke_linux.py` — the script that runs inside `debian:stable`. Its install,
   upgrade, remove, purge and uninstall steps run against a fake container rooted in a temporary
   directory: `apt-get` and `dpkg` are modelled, `install.sh` is run for real with its documented
   `--prefix`/`--bin` seam, and every `ate` call is the real source CLI against the container's own
   config and database. So these tests prove the smoke script *notices* a broken install — not that
   a real Debian install works.
+* `packaging/linux/docker_smoke.py` — the same sequence in three real `debian:stable` containers,
+  gated on `ATE_DOCKER_TESTS=1`. That is the part that has actually run.
 
-Nothing here executes `apt`, `dpkg -i`, `sudo`, `groupadd` or `chown` on this machine, and nothing
-is published anywhere: the artifacts only ever go to `actions/upload-artifact`.
+Nothing here executes `apt`, `dpkg -i`, `sudo`, `groupadd` or `chown` on this machine (containers
+do, when the gate is on), and nothing is published anywhere: the artifacts only ever go to
+`actions/upload-artifact`.
 
 | Seam | What it does |
 | --- | --- |
@@ -25,6 +28,7 @@ is published anywhere: the artifacts only ever go to `actions/upload-artifact`.
 
 from __future__ import annotations
 
+import ast
 import importlib.metadata
 import fnmatch
 import importlib.util
@@ -56,6 +60,10 @@ UPLOAD_NAME = "ate-linux-artifacts"
 from ate import _version as version_module
 from ate.cli import _report_problem
 from ate.report.pdf import pdf_has_text, run_pdf_helper
+
+_spec = importlib.util.spec_from_file_location("docker_smoke", DOCKER_SMOKE)
+harness = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(harness)
 
 try:  # pragma: no cover - depends on the environment's installs
     from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
@@ -157,6 +165,30 @@ def test_the_linux_build_job_builds_all_three_artifacts_in_order():
     assert job["env"]["QT_QPA_PLATFORM"] == "offscreen", "the bundle's _pdf helper and _selftest start QtWebEngine"
 
 
+def test_the_build_job_installs_the_libraries_pyinstaller_needs_to_import_qt():
+    """The build machine has to be able to import PyQt6, or the bundle ships a renderer that cannot start.
+
+    PyInstaller's Qt hooks collect `QtWebEngineProcess`, its `.pak` resources and the Qt platform
+    plugins only when PyQt6 imports in the build environment. In a bare Debian container the import
+    fails on libGL/libglib, the hooks are skipped without a word, and every Test Report the Station
+    writes is a 1.7 KB PDF with nothing in it. A debian:stable container caught this (see
+    packaging/linux/docker_smoke.py), so the libraries the artifacts need at runtime are installed
+    before the build runs.
+    """
+    doc = _workflow()
+    job = doc["jobs"]["linux-build"]
+    step = next((s for s in job["steps"] if "apt-get install" in s.get("run", "")), None)
+    assert step is not None, "the build job must install the libraries PyInstaller's Qt hooks need"
+    run = step["run"]
+    # libc6 is in every Debian and Ubuntu image, so the step does not name it: everything else the
+    # artifacts need at runtime has to be installed before PyInstaller runs.
+    missing = [pkg for pkg in packaging.DEPENDS + packaging.WHEEL_SYSTEM_LIBS if pkg != "libc6" and pkg not in run]
+    assert not missing, f"the build installs the runtime libraries the artifacts need; missing {missing}"
+    assert any("build_pyinstaller.py --smoke" in s.get("run", "") for s in job["steps"]), "the smoke checks are the catch"
+    names = [s.get("run", "") for s in job["steps"]]
+    assert names.index(run) < next(i for i, s in enumerate(names) if "build_pyinstaller.py" in s), "the libraries have to be installed before PyInstaller runs"
+
+
 def test_the_upload_globs_match_the_artifacts_the_builds_produce():
     """Each glob has to match the name the packaging actually writes, or the release is empty."""
     upload = next(u for u in _uploads(_workflow()) if u["name"] == UPLOAD_NAME)
@@ -237,8 +269,9 @@ def test_the_placeholder_comment_is_gone_and_nothing_is_published():
     assert "workflow_run" not in text and "actions/trigger" not in text, "a release job must not start another workflow"
     for forbidden in ("gh release create", "create-release", "s3.amazonaws", "curl -T"):
         assert forbidden not in text, f"the workflow publishes an artifact: {forbidden}"
-    for run in _runs(_workflow()):
-        assert "sudo" not in run, "the container is already root: nothing here needs sudo"
+    smoke_runs = [step["run"] for step in _workflow()["jobs"]["linux-smoke"]["steps"] if step.get("run")]
+    for run in smoke_runs:
+        assert "sudo" not in run, "the smoke container is already root: nothing in it needs sudo"
         assert "dpkg -i" not in run, "apt-get install ./ate_*.deb is what proves the Depends resolve"
         assert "groupadd" not in run and "chown" not in run, "ate setup does the privileged work, not the workflow"
 
@@ -732,8 +765,8 @@ def test_install_sh_failing_is_reported(tmp_path: Path) -> None:
 
 def test_a_depends_entry_debian_does_not_have_fails(tmp_path: Path) -> None:
     """apt resolving the Depends is the point of installing the .deb with apt."""
-    runner, station = _container(tmp_path, available=DEBIAN_STABLE - {"libxcb-cursor0"})
-    with pytest.raises(smoke.SmokeError, match="unable to satisfy Depends: libxcb-cursor0"):
+    runner, station = _container(tmp_path, available=DEBIAN_STABLE - {"libegl1"})
+    with pytest.raises(smoke.SmokeError, match="unable to satisfy Depends: libegl1"):
         smoke.run_smoke("deb", _artifacts(), runner, station, EXAMPLE)
 
 
@@ -928,8 +961,12 @@ def test_wheel_libs_are_read_from_the_packaging_script():
 
 def test_the_wheel_needs_libraries_the_deb_does_not() -> None:
     """PyPI's PyQt6 is linked against more than the bundle's own Qt, so the two lists differ."""
-    assert set(packaging.WHEEL_SYSTEM_LIBS) - set(packaging.DEPENDS), "the wheel uses the container's Python, not the bundle"
-    assert "libnss3" in packaging.WHEEL_SYSTEM_LIBS and "libxkbcommon0" in packaging.WHEEL_SYSTEM_LIBS
+    only_wheel = set(packaging.WHEEL_SYSTEM_LIBS) - set(packaging.DEPENDS)
+    assert only_wheel, "the wheel uses the container's Python, not the bundle"
+    assert {"libglib2.0-0t64", "libdbus-1-3", "libxkbcommon0"} <= set(packaging.WHEEL_SYSTEM_LIBS)
+    # Each one was found by removing it from a fresh debian:stable container and watching
+    # `ate _selftest --run` die with "cannot open shared object file".
+    assert "libnss3" not in packaging.WHEEL_SYSTEM_LIBS, "a headless report render never loads NSS"
 
 
 def test_ate_reports_the_version_baked_into_the_wheel(tmp_path: Path) -> None:
@@ -983,10 +1020,6 @@ def test_the_smoke_script_only_shells_out_through_the_runner(tmp_path: Path) -> 
         assert call not in text, f"{call} appears outside the Runner's argument lists"
 
 
-def test_runtime_libs_are_read_from_the_packaging_script():
-    assert smoke.runtime_libs() == packaging.DEPENDS, "the tarball and wheel install the .deb's Depends, not a copy of them"
-
-
 def test_station_paths_are_the_paths_packaging_advertises():
     station = smoke.Station()
     assert station.app_dir == Path("/opt/ate")
@@ -1001,3 +1034,94 @@ def test_run_smoke_rejects_an_unknown_kind(tmp_path: Path) -> None:
     runner, station = _container(tmp_path)
     with pytest.raises(smoke.SmokeError, match="unknown --kind"):
         smoke.run_smoke("exe", _artifacts(), runner, station, EXAMPLE)
+
+
+# --- the containers themselves: `ATE_DOCKER_TESTS=1` runs the real thing -------------------------
+
+
+def _passing_log() -> str:
+    """What a run that went well prints: the three logs and the closing line."""
+    return "".join(
+        f"{kind} smoke: 8 checks passed\n"
+        "run end-to-end: ok - ate ran the schedule: /tmp/r.html (8290 bytes HTML), /tmp/r.pdf (65792 bytes PDF, with text)\n"
+        "=== pdftotext probe (fresh container, same artifact) ===\nprobe pdf 11908 bytes\nText must survive the render.\n"
+        for kind in ("deb", "tar", "wheel")
+    )
+
+
+def test_the_harness_check_passes_a_good_run():
+    assert harness.check_run("".join(f"--- {kind} container log ---\n{report}\n" for kind, report in zip(harness.KINDS, [_passing_log()] * 3))) == []
+
+
+def test_the_harness_check_catches_a_blank_report_pdf():
+    """The whole point of the container run is the PDF having text in it, so dropping that line fails."""
+    report = _passing_log().replace("bytes PDF, with text", "bytes PDF").replace("Text must survive the render.", "")
+    problems = harness.check_run("".join(f"--- {kind} container log ---\n{report}\n" for kind in harness.KINDS))
+    assert len(problems) == 6, problems  # three kinds x (no selftest text, no pdftotext text)
+
+
+def test_the_harness_check_catches_a_missing_kind():
+    reports = dict(zip(harness.KINDS, [_passing_log()] * 3))
+    reports["wheel"] = "wheel container died before the smoke script started"
+    problems = harness.check_run("".join(f"--- {kind} container log ---\n{reports[kind]}\n" for kind in harness.KINDS))
+    assert any("wheel" in problem for problem in problems), problems
+
+
+def test_the_harness_check_catches_a_failed_smoke():
+    report = _passing_log().replace("deb smoke: 8 checks passed", "deb smoke failed: SMOKE FAILED: apt-get could not resolve Depends")
+    problems = harness.check_run("".join(f"--- {kind} container log ---\n{report}\n" for kind in harness.KINDS))
+    assert any("deb" in problem and "failure" in problem for problem in problems), problems
+
+
+def test_a_run_with_a_problem_never_prints_the_success_line(capsys):
+    """`finish` is what prints the closing line, and it refuses a run that did not prove anything."""
+    report = _passing_log().replace("bytes PDF, with text", "bytes PDF")
+    assert harness.finish(list(harness.KINDS), [report, report, report]) == 1
+    out = capsys.readouterr()
+    assert "docker smoke: all kinds ran in debian:stable" not in out.out
+    assert "DOCKER SMOKE INCOMPLETE" in out.err
+
+
+def test_a_clean_run_prints_the_success_line(capsys):
+    assert harness.finish(list(harness.KINDS), [_passing_log()] * 3) == 0
+    assert "docker smoke: all kinds ran in debian:stable" in capsys.readouterr().out
+
+
+def test_the_container_test_is_gated_on_the_flag():
+    """The real container run is opt-in: without the guard it would run in every CI job."""
+    source = (REPO / "tests" / "test_release_ci_28c.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "test_the_three_artifacts_smoke_in_real_debian_containers"), None)
+    assert body is not None, "the container test is gone"
+    lines = ast.get_source_segment(source, body) or ""
+    assert 'os.environ.get("ATE_DOCKER_TESTS") != "1"' in lines, "the container test runs whenever Docker is around"
+    assert "pytest.skip" in lines, "the guard must skip, not silently pass"
+    marks = {decorator.attr for decorator in body.decorator_list if isinstance(decorator, ast.Attribute)}
+    assert {"build", "slow"} <= marks, f"the container test is marked {marks}"
+
+
+@pytest.mark.build
+@pytest.mark.slow
+def test_the_three_artifacts_smoke_in_real_debian_containers(tmp_path: Path) -> None:
+    """Build the artifacts and run the smoke script in three fresh `debian:stable` containers.
+
+    Skipped by default: it needs Docker, the image and network, and takes several minutes. With
+    `ATE_DOCKER_TESTS=1` it is the real proof that `apt-get install ./ate_*.deb`, `install.sh` and
+    `pipx install` work on Debian stable, and that the report PDF the bundle writes has text in it.
+    """
+    if os.environ.get("ATE_DOCKER_TESTS") != "1":
+        pytest.skip("the Debian containers take minutes; set ATE_DOCKER_TESTS=1 to run them")
+    if shutil.which("docker") is None:
+        pytest.skip("docker is not installed: the containers cannot start")
+
+    out = tmp_path / "docker"
+    proc = subprocess.run(
+        [sys.executable, str(DOCKER_SMOKE), "--out", str(out)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    assert proc.returncode == 0, f"the container run failed:\n{proc.stdout[-2500:]}\n{proc.stderr[-2500:]}"
+    problems = harness.check_run(proc.stdout)
+    assert not problems, f"the container run did not prove what it claims: {problems}\n{proc.stdout[-1500:]}"

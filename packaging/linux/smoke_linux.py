@@ -19,12 +19,13 @@ kind then has to leave a Station behind: `/etc/ate/config.json`, the database it
 `ate _selftest --scan <definitions>` scanning the shipped example Media Release with nothing broken
 and nothing mismatched (assets/packaging.md, "CI").
 
-**NEVER RUN.** No Debian container has ever existed on the machines that wrote this: the release
-workflow has never triggered, because no tag of this repository has been cut, and nothing here has
-ever seen `dpkg`, `apt-get` or a Debian `pipx`. `tests/test_release_ci_28c.py` runs the sequence
-below against a fake container rooted in a temporary directory — a modelled `apt-get` and
-`install.sh`, and the real source CLI for every `ate` call — so it proves this script *notices* a
-broken install, not that an install works. The first tag is this script's first run.
+**RUN IN DEBIAN CONTAINERS, NEVER IN THE WORKFLOW.** `packaging/linux/docker_smoke.py` runs this
+script in fresh `debian:stable` containers with `ATE_DOCKER_TESTS=1`: `dpkg` has installed the
+`.deb`, `install.sh` has installed the tarball and `pipx` has installed the wheel. GitHub Actions
+has still never run it, because no tag of this repository has been cut.
+`tests/test_release_ci_28c.py` runs the same sequence against a fake container rooted in a
+temporary directory — a modelled `apt-get` and `install.sh`, and the real source CLI for every
+`ate` call — so it proves this script *notices* a broken install.
 
 The two seams the tests use:
 
@@ -494,6 +495,10 @@ def run_smoke(kind: str, dist: Path, runner: Runner, station: Station, sample: P
         result = runner.run([ate, "_selftest", "--run"])
         if result.returncode != 0:
             fail(f"ate _selftest --run failed (exit {result.returncode}): {result.output()[-600:]}")
+        # The selftest's own lines are the evidence the CI log needs: the report PDF it writes and
+        # whether that PDF has text in it. Without them a passing smoke run says nothing about the
+        # bytes the Station actually gets.
+        print(result.output())
         note("the bundle ran a Test Schedule end to end headless, and the PDF it wrote has text in it")
 
         prepared = check_station_prepared(runner, station, ate)
