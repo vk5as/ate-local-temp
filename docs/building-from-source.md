@@ -280,7 +280,8 @@ The version in `Version` is ATE's version as dpkg will accept it. Every prerelea
 `~` sorts before everything while a bare `-` sorts after the digits before it, so a prerelease
 precedes the release it is a prerelease of (`dpkg --compare-versions 1.2.3~rc1 lt 1.2.3`). Anything
 outside `[A-Za-z0-9.+~:-]` is rewritten as `-`, and a bundle whose `--version` prints nothing is
-refused rather than packaged as `ate__amd64.deb`.
+refused rather than packaged as `ate__amd64.deb`. A prerelease tag is written the PEP 440 way by the
+build: tag `v0.1.0-rc1` makes `ate --version` print `0.1.0rc1`, which the `.deb` names `0.1.0~rc1`.
 
 The bundle carries its own CPython, Qt, QtWebEngine, lupa, pyvisa-py, ICU, NSS, freetype, fontconfig
 and libX11, so the package needs none of Debian's Python or Qt packages. What it cannot guarantee to

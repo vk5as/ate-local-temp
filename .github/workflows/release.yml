@@ -210,6 +210,8 @@ jobs:
         # with its documented --prefix/--bin seam so the smoke script's root is the container's.
         # --expect-version is the tag the release was cut from: the bundle carries it in
         # ate/version.txt and the wheel in its metadata, so `ate --version` must print it.
+        # The tag arrives as cut, minus the leading v: `v0.1.0-rc1` comes in as `0.1.0-rc1` and
+        # smoke_linux.py compares it as `0.1.0rc1`, the PEP 440 spelling the artifact reports.
         run: |
           tag="${GITHUB_REF_NAME#v}"
           if [ "${GITHUB_REF_NAME}" = "${tag}" ]; then tag=""; fi
