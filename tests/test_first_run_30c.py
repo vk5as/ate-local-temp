@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 import ate.app as ate_app
+import ate.dialogs as ate_dialogs
 from ate.app import launch
 from ate.config import ConfigError, MissingConfigError, config_hint, config_path, read_config
 from ate.storage import SCHEMA_VERSION, RunStore
@@ -449,7 +450,7 @@ def test_auto_dismiss_seam_treats_falsy_values_as_unset(qapp, monkeypatch, value
     use) the box dismisses itself whatever the variable says, which is the next test."""
     scheduled: list[int] = []
     monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
-    monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
+    monkeypatch.setattr(ate_dialogs.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
     monkeypatch.setenv("ATE_AUTO_DISMISS_DIALOG", value)
     ate_app._dismiss_if_headless(ate_app.QMessageBox())
     assert bool(scheduled) is dismissed
@@ -464,7 +465,7 @@ def test_a_box_with_no_display_to_show_on_closes_itself(qapp, monkeypatch) -> No
     monkeypatch.delenv("ATE_AUTO_DISMISS_DIALOG", raising=False)
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     scheduled: list[int] = []
-    monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
+    monkeypatch.setattr(ate_dialogs.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
     ate_app._dismiss_if_headless(ate_app.QMessageBox())
     assert scheduled, "a headless ATE left a dialog open waiting for a click that can never come"
 

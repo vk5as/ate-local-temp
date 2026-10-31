@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QDialog,
 )
 
+from ate.dialogs import dismiss_if_headless
 from ate.engine.step_inputs import StepInput, value_error
 
 from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
@@ -1277,6 +1278,10 @@ class RunScreenMixin:
         if self.confirm_choice is not None:
             self.confirm_choice(dialog)
         else:
+            # Nobody is looking at a screen to click Start: arm the safe answer (start the run,
+            # store nothing) before `exec()`, which on a headless runner would otherwise wait for a
+            # click that never comes. See :meth:`MismatchConfirmation.answer_without_storing`.
+            dismiss_if_headless(dialog, MismatchConfirmation.answer_without_storing)
             dialog.exec()
         return dialog.store_choice()
 
@@ -1459,6 +1464,9 @@ class MismatchConfirmation(QDialog):
         self.mismatches = list(mismatches)
         self.store_setting = store_setting
         self._accepted = False
+        # Set only by :meth:`answer_without_storing`: the answer an unattended run is given, which
+        # outranks the checkbox and the `always`/`never` setting.
+        self._stored_override: Optional[bool] = None
 
         layout = QVBoxLayout(self)
         header = QLabel(f"<b>{html.escape(schedule_name)}</b><br><span style='color:#666'>{html.escape(release)}</span>")
@@ -1510,10 +1518,26 @@ class MismatchConfirmation(QDialog):
         """True once Start was clicked; False if Cancel was (or nothing was)."""
         return self._accepted
 
+    def answer_without_storing(self) -> None:
+        """Close this dialog the way a run nobody is watching has to be answered: Start, store nothing.
+
+        Cancel answers `None`, which starts no run at all; the box is ticked by default, and
+        accepting it that way writes bytes whose checksum does not match the release into the Test
+        Run. Storing is the Operator's explicit decision (ticket 06c) and no Operator made it, so
+        the safe branch is the run going ahead with the mismatched files left out of it. This is the
+        answer `dismiss_if_headless` gives on a runner with no display, where `exec()` otherwise
+        waits for a click that never comes."""
+        self._stored_override = False
+        if self.store_checkbox is not None:
+            self.store_checkbox.setChecked(False)
+        self.accept()
+
     def store_choice(self) -> Optional[bool]:
         """Whether this run stores the mismatched bytes, or ``None`` if the run was cancelled."""
         if not self._accepted:
             return None
+        if self._stored_override is not None:
+            return self._stored_override
         if self.store_checkbox is not None:
             return self.store_checkbox.isChecked()
         return self.store_setting == "always"

@@ -24,18 +24,18 @@ the event loop.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
 from .config import Config, ConfigError, MissingConfigError, config_hint, config_path, read_config
+from .dialogs import dismiss_if_headless
 from .history.session import HistorySession
 from .log import LogError, open_app_log
 from .report.pdf import pdf_sandbox_choice
@@ -321,33 +321,16 @@ class MainWindow(QMainWindow):
                 pass
 
 
-#: Qt platforms with no window server: nothing is ever drawn, so a dialog on them can never be
-#: answered. `offscreen` is what CI and every headless test run uses.
-_HEADLESS_PLATFORMS = ("offscreen", "minimal")
-
-
-def _has_no_display_to_answer() -> bool:
-    """True when Qt has no display to show a box on, so `exec()` would wait for no one."""
-    return os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in _HEADLESS_PLATFORMS
-
-
 def _dismiss_if_headless(box: QMessageBox) -> None:
     """Close a dialog rather than block on an Operator who cannot see it.
 
-    Two ways in. ``ATE_AUTO_DISMISS_DIALOG`` is the explicit seam for headless subprocess tests
-    (packet 30c); and a platform with no window server (`QT_QPA_PLATFORM=offscreen`) is the case
-    GitHub's runners and every container are in: the 30d question, the missing-config prompt and
-    the close confirmation all reach `QMessageBox.exec()`, which never returns when nobody is
-    watching — that is what made the first Windows CI run hang in "Run tests".
-
-    Either way the box closes through ``accept()``, which clicks no button, so ``clickedButton()``
-    is None and every prompt answers its *negative* branch: the missing-config prompt aborts, the
+    The rule and the platform test live in :mod:`ate.dialogs`; this is the `QMessageBox` shape of
+    it, kept here because the launch prompts and the packet 30d PDF question call it by name. With
+    no explicit answer the box is `accept()`ed, which clicks no button, so ``clickedButton()`` is
+    None and every prompt answers its *negative* branch: the missing-config prompt aborts, the
     "abort the run and quit?" confirmation keeps the run going, an unsandboxed PDF is skipped, and
-    an alert is acknowledged. ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"`` mean unset.
-    Documented in ``docs/building-from-source.md``."""
-    value = os.environ.get("ATE_AUTO_DISMISS_DIALOG", "").strip().lower()
-    if (value and value not in ("0", "false", "no", "off")) or _has_no_display_to_answer():
-        QTimer.singleShot(0, box.accept)
+    an alert is acknowledged."""
+    dismiss_if_headless(box)
 
 
 def _missing_config_dialog(path: str) -> bool:
