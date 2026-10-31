@@ -20,10 +20,13 @@ wrappers validate against the right Device Type.
 from __future__ import annotations
 
 import queue
+import select
+import socket
 import threading
 import time
 from typing import Any
 
+from .abort import check_abort, wait_slice
 from .registry import DEFAULT_RECEIVE_BUFFER_BYTES, Driver
 
 #: How long one reader poll waits for data before the loop re-checks the stop flag, so close()
@@ -116,6 +119,11 @@ class _StreamDevice:
         self._stop = threading.Event()  # set by close() so the reader stops
         self._teardown = False  # set by close() so the reader never records a failure on us
         self._reader_thread: threading.Thread | None = None
+        self.abort_flag: Any = None  # the run's abort flag, given by the registry at open (packet 32b)
+
+    def bind_abort(self, flag: Any) -> None:
+        """Let a whole-run abort end this Device's waits (packet 32b)."""
+        self.abort_flag = flag
 
     # --- transport hooks: the only parts that differ between TCP and SERIAL -------------------
 
@@ -253,7 +261,19 @@ class _StreamDevice:
                         return None, 0, False, "timeout"
                     data = self._take(len(self._buffer))
                     return data, len(data), True, None
-                self._cond.wait(timeout=remaining)
+                check_abort(self.abort_flag)
+                self._cond.wait(timeout=wait_slice(self.abort_flag, remaining))
+
+    def _wait_writable(self, sock: socket.socket, seconds: float) -> bool:
+        """Wait until ``sock`` can take bytes, for at most ``seconds``; an abort ends the wait."""
+        deadline = time.monotonic() + seconds
+        while True:
+            check_abort(self.abort_flag)
+            remaining = deadline - time.monotonic()
+            if select.select([], [sock], [], wait_slice(self.abort_flag, remaining))[1]:
+                return True
+            if remaining <= POLL_SECONDS or self.abort_flag is None:
+                return False
 
     def _take_complete(self, term: bytes, size: int | None) -> bytes | None:
         """Take a complete read from the buffer - up to a terminator within ``size`` bytes, or

@@ -86,8 +86,20 @@ def pytest_runtest_makereport(item, call):
     described as it stood (packet 32b)."""
     outcome = yield
     report = outcome.get_result()
-    if report.when == "call" and report.failed and any(engine.isRunning() for engine in list(_live_engines)):
-        report.sections.append(("RunEngine worker still running", _fixtures.describe_stuck_runs(_opened)))
+    if report.when != "call" or not report.failed:
+        return
+    try:  # the failure being reported is the test's own: nothing here may replace it
+        if any(_still_running(engine) for engine in list(_live_engines)):
+            report.sections.append(("RunEngine worker still running", _fixtures.describe_stuck_runs(_opened)))
+    except Exception as exc:  # noqa: BLE001
+        report.sections.append(("RunEngine worker still running", f"could not describe the stuck run: {exc!r}"))
+
+
+def _still_running(engine) -> bool:
+    try:
+        return engine.isRunning()
+    except RuntimeError:  # its C++ side is already gone
+        return False
 
 
 def _release_since(opened_mark: int, scratch_mark: int) -> None:

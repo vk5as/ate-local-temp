@@ -206,7 +206,7 @@ The Run screen comes in two layouts, staged (default) and three-pane, both built
 - **Run engine**: flow control.
   - All Pre-test Actions run up front, depth first and parent first. Post-test Actions run in reverse, always, after clearing the abort flag. Only schedules whose Pre-test Action started get a Post-test Action, and fully disabled Sub-schedules are skipped.
   - Steps run in tree order through an `xpcall(fn, debug.traceback)` wrapper. Stop on Fail opens a Continue/Retry/Abort prompt. Every Attempt is recorded, and the step's result is its last Attempt's.
-  - A Pre-test failure aborts automatically. An Operator abort makes the running step `ERROR` "Aborted by Operator".
+  - A Pre-test failure aborts automatically. An Operator abort makes the running step `ERROR` "Aborted by Operator"; one that lands at a Stop on Fail pause finds no step running, so the failed step keeps its result with no `prompt_choice`, and the End Reason is `ABORTED`.
   - It sets the End Reason (`COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL`, `ABORTED`) and the run result (`FAIL` on any `FAIL` or `ERROR`).
 - **RunStore**: the only storage interface. SQLAlchemy Core tables written once and dialect-neutral (36-character text UUIDs, ISO 8601 UTC text times with milliseconds, 0/1 booleans, JSON as text). SQLite in WAL mode through stdlib `sqlite3`.
   - Tables: `test_run`, `media_release`, `run_file`, `schedule_instance`, `node`, `action`, `attempt`, `input_value`, `equipment` and `log_line`.

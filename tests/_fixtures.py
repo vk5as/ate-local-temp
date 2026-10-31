@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from ate.engine.operator_input import OperatorInput
@@ -1352,7 +1352,7 @@ def _describe_engine(engine: RunEngine, sessions: Sequence) -> str:
             f"pauses={sorted(engine._pending)} stopped_on_fail={engine._stopped_on_fail} step={engine._ask_step} "
             f"attempt={engine._ask_attempt} run_uuid={engine._run_uuid}"
         ]
-    except RuntimeError as exc:  # its C++ side is already gone
+    except Exception as exc:  # noqa: BLE001 - its C++ side already gone, or anything else: say so and go on
         return f"RunEngine: {exc}"
     for session in sessions:
         if getattr(session, "_engine", None) is engine:
@@ -1374,9 +1374,23 @@ def describe_stuck_runs(sessions: Sequence = ()) -> str:
     What a worker that outlives its test, or a wait for FINISHED that expires, has to say for itself:
     `store writes` tells a slow or stalled disk from a worker blocked elsewhere, and two reports a few
     seconds apart show whether it was still making progress."""
-    with tempfile.TemporaryFile("w+", encoding="utf-8") as stacks:
-        faulthandler.dump_traceback(file=stacks, all_threads=True)
-        stacks.seek(0)
-        dumped = stacks.read()
-    states = [_describe_engine(engine, sessions) for engine in list(_live_engines)]
-    return "\n".join([*(states or ["no RunEngine worker alive"]), store_writes.describe(), "all thread stacks:", dumped])
+    def attempt(part: str, read: Callable[[], str]) -> str:
+        try:  # the report goes into an error message, which it must never replace with its own
+            return read()
+        except Exception as exc:  # noqa: BLE001
+            return f"{part} unavailable: {exc!r}"
+
+    def stacks() -> str:
+        with tempfile.TemporaryFile("w+", encoding="utf-8") as stream:
+            faulthandler.dump_traceback(file=stream, all_threads=True)
+            stream.seek(0)
+            return stream.read()
+
+    def states() -> str:
+        described = [_describe_engine(engine, sessions) for engine in list(_live_engines)]
+        return "\n".join(described or ["no RunEngine worker alive"])
+
+    return "\n".join(
+        [attempt("engine states", states), attempt("store writes", store_writes.describe), "all thread stacks:",
+         attempt("stacks", stacks)]
+    )

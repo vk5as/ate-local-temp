@@ -65,7 +65,7 @@ class _TcpDevice(_StreamDevice):
 
         A socket still not writable when the deadline is up is this call's timeout; a send error
         (reset, broken pipe) is a dead connection."""
-        if not select.select([], [self.sock], [], seconds)[1]:
+        if not self._wait_writable(self.sock, seconds):
             raise _SendTimeout("write timeout")
         try:
             return self.sock.send(chunk)

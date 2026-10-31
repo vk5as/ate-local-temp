@@ -182,8 +182,9 @@ def _norm_date(value) -> str:
     return str(value)
 
 
-#: Twelve columns a row stays under SQLite's oldest default of 999 variables a statement.
-_NODES_PER_STATEMENT = 80
+#: Rows one multi-row INSERT carries. At twelve columns or fewer a row, that stays under the 999
+#: variables a statement that is SQLite's lowest default limit.
+_ROWS_PER_STATEMENT = 80
 
 
 class RunStore:
@@ -353,10 +354,13 @@ class RunStore:
         """Insert many expanded-tree rows, each carrying its ``node_seq``, in as few commits as SQLite allows.
 
         Every statement here is its own synced commit, so an abort writing the steps it never ran pays
-        for one, not one per step (packet 32b). A statement carries at most :data:`_NODES_PER_STATEMENT`."""
-        for start in range(0, len(rows), _NODES_PER_STATEMENT):
-            batch = rows[start : start + _NODES_PER_STATEMENT]
-            self._run(node.insert().values([self._node_values(run_uuid, row["node_seq"], row) for row in batch]))
+        for one, not one per step (packet 32b)."""
+        self._insert_rows(node, [self._node_values(run_uuid, row["node_seq"], row) for row in rows])
+
+    def _insert_rows(self, table: Any, rows: list[dict[str, Any]]) -> None:
+        """Insert ``rows`` in as few commits as SQLite allows, at most :data:`_ROWS_PER_STATEMENT` each."""
+        for start in range(0, len(rows), _ROWS_PER_STATEMENT):
+            self._run(table.insert().values(rows[start : start + _ROWS_PER_STATEMENT]))
 
     @staticmethod
     def _node_values(run_uuid: str, seq: int, fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -711,7 +715,7 @@ class RunStore:
         rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no, at=line.get("at")) for line in lines]
         for i, row in enumerate(rows):
             row["seq"] = next_seq + i  # unique within this batch
-            self._run(log_line.insert().values(**row))
+        self._insert_rows(log_line, rows)  # a failing step's lines cost a commit, not one each (packet 32b)
         self._log_seq[run_uuid] = next_seq + len(rows)  # keep later batches monotonic
 
     def log_lines(self, run_uuid: str) -> list[dict]:

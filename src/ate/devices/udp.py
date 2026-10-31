@@ -24,6 +24,7 @@ import socket
 import time
 from typing import Any
 
+from .abort import check_abort, wait_slice
 from .registry import DEFAULT_RECEIVE_BUFFER_BYTES, Driver, validate_params
 from .stream import (
     POLL_SECONDS,
@@ -182,7 +183,8 @@ class _UdpDevice(_StreamDevice):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:  # decided under the lock, on the queue just checked
                     return None, 0, False, "timeout"
-                self._cond.wait(timeout=remaining)
+                check_abort(self.abort_flag)
+                self._cond.wait(timeout=wait_slice(self.abort_flag, remaining))
 
     def flush(self) -> tuple[bool, int, str | None]:
         """Discard every queued datagram and return ``(ok, count, err_or_None)``, count = bytes
@@ -213,7 +215,7 @@ class _UdpDevice(_StreamDevice):
         port-unreachable from a peer that is not listening yet is :class:`_Refused`, which fails only
         this call; an EMSGSIZE from a payload too big for a datagram is :class:`_Oversize`, which
         fails only this call too; anything else means the socket is gone."""
-        if not select.select([], [self.sock], [], seconds)[1]:
+        if not self._wait_writable(self.sock, seconds):
             raise _SendTimeout("write timeout")
         try:
             return self.sock.send(datagram)
