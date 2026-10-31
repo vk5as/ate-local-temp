@@ -811,3 +811,7 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - CI on `fa18047` and `629fdcb` failed one Windows job each; `7e6d12a` passed 4/4, so this is intermittent. Opus fixed the tests; where the 2.2 s went on Windows is not established, and it may be real.
 - Review: Haiku only (MUST-FIX 1, the packet claimed resolved; fixed). **Strata review owed after 32a:** its one slot is busy for hours, and the merge is needed to get Windows evidence. This departs from the two-reviewer rule.
 - Open product question: FINISHED follows synchronous SQLite commits on the worker, so a commit stall (antivirus, slow disk) delays an aborted run's end. No test measures an abort landing during a pre-wait commit.
+
+## Abort timing relaxed (user, 2026-11-01)
+
+- Story 83: an abort **should** stop within 0.5 s and **must** stop within 10 s. Tests fail only past 10 s; past 0.5 s they report it without failing. This also settles 31e's open product question: a slow database write delaying an abort by a couple of seconds is acceptable, past 10 s it is not.
