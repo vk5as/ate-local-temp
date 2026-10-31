@@ -367,9 +367,9 @@ def test_the_tarball_carries_the_bundle_and_install_sh(tmp_path: Path) -> None:
 def test_every_artifact_carries_the_licence_notices(tmp_path: Path) -> None:
     """Qt and PySide6 are LGPL, so the `.deb` and the tarball ship the texts and the notice (32a).
 
-    LGPL compliance is not a legal question here but a packaging one: the licence text, a notice
-    naming the Qt and PySide6 versions and where their source is, and the statement that Qt can be
-    replaced have to be in the artifact a Station receives. `verify_bundle` refuses a bundle without
+    This checks packaging, not the law: the licence text, a notice naming the Qt and PySide6
+    versions and where their source is, and the statement that Qt can be replaced have to be in the
+    artifact a Station receives. `verify_bundle` refuses a bundle without
     them, and this checks the two artifacts built from a bundle that has them still have them."""
     from ._fixtures import LICENCE_NOTICES
 

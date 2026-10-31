@@ -19,8 +19,10 @@ Two kinds of test here:
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -231,7 +233,13 @@ def test_the_notice_generator_lists_every_runtime_dependency(tmp_path: Path) -> 
     for name in ("pyside6-addons", "pyside6-essentials", "shiboken6", "lupa", "sqlalchemy", "jinja2", "pyserial", "pyvisa", "pyvisa-py"):
         assert name in text.lower(), f"{name} is not in the notices: {text}"
     assert "copyleft runtime libraries" in text and "pyside6-addons" in text.lower(), text
-    assert "licences the wheels do not state" in text, text  # jinja2 declares nothing, and that is said
+    # Jinja2's wheel has no License field, but it does have a licence classifier, which is read.
+    assert re.search(r"jinja2 \S+ - BSD License: permissive", text), text
+    assert "markupsafe" in text.lower() and "typing-extensions" in text.lower().replace("_", "-"), (
+        f"a dependency of a dependency is in the bundle but not in the notices: {text}"
+    )
+    # lupa's wheel says "MIT style", which is not a licence this script can name: reported, not guessed.
+    assert re.search(r"licences to check upstream: .*lupa", text), text
     assert "LGPL" in text, "the Qt binding's licence is not reported"
     assert "Lua" in text, "the Lua lupa embeds is not mentioned"
 
@@ -381,8 +389,7 @@ def test_the_spec_does_not_exclude_what_webengine_imports_itself() -> None:
         text=True,
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
     )
-    if probe.returncode != 0:
-        pytest.skip(f"QtWebEngineWidgets would not import here: {probe.stderr.strip()}")
+    assert probe.returncode == 0, f"QtWebEngineWidgets would not import, so nothing was checked: {probe.stderr.strip()}"
 
     pulled = {name for name in probe.stdout.split() if name.startswith("PySide6.")}
     cut = sorted(pulled & excluded)
@@ -437,3 +444,151 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
     # The build writes only under the work/dist directories it was given: dist/ and build/
     # are gitignored and must not be created in the checkout by a test run.
     assert before == _repo_build_state(), "the build left output in the checkout"
+
+
+def _notices_module():
+    return _load_module(REPO / "packaging" / "licence" / "notices.py", "licence_notices")
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        "Proprietary EULA: no redistribution; unlimited seats",  # "unlimited" holds "mit"
+        "Admit one; submitted under a commercial agreement",  # "admit" and "submitted" hold "mit"
+        "Not MIT",  # the word is there and means the opposite
+        "MIT style",
+        "MIT AND Proprietary",
+        "MPL-2.0",
+        "",
+    ],
+)
+def test_the_classifier_reports_what_it_cannot_name(stated: str) -> None:
+    assert "check upstream" in _notices_module()._classify([stated] if stated else []), stated
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        "MIT",
+        "The MIT License",
+        "BSD",
+        "BSD-3-Clause",
+        "BSD License",
+        "Apache-2.0",
+        "Apache Software License",
+        "ISC License (ISCL)",
+        "PSF-2.0",
+        "Python Software Foundation License",
+        "MIT OR GPL-3.0-only",
+    ],
+)
+def test_the_classifier_names_permissive_licences(stated: str) -> None:
+    assert _notices_module()._classify([stated]).startswith("permissive"), stated
+
+
+def test_the_classifier_separates_lgpl_from_gpl_and_keeps_disagreements_open() -> None:
+    notices = _notices_module()
+    assert notices._classify(["LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"]).startswith("copyleft (LGPL)")
+    assert notices._classify(["GNU Lesser General Public License v3 (LGPLv3)"]).startswith("copyleft (LGPL)")
+    # GPL with no LGPL or permissive option is a question for the user, not a footnote.
+    assert "check upstream" in notices._classify(["GPL-3.0-only"])
+    assert "check upstream" in notices._classify(["AGPL-3.0-or-later"])
+    assert "check upstream" in notices._classify(["MIT", "GPL-3.0-only"]), "field and classifier disagree"
+    assert notices._classify(["MIT", "MIT License"]).startswith("permissive")
+
+
+def test_the_licence_is_read_from_the_classifier_when_no_field_states_it(monkeypatch) -> None:
+    notices = _notices_module()
+    wheels = {
+        "only-classifier": {"Classifier": ["Topic :: X", "License :: OSI Approved :: BSD License"]},
+        "pasted-text": {"License": ["The MIT License\n\nCopyright (c) someone\n\nPermission is hereby granted"], "Classifier": ["License :: OSI Approved :: MIT License"]},
+        "pasted-no-classifier": {"License": ["The MIT License\n\nCopyright (c) someone\n\nPermission is hereby granted"]},
+        "unknown": {"License": ["UNKNOWN"]},
+    }
+
+    class Metadata:
+        def __init__(self, fields: dict) -> None:
+            self.fields = fields
+
+        def get(self, key: str, default=None):
+            return (self.fields.get(key) or [default])[0]
+
+        def get_all(self, key: str):
+            return self.fields.get(key)
+
+    monkeypatch.setattr(notices.importlib.metadata, "metadata", lambda name: Metadata(wheels[name]))
+    assert notices._declared("only-classifier") == ["BSD License"]
+    assert notices._declared("pasted-text") == ["MIT License"], "a pasted licence text is not a licence name"
+    assert notices._declared("pasted-no-classifier") == ["The MIT License"]
+    assert "check upstream" in notices._classify([]) and notices._declared("unknown") == []
+
+
+def test_the_inventory_walks_the_whole_requirement_closure(monkeypatch) -> None:
+    """Everything a requirement pulls in, once, and nothing behind an extra or a false marker."""
+    notices = _notices_module()
+    requires = {
+        "ate": ["Top>=1", "Skipped; extra == 'dev'", "NeverHere; sys_platform == 'no-such-platform'", "WithExtra[fast]"],
+        "top": ["Dep_One==2", "top"],  # a cycle ends
+        "dep-one": ["Dep.Two"],
+        "dep-two": [],
+        "withextra": ["OnlyWithFast; extra == 'fast'", "NotThis; extra == 'slow'"],
+        "onlywithfast": [],
+    }
+
+    class Dist:
+        def __init__(self, name: str) -> None:
+            self.requires = requires[name]
+
+    def distribution(name: str):
+        key = notices.canonicalize_name(name)
+        if key not in requires:
+            raise notices.importlib.metadata.PackageNotFoundError(name)
+        return Dist(key)
+
+    monkeypatch.setattr(notices.importlib.metadata, "distribution", distribution)
+    assert notices._runtime_dependency_names() == ["dep-one", "dep-two", "onlywithfast", "top", "withextra"]
+
+
+def test_the_notice_gives_the_source_the_wheels_name_and_claims_no_compliance() -> None:
+    """A version, a source location read from the wheel, what the build does, and no legal verdict."""
+    notices = _notices_module()
+    text = notices.qt_notice()
+    version = importlib.metadata.version("PySide6-Addons")
+    urls = importlib.metadata.metadata("PySide6-Addons").get_all("Project-URL")
+    repository = next(entry.split(", ", 1)[1] for entry in urls if entry.startswith("Repository"))
+    assert repository in text and f"v{version}" in text, text
+    assert version in text
+    # A link nobody checked is worse than none: these were in the notice and were never real sources.
+    for invented in ("github.com/qt/pyside", "github.com/qt/pyside-addons", "qt.io/download-open-source"):
+        assert invented not in text, invented
+    lowered = " ".join(text.lower().split())
+    for claim in ("compliance", "complies", "compliant", "satisfies", "what the lgpl asks"):
+        assert claim not in lowered, f"the notice makes a legal claim: {claim!r}"
+    assert "separate" in lowered and "unmodified" in lowered and "replace" in lowered, text
+
+
+def test_the_notice_does_not_say_the_lua_source_is_in_the_wheel() -> None:
+    assert "source is inside" not in _notices_module().LUA_NOTE
+
+
+def test_the_inno_setup_source_carries_the_notices() -> None:
+    """The installer ships `_internal/licences` only because of the recursive wildcard entry."""
+    iss = (REPO / "packaging" / "windows" / "ate.iss").read_text(encoding="utf-8")
+
+    def carries(text: str) -> bool:
+        section = re.search(r"^\[Files\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+        assert section, "the .iss has no [Files] section"
+        for line in section.group(1).splitlines():
+            if not re.match(r'Source:\s*"\{#SourceDir\}\\\*"', line.strip()):
+                continue
+            excludes = re.search(r'Excludes:\s*"([^"]*)"', line)
+            names = excludes.group(1).lower() if excludes else ""
+            return "recursesubdirs" in line and not any(word in names for word in ("licen", "_internal", ".txt"))
+        return False
+
+    assert carries(iss), "the installer's [Files] does not carry _internal/licences"
+    # The check itself can fail: an exclude, or a wildcard that stops at the top directory.
+    assert not carries(iss.replace('Excludes: "ate.exe"', 'Excludes: "ate.exe,licences"'))
+    assert not carries(iss.replace("recursesubdirs ", ""))
+    delete = re.search(r"^\[InstallDelete\]\s*$(.*?)(?=^\[|\Z)", iss, re.M | re.S)
+    assert not delete or "licen" not in delete.group(1).lower(), "the installer deletes the notices"

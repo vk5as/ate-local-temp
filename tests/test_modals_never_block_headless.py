@@ -36,6 +36,7 @@ from PySide6.QtWidgets import QDialog, QMessageBox
 
 from ate.dialogs import dismiss_if_headless
 from ate.ui.run_widgets import MismatchConfirmation
+from tests._fixtures import assert_no_swallowed_exception
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "ate"
@@ -126,6 +127,7 @@ def test_headless_modals_return_in_a_fresh_process() -> None:
     env.pop("ATE_AUTO_DISMISS_DIALOG", None)
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert proc.returncode == 0, proc.stderr
+    assert_no_swallowed_exception(proc.stderr)
     # Abort on the missing-config prompt, None for the alert, False for "abort the run and quit?",
     # and False (Skip PDF) for the unsandboxed-PDF question.
     assert proc.stdout.split() == ["False", "None", "False", "False"], proc.stdout
@@ -172,6 +174,7 @@ def _headless_mismatch_run(config: Path, *, dismiss_seam: bool = False, platform
         env.pop("ATE_AUTO_DISMISS_DIALOG", None)
     proc = subprocess.run([sys.executable, "-c", MISMATCH_RUN_CODE, str(config)], capture_output=True, text=True, env=env, timeout=120)
     assert proc.returncode == 0, proc.stderr
+    assert_no_swallowed_exception(proc.stderr)
     return [line for line in proc.stdout.splitlines() if line.startswith(("answer ", "finished ", "stored ", "flagged ", "logged "))]
 
 

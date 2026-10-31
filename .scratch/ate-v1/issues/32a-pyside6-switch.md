@@ -85,6 +85,10 @@ packet's dependencies), `QT_QPA_PLATFORM=offscreen`:
 1431 passed, 4 skipped in 332.98s (0:05:32)
 ```
 
+Those wall-clock times are from a loaded box and do not measure the binding. A reviewer ran both
+suites on the same box and got 265 s (PySide6) against 246 s (PyQt6), about 7% slower. The reviewer
+puts that at per-Qt-call overhead, which was not measured separately here.
+
 The same four tests skip in all three runs, and they are the same four that skipped before the switch
 (the baseline, from the pre-switch checkout in the shared venv, was `1424 passed, 4 skipped in
 255.53s`): the opt-in 30b screenshots, the two `ATE_BUILD_TESTS=1` frozen-build tests, and the
@@ -128,17 +132,26 @@ The GUI comparison ran on a real X display: `xvfb-run` with the xcb platform, th
 with a schedule picked, and finished, plus the History screen with one recorded run, in both bindings.
 The four widget grabs are byte-identical (same md5), and the four whole-window `xwd` captures have zero
 differing pixels (`compare -metric AE` = 0). The geometry dump — every widget's object name and
-rectangle — is identical apart from the first line, which names the binding and the Qt version. This
-host has no `libxcb-cursor.so.0`, so the run used a `dpkg -x`-extracted copy of Debian's
+rectangle — is identical apart from the first line, which names the binding and the Qt version. That
+is the whole of the comparison: these four screens, in this one run, on Qt 6.11.3 against Qt 6.11.2.
+This host has no `libxcb-cursor.so.0`, so the run used a `dpkg -x`-extracted copy of Debian's
 `libxcb-cursor0` on `LD_LIBRARY_PATH`; nothing was installed on the machine.
 
 ### Behaviour differences, one line each
 
-- **Thread a slot runs on.** All 69 `.connect(` calls in `src/ate/ui` and `src/ate/run_session` were
-  read; the engine's eight worker signals are connected to lambdas, closures, `QObject` methods and
-  bound methods. Checked by `tests/test_signal_threads_32a.py`, which records the thread of every
-  delivery during a real run: both bindings queue the signal onto the receiving thread, and not one
-  slot ran on the worker. Nothing had to be fixed.
+- **Thread a slot runs on.** The first pass read the 69 `.connect(` calls in `src/ate/ui` and
+  `src/ate/run_session` and claimed that was all of them. It was not: the connects at
+  `engine/run_engine.py:220,226`, `report/pdf_job.py:65,103,104` and `report/pdf.py:390,391` were
+  missed. Read now. The two in `run_engine.py` are what a worker reaches (`_op.asked`, `finished`) and
+  the test covers them; the `pdf_job.py` ones live on the main thread with their `QProcess`, and
+  `report_written` is checked landing there; the `pdf.py` ones run inside the helper process, on its
+  main thread, with no worker in it, so they have no test here. `tests/test_signal_threads_32a.py` now drives a real run with a
+  Stop-on-Fail pause, a POLL and a blocking input. All eight engine signals are recorded being emitted
+  on the worker, and each goes to a lambda, a closure, a `QObject` method and a plain method, plus the
+  session's own slots: all ran on the main thread. A control test connects `DirectConnection` and sees
+  the worker's thread, and planting `DirectConnection` in the main test fails it (`a worker signal ran
+  its slot outside the main thread`). Nothing had to be fixed. Only PySide6 was run; "both bindings"
+  was not something this test could show.
 - **An exception escaping a slot or `QThread.run`.** PyQt6 aborts the process (exit 134) before the
   probe's next line prints. PySide6 prints `Error calling Python override of QThread::run():` (or the
   traceback for a slot) and the process keeps going, which is why the guard in `RunEngine.run` matters
@@ -146,6 +159,22 @@ host has no `libxcb-cursor.so.0`, so the run used a `dpkg -x`-extracted copy of 
   that never arrives. The guard is unchanged, the docstring now says what PySide6 does, and
   `tests/test_unexpected_run_end.py` and `test_an_exception_leaving_the_worker_does_not_abort_the_process`
   still prove the run is recorded INTERRUPTED and FINISHED is still announced.
+  An exception in a slot was first left at "may only print". That made it invisible, so it now has a
+  route. PySide6 calls `sys.excepthook` for a direct slot, a queued slot, a timer callback and a
+  `QThread.run` override (probed; the last runs on the worker), so `launch()` installs
+  `ate.exception_log.UnhandledExceptionLog` there. It writes the traceback to the per-launch
+  application log at ERROR and passes the exception to the previous hook, so stderr and pytest-qt's
+  capture still get it. The Operator sees one red line in the main window's status bar: "Internal error: this window may have
+  stopped updating. A Test Run in progress keeps recording. Details: <log path>". No dialog, because
+  a modal box would sit in front of a run and nobody has to answer it for the run to continue; no
+  abort, because the worker's record is still good. The status bar exists only from the first error
+  on, so a healthy window keeps the mockup's layout. `qInstallMessageHandler` was not used: it sees
+  Qt's messages, not Python exceptions. It covers the GUI launch only: `ate _selftest` and other
+  headless paths have no application log and still print. Child-process tests no longer trust exit 0:
+  `assert_no_swallowed_exception` also reads stderr, in 10a, the `test_windows_ci_fixes.py` children,
+  the two in `test_modals_never_block_headless.py` and the one in `test_gui_launch_30a.py`. The other
+  `returncode == 0` tests run things with no Qt event loop (`--version`, `ate setup`, `sh -n`, dpkg) or are
+  frozen-build smokes, which were not changed.
 - **Blocking waits and the GIL.** `QThread.wait()`, the blocking Operator input and the abort path ran
   with eight busy-loop processes competing for three cores: `73 passed in 29.90s`
   (`tests/test_abort_blocking.py`, `tests/test_lua_seam13c_abort.py`, `tests/test_gui_launch_30a.py`,
@@ -159,12 +188,20 @@ host has no `libxcb-cursor.so.0`, so the run used a `dpkg -x`-extracted copy of 
   in PySide6 and is tolerated by PyQt6, which is why the suite still keeps exactly one application, and
   why `conftest.py` destroys the widget tree before quitting (an orphaned `QWidget` finalized at
   interpreter shutdown segfaults in this Qt 6.11 build either way).
-- **Signal argument types.** `Signal(int)` in PySide6 is a C `int`: 2147483647 is accepted, 2147483648
-  raises `OverflowError: int too big to convert` with a libshiboken overflow warning; PyQt6 accepts
-  9223372036854775807. `Signal(str)` accepts `None` in both. What `run_engine.py` actually emits —
-  node sequence, attempt number, input index, a UUID string, `"pre"`/`"post"` — all fits, and a new
-  test asserts that no signal is declared with a type its real values do not fit. Only the headless
-  session's `input_answered` can carry a value of any type, and it already declares `object`.
+- **Signal argument types.** `Signal(int)` in PySide6 is a C `int`. With a slot connected,
+  `emit(2**31)` returns normally and the slot receives -2147483648, with a `RuntimeWarning`; the
+  `OverflowError` stays pending behind the slot, so a slot's next C call can raise `SystemError`. With
+  nothing connected, `emit` raises `OverflowError`. PyQt6 wraps as well (a reviewer's probe, not re-run
+  here): the earlier line here saying it accepts 9223372036854775807 was false. `Signal(str)` turns `5`
+  and `None` into `''`, with one stderr line for `5`, where PyQt6 raised `TypeError` for `5`. So a slot
+  cannot see a bad value, and the earlier test, which looked from a slot, could not fail. The test now
+  wraps `emit` on the sending side, and a planted `seq + 2**31` or a non-`str` phase fails it. What is
+  really sent: node sequence, Attempt number and input index (bounded by the schedule; `LuaHost.inputs`
+  refuses an undeclared index before it reaches a signal), run UUID (`str` from the store), `"pre"`/`"post"`,
+  the choice (`CONTINUE`/`RETRY`/`ABORT`, from buttons), and report paths (`str()` or `""`). None
+  needs `object`. `session.choose()` does not validate a non-`str` argument, which would emit `''`, but
+  every caller passes a `Signal(str)` value that started as a button's constant. `input_answered` can carry any
+  type and already declares `object`.
 - **Dialogs and printing.** `dismiss_if_headless`, `clickedButton()` returning `None` headless, the
   mismatch confirmation and the `printToPdf` path are unchanged: `tests/test_modals_never_block_headless.py`
   and the PDF tests pass with imports renamed and nothing else touched.
@@ -202,27 +239,50 @@ were reworded because the two bindings do not expose the same attribute:
    of comparing the `QCursor` object with the enum, which only worked because PyQt6 overloads `==` for
    it. Same thing is being asserted.
 3. `tests/test_three_pane_run_screen_25a.py` — the pause assertion became `phases and set(phases) ==
-   {"Running"}`. PySide6 delivers the click and the forwarded `prompt_answered` in the same event pump,
-   PyQt6 in the next one; the old assertion was about which pump, not about what the screen shows.
+   {"Running"}`, and the end-state check is back in a weaker form: the header must read `Running` or
+   `Finished`, never `Paused`. Exactly `Running`, as before, is a race: the worker is already free and
+   in 8 local runs read `Finished` once.
 4. `tests/test_windows_ci_fixes.py` and `tests/test_headless_session.py` — docstring and one variable
    name (`PYQT_WEBENGINE_IMPORT_ERROR` → `WEBENGINE_IMPORT_ERROR`) updated for the new binding; no
    assertion changed.
 
-Seven tests were added, all proving something rather than relaxing it: `tests/test_signal_threads_32a.py`
-(thread of every slot, the blocking input, and the values each signal really carries), the
-excludes-vs-WebEngine-import check in 27a, the licence-notice generator test in 27a and the
-"every artifact carries the notices" test in 28b, and a guard in `tests/test_architecture_rules.py`
+Tests added, all proving something rather than relaxing it: `tests/test_signal_threads_32a.py`
+(thread of every slot, a control that sees a real worker delivery, the values sent, and what PySide6
+does to bad values), `tests/test_unhandled_exception_log_32a.py`, the child-check test in
+`tests/test_windows_ci_fixes.py`, the excludes-vs-WebEngine-import check (which now fails rather than
+skips when the import fails) and the licence classifier, closure, notice and Inno Setup tests in 27a,
+the "every artifact carries the notices" test in 28b, and a guard in `tests/test_architecture_rules.py`
 that fails if the forbidden-import patterns match nothing.
 
 ### Licence
 
 PySide6's wheels declare `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`, so the bundle carries the
-LGPL-3.0 and GPL-3.0 texts, a notice naming the Qt and PySide6 versions, where the source is, and the
-statement that Qt may be replaced. `THIRD_PARTY_NOTICES.txt` is generated from the installed wheels at
-build time. It reports, rather than guesses: jinja2's wheel states no licence at all and the notice
-says so; pyvisa and pyvisa-py paste the whole MIT text into their metadata, which the notice shortens
-to a readable line; lupa, sqlalchemy and pyserial are permissive; the three Qt wheels are flagged
-copyleft.
+LGPL-3.0 and GPL-3.0 texts, and a notice saying which versions are shipped, where the source is, and
+that Qt's libraries are separate, unmodified files that can be replaced. The notice describes the
+build and makes no claim of compliance. Nobody has checked compliance, and replacing Qt has not been
+tried. `strip=False` and `upx=False` in `ate.spec` are what "unmodified" rests on; no test compares
+the bundled libraries with the wheel's.
+
+Source locations: `https://code.qt.io/cgit/pyside/pyside-setup.git/` is read from the wheels'
+`Project-URL: Repository`. The wheels name no Qt source, so `https://code.qt.io/cgit/qt/qt5.git/` is a
+constant in `notices.py`, chosen from the same host. On 2026-11-01 both URLs answered HTTP 200 and
+`git ls-remote` found tag `v6.11.3` on `pyside/pyside-setup`, `qt/qt5`, `qt/qtbase` and `qt/qtwebengine`. The
+earlier GitHub and `qt.io/download-open-source` links were not from any metadata and are gone.
+
+`THIRD_PARTY_NOTICES.txt` is generated from the installed wheels at build time, so no copy is checked
+in. It now walks the whole requirement closure, honouring markers and extras, so `markupsafe` and
+`typing-extensions` are listed. It reads classifiers too: the earlier claim that jinja2's wheel states
+no licence was wrong, because it has `License :: OSI Approved :: BSD License`. A term counts only if
+the whole term is a known licence name, which goes further than word boundaries: `Not MIT` has the
+word and means the opposite. Generated from this venv: jinja2, markupsafe, pyserial, pyvisa, pyvisa-py,
+sqlalchemy and typing-extensions are permissive; the three Qt wheels are copyleft (LGPL).
+
+**Reported for you to decide:** lupa's wheel declares only `MIT style`, with no classifier, so it is
+listed as "check upstream". The Lupa section of its `LICENSE.txt` is the MIT text, and the file points
+to lua.org for Lua. The earlier note that the Lua source is inside lupa's wheel was false, since the
+wheel has only compiled modules, and is corrected. Separately, not done here: MIT and BSD ask for their copyright notice
+to travel with copies, and this inventory names licences rather than reproducing them. Whether the
+dependencies' licence files reach the bundle has not been checked.
 
 The repo still has no `LICENSE` file even though `pyproject.toml` says MIT. Per the packet, none was
 added here — that is your call, and it is worth deciding before the next release, because an artifact
@@ -234,6 +294,7 @@ that carries third-party LGPL text and no licence for ATE's own source is a stra
   machine. The workflow files were edited to match PySide6, and the same Python that CI runs was run
   locally where it could be, but the Actions result is unknown.
 - Windows paths in `ate_entry.py` and `verify_bundle()` (`PySide6/QtWebEngineProcess.exe` in
-  `_internal/PySide6`, the Qt DLLs next to it): taken from the PySide6 wheel layout and the PySide6
-  documentation, not from a Windows build. No Windows machine or emulator was available.
+  `_internal/PySide6`, the Qt DLLs next to it): a reviewer checked them against the real Windows
+  wheels and they match, so they are unchanged. They have still never run: no Windows build,
+  machine or emulator was available.
 - The Windows installer checks in `release.yml` are untested for the same reason.

@@ -1,208 +1,353 @@
-"""Packet 32a: which thread a worker's signal slot runs on.
+"""Packet 32a: which thread a worker's signal slot runs on, and what the signals really carry.
 
-The engine does its work on a `QThread` and talks to the session and the screens only through
-signals. A binding decides how those signals are delivered: a slot could run in the emitting
-worker's thread, which would mean a widget or the store being touched from outside the main
-thread. Both PyQt6 and PySide6 queue a cross-thread signal onto the receiver's thread, but this
-proves it rather than assumes it: every slot below records the thread it ran on, and the run is
-checked to have actually happened on a worker.
+The engine does its work on a `QThread` and talks to the session and the screens through signals.
+A binding decides how those are delivered: a slot could run in the emitting worker's thread, which
+would mean a widget or the store being touched from outside the main thread. This records both ends
+of every engine signal during one real run: the thread that emitted it, and the thread each shape of
+slot ran on. Without a recorded emission on the worker the delivery check would prove nothing, and
+`test_the_check_catches_a_slot_that_really_runs_on_the_worker` proves that the check can fail.
 
-Lambdas, closures, plain functions and methods of a `QObject` are each exercised, because those
-are the shapes the screens and the headless session actually connect.
+The values are read on the sending side. A slot cannot see a bad one: `Signal(int)` turns 2**31 into
+-2147483648 and `Signal(str)` turns 5 into `''` before any slot runs (pinned below).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 
-from PySide6.QtCore import QObject
+import pytest
+from PySide6.QtCore import QObject, Qt, Signal
+from pytestqt.exceptions import capture_exceptions
 
-import ate.engine.run_engine as run_engine_module
 import ate.report.pdf_job
+from ate.engine.run_engine import RunEngine, RunStatus
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
 
 from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
 
+ENGINE_SIGNALS = sorted(name for name, value in vars(RunEngine).items() if isinstance(value, Signal))
+SESSION_SIGNALS = sorted(name for name, value in vars(HeadlessRunSession).items() if isinstance(value, Signal))
 
-class Watcher(QObject):
+#: Pre- and Post-test Actions, a POLL (announced by the worker itself), a blocking input (announced
+#: through `OperatorInput.asked`) and a Stop-on-Fail failure: every signal the engine has.
+EVERY_SIGNAL = """\
+return ScheduleParams("Every signal schedule", "emits each of the engine's signals")
+  :setSchedule({
+    StepParams("asks"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "poll", type = "POLL", prompt = { "Go" } },
+                   [2] = { desc = "voltage", type = "INTEGER" } })
+      :setAction(function() local v=ATE.input(2); ATE.report(Result.PASS, "ok "..v) end),
+    StepParams("fails"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.FAIL, "nope") end),
+  })
+  :setStopOnFail(true)
+  :setPreTestAction(function(passFail) ATE.log(Log.INFO, "pretest "..passFail) end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "posttest "..passFail) end)
+"""
+
+
+class _Recording:
+    """Stands in for one signal on one object: notes what is emitted and where, then really emits it."""
+
+    def __init__(self, name: str, signal, sent: list) -> None:
+        self._name, self._signal, self._sent = name, signal, sent
+
+    def emit(self, *args):
+        self._sent.append((self._name, threading.get_ident(), args))
+        return self._signal.emit(*args)
+
+    def connect(self, *args, **kwargs):
+        return self._signal.connect(*args, **kwargs)
+
+
+def _record_sends(owner, names, sent) -> None:
+    for name in names:
+        setattr(owner, name, _Recording(name, getattr(owner, name), sent))
+
+
+class _QObjectSlots(QObject):
     """A QObject whose method is connected straight to a worker signal."""
 
-    def __init__(self) -> None:
-        self.threads: list[str] = []
+    def __init__(self, landed: list) -> None:
+        super().__init__()
+        self.landed = landed
 
-    def on_step(self, node_seq: int) -> None:
-        self.threads.append(threading.current_thread().name)
-
-
-def _wrap_slot(screen_class, name: str, record):
-    """Wrap one of the screen's slots so every delivery records its thread."""
-    original = getattr(screen_class, name)
-
-    def wrapper(self, *args, **kwargs):
-        record(threading.current_thread().name)
-        return original(self, *args, **kwargs)
-
-    return wrapper
+    def on_signal(self, *_args) -> None:
+        self.landed.append(("QObject method", threading.get_ident()))
 
 
-def test_worker_signals_reach_every_slot_on_the_main_thread(qapp, tmp_path, monkeypatch) -> None:
-    """A run that emits every signal the engine has, with each slot recording its thread."""
+class _PlainSlots:
+    """A method of something that is not a QObject, so there is no receiver for Qt to look at."""
+
+    def __init__(self, landed: list) -> None:
+        self.landed = landed
+
+    def on_signal(self, *_args) -> None:
+        self.landed.append(("plain method", threading.get_ident()))
+
+
+def _connect_every_shape(engine, landed: list, keep: list) -> None:
+    """Connect each signal to a lambda, a closure, a QObject method and a plain method."""
+    for name in ENGINE_SIGNALS:
+        signal = getattr(engine, name)
+        shapes: list = []
+
+        def closure(*_args, name=name):
+            landed.append((f"{name}: closure", threading.get_ident()))
+
+        qobject = _QObjectSlots(shapes)
+        plain = _PlainSlots(shapes)
+        signal.connect(lambda *_args, name=name: landed.append((f"{name}: lambda", threading.get_ident())))
+        signal.connect(closure)
+        signal.connect(qobject.on_signal)
+        signal.connect(plain.on_signal)
+        keep.append((qobject, plain, shapes, name))
+
+
+def _run_every_signal(qapp, tmp_path, monkeypatch, before_start=lambda engine: None) -> dict:
+    """Run EVERY_SIGNAL through a real session and screen: answer the input, then the pause."""
     env = write_ate_env(tmp_path)
+    schedule = env["defs_dir"] / "every_signal.tslua"
+    schedule.write_text(EVERY_SIGNAL, encoding="utf-8", newline="\n")
+    manifest_path = env["defs_dir"] / "demo.atedef"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append({"path": schedule.name, "sha256": hashlib.sha256(EVERY_SIGNAL.encode()).hexdigest()})
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
     monkeypatch.setattr(ate.report.pdf_job, "pdf_helper_command", fake_pdf_helper(WRITES_PDF))
 
-    main = threading.current_thread().name
-    worker_threads: list[str] = []
-    real_run = run_engine_module.RunEngine.run
+    result: dict = {
+        "sent": [],
+        "session_sent": [],
+        "landed": [],
+        "internal": [],
+        "keep": [],
+        "worker": [],
+        "session_landed": [],
+    }
 
-    def run_logging_thread(self):
-        worker_threads.append(threading.current_thread().name)
+    # The session's and the engine's own slots: the real receivers of the worker's signals.
+    for owner, names in (
+        (
+            HeadlessRunSession,
+            (
+                "_on_run_uuid",
+                "_on_input_asked",
+                "_on_step_finished",
+                "_on_failure_prompt",
+                "_on_prompt_answered",
+                "_on_action_started",
+                "_on_step_started",
+            ),
+        ),
+        (RunEngine, ("_on_asked", "_forget_ended_worker")),
+    ):
+        for name in names:
+            original = getattr(owner, name)
+
+            def wrapped(self, *args, _original=original, _name=name):
+                result["internal"].append((_name, threading.get_ident()))
+                return _original(self, *args)
+
+            monkeypatch.setattr(owner, name, wrapped)
+
+    real_run = RunEngine.run
+
+    def run_noting_thread(self):
+        result["worker"].append(threading.get_ident())
         real_run(self)
 
-    monkeypatch.setattr(run_engine_module.RunEngine, "run", run_logging_thread)
+    monkeypatch.setattr(RunEngine, "run", run_noting_thread)
 
-    screen_threads: list[str] = []
-    for name in ("_on_failure_prompt", "_on_prompt_answered", "_on_state_changed"):
-        monkeypatch.setattr(StagedRunScreen, name, _wrap_slot(StagedRunScreen, name, screen_threads.append))
+    # Everything is connected in the gap between the engine being built and its worker starting,
+    # so nothing the worker emits can be missed.
+    real_start = RunEngine.start
+
+    def start_connected(self, *args):
+        _connect_every_shape(self, result["landed"], result["keep"])
+        _record_sends(self, ENGINE_SIGNALS, result["sent"])
+        before_start(self)
+        real_start(self, *args)
+
+    monkeypatch.setattr(RunEngine, "start", start_connected)
 
     session = HeadlessRunSession(env["config"])
-    screen = StagedRunScreen(session)
+    screen = StagedRunScreen(session)  # connects its slots to the session's real signals
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
+    _record_sends(session, SESSION_SIGNALS, result["session_sent"])
+    # Connected to the real signal under the recording: the session's forward, on the session's side.
+    for name in SESSION_SIGNALS:
+        getattr(session, name).connect(
+            lambda *_args, name=name: result["session_landed"].append((name, threading.get_ident()))
+        )
 
-    landed: list[tuple[str, str]] = []
+    asked: list[tuple[int, int, int]] = []
+    prompted: list[tuple[int, int]] = []
+    session.input_asked.connect(lambda *args: asked.append(args))
+    session.failure_prompt.connect(lambda *args: prompted.append(args))
 
-    def note(name):
-        def slot(*_args):
-            landed.append((name, threading.current_thread().name))
+    session.select_schedule("Every signal schedule")
+    session.set_stop_on_fail(True)
+    session.start()
 
-        return slot
-
-    watcher = Watcher()
-    session.select_schedule("Pre post pass schedule")
-    engine = session.start()
-    # Connected before the event loop is pumped, so nothing emitted is missed.
-    for signal, name in (
-        (engine.run_uuid_reported, "run_uuid_reported"),
-        (engine.state_changed, "state_changed"),
-        (engine.step_started, "step_started"),
-        (engine.step_finished, "step_finished"),
-        (engine.action_started, "action_started"),
-        (engine.input_asked, "input_asked"),
-        (engine.failure_prompt, "failure_prompt"),
-    ):
-        signal.connect(note(name))
-    engine.step_finished.connect(watcher.on_step)
-
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
+    answered_input = answered_prompt = False
+    written: list[tuple[str, str]] = []
+    session.report_written.connect(lambda *args: written.append(args))
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not (session.state == SessionState.FINISHED and written):
         qapp.processEvents()
-        if session.state == SessionState.FINISHED:
-            break
-        time.sleep(0.01)
+        if not answered_input:
+            for node_seq, attempt_no, index in asked:
+                if index == 2:  # the POLL (index 1) is announced too, and never blocks
+                    session.supply_input(node_seq, attempt_no, index, 5)
+                    answered_input = True
+                    break
+        if prompted and not answered_prompt:
+            session.choose("CONTINUE")
+            answered_prompt = True
+        time.sleep(0.005)
     qapp.processEvents()
-
-    assert worker_threads and all(thread != main for thread in worker_threads), (
-        f"the schedule did not run on a worker thread: {worker_threads}"
-    )
-    names = {name for name, _ in landed}
-    assert {"run_uuid_reported", "state_changed", "step_started", "step_finished", "action_started"} <= names, (
-        f"the run emitted only {sorted(names)}: the test proved nothing"
-    )
-    off_thread = [(name, thread) for name, thread in landed if thread != main]
-    assert not off_thread, f"a worker signal ran its slot outside the main thread: {off_thread}"
-    assert watcher.threads and all(thread == main for thread in watcher.threads), watcher.threads
-    assert screen_threads and all(thread == main for thread in screen_threads), screen_threads
-
-
-def test_the_values_the_engine_signals_declare_are_the_values_they_carry(qapp, tmp_path, monkeypatch) -> None:
-    """No signal in `run_engine.py` is declared with a type its real values do not fit.
-
-    PySide6's `Signal(int)` is a C `int`: a value above 2**31 - 1 raises `OverflowError` where PyQt6
-    silently accepted it, and `Signal(str)` takes `None` without complaint in either binding. The
-    engine's numbers are node sequence, attempt and input indices; the strings are a run key and a
-    phase name. This runs a schedule and looks at what actually arrives.
-    """
-    env = write_ate_env(tmp_path)
-    monkeypatch.setattr(ate.report.pdf_job, "pdf_helper_command", fake_pdf_helper(WRITES_PDF))
-
-    session = HeadlessRunSession(env["config"])
-    session.select_schedule("Pre post pass schedule")
-    engine = session.start()
-
-    seen: list[tuple[str, tuple[object, ...]]] = []
-
-    def note(name):
-        def slot(*args):
-            seen.append((name, args))
-
-        return slot
-
-    for signal, name in (
-        (engine.run_uuid_reported, "run_uuid_reported"),
-        (engine.state_changed, "state_changed"),
-        (engine.step_started, "step_started"),
-        (engine.step_finished, "step_finished"),
-        (engine.action_started, "action_started"),
-        (engine.input_asked, "input_asked"),
-        (engine.failure_prompt, "failure_prompt"),
-        (engine.prompt_answered, "prompt_answered"),
-    ):
-        signal.connect(note(name))
-
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and session.state != SessionState.FINISHED:
+    assert session.state == SessionState.FINISHED, f"the run did not finish: {session.state}"
+    assert written, "the run-end PDF job never reported"
+    assert answered_input and answered_prompt
+    # The worker ends after FINISHED, and its `finished` signal is queued to this thread.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not any(name == "_forget_ended_worker" for name, _ in result["internal"]):
         qapp.processEvents()
-        time.sleep(0.01)
-    qapp.processEvents()
+        time.sleep(0.005)
     session.close()
-
-    assert seen, "nothing was emitted, so this test proved nothing"
-    for name, args in seen:
-        assert not any(arg is None for arg in args), f"{name} carried None: {args}"
-        for arg in args:
-            if isinstance(arg, int):
-                assert -(2**31) <= arg <= 2**31 - 1, f"{name} declared int but got {arg}, which Signal(int) cannot carry"
-    uuids = [args[0] for name, args in seen if name == "run_uuid_reported"]
-    assert uuids and all(isinstance(u, str) and u for u in uuids), uuids
-    phases = {args[0] for name, args in seen if name == "action_started"}
-    assert phases <= {"pre", "post"}, phases
+    screen.close()
+    return result
 
 
-def test_a_blocking_input_is_answered_from_the_main_thread(qapp, tmp_path, monkeypatch) -> None:
-    """The one signal the Operator answers by blocking: its slot still runs on the main thread."""
-    env = write_ate_env(tmp_path)
-    monkeypatch.setattr(ate.report.pdf_job, "pdf_helper_command", fake_pdf_helper(WRITES_PDF))
-    main = threading.current_thread().name
+def test_every_worker_signal_is_emitted_on_the_worker_and_lands_on_the_main_thread(qapp, tmp_path, monkeypatch) -> None:
+    """All eight signals, every slot shape, and the session's and the engine's own slots."""
+    main = threading.get_ident()
+    result = _run_every_signal(qapp, tmp_path, monkeypatch)
 
-    session = HeadlessRunSession(env["config"])
-    screen = StagedRunScreen(session)
-    screen.show()
-    qapp.processEvents()
+    assert result["worker"] and main not in result["worker"], "the schedule did not run on a worker thread"
+    worker = result["worker"][0]
 
-    asked: list[tuple[str, tuple[int, int, int]]] = []
+    assert len(ENGINE_SIGNALS) == 8, ENGINE_SIGNALS
+    emitted_on_worker = {name for name, thread, _args in result["sent"] if thread == worker}
+    assert emitted_on_worker == set(ENGINE_SIGNALS), (
+        f"not emitted on the worker: {sorted(set(ENGINE_SIGNALS) - emitted_on_worker)}; the delivery check proves nothing for those"
+    )
 
-    def record(node_seq: int, attempt_no: int, index: int) -> None:
-        asked.append((threading.current_thread().name, (node_seq, attempt_no, index)))
+    expected = {f"{name}: {shape}" for name in ENGINE_SIGNALS for shape in ("lambda", "closure")}
+    assert expected <= {shape for shape, _ in result["landed"]}
+    for qobject, plain, shapes, name in result["keep"]:
+        assert {"QObject method", "plain method"} == {shape for shape, _ in shapes}, f"{name}: {shapes}"
+        assert all(thread == main for _, thread in shapes), f"{name} ran a slot off the main thread"
+    off_main = [(shape, thread) for shape, thread in result["landed"] if thread != main]
+    assert not off_main, f"a worker signal ran its slot outside the main thread: {off_main}"
 
-    session.select_schedule("Blocking input schedule")
-    engine = session.start()
-    engine.input_asked.connect(record)
+    # `run_engine.py`'s own two connects are here: `_op.asked` and `finished`, both from the worker.
+    internal = {name for name, _ in result["internal"]}
+    assert internal == {
+        "_on_run_uuid",
+        "_on_input_asked",
+        "_on_step_finished",
+        "_on_failure_prompt",
+        "_on_prompt_answered",
+        "_on_action_started",
+        "_on_step_started",
+        "_on_asked",
+        "_forget_ended_worker",
+    }, internal
+    assert all(thread == main for _, thread in result["internal"]), result["internal"]
 
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and not asked:
-        qapp.processEvents()
-        time.sleep(0.01)
-    assert asked, "the worker never announced a blocking input"
-    assert all(thread == main for thread, _ in asked), asked
+    # What the screens are connected to: the session's forwards, and `report_written` from the PDF
+    # job, whose `QProcess` signals (pdf_job.py) are owned by and delivered on this thread.
+    assert all(thread == main for _, thread in result["session_landed"]), result["session_landed"]
+    assert all(thread == main for _name, thread, _args in result["session_sent"]), result["session_sent"]
+    assert "report_written" in {name for name, _ in result["session_landed"]}
 
-    # Answer it so the worker does not stay blocked.
-    _thread, (node_seq, attempt_no, index) = asked[0]
-    session.supply_input(node_seq, attempt_no, index, 5)
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and session.state != SessionState.FINISHED:
-        qapp.processEvents()
-        time.sleep(0.01)
-    session.close()
+
+def test_the_check_catches_a_slot_that_really_runs_on_the_worker(qapp, tmp_path, monkeypatch) -> None:
+    """A DirectConnection really does run on the worker: this is what the test above would see."""
+    main = threading.get_ident()
+    direct: list[int] = []
+
+    def connect_direct(engine) -> None:
+        engine.step_started.connect(lambda *_args: direct.append(threading.get_ident()), Qt.ConnectionType.DirectConnection)
+
+    result = _run_every_signal(qapp, tmp_path, monkeypatch, connect_direct)
+    assert direct and main not in direct, "a direct connection did not run on the worker: the recording cannot tell"
+    assert set(direct) == {result["worker"][0]}
+
+
+def test_the_values_every_signal_really_sends(qapp, tmp_path, monkeypatch) -> None:
+    """On the sending side, every declared `int` is a 32-bit `int` and every `str` is a real `str`."""
+    result = _run_every_signal(qapp, tmp_path, monkeypatch)
+    assert {name for name, _thread, _args in result["sent"]} == set(ENGINE_SIGNALS)
+
+    declared = {
+        "run_uuid_reported": (str,),
+        "state_changed": (RunStatus,),
+        "input_asked": (int, int, int),
+        "step_finished": (int,),
+        "failure_prompt": (int, int),
+        "prompt_answered": (int, int, str),
+        "action_started": (str, int, int),
+        "step_started": (int,),
+    }
+    session_declared = {
+        "state_changed": (SessionState,),
+        "input_asked": (int, int, int),
+        "input_answered": (int, int, int, object),
+        "step_finished": (int,),
+        "failure_prompt": (int, int),
+        "prompt_answered": (int, int, str),
+        "action_started": (str, int, int),
+        "step_started": (int,),
+        "report_written": (str, str),
+    }
+    for sent, table in ((result["sent"], declared), (result["session_sent"], session_declared)):
+        for name, _thread, args in sent:
+            types = table[name]
+            assert len(args) == len(types), f"{name}: {args}"
+            for arg, wanted in zip(args, types):
+                if wanted is object:
+                    continue
+                assert type(arg) is wanted, f"{name} sent {arg!r}, declared {wanted.__name__}: a slot would not see it"
+                if wanted is int:
+                    assert -(2**31) <= arg <= 2**31 - 1, f"{name} sent {arg}, which Signal(int) wraps: declare object"
+
+    by_name: dict[str, list[tuple]] = {}
+    for name, _thread, args in result["sent"]:
+        by_name.setdefault(name, []).append(args)
+    assert {args[0] for args in by_name["action_started"]} == {"pre", "post"}
+    assert {args[2] for args in by_name["prompt_answered"]} == {"CONTINUE"}
+    assert all(args[0] for args in by_name["run_uuid_reported"])
+    written = [args for name, _thread, args in result["session_sent"] if name == "report_written"]
+    assert written and written[0][0].endswith(".html") and written[0][1].endswith(".pdf"), written
+
+
+class _Probe(QObject):
+    number = Signal(int)
+    text = Signal(str)
+
+
+def test_why_the_values_are_read_on_the_sending_side(qapp) -> None:
+    """Pins what PySide6 does to a bad value, which is why a slot cannot be the one to check it."""
+    probe = _Probe()
+    numbers: list = []
+    texts: list = []
+    probe.number.connect(lambda value: numbers.append(value))
+    probe.text.connect(lambda value: texts.append(value))
+    # The OverflowError stays pending behind the slot, where its next C call can raise SystemError.
+    with capture_exceptions(), pytest.warns(RuntimeWarning, match="Overflow"):
+        probe.number.emit(2**31)
+    assert numbers == [-(2**31)]
+    probe.text.emit(5)
+    assert texts == [""]
+
+    unconnected = _Probe()
+    with pytest.raises(OverflowError), pytest.warns(RuntimeWarning, match="Overflow"):
+        unconnected.number.emit(2**31)

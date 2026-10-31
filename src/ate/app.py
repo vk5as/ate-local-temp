@@ -31,11 +31,12 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QActionGroup
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
 from .config import Config, ConfigError, MissingConfigError, config_hint, config_path, read_config
 from .dialogs import dismiss_if_headless
+from .exception_log import UnhandledExceptionLog
 from .history.session import HistorySession
 from .log import LogError, open_app_log
 from .report.pdf import pdf_sandbox_choice
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         self._confirm_close = confirm_close or _close_confirm_dialog
         self._run_active = False
         self._released = False
+        self.exception_log: Optional[UnhandledExceptionLog] = None  # set by launch(), once there is a log
         self.setWindowTitle(f"ATE {__version__} — {config.station_name}")
 
         self.history_session = HistorySession(session.store, config=session.config, pdf_choice=pdf_choice)
@@ -289,6 +291,25 @@ class MainWindow(QMainWindow):
                     picker.setCurrentItem(item)  # _on_schedule_selected selects it on the session
                     break
 
+    # -- something went wrong -------------------------------------------------
+
+    def show_internal_error(self, log_path: str) -> None:
+        """Say that a slot raised, without stopping anything: never a dialog, the worker may be mid-run.
+
+        The status bar only exists from the first error on, so a healthy window keeps the mockup's
+        layout. Stays up until ATE closes, because the screen may be wrong from here on."""
+        try:
+            label = self.findChild(QLabel, "internal_error_label")
+            if label is None:
+                label = QLabel(self)
+                label.setObjectName("internal_error_label")
+                label.setStyleSheet("color: #b00020; font-weight: bold;")
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                self.statusBar().addWidget(label, 1)
+            label.setText(f"Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: {log_path}")
+        except Exception:  # noqa: BLE001 - raising here would come straight back to this method
+            pass
+
     # -- closing -------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
@@ -314,6 +335,8 @@ class MainWindow(QMainWindow):
             return
         self._released = True
         self.session.close()
+        if self.exception_log is not None:
+            self.exception_log.uninstall()
         if self.app_log is not None:
             try:
                 self.app_log.close()
@@ -499,6 +522,11 @@ def launch(
 
     app = QApplication.instance() or QApplication([])  # reused when a test already has one
     window = MainWindow(session, config, app_log=app_log, confirm_close=confirm_close, pdf_choice=pdf_choice)
+    # PySide6 only prints an exception from a slot and carries on: this is how it reaches the log and
+    # the Operator. Queued, because the hook can run on the worker, and so a raising slot has unwound.
+    window.exception_log = UnhandledExceptionLog(app_log)
+    window.exception_log.reported.connect(window.show_internal_error, Qt.ConnectionType.QueuedConnection)
+    window.exception_log.install()
     if not exec_:
         # Keep the application referenced: a local QApplication dying here would take the
         # window (and the session's store) with it (30a review item 2).

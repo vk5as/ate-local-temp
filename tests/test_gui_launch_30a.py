@@ -30,7 +30,7 @@ from ate.storage.store import SCHEMA_VERSION, RunStore
 from ate.ui.history_screen import HistoryScreen
 from ate.ui.staged_run_screen import StagedRunScreen
 
-from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
+from ._fixtures import WRITES_PDF, assert_no_swallowed_exception, fake_pdf_helper, write_ate_env
 
 
 @pytest.fixture
@@ -325,6 +325,7 @@ def test_launch_keeps_its_qapplication_alive_without_pytest_qt(tmp_path):
         timeout=60,
     )
     assert "ALIVE" in proc.stdout, proc.stderr
+    assert_no_swallowed_exception(proc.stderr)
 
 
 def test_launch_reads_the_config_exactly_once(qapp, tmp_path, monkeypatch):

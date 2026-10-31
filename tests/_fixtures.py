@@ -1249,3 +1249,13 @@ def stub_licence_notices(internal: Path) -> None:
     licences.mkdir(parents=True, exist_ok=True)
     for name in LICENCE_NOTICES:
         (licences / name).write_text("stub notice", encoding="utf-8", newline="\n")
+
+
+def assert_no_swallowed_exception(stderr: str) -> None:
+    """A child's exit code cannot show a slot exception: PySide6 prints it and carries on.
+
+    PyQt6 aborted the process on one, so a child test could rely on exit 0. Under PySide6 the
+    only trace a child leaves is on stderr: the traceback, and for a `QThread.run` override this
+    line as well."""
+    assert "Traceback" not in stderr, f"a slot raised in the child:\n{stderr[-2000:]}"
+    assert "Error calling Python override" not in stderr, f"a Qt override raised in the child:\n{stderr[-2000:]}"

@@ -29,7 +29,7 @@ from ate.log import AppLog
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 from ate.ui import history_screen
-from tests._fixtures import files_held_open_under, files_refusing_a_rename_under, write_ate_env
+from tests._fixtures import assert_no_swallowed_exception, files_held_open_under, files_refusing_a_rename_under, write_ate_env
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -227,6 +227,7 @@ print("FINISHED" if done else "no finish", len(_live_engines))
 """
     result = _child(tmp_path, source)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED 0" in result.stdout, "the ended worker was not let go: " + result.stdout
 
 
@@ -252,6 +253,11 @@ print("FINISHED" if done else "no finish")
 """
     result = _child(tmp_path, source)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    # The guard reports the load failure on stderr with its traceback, on purpose. Nothing else may raise.
+    before, guard, after = result.stderr.partition("The Test Run ended on an unexpected error:")
+    assert guard, f"the guard never reported the failure:\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(before)
+    assert "Error calling Python override" not in after, after[-1500:]
     assert "FINISHED" in result.stdout, result.stdout
 
 
@@ -269,6 +275,7 @@ print("leaving", engine.isRunning())
 """
     result = _child(tmp_path, source)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "leaving True" in result.stdout, result.stdout
     conn = sqlite3.connect(tmp_path / "a.db")
     try:
@@ -504,3 +511,29 @@ def test_no_shipped_code_leaves_a_text_encoding_to_the_machine():
                 if needs and "encoding" not in keywords:
                     offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {name}")
     assert offenders == []
+
+
+def test_the_child_checks_can_see_an_exception_exit_0_hides(tmp_path):
+    """The reason every Qt child test also reads stderr: a raising slot leaves exit 0 and a full run."""
+    source = """
+from PySide6.QtCore import QCoreApplication, QObject, QTimer
+app = QCoreApplication([])
+def boom():
+    raise ValueError("a slot raised")
+QTimer.singleShot(0, boom)
+QTimer.singleShot(20, app.quit)
+app.exec()
+print("FINISHED")
+"""
+    script = tmp_path / "raising_slot.py"
+    script.write_text(source, encoding="utf-8", newline="\n")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        env=dict(os.environ, QT_QPA_PLATFORM="offscreen"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0 and "FINISHED" in result.stdout, result.stderr
+    with pytest.raises(AssertionError, match="a slot raised"):
+        assert_no_swallowed_exception(result.stderr)

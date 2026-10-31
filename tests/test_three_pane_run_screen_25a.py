@@ -602,10 +602,9 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     assert screen.table.table.item(other_row, COLUMNS.index("Result")).background().color().name().lower() == "#ffffff", "a step not paused is tinted"
     assert screen.status_bar.status_label.text() == "Paused"
 
-    # The header's phase at the instant the pause is answered. Both bindings deliver the pause's
-    # end twice to this session (once from choose(), once forwarded from the worker), and PySide6
-    # delivers the forwarded one in the same pump as the click while PyQt6 needs another, so the
-    # assertion is about every phase seen at a prompt_answered, not about how many there are.
+    # The header's phase at the instant the pause is answered. The pause's end reaches this session
+    # twice (once from choose(), once forwarded from the worker), and the second one's timing is the
+    # worker's, so this is about every phase seen at a prompt_answered, not about how many there are.
     phases: list[str] = []
     session.prompt_answered.connect(lambda *_seen: phases.append(screen.status_bar.status_label.text()))
     bar.continue_button.click()
@@ -614,6 +613,9 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     assert screen.table.banner.isVisible() is False
     assert screen.table.table.isRowHidden(prompt_row)
     assert phases and set(phases) == {"Running"}, f"the header never went back to Running after the pause: {phases}"
+    # The end state too. The worker is already free, so it can legally have finished within this pump
+    # (seen about 1 run in 8), but it must never still read Paused.
+    assert screen.status_bar.status_label.text() in {"Running", "Finished"}, screen.status_bar.status_label.text()
     assert _wait_finished(qapp, session)
     assert screen.status_bar.status_label.text() == "Finished"
     assert screen.table.table.item(row, COLUMNS.index("Result")).text() == "FAIL"

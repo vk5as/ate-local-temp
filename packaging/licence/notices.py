@@ -8,12 +8,13 @@ Three files land in ``--out``:
   NOTICE-Qt-PySide6.txt    what Qt and PySide6 are in this bundle, their licence, the version,
                            where the source is, and that Qt can be replaced
   THIRD_PARTY_NOTICES.txt  every runtime dependency, its version and the licence its wheel
-                           declares, plus the copies the copyleft ones require
+                           declares, including what those dependencies themselves require
   LGPL-3.0.txt, GPL-3.0.txt  the full texts, copied from this directory
 
 Generated from what is installed rather than written by hand, so the version numbers are the
-ones the bundle really carries. A licence the wheel does not state is reported as unstated:
-nothing here is guessed. ``packaging/build_pyinstaller.py`` runs this and puts the result in the
+ones the bundle really carries. A licence the wheel does not name, or that this script cannot
+name, is reported: nothing here is guessed. Needs ``packaging``, which PyInstaller already brings
+into the build venv. ``packaging/build_pyinstaller.py`` runs this and puts the result in the
 bundle, where ``verify_bundle()`` refuses to ship it if any of it is missing.
 """
 
@@ -21,32 +22,45 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import re
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 HERE = Path(__file__).resolve().parent
 
-#: Licence words that let ATE redistribute the dependency alongside an MIT-licensed ATE. A wheel
-#: states its licence in whatever shape the packager chose — "MIT", "BSD", the whole MIT text — so
-#: these are matched as words in the declaration, not as an exact metadata field.
-PERMISSIVE = ("mit", "bsd", "apache", "isc", "psf", "python-2.0")
+#: A licence name this script recognises as permissive. Each term of a declaration has to be one of
+#: these in full: a word found inside a sentence proves nothing ("Not MIT", "unlimited seats").
+_PERMISSIVE = re.compile(
+    r"(?:the\s+)?"
+    r"(?:mit|0bsd|bsd(?:-\d-clause(?:-clear)?)?|apache(?:-2\.0|\s+2\.0|\s+software)?|isc|psf(?:-2\.0)?"
+    r"|python-2\.0|python\s+software\s+foundation)"
+    r"(?:\s+licen[cs]e)?(?:\s+\([\w. -]+\))?",
+    re.IGNORECASE,
+)
+_LGPL = re.compile(r"(?:gnu\s+)?(?:lgpl[-\w.+]*|lesser\s+general\s+public\s+licen[cs]e.*)", re.IGNORECASE)
+_GPL = re.compile(r"(?:gnu\s+)?(?:a?gpl[-\w.+]*|(?:affero\s+)?general\s+public\s+licen[cs]e.*)", re.IGNORECASE)
 
-#: Copyleft licences: ATE may link against these and still be MIT, but the dependency's own
-#: licence governs the dependency, and its source has to stay available.
-COPYLEFT = ("lgpl", "gpl")
+PERMISSIVE_NOTE = "permissive"
+LGPL_NOTE = "copyleft (LGPL): keeps its own licence, which ATE's does not replace"
 
-# The Lua that lupa embeds is not a distribution: lupa ships Lua 5.5 source in its wheel.
+# The Lua that lupa embeds is not a distribution: lupa's wheel carries it compiled, as lupa.lua55.
 LUA_NOTE = (
-    "lupa embeds Lua 5.5, licensed under the MIT licence "
-    "(https://www.lua.org/copyright.html); the Lua source is inside lupa's wheel."
+    "lupa embeds Lua, and ATE's bundle carries its Lua 5.5 build (lupa.lua55). Lua's licence: "
+    "https://www.lua.org/license.html, the link lupa's own licence file gives."
 )
 
-QT_SOURCE = (
-    "Qt: https://www.qt.io/download-open-source — the sources of every library in this bundle, "
-    "including QtWebEngine and the Chromium it is built from, are at https://code.qt.io and "
-    "https://github.com/qt/qtwebengine and https://github.com/qt/qtwebengine-chromium.\n"
-    "PySide6: https://github.com/qt/pyside and https://github.com/qt/pyside-addons, and every "
-    "wheel on https://pypi.org/project/PySide6-Addons/."
-)
+#: Where Qt's source is. The wheels name PySide6's repository but not Qt's. This is the same host's
+#: top-level Qt repository, with a tag for each release (checked with ``git ls-remote``, 2026-11-01).
+QT_REPOSITORY = "https://code.qt.io/cgit/qt/qt5.git/"
+
+
+def _version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed in this interpreter"
 
 
 def _qt_version() -> str:
@@ -56,118 +70,162 @@ def _qt_version() -> str:
 
         return qVersion()
     except Exception:
-        try:
-            return importlib.metadata.version("PySide6-Addons")
-        except importlib.metadata.PackageNotFoundError:
-            return "not installed in this interpreter"
+        return _version("PySide6-Addons")
 
 
-def _licence(name: str) -> str:
-    """The licence a distribution declares, as its wheel states it."""
-    metadata = importlib.metadata.metadata(name)
-    stated = metadata.get("License-Expression") or metadata.get("License") or ""
-    return " ".join(stated.split())
+def _pyside_repository() -> str | None:
+    """The source repository PySide6's own wheel names, or None when it names none."""
+    try:
+        urls = importlib.metadata.metadata("PySide6-Addons").get_all("Project-URL") or []
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    for entry in urls:
+        label, _, url = entry.partition(",")
+        if label.strip().lower() == "repository":
+            return url.strip()
+    return None
 
 
-def _short(licence: str) -> str:
-    """The licence declaration cut to a line a person can read.
+def _declared(name: str) -> list[str]:
+    """Each licence a distribution's wheel names, from every metadata field that names one.
 
-    Some wheels paste the whole licence into the metadata field (pyvisa does), which would make this
-    file unreadable. The first words plus "see the wheel" is what the notice needs.
+    A ``License`` field is sometimes the whole licence text, which is not a name: it counts only when
+    nothing else names the licence, and then by its first line.
     """
-    return licence if len(licence) <= 60 else licence[:60] + "..."
+    metadata = importlib.metadata.metadata(name)
+    expression = " ".join((metadata.get("License-Expression") or "").split())
+    field = (metadata.get("License") or "").strip()
+    classifiers = [
+        entry.split("::")[-1].strip() for entry in metadata.get_all("Classifier") or [] if entry.startswith("License ::")
+    ]
+    pasted = "\n" in field
+    named = [expression] if expression else []
+    if field and field.upper() != "UNKNOWN" and not pasted:
+        named.append(" ".join(field.split()))
+    named += classifiers
+    if not named and pasted:
+        named.append(field.splitlines()[0].strip())
+    return named
 
 
-def _classify(licence: str) -> str:
-    """One line on what this licence means for an MIT-licensed ATE that ships the dependency."""
-    text = " ".join(licence.lower().split())
-    if not text:
-        return "the wheel states no licence: check upstream before redistributing this, nothing is assumed here"
-    if any(word in text for word in COPYLEFT):
-        return (
-            "copyleft: ATE stays MIT, but this dependency keeps its own licence — its source must "
-            "remain available and it may not be relicensed"
-        )
-    if any(word in text for word in PERMISSIVE):
-        return "compatible with MIT: redistributable as-is"
-    return f"the wheel declares {licence!r}, which this script cannot classify: check upstream"
+def _kind(term: str) -> str:
+    # Grouping parentheses of an expression go; "ISC License (ISCL)" keeps its own.
+    for candidate in (term.strip(), term.strip(" ()")):
+        for kind, pattern in (("permissive", _PERMISSIVE), ("lgpl", _LGPL), ("gpl", _GPL)):
+            if pattern.fullmatch(candidate):
+                return kind
+    return "unknown"
+
+
+def _classify_one(declaration: str) -> str:
+    """"permissive", "lgpl", "gpl" or "unknown" for one declaration, reading OR and AND as SPDX does."""
+    parts = re.split(r"\s+(or|and)\s+", declaration, flags=re.IGNORECASE)
+    kinds, operators = [_kind(term) for term in parts[0::2]], {op.lower() for op in parts[1::2]}
+    if "unknown" in kinds or len(operators) > 1:
+        return "unknown"
+    # An OR is the licensee's choice, so the most permissive option counts; an AND binds all of them.
+    order = ["permissive", "lgpl", "gpl"]
+    ranks = [order.index(kind) for kind in kinds]
+    return order[min(ranks) if operators == {"or"} else max(ranks)]
+
+
+def _classify(declared: list[str]) -> str:
+    """One line on what a dependency's declared licences are. Anything unclear says "check upstream"."""
+    if not declared:
+        return "the wheel states no licence: check upstream"
+    kinds = {_classify_one(declaration) for declaration in declared}
+    if kinds == {"permissive"}:
+        return PERMISSIVE_NOTE
+    if kinds == {"lgpl"}:
+        return LGPL_NOTE
+    if kinds == {"gpl"}:
+        return "GPL with no LGPL or permissive option: check upstream before shipping this with ATE"
+    if len(kinds) > 1:
+        return f"the wheel's licence fields disagree ({'; '.join(declared)}): check upstream"
+    return f"the wheel declares {declared[0]!r}, which this script cannot name: check upstream"
 
 
 def qt_notice() -> str:
-    """The Qt/PySide6 notice that travels with every artifact."""
-    try:
-        pyside = importlib.metadata.version("PySide6-Addons")
-    except importlib.metadata.PackageNotFoundError:
-        pyside = "not installed in this interpreter"
+    """The Qt/PySide6 notice that travels with every artifact: what this build did, not a verdict on it."""
+    pyside = _version("PySide6-Addons")
     qt = _qt_version()
+    shiboken = _version("shiboken6")
+    repository = _pyside_repository()
+    pyside_source = (
+        f"PySide6 and shiboken6: {repository} (tag v{pyside}), the repository these wheels name."
+        if repository
+        else "PySide6 and shiboken6: the wheels used for this build name no source repository."
+    )
     try:
-        shiboken = importlib.metadata.version("shiboken6")
+        declared = " ".join((importlib.metadata.metadata("PySide6-Addons").get("License") or "").split())
     except importlib.metadata.PackageNotFoundError:
-        shiboken = "not installed in this interpreter"
+        declared = ""
     return f"""Qt and PySide6 in this bundle
-==========================
+=============================
 
 ATE's interface and its Test Report renderer are Qt, used through PySide6.
 
-  Qt:      {qt} (the C++ libraries in _internal/PySide6/Qt/lib)
-  PySide6: {pyside} (PySide6-Essentials and PySide6-Addons, the official Qt for Python binding)
+  Qt:        {qt} (the C++ libraries under _internal/PySide6)
+  PySide6:   {pyside} (the PySide6-Essentials and PySide6-Addons wheels)
   shiboken6: {shiboken} (PySide6's C++ object-lifetime runtime)
 
 Licence
 -------
-Qt is dual-licensed under the GNU Lesser General Public License version 3 and the GNU General
-Public License version 2 or 3; PySide6 declares the same choice ("LGPL-3.0-only OR GPL-2.0-only
-OR GPL-3.0-only"). You may use the Qt and PySide6 in this bundle under either licence. The full
-texts of LGPL-3.0 and GPL-3.0 are in this directory.
-
-ATE is MIT-licensed. Nothing about Qt or PySide6 changes that: ATE's own source is not covered by
-the GPL or the LGPL, and the Qt and PySide6 code in this bundle is not ATE's.
+The PySide6 wheels declare: {declared or "no licence"}.
+The LGPL-3.0 and GPL-3.0 texts are in this directory.
 
 Where the source is
 -------------------
-{QT_SOURCE}
+{pyside_source}
+Qt: {QT_REPOSITORY} (tag v{qt}), Qt's own top-level repository. Its submodules hold qtbase,
+qtwebengine and the other Qt libraries.
 
-Replacing Qt
-------------
-The Qt libraries here are separate, unmodified shared libraries, and the binding is separate from
-them. Nothing links Qt into ATE's own code, so a Station may replace these shared libraries with
-its own build of Qt of the same Qt version without recompiling ATE. Keeping the bundle one-directory,
-with Qt as loose shared libraries rather than a merged binary, is what makes that possible and what
-the LGPL asks for.
-
-Questions
----------
-LGPL compliance for this bundle comes down to three things, all of which the bundle satisfies: the
-licence texts are here, the source of every Qt and PySide6 library shipped here is reachable from
-the links above, and nothing in the bundle is a modified or statically linked copy of Qt.
+How this build uses Qt
+----------------------
+This bundle is one directory. The build copies Qt's shared libraries out of the PySide6 wheels as
+separate files, unmodified: it does not link them into ATE's own code, merge them into one binary,
+strip or compress them. They can be replaced with another build of the same Qt version by replacing
+those files, without rebuilding ATE. ATE's own tests have not run against a replaced Qt.
 """
 
 
 def _runtime_dependency_names() -> list[str]:
-    """The runtime dependencies: from the installed wheel, or from pyproject.toml if ATE is not installed."""
+    """Every distribution the bundle's runtime needs: ATE's requirements and all of theirs."""
     try:
-        lines = importlib.metadata.metadata("ate").get_all("Requires-Dist") or []
+        roots = importlib.metadata.distribution("ate").requires or []
     except importlib.metadata.PackageNotFoundError:
         import tomllib
 
-        pyproject = HERE.parents[1] / "pyproject.toml"
-        with open(pyproject, "rb") as handle:
-            lines = tomllib.load(handle)["project"].get("dependencies", [])
+        with open(HERE.parents[1] / "pyproject.toml", "rb") as handle:
+            roots = tomllib.load(handle)["project"].get("dependencies", [])
 
-    names: list[str] = []
-    for line in lines:
-        if ";" in line:  # an extra, not a runtime dependency
-            continue
-        names.append(line.split("[")[0].split("<")[0].split(">")[0].split("=")[0].strip().lower())
-    # PySide6-Addons is the only Qt wheel ATE asks for, but it drags in its two companions, and
-    # the bundle carries all three: shiboken6 is the C++ runtime every Qt module links against.
-    for extra in ("PySide6-Essentials", "shiboken6"):
-        try:
-            importlib.metadata.version(extra)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-        names.append(extra.lower())
-    return names
+    found: set[str] = set()
+    extras_seen: set[tuple[str, str]] = set()
+
+    def wanted(requirement: Requirement, extra: str) -> bool:
+        return requirement.marker is None or requirement.marker.evaluate({"extra": extra})
+
+    def visit(requirements: list[str], extra: str) -> None:
+        for line in requirements:
+            requirement = Requirement(line)
+            if not wanted(requirement, extra):
+                continue
+            name = canonicalize_name(requirement.name)
+            new = name not in found
+            found.add(name)
+            fresh_extras = [e for e in requirement.extras if (name, e) not in extras_seen]
+            extras_seen.update((name, e) for e in fresh_extras)
+            try:
+                requires = importlib.metadata.distribution(name).requires or []
+            except importlib.metadata.PackageNotFoundError:
+                continue  # listed by third_party_notices() as declared but not installed
+            if new:
+                visit(requires, "")
+            for fresh in fresh_extras:
+                visit(requires, fresh)
+
+    visit(roots, "")
+    return sorted(found)
 
 
 def third_party_notices() -> str:
@@ -176,43 +234,43 @@ def third_party_notices() -> str:
         "Third-party licences in ATE",
         "==========================",
         "",
-        "Generated from the wheels installed in the interpreter that built this bundle. The licence",
-        "shown is what that wheel declares; where it declares nothing, this file says so rather than",
-        "guessing.",
+        "Generated from the wheels installed in the interpreter that built this bundle, walking every",
+        "requirement of every requirement. The licence shown is what that wheel's metadata names; a",
+        "licence it does not name, or that this script cannot name, is reported below, not guessed.",
         "",
     ]
-    unstated: list[str] = []
+    unclear: list[str] = []
     copyleft: list[str] = []
-    for name in sorted(set(_runtime_dependency_names())):
+    for name in _runtime_dependency_names():
         try:
             version = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
-            lines.append(f"  {name}: declared by ATE but not installed here - licence not read")
+            lines.append(f"  {name}: required but not installed here - licence not read: check upstream")
+            unclear.append(name)
             continue
-        licence = _licence(name)
-        note = _classify(licence)
-        if "copyleft" in note:
+        declared = _declared(name)
+        note = _classify(declared)
+        if note == LGPL_NOTE:
             copyleft.append(name)
         if "check upstream" in note:
-            unstated.append(name)
-        lines.append(f"  {name} {version} - {_short(licence) or 'no licence in the wheel metadata'}: {note}")
+            unclear.append(name)
+        lines.append(f"  {name} {version} - {' / '.join(declared) or 'no licence in the wheel metadata'}: {note}")
 
     lines += [
         "",
         LUA_NOTE,
         "",
-        "Qt itself is not a Python distribution: it is the set of shared libraries under",
-        "_internal/PySide6/Qt, dual-licensed LGPL-3.0 / GPL-2.0 / GPL-3.0, listed above as part of",
-        "PySide6. See NOTICE-Qt-PySide6.txt beside this file.",
+        "Qt itself is not a Python distribution: it is the shared libraries under _internal/PySide6,",
+        "listed above as part of PySide6. See NOTICE-Qt-PySide6.txt beside this file.",
         "",
         "Reported, not assumed:",
     ]
     if copyleft:
         lines.append(f"  copyleft runtime libraries: {', '.join(copyleft)}")
-    if unstated:
-        lines.append(f"  licences the wheels do not state: {', '.join(unstated)}")
-    if not copyleft and not unstated:
-        lines.append("  none: every runtime dependency above declares a licence MIT distribution tolerates")
+    if unclear:
+        lines.append(f"  licences to check upstream: {', '.join(unclear)}")
+    if not copyleft and not unclear:
+        lines.append("  nothing: every runtime dependency above names a permissive licence")
     return "\n".join(lines) + "\n"
 
 

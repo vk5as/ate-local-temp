@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StepInputWidget, StagedRunScreen
+from tests._fixtures import assert_no_swallowed_exception
 
 #: The mockup's `.inp.inp-on` (line 54): background and left border, read off the pixels.
 ACTIVE_BG = (255, 246, 204)  # #fff6cc
@@ -890,6 +891,7 @@ def test_pause_with_input_rows_exits_cleanly_on_continue(qapp, tmp_path):
     SIGSEGV the process (exit 139). The pause must keep those widgets alive."""
     result = _run_pause_child("CONTINUE", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout
 
 
@@ -897,6 +899,7 @@ def test_pause_with_input_rows_exits_cleanly_on_retry(qapp, tmp_path):
     """RETRY reruns the failing step, re-asking its input: the retried Attempt's widgets stay alive."""
     result = _run_pause_child("RETRY", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout
 
 
@@ -904,4 +907,5 @@ def test_pause_with_input_rows_exits_cleanly_on_abort(qapp, tmp_path):
     """ABORT ends the run from the pause with the input rows still on screen."""
     result = _run_pause_child("ABORT", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout

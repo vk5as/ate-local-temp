@@ -85,9 +85,11 @@ def test_pytest_timeout_is_still_not_a_dependency() -> None:
 def test_the_workflow_checks_the_qt_pair_before_running_tests() -> None:
     """The job says out loud whether QtWebEngine can be imported, before the suite starts.
 
-    PySide6 6.12 installs Qt 6.12, and PySide6-WebEngine has no release for it: it pulls in
-    PySide6-WebEngine-Qt6 6.11.2, and two Qt builds in one process abort the import on Windows with
-    0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND). In the first Windows run that crash was three lines
+    Under PyQt6, 6.12 installed Qt 6.12 while PyQt6-WebEngine had no release for it and pulled in
+    PyQt6-WebEngine-Qt6 6.11.2: two Qt builds in one process abort the import on Windows with
+    0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND). `PySide6-Addons` pins `PySide6-Essentials` and
+    `shiboken6` to its own version, so that resolve cannot happen now; the check still catches a
+    mixed install. In the first Windows run that crash was three lines
     of stack in the middle of collection, and the Test Report tests simply never ran. The check
     prints the versions and stops the job on a mismatch, so the cause is one line rather than a
     mystery skip."""
