@@ -231,7 +231,13 @@ print("FINISHED" if done else "no finish", len(_live_engines))
 
 
 def test_an_exception_leaving_the_worker_does_not_abort_the_process(tmp_path):
-    """PyQt aborts on an exception escaping ``QThread.run``. Here a schedule no host can load."""
+    """A worker whose ``QThread.run`` raises does not get to end silently. Here a schedule no host can load.
+
+    PyQt6 aborted the process on an exception escaping ``QThread.run``; PySide6 prints
+    "Error calling Python override of QThread::run()" and lets the thread end, which is worse for the
+    screen: it would wait for a FINISHED that never arrives. The guard in ``RunEngine.run`` is what
+    makes both bindings report the run as INTERRUPTED and still announce FINISHED, and this child
+    proves it: exit 0, and the run ended."""
     source = _ENGINE_CHILD_PREAMBLE + """
 schedule.write_text('this is not lua', encoding="utf-8", newline="\\n")
 done = []

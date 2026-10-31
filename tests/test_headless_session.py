@@ -29,9 +29,9 @@ from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, fake_pdf_help
 try:
     from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 
-    PYQT_WEBENGINE_IMPORT_ERROR = None
+    WEBENGINE_IMPORT_ERROR = None
 except Exception as _exc:  # noqa: BLE001 - any import failure means no real PDF rendering here
-    PYQT_WEBENGINE_IMPORT_ERROR = _exc
+    WEBENGINE_IMPORT_ERROR = _exc
 
 
 def _pump_until(predicate, *, deadline: float | None = None) -> bool:
@@ -282,7 +282,7 @@ def test_run_end_pdf_is_not_blocking(tmp_path, monkeypatch) -> None:
 
 def test_run_end_writes_real_pdf_report(tmp_path) -> None:
     """End-to-end with the real helper process; skipped unless QtWebEngineCore can import."""
-    if PYQT_WEBENGINE_IMPORT_ERROR is not None:
+    if WEBENGINE_IMPORT_ERROR is not None:
         pytest.skip("QtWebEngineCore unavailable for real PDF rendering")
 
     env = write_ate_env(tmp_path)

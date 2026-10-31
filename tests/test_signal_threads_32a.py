@@ -117,6 +117,60 @@ def test_worker_signals_reach_every_slot_on_the_main_thread(qapp, tmp_path, monk
     assert screen_threads and all(thread == main for thread in screen_threads), screen_threads
 
 
+def test_the_values_the_engine_signals_declare_are_the_values_they_carry(qapp, tmp_path, monkeypatch) -> None:
+    """No signal in `run_engine.py` is declared with a type its real values do not fit.
+
+    PySide6's `Signal(int)` is a C `int`: a value above 2**31 - 1 raises `OverflowError` where PyQt6
+    silently accepted it, and `Signal(str)` takes `None` without complaint in either binding. The
+    engine's numbers are node sequence, attempt and input indices; the strings are a run key and a
+    phase name. This runs a schedule and looks at what actually arrives.
+    """
+    env = write_ate_env(tmp_path)
+    monkeypatch.setattr(ate.report.pdf_job, "pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+
+    session = HeadlessRunSession(env["config"])
+    session.select_schedule("Pre post pass schedule")
+    engine = session.start()
+
+    seen: list[tuple[str, tuple[object, ...]]] = []
+
+    def note(name):
+        def slot(*args):
+            seen.append((name, args))
+
+        return slot
+
+    for signal, name in (
+        (engine.run_uuid_reported, "run_uuid_reported"),
+        (engine.state_changed, "state_changed"),
+        (engine.step_started, "step_started"),
+        (engine.step_finished, "step_finished"),
+        (engine.action_started, "action_started"),
+        (engine.input_asked, "input_asked"),
+        (engine.failure_prompt, "failure_prompt"),
+        (engine.prompt_answered, "prompt_answered"),
+    ):
+        signal.connect(note(name))
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and session.state != SessionState.FINISHED:
+        qapp.processEvents()
+        time.sleep(0.01)
+    qapp.processEvents()
+    session.close()
+
+    assert seen, "nothing was emitted, so this test proved nothing"
+    for name, args in seen:
+        assert not any(arg is None for arg in args), f"{name} carried None: {args}"
+        for arg in args:
+            if isinstance(arg, int):
+                assert -(2**31) <= arg <= 2**31 - 1, f"{name} declared int but got {arg}, which Signal(int) cannot carry"
+    uuids = [args[0] for name, args in seen if name == "run_uuid_reported"]
+    assert uuids and all(isinstance(u, str) and u for u in uuids), uuids
+    phases = {args[0] for name, args in seen if name == "action_started"}
+    assert phases <= {"pre", "post"}, phases
+
+
 def test_a_blocking_input_is_answered_from_the_main_thread(qapp, tmp_path, monkeypatch) -> None:
     """The one signal the Operator answers by blocking: its slot still runs on the main thread."""
     env = write_ate_env(tmp_path)
