@@ -1278,10 +1278,11 @@ class RunScreenMixin:
         if self.confirm_choice is not None:
             self.confirm_choice(dialog)
         else:
-            # Nobody is looking at a screen to click Start: arm the safe answer (start the run,
-            # store nothing) before `exec()`, which on a headless runner would otherwise wait for a
-            # click that never comes. See :meth:`MismatchConfirmation.answer_without_storing`.
-            dismiss_if_headless(dialog, MismatchConfirmation.answer_without_storing)
+            # Nobody is looking at a screen to click Start: arm the answer the config gives (start the
+            # run, store the mismatched bytes only if `database.storeMismatchedFiles` says `always`)
+            # before `exec()`, which on a headless runner would otherwise wait for a click that never
+            # comes. See :meth:`MismatchConfirmation.answer_from_setting`.
+            dismiss_if_headless(dialog, MismatchConfirmation.answer_from_setting)
             dialog.exec()
         return dialog.store_choice()
 
@@ -1464,8 +1465,9 @@ class MismatchConfirmation(QDialog):
         self.mismatches = list(mismatches)
         self.store_setting = store_setting
         self._accepted = False
-        # Set only by :meth:`answer_without_storing`: the answer an unattended run is given, which
-        # outranks the checkbox and the `always`/`never` setting.
+        # Set only by :meth:`answer_from_setting`: the answer an unattended run is given, taken from
+        # `database.storeMismatchedFiles` rather than from the checkbox, so a default nobody chose
+        # cannot count as a decision.
         self._stored_override: Optional[bool] = None
 
         layout = QVBoxLayout(self)
@@ -1518,17 +1520,17 @@ class MismatchConfirmation(QDialog):
         """True once Start was clicked; False if Cancel was (or nothing was)."""
         return self._accepted
 
-    def answer_without_storing(self) -> None:
-        """Close this dialog the way a run nobody is watching has to be answered: Start, store nothing.
+    def answer_from_setting(self) -> None:
+        """Close this dialog the way a run nobody is watching has to be answered: Start, and store by the config.
 
-        Cancel answers `None`, which starts no run at all; the box is ticked by default, and
-        accepting it that way writes bytes whose checksum does not match the release into the Test
-        Run. Storing is the Operator's explicit decision (ticket 06c) and no Operator made it, so
-        the safe branch is the run going ahead with the mismatched files left out of it. This is the
-        answer `dismiss_if_headless` gives on a runner with no display, where `exec()` otherwise
-        waits for a click that never comes."""
-        self._stored_override = False
-        if self.store_checkbox is not None:
+        `database.storeMismatchedFiles` is the only authority (ticket 31d): `always` stores the
+        mismatched bytes, `never` stores none, and `ask` stores none either, because the box is
+        ticked by default and a default nobody chose is not an answer. Cancel would answer `None` and
+        start no run at all, so the run starts in all three cases. This is what `dismiss_if_headless`
+        answers on a runner with no display, where `exec()` otherwise waits for a click that never
+        comes; an Operator at a screen still answers for themselves."""
+        self._stored_override = self.store_setting == "always"
+        if self.store_checkbox is not None:  # only `ask` has one
             self.store_checkbox.setChecked(False)
         self.accept()
 
