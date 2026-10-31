@@ -799,3 +799,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Strata implemented (149 steps, 0 compactions). Review: Strata MUST-FIX 2, Haiku MUST-FIX 2; orchestrator fixed both in the light review. Test cleanup could raise `KeyError` and hide the real failure. `serial.Serial(exclusive=True)` succeeds on Linux while the port is held, so it could not fail, and was dropped (my packet asked for it). Haiku's "mutations unproven" was settled by Strata reproducing them: 7 failed with teardown off.
 - Leftover, not fixed: `DeviceRegistry.close_device` pops a handle before `device.close()`, so a Device whose close raises is never retried and its socket and reader can leak until process exit. `stream.close` swallows `OSError`, so this needs a driver close that raises something else or `visa`. Test `test_one_device_whose_close_raises…` pins today's behaviour.
 - ATE takes no exclusive lock on serial ports on Linux, so another program can share a port during a run.
+
+## 31d — headless mismatch follows the config (merged 2026-11-01)
+
+- User decision (2026-10-31), on my claim that the old answer lost bytes under `always`. **That claim was wrong:** `store_mismatched_files` already ignored the answer for `always`/`never`. Strata ran it on integration: storage identical in all three settings. The change makes the dialog's answer and the documents truthful; stored bytes do not change. User told.
+- Strata implemented (55 steps, 0 compactions). Review: Strata MUST-FIX 2, Haiku 0. Fixed in the light review: dead branch and unused return in `answer_from_setting`; the seam's real-run test used `always`, where a bare accept gives the same answer, so it now uses `ask`. The in-process `always`/`never` cases stay as behaviour pins (they don't prove arming; `ask` does).
+- Leftover: `HeadlessRunSession.start()` called directly still raises under `ask` with a mismatch and no choice; the UI always passes one.
