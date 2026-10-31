@@ -297,6 +297,33 @@ sip.delete(thread)  # destroyed while it runs
     assert "most recent call first" in result.stderr, "no Python stack: " + result.stderr[-1500:]
 
 
+def test_a_qt_fatal_inside_a_real_pytest_run_is_not_swallowed(tmp_path):
+    """Inside pytest two things eat that message: pytest-qt's handler and the capture of stderr."""
+    test_file = tmp_path / "test_dies.py"
+    test_file.write_text(
+        "import time\n"
+        "from PyQt6 import sip\n"
+        "from PyQt6.QtCore import QThread\n"
+        "class Sleeper(QThread):\n"
+        "    def run(self):\n"
+        "        time.sleep(30)\n"
+        "def test_dies():\n"
+        "    thread = Sleeper()\n"
+        "    thread.start()\n"
+        "    time.sleep(0.2)\n"
+        "    sip.delete(thread)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    env = dict(os.environ, PYTHONPATH=f"{REPO / 'src'}{os.pathsep}{REPO}")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "conftest", "-p", "no:cacheprovider", "-q", "--rootdir", str(tmp_path), str(test_file)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=90, cwd=str(tmp_path),
+    )
+    assert result.returncode != 0
+    assert "Qt fatal error: QThread: Destroyed" in result.stderr, result.stdout[-800:] + result.stderr[-800:]
+
+
 # -- devices speak the same on both platforms ------------------------------------------------------
 
 

@@ -122,18 +122,24 @@ def executable_stub(path: Path, source: str) -> None:
 _fatal_stream = None
 
 
+def open_fatal_stream() -> None:
+    """Duplicate the real stderr. pytest must call this from ``pytest_configure``, where its capture
+    is suspended: from inside a test, descriptor 2 is pytest's capture file, which a crash never shows."""
+    global _fatal_stream
+    if _fatal_stream is None:
+        _fatal_stream = os.fdopen(os.dup(sys.__stderr__.fileno()), "w", encoding="utf-8", errors="replace")
+
+
 def report_qt_fatal(previous=None):
     """A Qt message handler that prints a fatal message and every thread's stack before Qt aborts.
 
     Qt ends the process with ``__fastfail`` on Windows, which no handler sees, and pytest-qt keeps
     every message for a report that an aborted run never prints: without this a dying CI job says
     nothing at all. The stream is a duplicate of the real stderr so that pytest's capture cannot
-    swallow it. Anything but a fatal message goes to ``previous``, the handler this one replaced."""
+    swallow it (see open_fatal_stream). Anything but a fatal message goes to ``previous``, the handler this one replaced."""
     from PyQt6.QtCore import QtMsgType
 
-    global _fatal_stream
-    if _fatal_stream is None:
-        _fatal_stream = os.fdopen(os.dup(sys.__stderr__.fileno()), "w", encoding="utf-8", errors="replace")
+    open_fatal_stream()
 
     def handler(mode, context, message):
         if mode == QtMsgType.QtFatalMsg:

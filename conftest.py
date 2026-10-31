@@ -49,6 +49,11 @@ from ate.run_session.headless import HeadlessRunSession  # noqa: E402
 from ate.storage.store import RunStore  # noqa: E402
 from tests import _fixtures  # noqa: E402
 
+
+def pytest_configure(config) -> None:
+    _fixtures.open_fatal_stream()
+
+
 # -- everything a test opens is released before its files are deleted ------------------------------
 
 #: Sessions, stores and application logs in the order they were opened. Tests drop these freely: on Linux an
