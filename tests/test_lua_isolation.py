@@ -26,7 +26,7 @@ def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk and return it (no Qt event loop needed)."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
 
 
@@ -113,7 +113,7 @@ def test_ate_exception_isolated_through_run_engine(app: QCoreApplication) -> Non
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(ISO_ISOLATED, encoding="utf-8")
+        schedule_path.write_text(ISO_ISOLATED, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), ate_fns={"boom": _boom_fn()})
         engine.run_uuid_reported.connect(_capture)
         _drive(engine, app)

@@ -52,8 +52,8 @@ def _write_release(tmp_path: Path) -> tuple[Path, dict]:
     )
 
     (defs_dir / "helper.lua").write_bytes(COUNTER_MODULE.encode("utf-8"))
-    (defs_dir / "load.tslua").write_text(load_src, encoding="utf-8")
-    (defs_dir / "cache.tslua").write_text(cache_src, encoding="utf-8")
+    (defs_dir / "load.tslua").write_text(load_src, encoding="utf-8", newline="\n")
+    (defs_dir / "cache.tslua").write_text(cache_src, encoding="utf-8", newline="\n")
 
     atedef = {
         "format": 1,
@@ -66,7 +66,7 @@ def _write_release(tmp_path: Path) -> tuple[Path, dict]:
             {"path": "cache.tslua", "sha256": hashlib.sha256(cache_src.encode("utf-8")).hexdigest()},
         ],
     }
-    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     definition = read_definition(defs_dir / "demo.atedef")
     return defs_dir, definition

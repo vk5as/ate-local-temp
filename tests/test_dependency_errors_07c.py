@@ -64,7 +64,7 @@ def _scan(tmp_path: Path, releases: dict[str, dict]) -> dict[str, Definition]:
     for label, (atedef, files) in releases.items():
         release_dir = root / label
         release_dir.mkdir(parents=True, exist_ok=True)
-        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
         for path, content in files.items():
             (release_dir / path).write_bytes(content)
     return {d.media_number: d for d in find_definitions(root)}

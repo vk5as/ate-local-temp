@@ -40,7 +40,7 @@ def _write_atedef(tmp_path, *, files: list[dict], lua: bytes = b'return {}\n', o
         "files": files,
     }
     path = release_dir / "demo.atedef"
-    path.write_text(json.dumps(atedef))
+    path.write_text(json.dumps(atedef), newline="\n")
     return str(path)
 
 

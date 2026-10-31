@@ -517,13 +517,16 @@ environment expansion.
 | --- | --- | --- |
 | `ATE_DEFAULT_CONFIG` | Replaces the platform default **config file** path (`/etc/ate/config.json`, `%PROGRAMDATA%\ATE\config.json`), so a test can prove "no config at the default location" without touching `/etc` | `ate.config._platform_default` only |
 | `ATE_DATA_DIR` | Replaces the platform **data directory** (`/var/lib/ate`, `%PROGRAMDATA%\ATE`) that `<data>` resolves to | `ate.config._platform_data_dir` only |
-| `ATE_AUTO_DISMISS_DIALOG` | Closes every launch dialog by itself, so a refusal exits instead of blocking in `exec()`. It closes with `accept()`, which clicks no button: the missing-config prompt therefore answers **Abort** and the "abort the run and quit?" confirmation answers **keep running**. `""`, `"0"`, `"false"`, `"no"` and `"off"` mean unset | `ate.app._dismiss_if_headless` |
+| `ATE_AUTO_DISMISS_DIALOG` | Closes every dialog by itself, so a refusal exits instead of blocking in `exec()`. A box closed with `accept()` clicks no button, so each prompt answers its negative branch: the missing-config prompt answers **Abort**, the "abort the run and quit?" confirmation **keep running**, the PDF question **Skip PDF**. The run-start checksum confirmation has an explicit answer instead, **Start the run and store nothing**. `""`, `"0"`, `"false"`, `"no"` and `"off"` mean unset | `ate.dialogs.dismiss_if_headless`, called by `ate.app._dismiss_if_headless` and by `ui/run_widgets.py._confirm_store_choice` |
 | `ATE_ELEVATED` | Says whether ATE believes it is running as root or Administrator, which decides whether the Test Report PDF needs the Chromium sandbox (packet 30d). `1`, `true`, `yes` mean elevated; anything else means not. `conftest.py` sets it to `0` for the whole test session, and it is inherited by every spawned `ate _pdf` helper, which a monkeypatch cannot reach | `ate.report.pdf._elevation`, `ate.cli._is_root`, `packaging/pyinstaller/ate_entry.py` |
 
 A dialog is also dismissed automatically when the platform has no window server at all
 (`QT_QPA_PLATFORM=offscreen` or `minimal`): nothing could be drawn, so nothing can be
 answered. That is the case every container and every CI runner is in, and it is what stopped
 the first CI run from hanging for six hours on a `QMessageBox.exec()` nobody could click.
+Every modal in `src/ate` is armed through `ate.dialogs.dismiss_if_headless` before it is
+`exec()`ed, and `tests/test_modals_never_block_headless.py` scans the package so a new dialog
+cannot be added without an answer of its own.
 
 `conftest.py` also points `<data>` at pytest's `basetemp` for the whole session, so no test
 ever writes under `/var/lib`.

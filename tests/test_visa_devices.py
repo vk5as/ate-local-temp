@@ -147,7 +147,7 @@ def _run_fake(app: QCoreApplication, source: str, manager: _FakeManager):
         with tempfile.TemporaryDirectory() as td:
             store = RunStore(Path(td) / "ate.db")
             path = Path(td) / "schedule.tslua"
-            path.write_text(source, encoding="utf-8")
+            path.write_text(source, encoding="utf-8", newline="\n")
             engine = RunEngine(store, str(path))
             engine.run_uuid_reported.connect(_capture)
             _drive(engine, app)

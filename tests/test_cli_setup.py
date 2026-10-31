@@ -91,7 +91,7 @@ def test_setup_never_overwrites_an_existing_config(tmp_path):
     root = tmp_path / "station"
     (root / "config").mkdir(parents=True)
     existing = {"format": 1, "station": {"name": "BENCH-03", "uuid": "keep-me"}}
-    (root / "config" / "config.json").write_text(json.dumps(existing), encoding="utf-8")
+    (root / "config" / "config.json").write_text(json.dumps(existing), encoding="utf-8", newline="\n")
 
     main(["setup", "--root", str(root)])
 
@@ -122,7 +122,7 @@ def test_setup_migrates_an_existing_database_without_recreating_it(tmp_path):
 def test_setup_unwritable_target_fails_with_nonzero_exit(tmp_path, capsys):
     """An unwritable target (a path blocked by a regular file) fails with a non-zero exit."""
     blocker = tmp_path / "blocker"  # a regular file blocks the data/config subtree below it
-    blocker.write_text("x", encoding="utf-8")
+    blocker.write_text("x", encoding="utf-8", newline="\n")
 
     rc, captured = main(
         ["setup", "--data-dir", str(blocker / "data"), "--config-dir", str(blocker / "config")],
@@ -249,7 +249,7 @@ def test_real_linux_command_construction(tmp_path, monkeypatch):
     # set_admin_only: owner root; a file 0644 (readable by all, writable only by root), a dir 0755.
     config_file = tmp_path / "config" / "config.json"
     (tmp_path / "config").mkdir(parents=True)
-    config_file.write_text("{}")  # must exist for set_admin_only to act on it
+    config_file.write_text("{}", newline="\n")  # must exist for set_admin_only to act on it
     perms.set_admin_only(config_file)
     perms.set_admin_only(tmp_path / "config")
 

@@ -52,12 +52,12 @@ def _write_releases(tmp_path: Path, releases: dict[str, dict], files: dict[str, 
     for label, atedef in releases.items():
         release_dir = root / label
         release_dir.mkdir(parents=True, exist_ok=True)
-        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
         for entry in atedef["files"]:
             if entry["path"] in files:
                 target = release_dir / entry["path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(files[entry["path"]], encoding="utf-8")
+                target.write_text(files[entry["path"]], encoding="utf-8", newline="\n")
     return root
 
 
@@ -71,7 +71,7 @@ def _config(tmp_path: Path, root: Path, store_mismatched: str = "ask") -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return config_path
 
 
@@ -306,8 +306,8 @@ def test_a_release_own_module_wins_over_the_same_name_in_a_dependency(tmp_path):
         {"main.tslua": SCHEDULE_SRC, "b_mod.lua": D_MOD_SRC, "util.lua": ""},
     )
     # Each release's own directory holds its own copy of util.lua.
-    (root / "a" / "util.lua").write_text(UTIL_SRC, encoding="utf-8")
-    (root / "c" / "util.lua").write_text(B_UTIL_SRC, encoding="utf-8")
+    (root / "a" / "util.lua").write_text(UTIL_SRC, encoding="utf-8", newline="\n")
+    (root / "c" / "util.lua").write_text(B_UTIL_SRC, encoding="utf-8", newline="\n")
 
     by_media = _by_media(root)
     assert by_media["MR-A"].broken == "module name collision across Media Releases: util (MR-A, MR-C)"
@@ -368,8 +368,8 @@ def test_the_chain_is_walked_depth_first_in_declaration_order(tmp_path):
         },
         {"main.tslua": SCHEDULE_SRC, "shared.lua": ""},
     )
-    (root / "d" / "shared.lua").write_text(D_SHARED_SRC, encoding="utf-8")
-    (root / "e" / "shared.lua").write_text(E_SHARED_SRC, encoding="utf-8")
+    (root / "d" / "shared.lua").write_text(D_SHARED_SRC, encoding="utf-8", newline="\n")
+    (root / "e" / "shared.lua").write_text(E_SHARED_SRC, encoding="utf-8", newline="\n")
 
     by_media = _by_media(root)
     assert by_media["MR-A"].broken == "module name collision across Media Releases: shared (MR-D, MR-E)"

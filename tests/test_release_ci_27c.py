@@ -87,6 +87,7 @@ def _station(root: Path, schema: int = 5) -> Path:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     from ate.storage import RunStore
 
@@ -144,10 +145,11 @@ def test_scan_fails_on_a_broken_media_release(tmp_path):
     release = tmp_path / "broken-release"
     release.mkdir()
     schedule = release / "oops.tslua"
-    schedule.write_text("return ScheduleParams('broken', 'no params')\n", encoding="utf-8")
+    schedule.write_text("return ScheduleParams('broken', 'no params')\n", encoding="utf-8", newline="\n")
     (release / "broken.atedef").write_text(
         json.dumps({"format": 1, "mediaNumber": "MR-BROKEN", "name": "Broken", "version": "not semver", "files": []}),
         encoding="utf-8",
+        newline="\n",
     )
     proc = _run_cli(["_selftest", "--scan", str(release), "--config", str(config)])
     out = proc.stdout + proc.stderr
@@ -160,7 +162,8 @@ def test_scan_fails_on_a_checksum_mismatch_in_the_release(tmp_path):
     release = tmp_path / "tampered"
     shutil.copytree(EXAMPLE, release)
     (release / "schedule_basics.tslua").write_text(
-        (release / "schedule_basics.tslua").read_text(encoding="utf-8") + "\n-- touched by the smoke test\n", encoding="utf-8"
+        (release / "schedule_basics.tslua").read_text(encoding="utf-8") + "\n-- touched by the smoke test\n", encoding="utf-8",
+        newline="\n",
     )
     proc = _run_cli(["_selftest", "--scan", str(release), "--config", str(config)])
     out = proc.stdout + proc.stderr
@@ -482,9 +485,9 @@ class FakeInstaller:
             shutil.rmtree(internal, ignore_errors=True)
         internal.mkdir(parents=True, exist_ok=True)
         ate_exe = self.app_dir / "ate.exe"
-        ate_exe.write_text("the bundle", encoding="utf-8")
+        ate_exe.write_text("the bundle", encoding="utf-8", newline="\n")
         ate_exe.chmod(0o755)  # shutil.which needs the bit on a POSIX host; Windows has none
-        (self.app_dir / "unins000.exe").write_text("the uninstaller", encoding="utf-8")
+        (self.app_dir / "unins000.exe").write_text("the uninstaller", encoding="utf-8", newline="\n")
 
         others = smoke.other_path_entries(self.registry.value, str(self.app_dir))
         if self.flags["clobber_others"]:
@@ -509,14 +512,15 @@ class FakeInstaller:
                     }
                 ),
                 encoding="utf-8",
+                newline="\n",
             )
         if not self.flags["no_db"]:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            (self.data_dir / "ate.db").write_text("sqlite bytes", encoding="utf-8")
+            (self.data_dir / "ate.db").write_text("sqlite bytes", encoding="utf-8", newline="\n")
         if self.flags["wipe_data"] and self.installs > 1:
             shutil.rmtree(self.data_dir, ignore_errors=True)
 
-        log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8", newline="\n")
         return smoke.CommandResult(self.flags["install_exit"], "", "")
 
     def clock(self, _seconds: float) -> None:
@@ -545,7 +549,7 @@ def _smoke(tmp_path: Path, poll_limit: int = 10, install_log: Path | None = None
     data = tmp_path / "ProgramData" / "ATE"
     installer = tmp_path / "dist" / "ate-1.2.3-windows-x64-setup.exe"
     installer.parent.mkdir(parents=True, exist_ok=True)
-    installer.write_text("setup", encoding="utf-8")
+    installer.write_text("setup", encoding="utf-8", newline="\n")
     runner = FakeInstaller(registry, app, data, **flags)
     checks = smoke.run_smoke(
         installer=installer,
@@ -607,7 +611,7 @@ def test_resolve_command_finds_ate_by_full_path_and_expands_the_registry_value(t
     bin_dir = tmp_path / "Program Files" / "ATE"
     bin_dir.mkdir(parents=True)
     exe = bin_dir / "ate.exe"
-    exe.write_text("the bundle", encoding="utf-8")
+    exe.write_text("the bundle", encoding="utf-8", newline="\n")
     exe.chmod(0o755)
     monkeypatch.setenv("ATE_SMOKE_BIN", str(bin_dir))
     value = r"C:\Windows\system32;%ATE_SMOKE_BIN%"
@@ -798,7 +802,7 @@ def test_a_stale_install_log_is_deleted_before_each_install(tmp_path):
     A log left by a previous install (or the first install of this run) is what the upgrade's
     check would otherwise be looking at."""
     log = tmp_path / "install.log"
-    log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8")
+    log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8", newline="\n")
     checks, registry, runner = _smoke(tmp_path)
     assert any("clean /LOG" in check for check in checks), "the first run's log was still there"
     assert not any(runner.log_existed), f"Setup ran with a log already on disk: {runner.log_existed}"
@@ -853,9 +857,9 @@ def test_smoke_fails_when_no_config_is_left_behind(tmp_path):
 def test_smoke_prints_install_log_when_it_fails(tmp_path, capsys):
     """main()'s failure path: the message, then the log, then exit 1."""
     log = tmp_path / "install.log"
-    log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8")
+    log.write_text("- Setup logging started.\n- Error: \"ate setup\" exited with code 1\n", encoding="utf-8", newline="\n")
     installer = tmp_path / "ate-1.2.3-windows-x64-setup.exe"
-    installer.write_text("setup", encoding="utf-8")
+    installer.write_text("setup", encoding="utf-8", newline="\n")
 
     def boom(**_kwargs):
         raise smoke.SmokeError("install: the installer exited 1")
@@ -877,9 +881,9 @@ def test_smoke_prints_install_log_when_it_crashes_on_something_else(tmp_path, ca
     reading the config, exit with a traceback and no install log: the log is the only trace a
     silent install leaves, and the CI step would be unreadable."""
     log = tmp_path / "install.log"
-    log.write_text("- Setup logging started.\n- Installing file ate.exe\n- Error: could not copy _internal\n", encoding="utf-8")
+    log.write_text("- Setup logging started.\n- Installing file ate.exe\n- Error: could not copy _internal\n", encoding="utf-8", newline="\n")
     installer = tmp_path / "ate-1.2.3-windows-x64-setup.exe"
-    installer.write_text("setup", encoding="utf-8")
+    installer.write_text("setup", encoding="utf-8", newline="\n")
 
     def boom(**_kwargs):
         raise FileNotFoundError("CreateProcess could not find ate.exe on the runner's PATH")

@@ -42,7 +42,7 @@ def _launch(env, tmp_path, ui=None):
         data = json.loads(config.read_text(encoding="utf-8"))
         data["ui"] = ui
         config = tmp_path / "layout-config.json"
-        config.write_text(json.dumps(data), encoding="utf-8")
+        config.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     alerts: list[str] = []
     outcome = launch(
         ["--config", str(config)],

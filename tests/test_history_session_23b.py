@@ -56,7 +56,7 @@ def _record_open(tmp_path: Path, app: object, source: str = DOC_FIELDS) -> tuple
     tmp.mkdir(exist_ok=True)
     store = RunStore(tmp / "ate.db")
     schedule_path = tmp / "schedule.tslua"
-    schedule_path.write_text(source, encoding="utf-8")
+    schedule_path.write_text(source, encoding="utf-8", newline="\n")
     engine = RunEngine(
         store,
         str(schedule_path),

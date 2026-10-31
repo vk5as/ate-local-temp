@@ -3,6 +3,11 @@
 These write a config pointing at a fresh SQLite database and one Test Definition
 directory holding three schedules (one that passes, one that fails, one that raises), so
 the headless session and CLI can be exercised end-to-end against real files — no mocks.
+
+Every fixture is written with `newline="\n"`. A Test Definition checksum is a hash of the file's
+bytes, and `Path.write_text` without a `newline` writes `os.linesep` — "\r\n" on Windows — so a
+fixture built from a schedule string would disagree with its own manifest on a Windows runner. See
+`tests/test_fixture_line_endings.py`.
 """
 
 from __future__ import annotations
@@ -708,26 +713,26 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     reports_dir = tmp_path / "reports"
     defs_dir = tmp_path / "defs"
     defs_dir.mkdir(parents=True, exist_ok=True)
-    (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8")
-    (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8")
-    (defs_dir / "stop_on_fail_false.tslua").write_text(STOP_ON_FAIL_FALSE, encoding="utf-8")
-    (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8")
-    (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8")
-    (defs_dir / "pre_post_pass.tslua").write_text(PRE_POST_PASS, encoding="utf-8")
-    (defs_dir / "pre_post_fail.tslua").write_text(PRE_POST_FAIL, encoding="utf-8")
-    (defs_dir / "pre_error_post_ok.tslua").write_text(PRE_ERROR_POST_OK, encoding="utf-8")
-    (defs_dir / "doc_fields.tslua").write_text(DOC_FIELDS, encoding="utf-8")
+    (defs_dir / "passing.tslua").write_text(PASSING, encoding="utf-8", newline="\n")
+    (defs_dir / "failing.tslua").write_text(FAILING, encoding="utf-8", newline="\n")
+    (defs_dir / "stop_on_fail_false.tslua").write_text(STOP_ON_FAIL_FALSE, encoding="utf-8", newline="\n")
+    (defs_dir / "erroring.tslua").write_text(ERRORING, encoding="utf-8", newline="\n")
+    (defs_dir / "logging.tslua").write_text(LOGGING, encoding="utf-8", newline="\n")
+    (defs_dir / "pre_post_pass.tslua").write_text(PRE_POST_PASS, encoding="utf-8", newline="\n")
+    (defs_dir / "pre_post_fail.tslua").write_text(PRE_POST_FAIL, encoding="utf-8", newline="\n")
+    (defs_dir / "pre_error_post_ok.tslua").write_text(PRE_ERROR_POST_OK, encoding="utf-8", newline="\n")
+    (defs_dir / "doc_fields.tslua").write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
 
     # Ticket 10 schedules: one blocking input, one POLL-only step, and a step declaring every Step
     # Input type. Written into the demo Test Definition so seam/staged tests can select them by name.
-    (defs_dir / "blocking_input.tslua").write_text(BLOCKING_INPUT, encoding="utf-8")
-    (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8")
-    (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8")
-    (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8")
-    (defs_dir / "abortable_two_inputs.tslua").write_text(ABORTABLE_TWO_INPUTS, encoding="utf-8")
-    (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8")
-    (defs_dir / "fail_then_pass.tslua").write_text(STEPS_FAIL_THEN_PASS, encoding="utf-8")
-    (defs_dir / "passes_on_retry.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8")
+    (defs_dir / "blocking_input.tslua").write_text(BLOCKING_INPUT, encoding="utf-8", newline="\n")
+    (defs_dir / "poll_input.tslua").write_text(POLL_INPUT, encoding="utf-8", newline="\n")
+    (defs_dir / "all_types_inputs.tslua").write_text(ALL_TYPES_INPUTS, encoding="utf-8", newline="\n")
+    (defs_dir / "abortable.tslua").write_text(ABORTABLE, encoding="utf-8", newline="\n")
+    (defs_dir / "abortable_two_inputs.tslua").write_text(ABORTABLE_TWO_INPUTS, encoding="utf-8", newline="\n")
+    (defs_dir / "enable_disabled.tslua").write_text(ENABLE_DISABLED, encoding="utf-8", newline="\n")
+    (defs_dir / "fail_then_pass.tslua").write_text(STEPS_FAIL_THEN_PASS, encoding="utf-8", newline="\n")
+    (defs_dir / "passes_on_retry.tslua").write_text(FAIL_THEN_PASS, encoding="utf-8", newline="\n")
 
     # Packet 16a schedules are exercised directly by the seam tests in
     # test_device_registry_16a.py (which substitute the live peer port), so they are not part of
@@ -757,7 +762,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
             {"path": "passes_on_retry.tslua", "sha256": _sha256(defs_dir / "passes_on_retry.tslua")},
         ],
     }
-    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     config = {
         "format": 1,
@@ -771,7 +776,7 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
         "log": {"directory": str(tmp_path / "logs")},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
 
     return {"config": config_path, "defs_dir": defs_dir, "db": db, "reports_dir": reports_dir}
 
@@ -914,10 +919,10 @@ def _drive_with_operator(app, engine, op, strategy=INPUTS_BLOCKING, values_by_in
 def _append_file(defs_dir: Path, name: str, source: str) -> None:
     """Write one schedule file into the demo Test Definition and register its checksum."""
     path = defs_dir / name
-    path.write_text(source, encoding="utf-8")
+    path.write_text(source, encoding="utf-8", newline="\n")
     atedef = json.loads((defs_dir / "demo.atedef").read_text(encoding="utf-8"))
     atedef["files"].append({"path": name, "sha256": _sha256(path)})
-    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
 
 def add_long_schedule(tmp_path: Path, steps: int = 60, fail_at: int = 30) -> str:

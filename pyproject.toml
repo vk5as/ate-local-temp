@@ -19,9 +19,16 @@ classifiers = [
 # Lower bounds are the oldest versions this suite is known to pass against.
 # tests/test_wheel_build_28a.py compares each floor with the version installed in the
 # venv running the suite, so a floor that was never released (pyvisa>=1.22) fails.
+#
+# The two Qt packages carry an upper bound because they have to be the *same* Qt:
+# PyQt6 6.12 installs Qt 6.12, while PyQt6-WebEngine tops out at 6.11 and brings in
+# PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process work on Linux and kill the
+# Windows runner with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) when WebEngine is
+# imported. Keeping both in one band is what makes the PDF report render on Windows.
+# See the "Check Qt and QtWebEngine are the same Qt" step in .github/workflows/ci.yml.
 dependencies = [
-    "PyQt6>=6.7",
-    "PyQt6-WebEngine>=6.7",
+    "PyQt6>=6.11,<6.12",
+    "PyQt6-WebEngine>=6.11,<6.12",
     "lupa>=2.8",
     "SQLAlchemy>=2.0",
     "Jinja2>=3.1",

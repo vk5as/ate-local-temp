@@ -125,7 +125,7 @@ def test_project_prefills_from_config_default_project(qapp, tmp_path):
     data = json.loads(env["config"].read_text(encoding="utf-8"))
     data["defaultProject"] = "PSU-200 Production"
     config_path = tmp_path / "project-config.json"
-    config_path.write_text(json.dumps(data), encoding="utf-8")
+    config_path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     screen = StagedRunScreen(HeadlessRunSession(config_path))
     assert screen.uut_operator_stage.project_edit.text() == "PSU-200 Production", screen.uut_operator_stage.project_edit.text()
     assert "BENCH-03" not in screen.uut_operator_stage.project_edit.text()

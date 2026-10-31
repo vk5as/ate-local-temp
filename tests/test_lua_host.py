@@ -24,7 +24,7 @@ def _make_host(source: str) -> LuaHost:
     construction runs synchronously (no Qt event loop needed)."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
 
 
@@ -70,7 +70,7 @@ def test_chunks_load_with_path_name_and_text_mode():
             ':setAction(function() end) })\n'
             'error("schedule.tslua")'
         )
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
 
         # Loading fails (body-level error), but the traceback must still carry the chunk's own
         # name — proving it was loaded with ``@<path>`` rather than an anonymous string.

@@ -33,7 +33,7 @@ def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
         _drive(engine, app)
@@ -78,7 +78,7 @@ def _drive_with_choice(app: QCoreApplication, source: str, choice: str, stop_on_
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), stop_on_fail=stop_on_fail)
         engine.run_uuid_reported.connect(_capture)
         engine.failure_prompt.connect(_on_failure)
@@ -109,7 +109,7 @@ def _drive_abort(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
 
@@ -148,7 +148,7 @@ def _drive_abort_twice(app: QCoreApplication, source: str) -> tuple[RunStore, di
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
 
@@ -309,7 +309,7 @@ def test_remaining_posttest_actions_still_run_after_one_aborted(app: QCoreApplic
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(MINIMAL, encoding="utf-8")
+        schedule_path.write_text(MINIMAL, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
 
         # A real LuaHost (real runtime + abort hook); drive two Post-test Actions directly through

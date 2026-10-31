@@ -198,18 +198,18 @@ work = schedule.parent
 
 defs = work / "defs"
 defs.mkdir(parents=True, exist_ok=True)
-(defs / "pause.tslua").write_text(source, encoding="utf-8")
+(defs / "pause.tslua").write_text(source, encoding="utf-8", newline="\\n")
 (defs / "pause.atedef").write_text(json.dumps({
     "format": 1, "mediaNumber": "MR-10a", "name": "Pause release", "version": "1.0.0",
     "files": [{"path": "pause.tslua", "sha256": hashlib.sha256(source.encode()).hexdigest()}],
-}), encoding="utf-8")
+}), encoding="utf-8", newline="\\n")
 config = {"format": 1, "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"}, "defaultProject": "Power board",
           "database": {"type": "sqlite", "path": str(work / "ate.db")},
           "reports": {"directory": str(work / "reports")},
           "testDefinitions": {"directories": [str(defs)]},
           "log": {"directory": str(work / "logs")}}
 config_path = work / "config.json"
-config_path.write_text(json.dumps(config), encoding="utf-8")
+config_path.write_text(json.dumps(config), encoding="utf-8", newline="\\n")
 
 app = QApplication([])
 session = HeadlessRunSession(config_path)
@@ -273,11 +273,12 @@ def _write_env(tmp_path: Path, schedules: dict[str, str]) -> dict[str, Path]:
     files = [{"path": name, "sha256": __import__("hashlib").sha256(text.encode()).hexdigest()}
              for name, text in schedules.items()]
     for name, text in schedules.items():
-        (defs / name).write_text(text, encoding="utf-8")
+        (defs / name).write_text(text, encoding="utf-8", newline="\n")
     (defs / "widgets.atedef").write_text(
         json.dumps({"format": 1, "mediaNumber": "MR-10a", "name": "Widget release", "version": "1.0.0",
                     "files": files}),
         encoding="utf-8",
+        newline="\n",
     )
     config = {
         "format": 1,
@@ -288,7 +289,7 @@ def _write_env(tmp_path: Path, schedules: dict[str, str]) -> dict[str, Path]:
         "testDefinitions": {"directories": [str(defs)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return {"config": config_path, "defs": defs}
 
 
@@ -868,9 +869,9 @@ def _run_pause_child(choice: str, tmp_path: Path) -> subprocess.CompletedProcess
     """Run the pause scenario in a fresh process: a segfault is exit 139, not a test failure."""
     root = Path(__file__).resolve().parent.parent
     script = tmp_path / "pause_child.py"
-    script.write_text(PAUSE_CHILD, encoding="utf-8")
+    script.write_text(PAUSE_CHILD, encoding="utf-8", newline="\n")
     schedule = tmp_path / "pause.tslua"
-    schedule.write_text(PAUSE_WITH_INPUTS, encoding="utf-8")
+    schedule.write_text(PAUSE_WITH_INPUTS, encoding="utf-8", newline="\n")
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["PYTHONPATH"] = f"{root / 'src'}{os.pathsep}{root}"

@@ -41,9 +41,10 @@ def _release(root: Path, label: str, files: dict[str, str]) -> Path:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     for rel, src in files.items():
-        (directory / rel).write_text(src, encoding="utf-8")
+        (directory / rel).write_text(src, encoding="utf-8", newline="\n")
     return directory
 
 
@@ -68,7 +69,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     path = tmp_path / "config.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
+    path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return path
 
 
@@ -350,7 +351,7 @@ def test_a_bad_tree_breaks_only_its_schedule_at_scan_and_run_start(qapp, tmp_pat
     session = HeadlessRunSession(_config(tmp_path, root))
     session.select_schedule("Good main")
     (root / "scope" / "good.tslua").write_text(
-        _schedule("Good main", _step("1.", "setup"), _header("2.", "leaf", "leaf.tslua")), encoding="utf-8")
+        _schedule("Good main", _step("1.", "setup"), _header("2.", "leaf", "leaf.tslua")), encoding="utf-8", newline="\n")
     with pytest.raises(SessionError, match="'Good main' is not available"):
         session.start()
     assert session.store.query_runs() == []

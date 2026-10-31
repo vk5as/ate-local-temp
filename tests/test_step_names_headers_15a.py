@@ -67,8 +67,8 @@ EMPTY_SUB = 'return ScheduleParams("Empty sub", "an include with no steps") :set
 def _run(source: str, tmp_path: Path, app) -> tuple[RunStore, str]:
     """Write ``source`` as a schedule, run it to completion, return the store and run uuid."""
     schedule = tmp_path / "schedule.tslua"
-    schedule.write_text(source, encoding="utf-8")
-    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b: the include needs its file
+    schedule.write_text(source, encoding="utf-8", newline="\n")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b: the include needs its file
     store = RunStore(tmp_path / "ate.db")
     engine = RunEngine(store, str(schedule))
     captured: dict[str, str] = {}
@@ -93,7 +93,7 @@ def test_named_step_records_its_step_name(qapp, tmp_path) -> None:
 def test_step_params_without_a_name_still_loads(tmp_path) -> None:
     """`StepParams()` and `StepParams(nil)` are both valid: the name is None, not "None"."""
     schedule = tmp_path / "schedule.tslua"
-    schedule.write_text(NAMED_AND_UNNAMED, encoding="utf-8")
+    schedule.write_text(NAMED_AND_UNNAMED, encoding="utf-8", newline="\n")
     steps = LuaHost(schedule).schedule.steps
     assert steps[0].name == "LED colour"
     assert steps[1].name is None and steps[2].name is None
@@ -113,8 +113,8 @@ def test_unnamed_step_records_a_null_step_name(qapp, tmp_path) -> None:
 def test_include_step_is_a_header_on_the_loaded_tree(tmp_path) -> None:
     """The loaded step says what it is, so later packets need not guess from `action is None`."""
     schedule = tmp_path / "schedule.tslua"
-    schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
-    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
+    schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8", newline="\n")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b expands the header
     steps = LuaHost(schedule).schedule.steps
     assert steps[1].is_header and steps[1].kind == "header"
     assert not steps[0].is_header and steps[0].kind == "step"
@@ -169,8 +169,8 @@ def test_headers_are_recorded_when_a_run_is_aborted(qapp, tmp_path) -> None:
     """An abort at the first step boundary marks later steps NOTRUN and headers as headers."""
     store = RunStore(tmp_path / "ate.db")
     schedule = tmp_path / "schedule.tslua"
-    schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
-    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
+    schedule.write_text(HEADER_AMONG_STEPS, encoding="utf-8", newline="\n")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b expands the header
     engine = RunEngine(store, str(schedule))
     captured: dict[str, str] = {}
     engine.run_uuid_reported.connect(lambda ru: captured.__setitem__("ru", ru))
@@ -201,7 +201,7 @@ def test_header_is_excluded_from_the_report_summary_counts(qapp, tmp_path) -> No
 def _load_error(source: str, tmp_path: Path) -> str:
     """Write ``source`` and return the HostError message loading it raises."""
     schedule = tmp_path / "schedule.tslua"
-    schedule.write_text(source, encoding="utf-8")
+    schedule.write_text(source, encoding="utf-8", newline="\n")
     with pytest.raises(HostError) as excinfo:
         LuaHost(schedule)
     return str(excinfo.value)
@@ -301,8 +301,8 @@ def test_set_enable_and_set_prefix_on_a_header_are_allowed(tmp_path) -> None:
     schedule = tmp_path / "schedule.tslua"
     schedule.write_text(_one_step(
         'StepParams("group"):setInclude("sub.tslua"):setPrefix("3."):setEnable(false)'
-    ), encoding="utf-8")
-    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
+    ), encoding="utf-8", newline="\n")
+    (tmp_path / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b expands the header
     header = LuaHost(schedule).schedule.steps[0]
     assert header.is_header and header.enabled is False and header.prefix == "3."
 
@@ -346,11 +346,12 @@ def test_catalog_reports_a_header_misuse_as_a_load_error(tmp_path) -> None:
         'return ScheduleParams("Bad", "prefix without include")\n'
         '  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("2.") })\n',
         encoding="utf-8",
+        newline="\n",
     )
     good = defs / "good.tslua"
-    good.write_text(HEADER_AMONG_STEPS, encoding="utf-8")
+    good.write_text(HEADER_AMONG_STEPS, encoding="utf-8", newline="\n")
     sub = defs / "sub.tslua"  # packet 15b: the header's Sub-schedule must exist
-    sub.write_text(EMPTY_SUB, encoding="utf-8")
+    sub.write_text(EMPTY_SUB, encoding="utf-8", newline="\n")
     (defs / "bad.atedef").write_text(
         json.dumps({
             "format": 1, "mediaNumber": "REL-15A", "name": "15a release", "version": "1.0.0",
@@ -359,6 +360,7 @@ def test_catalog_reports_a_header_misuse_as_a_load_error(tmp_path) -> None:
                       {"path": "sub.tslua", "sha256": _sha256(sub)}],
         }),
         encoding="utf-8",
+        newline="\n",
     )
     rows = list_schedule_rows(defs)
     errors = [r.error for r in rows if r.error]
@@ -373,8 +375,8 @@ def test_run_screen_step_list_shows_no_none_for_an_unnamed_step(qapp) -> None:
     """The Steps & options rows for an unnamed step are blank after the number, never "None"."""
     with tempfile.TemporaryDirectory() as td:
         schedule = Path(td) / "schedule.tslua"
-        schedule.write_text(HEADER_WITHOUT_NUMBER, encoding="utf-8")
-        (Path(td) / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8")  # packet 15b expands the header
+        schedule.write_text(HEADER_WITHOUT_NUMBER, encoding="utf-8", newline="\n")
+        (Path(td) / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b expands the header
         stage = StepsOptionsStage()
         stage.load_steps(LuaHost(schedule).schedule.steps)
         texts = [stage.step_list.item(i).text() for i in range(stage.step_list.count())]

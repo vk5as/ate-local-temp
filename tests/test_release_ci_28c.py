@@ -314,16 +314,16 @@ def _fake_bundle(root: Path) -> Path:
     (internal / "ate" / "lua").mkdir(parents=True)
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
-    exe.write_text(_stub_ate(), encoding="utf-8")
+    exe.write_text(_stub_ate(), encoding="utf-8", newline="\n")
     exe.chmod(0o755)
-    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8")
-    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8")
-    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8")
+    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8", newline="\n")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8", newline="\n")
     return bundle
 
 
@@ -363,7 +363,7 @@ def _artifacts() -> Path:
             zf.writestr("ate/__init__.py", "")
             zf.writestr(f"ate-{version.replace('-dev', '.dev0')}.dist-info/METADATA", "Metadata-Version: 2.1\nName: ate\n")
             zf.writestr(f"ate-{version.replace('-dev', '.dev0')}.dist-info/WHEEL", "Wheel-Version: 1.0\n")
-        (dist / "glibc-build.txt").write_text("ldd (Ubuntu GLIBC 2.39-0ubuntu2) 2.39\n", encoding="utf-8")
+        (dist / "glibc-build.txt").write_text("ldd (Ubuntu GLIBC 2.39-0ubuntu2) 2.39\n", encoding="utf-8", newline="\n")
         _CACHE["dist"] = dist
         _CACHE["where"] = where
     return _CACHE["dist"]
@@ -527,7 +527,7 @@ class FakeContainer:
         for real in ("/opt/ate", "/etc/ate", "/var/lib/ate"):
             text = text.replace(real, str(self.root / real.lstrip("/")))
         copy = self.root / f"{script}-test"
-        copy.write_text(text, encoding="utf-8")
+        copy.write_text(text, encoding="utf-8", newline="\n")
         copy.chmod(0o755)
         return self._subprocess(["/bin/sh", str(copy), action])
 
@@ -544,7 +544,7 @@ class FakeContainer:
         if purge:
             if not self.purge_removes_config:
                 self.station.config_dir.mkdir(parents=True, exist_ok=True)
-                self.station.config.write_text('{"format": 1}', encoding="utf-8")
+                self.station.config.write_text('{"format": 1}', encoding="utf-8", newline="\n")
             # Each record is a separate promise: purge may delete none of them.
             if not self.purge_keeps_database:
                 self.station.data_dir.joinpath("ate.db").unlink(missing_ok=True)
@@ -582,7 +582,7 @@ class FakeContainer:
             if not self.upgrade_clears_internal:
                 stale = self.station.app_dir / "_internal" / "stale-from-the-previous-build.py"
                 stale.parent.mkdir(parents=True, exist_ok=True)
-                stale.write_text("a file the previous build shipped", encoding="utf-8")
+                stale.write_text("a file the previous build shipped", encoding="utf-8", newline="\n")
         return result
 
     def _pipx(self, args: list[str]) -> smoke.CommandResult:
@@ -590,7 +590,7 @@ class FakeContainer:
         if args[:1] != ["install"] or not wheel.is_file():
             return smoke.CommandResult(1, "", f"pipx: {wheel} is not a wheel")
         self.station.wheel_bin.parent.mkdir(parents=True, exist_ok=True)
-        self.station.wheel_bin.write_text(_stub_ate(), encoding="utf-8")
+        self.station.wheel_bin.write_text(_stub_ate(), encoding="utf-8", newline="\n")
         self.station.wheel_bin.chmod(0o755)
         return smoke.CommandResult(0, "pipx installed ate\n", "")
 
@@ -640,10 +640,11 @@ def _broken_release(tmp_path: Path) -> Path:
     """A Media Release whose .atedef is not a valid one: the scan has to report it as broken."""
     release = tmp_path / "broken-release"
     release.mkdir()
-    (release / "oops.tslua").write_text("return ScheduleParams('broken', 'no params')\n", encoding="utf-8")
+    (release / "oops.tslua").write_text("return ScheduleParams('broken', 'no params')\n", encoding="utf-8", newline="\n")
     (release / "broken.atedef").write_text(
         json.dumps({"format": 1, "mediaNumber": "MR-BROKEN", "name": "Broken", "version": "not semver", "files": []}),
         encoding="utf-8",
+        newline="\n",
     )
     return release
 
@@ -655,6 +656,7 @@ def _tampered_release(tmp_path: Path) -> Path:
     (release / "schedule_basics.tslua").write_text(
         (release / "schedule_basics.tslua").read_text(encoding="utf-8") + "\n-- touched by the smoke test\n",
         encoding="utf-8",
+        newline="\n",
     )
     return release
 
@@ -962,7 +964,7 @@ def test_pdf_has_text_tells_a_blank_page_from_a_rendered_report() -> None:
 def test_pdf_has_text_accepts_a_real_webengine_report(tmp_path: Path) -> None:
     """The real thing QtWebEngine prints passes the check, so it never fails a good build."""
     html = tmp_path / "report.html"
-    html.write_text("<html><body><h1>Test Report</h1><p>1. Check the fuse: PASS</p></body></html>", encoding="utf-8")
+    html.write_text("<html><body><h1>Test Report</h1><p>1. Check the fuse: PASS</p></body></html>", encoding="utf-8", newline="\n")
     pdf = tmp_path / "report.pdf"
     run_pdf_helper(html, pdf, "A4")
     data = pdf.read_bytes()
@@ -1045,7 +1047,7 @@ def test_ate_reports_the_version_baked_into_the_wheel(tmp_path: Path) -> None:
     """
     site = tmp_path / "site"
     (site / "ate-1.2.3.dist-info").mkdir(parents=True)
-    (site / "ate-1.2.3.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: ate\nVersion: 1.2.3\n", encoding="utf-8")
+    (site / "ate-1.2.3.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: ate\nVersion: 1.2.3\n", encoding="utf-8", newline="\n")
     sys.path.insert(0, str(site))
     try:
         assert version_module._metadata_version() == "1.2.3", "the version is read from the installed distribution"

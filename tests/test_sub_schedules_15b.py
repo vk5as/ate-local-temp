@@ -110,6 +110,7 @@ def _write_release(root: Path, label: str, files: list[dict], deps: Optional[lis
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     return release_dir
 
@@ -118,7 +119,7 @@ def _write_files(directory: Path, files: dict[str, str]) -> None:
     for rel, src in files.items():
         target = directory / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(src, encoding="utf-8")
+        target.write_text(src, encoding="utf-8", newline="\n")
 
 
 def _config(tmp_path: Path, root: Path) -> Path:
@@ -131,7 +132,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     path = tmp_path / "config.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
+    path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return path
 
 
@@ -671,6 +672,7 @@ def test_an_include_listed_but_absent_on_disk_is_a_load_error(tmp_path) -> None:
         'return ScheduleParams("Main schedule", "includes a file that is not on disk")\n'
         '  :setSchedule({ StepParams("x"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua") })\n',
         encoding="utf-8",
+        newline="\n",
     )
     definition = Definition(
         path=directory, media_number="MR-GONE", name="Release gone", version="1.0.0",
@@ -867,6 +869,7 @@ return ScheduleParams("Sibling schedule", "does not include the mismatched file"
                       _entry("sibling.tslua", sibling)],
         }),
         encoding="utf-8",
+        newline="\n",
     )
     definition = _definition(root, "mis")
     assert definition_mismatches(definition, "Sibling schedule") == []
@@ -990,8 +993,9 @@ def test_bare_host_resolves_includes_against_its_own_directory(tmp_path) -> None
         'return ScheduleParams("Bare main", "no definition behind it")\n'
         '  :setSchedule({ StepParams("child"):setStepNo("1."):setPrefix("1."):setInclude("sub.tslua", { channel = 9 }) })\n',
         encoding="utf-8",
+        newline="\n",
     )
-    (directory / "sub.tslua").write_text(CHANNEL_SRC, encoding="utf-8")
+    (directory / "sub.tslua").write_text(CHANNEL_SRC, encoding="utf-8", newline="\n")
     host = LuaHost(directory / "main.tslua")
     inst = host.instances[1]
     assert (inst.file, inst.media_number, inst.keyvals) == ("sub.tslua", None, {"channel": 9})

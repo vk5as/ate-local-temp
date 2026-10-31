@@ -36,12 +36,12 @@ DOCS = REPO / "docs" / "building-from-source.md"
 # no .git or tests/ is needed.
 BUILD_INPUTS = ("pyproject.toml", "README.md", "src")
 
-# Runtime dependencies and the lowest version each one is known to work with.
-# An upper bound is deliberately absent: the frozen builds pin exact versions, the
-# wheel floats to whatever PyPI has that satisfies the floor.
+# Runtime dependencies and the lowest version each one is known to work with. Only the two Qt
+# packages carry an upper bound: they must be the same Qt, and PyQt6-WebEngine has no release
+# past 6.11 (see tests/test_ci_run_is_bounded.py and the CI step that checks the pairing).
 EXPECTED_DEPS = {
-    "pyqt6": "6.7",
-    "pyqt6-webengine": "6.7",
+    "pyqt6": "6.11",
+    "pyqt6-webengine": "6.11",
     "lupa": "2.8",
     "pyvisa": "1.16",  # PyPI's newest is 1.16.2; 1.22 was never released
     "pyvisa-py": "0.7",
@@ -175,9 +175,9 @@ def test_an_egg_info_from_an_editable_install_never_reaches_the_build() -> None:
     """
     fake = Path(tempfile.mkdtemp(prefix="ate-checkout-"))
     try:
-        (fake / "pyproject.toml").write_text('[project]\nname = "ate"\n', encoding="utf-8")
+        (fake / "pyproject.toml").write_text('[project]\nname = "ate"\n', encoding="utf-8", newline="\n")
         (fake / "src" / "ate.egg-info").mkdir(parents=True)
-        (fake / "src" / "ate.egg-info" / "SOURCES.txt").write_text("src/ate/lua/devices.lua\n", encoding="utf-8")
+        (fake / "src" / "ate.egg-info" / "SOURCES.txt").write_text("src/ate/lua/devices.lua\n", encoding="utf-8", newline="\n")
         copy = _clean_build_copy(fake)
         try:
             assert (copy / "pyproject.toml").is_file() and (copy / "src").is_dir(), "the copy is incomplete"
@@ -198,7 +198,7 @@ def test_package_data_decides_what_the_wheel_carries() -> None:
     out = Path(tempfile.mkdtemp(prefix="ate-wheel-mut-"))
     try:
         pyproject = source / "pyproject.toml"
-        pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('"*.lua", ', ""), encoding="utf-8")
+        pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('"*.lua", ', ""), encoding="utf-8", newline="\n")
         wheel = _build_wheel(source, out)
         with zipfile.ZipFile(wheel) as zf:
             lua = [n for n in zf.namelist() if n.endswith(".lua")]
@@ -223,23 +223,56 @@ def test_wheel_declares_python_and_classifiers(wheel: zipfile.ZipFile) -> None:
         assert f"Programming Language :: Python :: {minor}" in meta
 
 
+def test_the_qt_pair_is_banded_to_one_qt(wheel: zipfile.ZipFile) -> None:
+    """`PyQt6` and `PyQt6-WebEngine` are capped in the same band, and both floors match the cap.
+
+    PyQt6 6.12 installs Qt 6.12 while PyQt6-WebEngine stops at 6.11 and brings in
+    PyQt6-WebEngine-Qt6 6.11.2: two Qt builds in one process. Linux tolerates it; Windows aborts
+    with 0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND) the moment QtWebEngine is imported, which is
+    why the first Windows CI run could not render a Test Report at all. An uncapped floor lets
+    pip put those two together again."""
+    specs = _runtime_dependencies(wheel)
+    bands: dict[str, tuple[int, int]] = {}
+    for name in ("pyqt6", "pyqt6-webengine"):
+        spec = specs[name]
+        floor = re.search(r">=(\d+)\.(\d+)", spec)
+        cap = re.search(r"<(\d+)\.(\d+)", spec)
+        assert floor and cap, f"{name} is not bounded both ways: {spec!r}"
+        band = (int(floor.group(1)), int(floor.group(2)))
+        # one release only: >=6.11,<6.12. A wider span lets pip put a newer core next to it.
+        assert (int(cap.group(1)), int(cap.group(2))) == (band[0], band[1] + 1), (
+            f"{name} is not held to one Qt release ({spec!r})"
+        )
+        bands[name] = band
+    assert bands["pyqt6"] == bands["pyqt6-webengine"], f"the Qt pair is banded differently: {bands}"
+
+
 def test_wheel_exposes_the_ate_entry_point(wheel: zipfile.ZipFile) -> None:
     """`pipx install ate` puts `ate` on the PATH, pointing at ate.cli:main."""
     entry_points = _dist_info(wheel, "entry_points.txt")
     assert re.search(r"^ate = ate\.cli:main$", entry_points, re.MULTILINE), entry_points
 
 
-def test_wheel_declares_every_runtime_dependency(wheel: zipfile.ZipFile) -> None:
-    """Every runtime dependency is declared with a lower bound, and nothing else is."""
-    declared = {}
+def _runtime_dependencies(wheel: zipfile.ZipFile) -> dict[str, str]:
+    """Each runtime dependency's requirement string, exactly as the wheel writes it.
+
+    setuptools orders the bounds it is given, so `PyQt6>=6.11,<6.12` comes out as
+    `PyQt6<6.12,>=6.11`: compare the bounds, never a literal "name>=floor" substring."""
+    out: dict[str, str] = {}
     for line in _dist_info(wheel, "METADATA").splitlines():
         if not line.startswith("Requires-Dist: "):
             continue
         spec = line[len("Requires-Dist: "):]
         if ";" in spec:  # an optional extra (`; extra == "test"`), not a runtime dependency
             continue
-        name, *rest = re.match(r"([A-Za-z0-9._-]+)(.*)", spec).groups()
-        declared[name.strip().lower()] = rest[0].strip()
+        name = re.match(r"([A-Za-z0-9._-]+)(.*)", spec).groups()[0]
+        out[name.strip().lower()] = spec.strip()
+    return out
+
+
+def test_wheel_declares_every_runtime_dependency(wheel: zipfile.ZipFile) -> None:
+    """Every runtime dependency is declared with a lower bound, and nothing else is."""
+    declared = _runtime_dependencies(wheel)
 
     assert set(declared) == set(EXPECTED_DEPS), f"unexpected dependency set: {sorted(declared)}"
     for name, expected in EXPECTED_DEPS.items():
@@ -261,8 +294,8 @@ def test_every_floor_is_a_version_that_exists(wheel: zipfile.ZipFile) -> None:
         assert _version_tuple(floor) <= _version_tuple(installed), (
             f"{name}>= {floor} is above the installed {installed}: no such release exists"
         )
-        # and the wheel really says that floor
-        assert f"{name}>={floor}".lower() in _dist_info(wheel, "METADATA").lower(), (
+        # and the wheel really says that floor (setuptools writes the cap before the floor)
+        assert f">={floor}" in _runtime_dependencies(wheel)[name], (
             f"wheel declares {name} differently: {floor} expected"
         )
 

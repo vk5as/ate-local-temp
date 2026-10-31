@@ -189,7 +189,7 @@ def write_config(tmp_dir: Path, release_dir: Path = RELEASE_DIR) -> Path:
         "deviceTrace": {"enabled": True},
     }
     path = tmp_dir / "config.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
+    path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return path
 
 

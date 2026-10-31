@@ -101,9 +101,10 @@ def _write_release(root: Path, label: str, files: dict[str, str]) -> Path:
             "files": [{"path": rel, "sha256": _sha(src)} for rel, src in files.items()],
         }),
         encoding="utf-8",
+        newline="\n",
     )
     for rel, src in files.items():
-        directory.joinpath(rel).write_text(src, encoding="utf-8")
+        directory.joinpath(rel).write_text(src, encoding="utf-8", newline="\n")
     return directory
 
 
@@ -116,7 +117,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
         "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
         "reports": {"directory": str(tmp_path / "reports")},
         "testDefinitions": {"directories": [str(root)]},
-    }), encoding="utf-8")
+    }), encoding="utf-8", newline="\n")
     return path
 
 

@@ -388,7 +388,7 @@ def test_pdf_helper_as_root_without_the_argument_refuses(tmp_path, monkeypatch, 
     """`ate _pdf` run directly by a root operator exits non-zero and says why."""
     _as_root(monkeypatch)
     html = tmp_path / "report.html"
-    html.write_text("<html><body>x</body></html>", encoding="utf-8")
+    html.write_text("<html><body>x</body></html>", encoding="utf-8", newline="\n")
     pdf_path = tmp_path / "report.pdf"
     code = main(["_pdf", str(html), str(pdf_path)])
     err = capsys.readouterr().err

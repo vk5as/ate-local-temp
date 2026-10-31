@@ -68,7 +68,7 @@ def _drive_with_choices(
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), stop_on_fail=stop_on_fail)
         engine.run_uuid_reported.connect(_capture)
         engine.failure_prompt.connect(_on_failure)
@@ -138,7 +138,7 @@ def _drive_poll_retry(
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
         engine.run_uuid_reported.connect(_capture)
         engine.failure_prompt.connect(_on_failure)
@@ -173,7 +173,7 @@ def _drive_retry_then_abort(app: QCoreApplication, source: str) -> tuple[RunStor
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
         engine.run_uuid_reported.connect(_capture)
         engine.failure_prompt.connect(_on_failure)

@@ -32,7 +32,7 @@ def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
         _drive(engine, app)
@@ -195,7 +195,7 @@ def _abort_between_steps(app: QCoreApplication, source: str) -> tuple[RunStore, 
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         op = OperatorInput()
         engine = RunEngine(store, str(schedule_path), operator_input=op)
         engine.run_uuid_reported.connect(_capture)

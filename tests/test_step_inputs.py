@@ -178,7 +178,7 @@ def _host_with_source(source: str) -> LuaHost:
     """Build a host for one schedule on disk (named schedule.tslua so errors carry its name)."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "schedule.tslua"
-        path.write_text(source, encoding="utf-8")
+        path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(path))
 
 

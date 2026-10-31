@@ -117,15 +117,15 @@ def _add_schedule(env: dict[str, Path], name: str, source: str, extra: dict[str,
     """Drop ``source`` into the env's Test Definition (plus any ``extra`` files) and its manifest."""
     defs = env["defs_dir"]
     path = defs / name
-    path.write_text(source, encoding="utf-8")
+    path.write_text(source, encoding="utf-8", newline="\n")
     atedef_path = defs / "demo.atedef"
     atedef = json.loads(atedef_path.read_text(encoding="utf-8"))
     atedef["files"].append({"path": name, "sha256": _sha256(path)})
     for extra_name, extra_source in (extra or {}).items():
         extra_path = defs / extra_name
-        extra_path.write_text(extra_source, encoding="utf-8")
+        extra_path.write_text(extra_source, encoding="utf-8", newline="\n")
         atedef["files"].append({"path": extra_name, "sha256": _sha256(extra_path)})
-    atedef_path.write_text(json.dumps(atedef), encoding="utf-8")
+    atedef_path.write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
 
 def _status_labels(screen: StagedRunScreen) -> tuple[QLabel, QLabel, QLabel, QLabel, QLabel, QLabel]:

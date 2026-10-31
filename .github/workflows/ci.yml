@@ -18,8 +18,10 @@ jobs:
     # The first real run of this workflow hung on windows-latest with no output for an hour: a
     # modal dialog waiting for an Operator who is not there. A job that cannot finish is a bug to
     # read, not a job to wait for, so the wall clock is bounded and pytest is asked to say where it
-    # stopped.
-    timeout-minutes: 30
+    # stopped. Windows gets the larger bound: its runner is slower to install 130 MB of Qt and
+    # slower at every Qt call, and a bound tighter than the job needs just hides the hang behind a
+    # timeout instead of letting faulthandler print the stack that explains it.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 30 }}
     env:
       # conftest.py builds the shared QApplication with no `platform=` kwarg (this PyQt6 build's
       # binding does not accept one), so Qt's offscreen platform has to come from the environment:
@@ -53,16 +55,54 @@ jobs:
       - name: Install ATE and test extras (editable)
         run: pip install -e ".[test]"
 
+      - name: Check Qt and QtWebEngine are the same Qt
+        # PyQt6 6.12.0 pulls Qt 6.12, while PyQt6-WebEngine stops at 6.11 and drags in
+        # PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process is what killed the Windows
+        # runner: the WebEngine DLL resolves its entry points against Qt 6.11 DLLs that are not
+        # there, and Python reports "Windows fatal exception: code 0xc0000139"
+        # (STATUS_ENTRYPOINT_NOT_FOUND) while importing it. Fail here, in one line, rather than
+        # letting a third of the suite quietly skip because PDF rendering is unavailable.
+        run: |
+          python - <<'PY'
+          import importlib.metadata as m
+
+          from PyQt6.QtCore import qVersion
+
+          def band(value: str) -> tuple[int, int]:
+              parts = value.split(".")
+              return (int(parts[0]), int(parts[1]))
+
+          core, webengine = band(qVersion()), band(m.version("PyQt6-WebEngine-Qt6"))
+          print(f"PyQt6 {m.version('PyQt6')} / Qt runtime {qVersion()} "
+                f"/ PyQt6-WebEngine {m.version('PyQt6-WebEngine')} / WebEngine-Qt6 {m.version('PyQt6-WebEngine-Qt6')}")
+          if core != webengine:
+              raise SystemExit(
+                  f"Qt {core[0]}.{core[1]} and WebEngine's Qt {webengine[0]}.{webengine[1]} are "
+                  "different builds: PyQt6-WebEngine has no release for Qt "
+                  f"{core[0]}.{core[1]}, so PyQt6 must stay in the band WebEngine can reach."
+              )
+          try:
+              from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+          except Exception as exc:
+              raise SystemExit(f"QtWebEngine cannot be imported on this runner: {exc}")
+          print("QtWebEngine imports")
+          PY
+
       - name: Run tests
         # -v names each test as it finishes, so a runner that dies mid-test shows the last one it
-        # reached. `--durations=20` reports the slowest tests, which is how a hang is told apart
-        # from a merely slow suite. `faulthandler_timeout=300` makes pytest dump the traceback of
-        # every thread when a single test runs for five minutes: that stack is what identifies a
-        # modal `QMessageBox.exec()` waiting for a click nobody can give, and it is printed into
-        # the log before the job's own timeout kills it.
+        # reached. -rfE prints the short summary of failures and errors at the end even when the
+        # run is long, and --tb=short keeps that summary readable. `--durations=20` reports the
+        # slowest tests, which is how a hang is told apart from a merely slow suite.
+        #
+        # `faulthandler_timeout=300` makes pytest dump the traceback of every thread when a single
+        # test runs for five minutes: that stack is what identifies a modal `QMessageBox.exec()`
+        # waiting for a click nobody can give. `faulthandler_exit_on_timeout=true` then ends the
+        # session instead of carrying on from a test that is still stuck, so the job reports the
+        # hang as a failed run with the stack in the log rather than being killed by GitHub at the
+        # wall clock with nothing printed.
         #
         # `pytest-timeout` is deliberately not a dependency: it would need its own install step,
         # its own floor in the `[test]` extra, and it kills a stuck test rather than showing the
         # stack that explains it. faulthandler is in the standard library and pytest already
         # enables it.
-        run: pytest -v -o log_cli=false --durations=20 -o faulthandler_timeout=300
+        run: pytest -v -rfE --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true

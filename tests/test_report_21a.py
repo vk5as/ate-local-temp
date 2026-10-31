@@ -33,7 +33,7 @@ def _record(app: object, source: str = DOC_FIELDS) -> tuple[RunStore, str]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(
             store,
             str(schedule_path),
@@ -123,7 +123,7 @@ def test_filename_replaces_windows_invalid_chars(app: object) -> None:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(DOC_FIELDS, encoding="utf-8")
+        schedule_path.write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
         bad_serial = 'A:B/C\\D?E|F*G'
         engine = RunEngine(
             store,

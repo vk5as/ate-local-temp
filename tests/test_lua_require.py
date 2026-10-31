@@ -46,7 +46,7 @@ def _write_def_with_module(tmp_path: Path) -> tuple[Path, dict]:
         '    :setAction(function() ATE.report(Result.PASS, "helper loaded") end),\n'
         "})\n"
     )
-    (defs_dir / "main.tslua").write_text(main_text, encoding="utf-8")
+    (defs_dir / "main.tslua").write_text(main_text, encoding="utf-8", newline="\n")
 
     atedef = {
         "format": 1,
@@ -58,7 +58,7 @@ def _write_def_with_module(tmp_path: Path) -> tuple[Path, dict]:
             {"path": "main.tslua", "sha256": _sha256(main_text.encode("utf-8"))},
         ],
     }
-    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     definition = read_definition(defs_dir / "demo.atedef")
     return defs_dir, definition

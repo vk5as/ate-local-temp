@@ -925,6 +925,9 @@ class RunEngine(QThread):
             # written once, after its last Attempt, with that Attempt's result.
             last_result = "NOREPORT"
             attempt_count = 0
+            # 14d review: POLL is the only non-blocking type, so these are the indices whose
+            # ``ATE.input(n)`` can wait. reset() below keeps any answer already given for them.
+            blocking = [index - 1 for index, decl in enumerate(validated, start=1) if decl.type != "POLL"]
             while True:
                 attempt_count += 1
                 # Packet 14d: announce the Attempt so the status bar restarts its current-item timer
@@ -936,8 +939,13 @@ class RunEngine(QThread):
                 # asked input. The input_asked signals are queued here (before _run_action blocks), so
                 # a blocking supply from another thread wakes get_raw while the worker waits; the
                 # op.reset() below starts this Attempt's recording window clean so its values attach
-                # to it (a retried Attempt re-asks under its own number, packet 12c).
-                self._op.reset()
+                # to it (a retried Attempt re-asks under its own number, packet 12c). The `blocking`
+                # argument carries in any answer the operator gave before this step's first
+                # ATE.input(n) ran — without it that answer is wiped, the ask waits forever, and the
+                # run hangs (14d review: the status-bar test's flake was this race). Only the step's
+                # first Attempt may inherit: an answer supplied during a Stop-on-Fail pause belongs
+                # to the Attempt that just ended, and a retry has to ask for its own (12c).
+                self._op.reset(blocking if attempt_count == 1 else ())
                 # Packet 10a review: a blocking input opens only when its ``ATE.input(n)`` call
                 # actually blocks — the OperatorInput's ``asked`` signal, wired to ``input_asked`` in
                 # __init__ — while a POLL is live for the whole Attempt, so it is announced here,

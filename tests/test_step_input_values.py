@@ -32,7 +32,7 @@ def _host(op: OperatorInput, source: str = _MINIMAL) -> LuaHost:
     """Build a real host on disk with ``op`` injected so tests own supply/click."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "schedule.tslua"
-        path.write_text(source, encoding="utf-8")
+        path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(path), operator_input=op)
 
 
@@ -226,7 +226,7 @@ def test_undeclared_input_through_lua_raises_invalid_step_input(app):
     )
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "schedule.tslua"
-        path.write_text(source, encoding="utf-8")
+        path.write_text(source, encoding="utf-8", newline="\n")
         host = LuaHost(str(path), operator_input=op)
         # Put the single declared input in place so only index 9 is undeclared.
         host._step_inputs = [StepInput(index=1, desc="voltage", type="INTEGER")]
@@ -266,7 +266,8 @@ def _run_read_back(app, type_name: str, extra: str, value):
         store = RunStore(Path(td) / "ate.db")
         path = Path(td) / "read_back.tslua"
         path.write_text(
-            _READ_BACK.replace("__TYPE__", type_name).replace("__EXTRA__", extra), encoding="utf-8"
+            _READ_BACK.replace("__TYPE__", type_name).replace("__EXTRA__", extra), encoding="utf-8",
+            newline="\n",
         )
         engine = RunEngine(store, str(path), operator_input=op)
         engine.input_asked.connect(lambda seq, attempt, index: op.supply_input(index - 1, value))

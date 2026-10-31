@@ -57,7 +57,7 @@ return ScheduleParams("Text values", "how a reported value reaches the record as
 def _config(tmp_path: Path) -> Path:
     root = tmp_path / "defs"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "values.tslua").write_text(VALUES_SRC, encoding="utf-8")
+    (root / "values.tslua").write_text(VALUES_SRC, encoding="utf-8", newline="\n")
     (root / "values.atedef").write_text(
         json.dumps(
             {
@@ -69,6 +69,7 @@ def _config(tmp_path: Path) -> Path:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     config = {
         "format": 1,
@@ -79,7 +80,7 @@ def _config(tmp_path: Path) -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     path = tmp_path / "config.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
+    path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return path
 
 

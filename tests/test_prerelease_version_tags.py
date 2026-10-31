@@ -74,13 +74,13 @@ def _describe_of_tagged_repo(tmp_path: Path, tag: str, commits_after: int = 0) -
     """
     root = tmp_path / "checkout"
     root.mkdir(parents=True)
-    (root / "file.txt").write_text("release build\n", encoding="utf-8")
+    (root / "file.txt").write_text("release build\n", encoding="utf-8", newline="\n")
     _git(root, "init", "-q")
     _git(root, "add", "file.txt")
     _git(root, "commit", "-q", "-m", "release build")
     _git(root, "tag", tag)
     for i in range(commits_after):
-        (root / "file.txt").write_text(f"commit {i}\n", encoding="utf-8")
+        (root / "file.txt").write_text(f"commit {i}\n", encoding="utf-8", newline="\n")
         _git(root, "add", "file.txt")
         _git(root, "commit", "-q", "-m", f"after the tag {i}")
     return _git(root, "describe", "--tags")
@@ -184,7 +184,7 @@ def test_the_prerelease_bundle_is_named_after_it(tmp_path: Path):
     """The tarball and the .deb built from a bundle that prints `0.1.0rc1`."""
     bundle = tmp_path / "dist" / "ate"
     bundle.mkdir(parents=True)
-    (bundle / "ate").write_text("#!/bin/sh\necho 0.1.0rc1\n", encoding="utf-8")
+    (bundle / "ate").write_text("#!/bin/sh\necho 0.1.0rc1\n", encoding="utf-8", newline="\n")
     out = tmp_path / "out"
     out.mkdir()
 

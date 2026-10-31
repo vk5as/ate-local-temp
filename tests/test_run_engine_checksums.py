@@ -47,8 +47,8 @@ def _write_release(tmp_path: Path) -> tuple[Path, object]:
 
     helper_src = _helper_source()
     main_src = _main_source()
-    (defs_dir / "helper.lua").write_text(helper_src, encoding="utf-8")
-    (defs_dir / "main.tslua").write_text(main_src, encoding="utf-8")
+    (defs_dir / "helper.lua").write_text(helper_src, encoding="utf-8", newline="\n")
+    (defs_dir / "main.tslua").write_text(main_src, encoding="utf-8", newline="\n")
 
     atedef = {
         "format": 1,
@@ -60,7 +60,7 @@ def _write_release(tmp_path: Path) -> tuple[Path, object]:
             {"path": "main.tslua", "sha256": hashlib.sha256(main_src.encode("utf-8")).hexdigest()},
         ],
     }
-    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs_dir / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     definition = read_definition(defs_dir / "demo.atedef")
     return defs_dir, definition
@@ -112,7 +112,7 @@ def test_mismatched_file_is_flagged_and_warns_but_still_runs(app: QCoreApplicati
         defs_dir, definition = _write_release(Path(td))
 
         # Corrupt the helper on disk *after* the .atedef recorded its original bytes.
-        (defs_dir / "helper.lua").write_text(_helper_source() + "\n-- tampered after recording\n", encoding="utf-8")
+        (defs_dir / "helper.lua").write_text(_helper_source() + "\n-- tampered after recording\n", encoding="utf-8", newline="\n")
 
         store = RunStore(Path(td) / "ate.db")
         engine = RunEngine(
