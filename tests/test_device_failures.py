@@ -17,7 +17,6 @@ import struct
 import threading
 import time
 import socket
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from ._fixtures import (
     _drive,
 )
 from .test_tcp_read_write import _run_with_peer, _step, _step_message
+from tests._fixtures import scratch_directory
 
 
 def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = ""):
@@ -210,7 +210,7 @@ def test_closed_handle_is_dropped_once_its_warnings_are_drained() -> None:
 def test_flush_attributes_a_between_action_failure_to_the_run() -> None:
     """A warning timestamped outside an action's window attaches to the run (all ownership None);
     one inside the window is owned by the action, and a single drain splits them."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         ru = store.insert_test_run(
             {"run_uuid": "test", "station_name": "X", "operator": "op", "project": "p",
@@ -296,7 +296,7 @@ return ScheduleParams("Pretest failure schedule", "a pretest opens a device that
     dev = nil  -- left open; the engine closes it at run end
   end)
 """
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
             schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -352,7 +352,7 @@ return ScheduleParams("Buffer then fail then reopen", "two steps")
       end),
   }})
 """
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
             schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -382,7 +382,10 @@ return ScheduleParams("Buffer then fail then reopen", "two steps")
         f"step 2's failure is owned by step 2: {device_warnings[1]!r}"
 
 
-_SMALL_BUF = 4096  # both ends' socket buffers shrink to this, so a 256 KiB write can't fit
+_SMALL_BUF = 4096  # both ends' socket buffers shrink to this, so a write this size can't fit
+#: More than any loopback buffers hold on any OS: Windows tunes its send buffer far past the 64 KiB
+#: it starts with, so a smaller write can simply fit.
+_STALL_BYTES = 64 * 1024 * 1024
 
 
 def _open_small(peer: "_ManualPeer", timeout: float = 5):
@@ -412,7 +415,7 @@ def test_write_honours_the_open_timeout_when_the_peer_stops_reading() -> None:
     peer = _ManualPeer(rcvbuf=_SMALL_BUF)
     try:
         dev, _conn = _open_small(peer, timeout=0.3)
-        payload = b"\x00" * (256 * 1024)
+        payload = b"\x00" * _STALL_BYTES
         start = time.monotonic()
         ok, sent, err = dev.write({"data": payload})  # no per-call timeout: uses the open-time 0.3 s
         elapsed = time.monotonic() - start
@@ -433,7 +436,7 @@ def test_write_per_call_timeout_overrides_the_open_timeout() -> None:
     try:
         dev, _conn = _open_small(peer, timeout=5)
         start = time.monotonic()
-        ok, sent, err = dev.write({"data": b"\x00" * (256 * 1024), "timeout": 0.3})
+        ok, sent, err = dev.write({"data": b"\x00" * _STALL_BYTES, "timeout": 0.3})
         elapsed = time.monotonic() - start
         dev.close()
     finally:
@@ -450,7 +453,7 @@ def test_write_timeout_does_not_fail_the_device() -> None:
     peer = _ManualPeer(rcvbuf=_SMALL_BUF)
     try:
         dev, conn = _open_small(peer)
-        ok, sent, err = dev.write({"data": b"a" * (256 * 1024), "timeout": 0.3})
+        ok, sent, err = dev.write({"data": b"a" * _STALL_BYTES, "timeout": 0.3})
         assert (ok, err) == (False, "timeout") and 0 < sent, f"the first write must time out: {(ok, sent, err)!r}"
 
         # The peer drains exactly what was sent, then the device must work again.
@@ -598,7 +601,7 @@ return ScheduleParams("x") :setSchedule({{
     seen_during_pause: list[dict] = []
     captured: dict = {}
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
             schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -672,7 +675,7 @@ def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: Q
 def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCoreApplication) -> None:
     """Several ATE.log lines in one step, no device: recorded in the order logged, each stamped
     with its own emission time (0.3 s apart), not one shared end-of-step time."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         path = Path(td) / "schedule.tslua"
         path.write_text("""return ScheduleParams("x") :setSchedule({
