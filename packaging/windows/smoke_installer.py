@@ -402,7 +402,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dist", default=str(REPO / "dist"), help="directory holding the installer")
     parser.add_argument("--installer", default=None, help="setup.exe to run (default: the newest in --dist)")
     parser.add_argument("--app-dir", default=None, help="where the installer puts the program (default: Program Files\\ATE)")
-    parser.add_argument("--data-dir", default=None, help="the Station data directory (default: %PROGRAMDATA%\\ATE)")
+    # Not a typo, and not one `%` too many: argparse formats a help string with `%` before printing
+    # it (`HelpFormatter._expand_help`), so CPython 3.14 raises `ValueError: badly formed help
+    # string` for a bare `%PROGRAMDATA%` when the argument is registered, and the smoke step dies
+    # before the installer runs. `%%%%` in source is `%%` in the string, which formats to the one
+    # `%` the Operator sees.
+    parser.add_argument("--data-dir", default=None, help="the Station data directory (default: %%%%PROGRAMDATA%%%%\\ATE)")
     parser.add_argument("--sample", default=str(REPO / "examples" / "media-release"), help="Media Release to copy for the scan")
     parser.add_argument("--install-log", default="install.log", help="the /LOG file the installer writes")
     parser.add_argument("--poll-limit", type=int, default=300, help="how many seconds to wait for the re-spawned uninstaller")
