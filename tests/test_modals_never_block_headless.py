@@ -14,11 +14,12 @@ What each answers headless:
 | alert (`app._alert_dialog`) | acknowledged, then the launch stops |
 | close confirmation (`app._close_confirm_dialog`) | Keep running — the run is not aborted |
 | PDF sandbox question (`app._pdf_sandbox_dialog`) | Skip PDF |
-| run-start mismatch (`MismatchConfirmation`) | Start the run, store nothing |
+| run-start mismatch (`MismatchConfirmation`) | Start the run; store what `database.storeMismatchedFiles` says — `always` stores, `ask` and `never` do not (packet 31d) |
 
 The first test is a static scan, so a new modal cannot be added without an answer; the second runs
 the real dialogs in a fresh interpreter (a monkeypatch cannot reach a subprocess) and fails if any
-of them blocks; the last two prove the mismatch confirmation's answer is the safe one.
+of them blocks; the rest prove the mismatch confirmation's answer comes from the config rather than
+from a default nobody chose, in a real headless run and through the `ATE_AUTO_DISMISS_DIALOG` seam.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from ate.dialogs import dismiss_if_headless
@@ -38,6 +40,11 @@ from ate.ui.run_widgets import MismatchConfirmation
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "ate"
 
+#: What each `database.storeMismatchedFiles` setting answers when nobody is at a screen (packet 31d):
+#: `always` stores the mismatched bytes, `never` stores nothing, and `ask` stores nothing because the
+#: ticked-by-default box is not a choice anyone made. The run starts in all three.
+HEADLESS_ANSWERS = (("always", True), ("never", False), ("ask", False))
+
 #: Every modal in the package, and the answer it gives when nobody can click. A new dialog `exec()`
 #: has to appear here, with its answer, or these tests fail.
 MODALS = {
@@ -45,7 +52,7 @@ MODALS = {
     "app.py:_alert_dialog": "acknowledged; the launch stops",
     "app.py:_close_confirm_dialog": "Keep running (the run is not aborted)",
     "app.py:_pdf_sandbox_dialog": "Skip PDF",
-    "ui/run_widgets.py:_confirm_store_choice": "Start the run, store nothing",
+    "ui/run_widgets.py:_confirm_store_choice": "Start the run; store by database.storeMismatchedFiles",
 }
 
 #: A dialog `exec()`, as opposed to the `app.exec()` of a QApplication event loop.
@@ -124,45 +131,84 @@ def test_headless_modals_return_in_a_fresh_process() -> None:
     assert proc.stdout.split() == ["False", "None", "False", "False"], proc.stdout
 
 
-def test_a_mismatched_run_starts_in_a_fresh_headless_process(tmp_path) -> None:
+#: The real run that hung CI: `begin_run` → `_confirm_store_choice` with nobody to click Start. It
+#: prints the dialog's answer, whether the run finished, and what the recorded run_file rows say.
+MISMATCH_RUN_CODE = (
+    "import sys, time\n"
+    "from PyQt6.QtWidgets import QApplication\n"
+    "app = QApplication([])\n"
+    "from ate.run_session.headless import HeadlessRunSession, SessionState\n"
+    "from ate.ui.staged_run_screen import StagedRunScreen\n"
+    "session = HeadlessRunSession(sys.argv[1])\n"
+    "screen = StagedRunScreen(session)\n"
+    "screen._refresh_schedule_list()\n"
+    "lw = screen.test_schedule_stage.schedule_list\n"
+    "item = next(lw.item(i) for i in range(lw.count()) if 'Mismatch schedule' in lw.item(i).text())\n"
+    "lw.setCurrentItem(item)\n"
+    "screen._begin_run_from_selection()\n"
+    "screen.steps_options_stage.run_button.click()\n"
+    "print('answer', screen._confirm_dialog.store_choice())\n"
+    "deadline = time.monotonic() + 20.0\n"
+    "while time.monotonic() < deadline:\n"
+    "    app.processEvents()\n"
+    "    if session._state == SessionState.FINISHED:\n"
+    "        break\n"
+    "    time.sleep(0.005)\n"
+    "print('finished', session._state == SessionState.FINISHED)\n"
+    "rows = session.store.run_files(session.run_uuid)\n"
+    "print('stored', any(row['content'] is not None for row in rows))\n"
+    "flagged = [row for row in rows if row['mismatch']]\n"
+    "print('flagged', len(flagged), all(row['expected_sha256'] and row['computed_sha256'] for row in flagged))\n"
+    "print('logged', any('checksum mismatch' in line['text'] for line in session.store.log_lines(session.run_uuid)))\n"
+)
+
+
+def _headless_mismatch_run(config: Path, *, dismiss_seam: bool = False, platform: str = "offscreen") -> list[str]:
+    """Run a mismatched schedule in a fresh interpreter with no display, and return its print lines."""
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"), QT_QPA_PLATFORM=platform)
+    if dismiss_seam:
+        env["ATE_AUTO_DISMISS_DIALOG"] = "1"
+    else:
+        env.pop("ATE_AUTO_DISMISS_DIALOG", None)
+    proc = subprocess.run([sys.executable, "-c", MISMATCH_RUN_CODE, str(config)], capture_output=True, text=True, env=env, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return [line for line in proc.stdout.splitlines() if line.startswith(("answer ", "finished ", "stored ", "flagged ", "logged "))]
+
+
+@pytest.mark.parametrize("setting, stores", HEADLESS_ANSWERS)
+def test_a_mismatched_run_starts_in_a_fresh_headless_process(tmp_path, setting: str, stores: bool) -> None:
     """Start a run whose files mismatch, with no Operator: the confirmation answers itself.
 
-    This is the run that hung: `_confirm_store_choice` ← `begin_run` with nobody to click Start."""
-    env = _write_mismatched_release(tmp_path)
-    code = (
-        "import sys, time\n"
-        "from PyQt6.QtWidgets import QApplication\n"
-        "app = QApplication([])\n"
-        "from ate.run_session.headless import HeadlessRunSession, SessionState\n"
-        "from ate.ui.staged_run_screen import StagedRunScreen\n"
-        "session = HeadlessRunSession(sys.argv[1])\n"
-        "screen = StagedRunScreen(session)\n"
-        "screen._refresh_schedule_list()\n"
-        "lw = screen.test_schedule_stage.schedule_list\n"
-        "item = next(lw.item(i) for i in range(lw.count()) if 'Mismatch schedule' in lw.item(i).text())\n"
-        "lw.setCurrentItem(item)\n"
-        "screen._begin_run_from_selection()\n"
-        "screen.steps_options_stage.run_button.click()\n"
-        "print('answer', screen._confirm_dialog.store_choice())\n"
-        "deadline = time.monotonic() + 20.0\n"
-        "while time.monotonic() < deadline:\n"
-        "    app.processEvents()\n"
-        "    if session._state == SessionState.FINISHED:\n"
-        "        break\n"
-        "    time.sleep(0.005)\n"
-        "print('finished', session._state == SessionState.FINISHED)\n"
-        "print('stored', any(row['content'] is not None for row in session.store.run_files(session.run_uuid)))\n"
-    )
-    env_vars = dict(os.environ, PYTHONPATH=str(REPO / "src"), QT_QPA_PLATFORM="offscreen")
-    env_vars.pop("ATE_AUTO_DISMISS_DIALOG", None)
-    proc = subprocess.run([sys.executable, "-c", code, str(env["config"])], capture_output=True, text=True, env=env_vars, timeout=120)
-    assert proc.returncode == 0, proc.stderr
-    answers = [line for line in proc.stdout.splitlines() if line.startswith(("answer ", "finished ", "stored "))]
-    assert answers == ["answer False", "finished True", "stored False"], answers
+    `database.storeMismatchedFiles` decides whether the mismatched bytes end up on the run_file rows
+    (packet 31d), and the mismatch is still flagged, logged and recorded with its checksums whatever
+    that answer is.
+    """
+    config = _write_mismatched_release(tmp_path, setting)
+    lines = _headless_mismatch_run(config)
+    assert lines == [
+        f"answer {stores}",
+        "finished True",
+        f"stored {stores}",
+        "flagged 1 True",
+        "logged True",
+    ], lines
 
 
-def _write_mismatched_release(tmp_path: Path) -> dict[str, Path]:
-    """One Media Release whose bytes on disk do not match the checksum its `.atedef` records."""
+def test_the_dismiss_seam_answers_a_real_run_the_same_way(tmp_path) -> None:
+    """`ATE_AUTO_DISMISS_DIALOG` and `minimal` give the same mismatch answer as `offscreen`.
+
+    A subprocess cannot be monkeypatched, so the seam is proved in a real run: the `always` Station
+    still stores the bytes when the dialog is closed by the seam, and again on the other headless
+    platform, `minimal`."""
+    for seam, platform in ((True, "offscreen"), (False, "minimal"), (True, "minimal")):
+        lines = _headless_mismatch_run(_write_mismatched_release(tmp_path / f"seam{seam}{platform}", "always"), dismiss_seam=seam, platform=platform)
+        assert lines[0] == "answer True", f"{platform} seam={seam}: {lines}"
+        assert lines[2] == "stored True", f"{platform} seam={seam}: {lines}"
+
+
+def _write_mismatched_release(tmp_path: Path, setting: str) -> Path:
+    """One Media Release whose bytes on disk do not match the checksum its `.atedef` records, and a
+    config whose `database.storeMismatchedFiles` is `setting`. Returns the config path."""
     src = (
         'return ScheduleParams("Mismatch schedule", "one step")\n'
         '  :setSchedule({StepParams("ok"):setStepNo("1.")'
@@ -192,7 +238,7 @@ def _write_mismatched_release(tmp_path: Path) -> dict[str, Path]:
                 "format": 1,
                 "station": {"name": "BENCH", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
                 "defaultProject": "Power board",
-                "database": {"type": "sqlite", "path": str(tmp_path / "ate.db")},
+                "database": {"type": "sqlite", "path": str(tmp_path / "ate.db"), "storeMismatchedFiles": setting},
                 "reports": {"directory": str(tmp_path / "reports")},
                 "testDefinitions": {"directories": [str(defs)]},
             }
@@ -200,17 +246,35 @@ def _write_mismatched_release(tmp_path: Path) -> dict[str, Path]:
         encoding="utf-8",
         newline="\n",
     )
-    return {"config": config, "defs": defs}
+    return config
 
 
-def test_the_headless_answer_is_the_safe_branch(qapp) -> None:
-    """`answer_without_storing` answers Start and un-ticks the box, even where the setting says `always`."""
-    for setting in ("ask", "always", "never"):
-        dialog = MismatchConfirmation("S", "REL", [("a.tslua", "aa", "bb", "MR-1")], setting)
-        dialog.answer_without_storing()
-        assert dialog.store_choice() is False, f"{setting} answered by storing"
-        if dialog.store_checkbox is not None:
-            assert not dialog.store_checkbox.isChecked(), f"{setting} left the box ticked"
+@pytest.mark.parametrize("setting, answer", HEADLESS_ANSWERS)
+def test_the_headless_answer_follows_the_setting(qapp, setting: str, answer: bool) -> None:
+    """`answer_from_setting` answers Start and stores exactly what `database.storeMismatchedFiles` says.
+
+    `ask` is the one that needs care: the box is ticked by default, and default is not a decision, so
+    nobody's answer to it is "store nothing" (packet 31d)."""
+    dialog = MismatchConfirmation("S", "REL", [("a.tslua", "aa", "bb", "MR-1")], setting)
+    dialog.answer_from_setting()
+    assert dialog.is_accepted(), f"{setting}: an unattended run must still start"
+    assert dialog.store_choice() is answer, f"{setting} answered {dialog.store_choice()}"
+    if dialog.store_checkbox is not None:
+        assert not dialog.store_checkbox.isChecked(), f"{setting} left the box ticked"
+
+
+@pytest.mark.parametrize("setting, answer", HEADLESS_ANSWERS)
+def test_the_dismiss_seam_arms_the_same_answer(qapp, monkeypatch, setting: str, answer: bool) -> None:
+    """`ATE_AUTO_DISMISS_DIALOG` arms the mismatch dialog with the setting's answer, not a bare accept.
+
+    `QT_QPA_PLATFORM` is set to a window server here so the seam alone is what arms the dialog."""
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("ATE_AUTO_DISMISS_DIALOG", "1")
+    dialog = MismatchConfirmation("S", "REL", [("a.tslua", "aa", "bb", "MR-1")], setting)
+    assert dismiss_if_headless(dialog, MismatchConfirmation.answer_from_setting) is True
+    for _ in range(5):
+        qapp.processEvents()
+    assert dialog.store_choice() is answer, f"{setting} answered {dialog.store_choice()}"
 
 
 def test_dismiss_if_headless_does_nothing_when_a_display_exists(monkeypatch) -> None:

@@ -18,7 +18,9 @@ runs, so `exec()` returns. With no `answer`, a `QMessageBox` closes through `acc
 no button: `clickedButton()` is None and every prompt therefore takes its *negative* branch — the
 missing-config prompt aborts, the close confirmation keeps the run going, the PDF question is
 answered "Skip PDF". A dialog with a decision of its own (the mismatch confirmation) is handed an
-explicit answer function, and the safe one is always the one that writes nothing.
+explicit answer function: `MismatchConfirmation.answer_from_setting` starts the run and stores the
+mismatched bytes only when `database.storeMismatchedFiles` says `always`, because an unattended run
+makes no choice and the ticked-by-default box is not one (packet 31d).
 """
 
 from __future__ import annotations
