@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from ..storage.store import _now_iso
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -83,9 +83,20 @@ class OperatorInput(QObject):
                 remaining = None if timeout is None else timeout
                 self._lock.wait(remaining)
 
-    def reset(self) -> None:
-        """Clear blocking values and POLL state — called at Test Run start and each step start."""
+    def reset(self, keep: Sequence[int] = ()) -> None:
+        """Clear blocking values and POLL state — called at the start of each Attempt.
+
+        ``keep`` is the set of 0-based indices the Attempt about to run declares as blocking. An
+        operator (or a harness driving the engine directly) can answer an input before the Action's
+        ``ATE.input(n)`` runs: the answer sits in :attr:`pending` until this reset wipes it, the ask
+        then waits for an answer nobody will ever give, and the run hangs with its status bar stuck
+        on the current step. An answer already given for an index this Attempt will ask for is
+        carried into the new window instead of dropped; everything else is still cleared, so a
+        retried Attempt's re-ask never inherits the previous Attempt's value (12c)."""
         with self._lock:
+            # The answers to carry, and their log rows, are taken before the wipe.
+            carried = {index: self.pending[index] for index in keep if index in self.pending}
+            carried_log = [(index, raw) for index, raw in self._supplies_log if index in carried]
             self.pending.clear()
             self.poll_state.clear()
             self._outstanding = 0
@@ -98,6 +109,9 @@ class OperatorInput(QObject):
             # Start each step's recording window clean so its input values are attributed to it.
             self._supplies_log.clear()
             self._clicks_log.clear()
+            # 14d review: the pre-ask answers come back, so get_raw finds them and records them.
+            self.pending.update(carried)
+            self._supplies_log = carried_log
             self.values_changed.emit()
 
     def supplied_inputs(self) -> list[tuple[int, Any]]:
@@ -120,11 +134,14 @@ class OperatorInput(QObject):
         Records the raw value under this controller's active step context so the run engine can
         attribute it to that step when it records :class:`~ate.storage.store.input_value` rows."""
         with self._lock:
-            self.pending[index] = value
-            # Deliver to any waiting worker on this channel.
-            ch = self._channels.get(index)
-            if ch is not None:
-                ch.put_nowait(value)
+            # Only an answer nobody has asked for yet is kept in `pending`: that is exactly the
+            # pre-ask answer reset() carries into the Attempt that will ask (14d review). An answer
+            # handed to a worker already blocked on this index belongs to that ask and is not
+            # repeated, so a retried Attempt re-asks under its own number (12c).
+            if index in self._waiting:
+                self._channels[index].put_nowait(value)
+            else:
+                self.pending[index] = value
             # Record the raw supply (typed later by the run engine from the step's declarations).
             self._supplies_log.append((index, value))
             # Only a wait actually in progress is resolved by this answer (10a review).
