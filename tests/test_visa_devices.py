@@ -713,13 +713,15 @@ def _closed_port() -> int:
 def test_a_resource_pyvisa_cannot_open_fails_through_onerror(app: QCoreApplication, resource: str,
                                                             expected: str) -> None:
     """Whatever pyvisa raises opening a resource, it is a Device failure: onError gets it and the
-    step decides, with no traceback and no "opened" device."""
+    step decides, with no traceback and no "opened" device.
+
+    The timeout outlasts the 2 s Windows spends retrying a closed port before it says refused."""
     resource = resource.replace("__CLOSED__", str(_closed_port()))
     store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
     StepParams("io"):setStepNo("1.")
       :setAction(function()
         local calls = 0
-        local msg = ATE.open(DeviceType.VISA, {{resource="{resource}", timeout=1, readTerm="\\n", writeTerm="\\n"}},
+        local msg = ATE.open(DeviceType.VISA, {{resource="{resource}", timeout=5, readTerm="\\n", writeTerm="\\n"}},
           function(res) calls = calls + 1; return tostring(res.ok) .. " " .. res.err end)
         ATE.report(Result.PASS, calls .. " " .. tostring(msg))
       end),
@@ -730,6 +732,46 @@ def test_a_resource_pyvisa_cannot_open_fails_through_onerror(app: QCoreApplicati
     assert expected in message, message
     errors_logged = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR"]
     assert not errors_logged, f"an open failure is not an isolated error: {errors_logged!r}"
+
+
+def _fails_like_pyvisa_py_on_windows(status=constants.StatusCode.error_timeout):
+    """A manager whose open reports what pyvisa-py's connect reports when Winsock refuses it."""
+    class Manager:
+        def open_resource(self, name, **_kwargs):
+            raise Exception(f"could not connect: {status}")
+
+    return lambda: Manager()
+
+
+def test_a_refused_connect_pyvisa_py_reports_as_a_timeout_is_named_a_refusal() -> None:
+    """On Windows pyvisa-py never sees the refusal; the Operator must not read -1073807339."""
+    driver = VisaDriver(manager_factory=_fails_like_pyvisa_py_on_windows())
+    with pytest.raises(OSError) as refused:
+        driver.open({"resource": f"TCPIP0::127.0.0.1::{_closed_port()}::SOCKET", "timeout": 5,
+                     "readTerm": "", "writeTerm": ""})
+    assert str(refused.value).endswith("could not connect: connection refused"), refused.value
+
+
+def test_a_connect_that_really_times_out_still_says_so(monkeypatch) -> None:
+    """The second connect names the cause it finds; it does not call every failure a refusal."""
+    def silent(*_args, **_kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("ate.devices.visa.socket.create_connection", silent)
+    driver = VisaDriver(manager_factory=_fails_like_pyvisa_py_on_windows())
+    with pytest.raises(OSError, match="could not connect: timed out$"):
+        driver.open({"resource": "TCPIP0::192.0.2.1::5025::SOCKET", "timeout": 1, "readTerm": "", "writeTerm": ""})
+
+
+def test_a_failed_open_of_anything_else_makes_no_second_connect(monkeypatch) -> None:
+    """Only the SOCKET timeout is ambiguous: no other failure touches the instrument twice."""
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("a second connect was made")
+
+    monkeypatch.setattr("ate.devices.visa.socket.create_connection", unexpected)
+    driver = VisaDriver(manager_factory=_fails_like_pyvisa_py_on_windows())
+    with pytest.raises(OSError, match="USB0"):
+        driver.open({"resource": "USB0::0x1234::0x5678::SN1::INSTR", "timeout": 1, "readTerm": "", "writeTerm": ""})
 
 
 def test_flush_discards_nothing_and_a_read_after_it_gets_no_stale_bytes(app: QCoreApplication) -> None:

@@ -15,6 +15,7 @@ that never happens — only a lone application is ever finalized.
 """
 
 import os
+import subprocess
 import sys
 import weakref
 from pathlib import Path
@@ -128,6 +129,26 @@ def _release_files(_release_files_module, tmp_path_factory):
     _release_since(*marks)
     leaked = _fixtures.open_files_under(root) - before - outer
     assert not leaked, f"still open after the test closed everything it opened: {sorted(leaked)}"
+
+
+@pytest.fixture
+def deny_writes():
+    """Make a directory unwritable for this process, on either OS, until the test ends."""
+    undo = []
+
+    def deny(path: Path) -> None:
+        if os.name == "nt":
+            subprocess.run(_fixtures.deny_writes_command(path), check=True, capture_output=True)
+            undo.append(lambda: subprocess.run(_fixtures.allow_writes_command(path), check=True, capture_output=True))
+            return
+        if not _fixtures.chmod_can_deny_access():
+            pytest.skip("chmod 0o555 denies nothing to root")
+        path.chmod(0o555)
+        undo.append(lambda: path.chmod(0o755))
+
+    yield deny
+    for step in undo:
+        step()
 
 
 @pytest.fixture(autouse=True)

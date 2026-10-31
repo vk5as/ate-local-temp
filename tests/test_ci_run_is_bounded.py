@@ -69,7 +69,7 @@ def test_the_test_step_names_each_test_and_dumps_a_stuck_stack() -> None:
         "the dump is printed and pytest carries on into the same stuck test, so the job still "
         "runs to GitHub's wall clock"
     )
-    assert "-rfE" in command, "a long run reaches its end with no summary of what failed"
+    assert "-rfEs" in command, "a long run reaches its end with no summary of what failed or was skipped"
     assert "--tb=short" in command, "the summary is a wall of full tracebacks nobody reads"
 
 

@@ -27,6 +27,7 @@ import atexit
 import enum
 import json
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -94,7 +95,7 @@ class RunEngine(QThread):
     input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
     step_finished = pyqtSignal(int)  # node_seq: this step's Attempts are done, so its POLL inputs close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
-    # (node_seq, attempt_no, choice): the pause above was answered and the worker is running again.
+    # (node_seq, attempt_no, choice): the worker has taken the answer to the pause above and moved on.
     prompt_answered = pyqtSignal(int, int, str)
     action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
@@ -125,9 +126,13 @@ class RunEngine(QThread):
         receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES,  # packet 17a: the per-device receive cap
         device_trace_enabled: bool = False,  # packet 17c: deviceTrace.enabled — one DEBUG line per operation
         device_trace_max_bytes: int = DEFAULT_TRACE_MAX_BYTES,  # packet 17c: deviceTrace.maxBytes truncation
+        on_error: Optional[Callable[[str], None]] = None,  # the application log, for what ends a run unexpectedly
     ) -> None:
         super().__init__(parent)
         self._store = store
+        self._on_error = on_error
+        self._host: Optional[LuaHost] = None
+        self._run_uuid: Optional[str] = None  # set once the run row exists, for an unexpected end to close
         self._schedule_path = Path(schedule_path)
         self.operator = operator
         self.project = project
@@ -324,17 +329,18 @@ class RunEngine(QThread):
         with self._pause_lock:
             return bool(self._pending)
 
-    def choose(self, choice: str) -> None:
+    def choose(self, choice: str) -> Optional[tuple[int, int]]:
         """Answer a Stop-on-Fail failure prompt from the operator/main thread (packet 12b).
 
         Records ``choice`` (CONTINUE / RETRY / ABORT) onto the pending pause channel; the blocked
-        worker wakes and records it as that Attempt's prompt_choice. Raises if there is no run to
-        answer."""
+        worker wakes and records it as that Attempt's prompt_choice. Returns the (node_seq,
+        attempt_no) this answered, or None when no pause was waiting."""
         with self._pause_lock:
             entry = next(iter(self._pending), None)
             ch = self._pending.pop(entry) if entry is not None else None
         if ch is not None:
             ch.put_nowait(choice)
+        return entry
 
     def _record_inputs(self, node_seq: int, validated: list[Any], attempt_no: int) -> list[dict[str, Any]]:
         """Build this Attempt's input_value rows from what OperatorInput recorded during its action.
@@ -772,14 +778,41 @@ class RunEngine(QThread):
 
     def run(self) -> None:
         """Run the schedule on the worker. An exception leaving a QThread's ``run`` aborts the whole
-        process under PyQt, taking the Operator's window with it, so it ends here instead: the run
-        row stays open for the next start's interrupted-run recovery to close, and the screen is
-        told the run is over rather than waiting on a worker that has gone."""
+        process under PyQt, taking the Operator's window with it, so it ends here instead."""
         try:
             self._execute()
         except Exception:  # noqa: BLE001 - see above: nothing may leave this frame
-            traceback.print_exc()
-            self.state_changed.emit(RunStatus.FINISHED)
+            self._end_unexpectedly(traceback.format_exc())
+
+    def _end_unexpectedly(self, trace: str) -> None:
+        """Say why the run ended, close it INTERRUPTED / FAIL, and tell the screen it is over.
+
+        ATE stopped before the run could end, which is what INTERRUPTED records; the Post-test
+        Actions do not run, as they would not after a crash. The exception may have come from the
+        store itself, so each step is attempted on its own, and FINISHED is always announced: the
+        screen must not wait on a worker that has gone."""
+        def attempt(step: Callable[[], Any]) -> None:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - the next step still has to happen
+                traceback.print_exc()
+
+        message = f"The Test Run ended on an unexpected error:\n{trace.rstrip()}"
+        print(message, file=sys.stderr, flush=True)  # survives whatever the two logs below cannot do
+        if self._on_error is not None:
+            attempt(lambda: self._on_error(message))
+        run_uuid, host = self._run_uuid, self._host
+        if run_uuid is not None:
+            attempt(self._drain_device_warnings)
+            attempt(lambda: self._store.insert_log_lines(
+                run_uuid, 0, [{"level": "ERROR", "source": "ate", "text": message}]
+            ))
+            if host is not None:
+                attempt(lambda: self._close_open_devices(host, run_uuid))
+            attempt(lambda: self._store.update_run_end(run_uuid, result="FAIL", end_reason="INTERRUPTED"))
+            # The row may have failed before the worker announced it, and the report needs the key.
+            self.run_uuid_reported.emit(run_uuid)
+        self.state_changed.emit(RunStatus.FINISHED)
 
     def _execute(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
@@ -841,6 +874,7 @@ class RunEngine(QThread):
                 "utc_offset": self.utc_offset,
             }
         )
+        self._run_uuid = created["run_uuid"]
         # Packet 06b, 07d: record every Media Release in this run's resolved chain, straight after the
         # test_run row — the owning release at seq 0, then its dependencies depth-first in declaration
         # order, a release reached twice listed once. Without a resolved definition there is nothing to
