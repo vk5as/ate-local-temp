@@ -805,3 +805,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - User decision (2026-10-31), on my claim that the old answer lost bytes under `always`. **That claim was wrong:** `store_mismatched_files` already ignored the answer for `always`/`never`. Strata ran it on integration: storage identical in all three settings. The change makes the dialog's answer and the documents truthful; stored bytes do not change. User told.
 - Strata implemented (55 steps, 0 compactions). Review: Strata MUST-FIX 2, Haiku 0. Fixed in the light review: dead branch and unused return in `answer_from_setting`; the seam's real-run test used `always`, where a bare accept gives the same answer, so it now uses `ask`. The in-process `always`/`never` cases stay as behaviour pins (they don't prove arming; `ask` does).
 - Leftover: `HeadlessRunSession.start()` called directly still raises under `ask` with a mismatch and no choice; the UI always passes one.
+
+## 31e — Windows CI timing (merged 2026-11-01, still open)
+
+- CI on `fa18047` and `629fdcb` failed one Windows job each; `7e6d12a` passed 4/4, so this is intermittent. Opus fixed the tests; where the 2.2 s went on Windows is not established, and it may be real.
+- Review: Haiku only (MUST-FIX 1, the packet claimed resolved; fixed). **Strata review owed after 32a:** its one slot is busy for hours, and the merge is needed to get Windows evidence. This departs from the two-reviewer rule.
+- Open product question: FINISHED follows synchronous SQLite commits on the worker, so a commit stall (antivirus, slow disk) delays an aborted run's end. No test measures an abort landing during a pre-wait commit.
