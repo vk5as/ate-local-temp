@@ -61,7 +61,7 @@ def _shown_window(qapp, tmp_path, layout: str, size=WINDOW_SIZE, steps: int = 20
     config = tmp_path / "layout-config.json"
     data = json.loads(env["config"].read_text(encoding="utf-8"))
     data["ui"] = {"layout": layout}
-    config.write_text(json.dumps(data), encoding="utf-8")
+    config.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     outcome = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[])
     window = outcome.window
     window.resize(*size)

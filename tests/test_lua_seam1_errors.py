@@ -34,7 +34,7 @@ def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk and return it."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
 
 
@@ -48,7 +48,7 @@ def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         _drive(engine, app, on_run_uuid=_capture)
 

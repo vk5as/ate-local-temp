@@ -104,7 +104,7 @@ def _write_and_run(app, op, schedule_text, strategy=INPUTS_BLOCKING, values_by_i
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(schedule_text, encoding="utf-8")
+        schedule_path.write_text(schedule_text, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), operator_input=op)
         asked, run_uuid = _drive(app, engine, op, strategy, values_by_index=values_by_index)
         return store, run_uuid
@@ -140,7 +140,7 @@ def test_blocking_input_announced_once_per_step_and_recorded(app):
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "blocking.tslua"
-        schedule_path.write_text(BLOCKING_INPUT, encoding="utf-8")
+        schedule_path.write_text(BLOCKING_INPUT, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path), operator_input=op)
         asked, run_uuid = _drive(app, engine, op, INPUTS_BLOCKING, values_by_index={0: 42})
     # input_asked fired exactly once for the single declared input under its step (node_seq 0).

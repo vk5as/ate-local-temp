@@ -104,6 +104,7 @@ def test_data_placeholder_resolves_to_the_platform_data_dir(tmp_path: Path, monk
     config.write_text(
         json.dumps({"format": 1, "database": {"type": "sqlite", "path": "<data>/ate.db"}}),
         encoding="utf-8",
+        newline="\n",
     )
     cfg = read_config(config)
     assert cfg.database_path == tmp_path / "station-data" / "ate.db"
@@ -118,6 +119,7 @@ def test_unknown_placeholder_is_a_config_error(tmp_path: Path) -> None:
     config.write_text(
         json.dumps({"format": 1, "database": {"type": "sqlite", "path": "<datx>/ate.db"}}),
         encoding="utf-8",
+        newline="\n",
     )
     with pytest.raises(ConfigError, match="unknown placeholder '<datx>'"):
         read_config(config)
@@ -134,6 +136,7 @@ def test_db_status_and_migrate_use_the_configured_database(tmp_path: Path) -> No
     config.write_text(
         json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}),
         encoding="utf-8",
+        newline="\n",
     )
     cwd = tmp_path / "cwd"
     cwd.mkdir()
@@ -155,6 +158,7 @@ def test_explicit_db_path_still_overrides_the_config(tmp_path: Path) -> None:
     config.write_text(
         json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(tmp_path / "configured.db")}}),
         encoding="utf-8",
+        newline="\n",
     )
     explicit = tmp_path / "explicit.db"
     RunStore(explicit)
@@ -190,7 +194,7 @@ def test_read_config_without_a_path_reads_the_platform_default(tmp_path: Path, m
 
     db = tmp_path / "ate.db"
     RunStore(db)
-    default.write_text(json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8")
+    default.write_text(json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8", newline="\n")
     cfg = read_config(None)
     assert cfg.path == default and cfg.database_path == db
 
@@ -227,7 +231,8 @@ def test_db_status_reads_a_default_config_when_no_config_is_given(tmp_path: Path
     db.parent.mkdir(parents=True)
     RunStore(db)
     default.write_text(
-        json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8"
+        json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8",
+        newline="\n",
     )
 
     result = _run_ate(["db", "status"], cwd=cwd, env_extra={"ATE_DEFAULT_CONFIG": str(default)})
@@ -273,6 +278,7 @@ def test_launch_refuses_when_the_data_directory_is_not_writable(tmp_path: Path) 
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
 
     result = _run_ate(["--config", str(config)], cwd=cwd, env_extra={"ATE_DATA_DIR": str(data)})
@@ -329,6 +335,7 @@ def test_launch_refuses_an_unwritable_log_directory_in_process(tmp_path: Path) -
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     alerts: list[str] = []
     outcome = launch(["--config", str(config)], exec_=False, alert=alerts.append)
@@ -376,7 +383,7 @@ def test_creating_the_default_config_leaves_a_complete_file(tmp_path: Path) -> N
 def test_a_failed_config_write_leaves_no_temporary_file(tmp_path: Path, monkeypatch) -> None:
     """``write_config`` stages the JSON and moves it, so a failed write leaves nothing behind."""
     config = tmp_path / "config.json"
-    config.write_text('{"format": 1}\n', encoding="utf-8")
+    config.write_text('{"format": 1}\n', encoding="utf-8", newline="\n")
 
     def _boom(source, destination):
         raise OSError("disk full")
@@ -401,7 +408,8 @@ def test_the_migrate_hint_names_the_config_and_the_database(tmp_path: Path) -> N
     config = tmp_path / "config.json"
     db = tmp_path / "station" / "data" / "ate.db"
     config.write_text(
-        json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8"
+        json.dumps({"format": 1, "database": {"type": "sqlite", "path": str(db)}}), encoding="utf-8",
+        newline="\n",
     )
 
     result = _run_ate(["--config", str(config), "db", "status"], cwd=cwd)
@@ -485,6 +493,7 @@ def _station_config(tmp_path: Path) -> Path:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     return config
 
@@ -531,7 +540,7 @@ def test_launch_refusals_exit_one_with_their_message(tmp_path: Path, prepare: st
 def test_invalid_config_refusal_exits_one_with_its_message(tmp_path: Path) -> None:
     """An invalid config is refused in a subprocess: message printed, exit 1, no abort."""
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"format": 1, "unknownKey": {"x": 1}}), encoding="utf-8")
+    config.write_text(json.dumps({"format": 1, "unknownKey": {"x": 1}}), encoding="utf-8", newline="\n")
     result = _run_ate(["--config", str(config)], cwd=tmp_path)
     output = result.stdout + result.stderr
     assert "Must construct a QApplication" not in output, output

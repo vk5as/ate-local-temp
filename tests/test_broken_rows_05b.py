@@ -79,9 +79,9 @@ def _write_env(tmp_path: Path) -> dict[str, Path]:
     ):
         release = defs / label
         release.mkdir(parents=True, exist_ok=True)
-        (release / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+        (release / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
         for name, text in files.items():
-            (release / name).write_text(text, encoding="utf-8")
+            (release / name).write_text(text, encoding="utf-8", newline="\n")
 
     config = {
         "format": 1,
@@ -92,7 +92,7 @@ def _write_env(tmp_path: Path) -> dict[str, Path]:
         "testDefinitions": {"directories": [str(defs)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return {"config": config_path, "defs": defs, "db": tmp_path / "ate.db"}
 
 
@@ -350,7 +350,7 @@ def test_rescan_picks_up_a_file_broken_after_the_first_scan(qapp, tmp_path):
         "format": 1, "mediaNumber": "MR-10700", "name": "Late fixtures", "version": "0.1.0",
         "files": [{"path": "ghost.tslua", "sha256": "0" * 64}],
     }
-    (env["defs"] / "late.atedef").write_text(json.dumps(late), encoding="utf-8")
+    (env["defs"] / "late.atedef").write_text(json.dumps(late), encoding="utf-8", newline="\n")
 
     screen.test_schedule_stage.rescan_button.click()
 
@@ -400,8 +400,8 @@ def _write_long_error_env(tmp_path: Path) -> Path:
         "format": 1, "mediaNumber": "MR-10750", "name": "Long errors", "version": "1.0.0",
         "files": [{"path": "long.tslua", "sha256": hashlib.sha256(LONG_RAISING_SRC.encode()).hexdigest()}],
     }
-    (release / "longerr.atedef").write_text(json.dumps(atedef), encoding="utf-8")
-    (release / "long.tslua").write_text(LONG_RAISING_SRC, encoding="utf-8")
+    (release / "longerr.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
+    (release / "long.tslua").write_text(LONG_RAISING_SRC, encoding="utf-8", newline="\n")
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
@@ -411,7 +411,7 @@ def _write_long_error_env(tmp_path: Path) -> Path:
         "testDefinitions": {"directories": [str(defs)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return config_path
 
 
@@ -425,8 +425,8 @@ def _write_flagged_env(tmp_path: Path) -> Path:
         # The recorded sha256 is of different bytes than the file on disk: a ⚠ flag, not a broken row.
         "files": [{"path": "good.tslua", "sha256": hashlib.sha256(b"edited after the release\n").hexdigest()}],
     }
-    (release / "flagged.atedef").write_text(json.dumps(atedef), encoding="utf-8")
-    (release / "good.tslua").write_text(GOOD_SRC, encoding="utf-8")
+    (release / "flagged.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
+    (release / "good.tslua").write_text(GOOD_SRC, encoding="utf-8", newline="\n")
     config = {
         "format": 1,
         "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"},
@@ -436,7 +436,7 @@ def _write_flagged_env(tmp_path: Path) -> Path:
         "testDefinitions": {"directories": [str(defs)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return config_path
 
 
@@ -616,7 +616,7 @@ def test_stage_two_start_reports_a_schedule_that_broke_after_picking(qapp, tmp_p
     assert screen.steps_stack.currentIndex() == 2
     assert screen.steps_options_stage.run_button.isEnabled()
 
-    (env["defs"] / "demo" / "good.tslua").write_text(RAISING_SRC, encoding="utf-8")
+    (env["defs"] / "demo" / "good.tslua").write_text(RAISING_SRC, encoding="utf-8", newline="\n")
     screen.test_schedule_stage.rescan_button.click()
     assert not screen.steps_options_stage.run_button.isEnabled(), "Start goes with the broken row"
     assert not screen.test_schedule_stage.run_button.isEnabled()

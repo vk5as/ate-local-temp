@@ -141,7 +141,7 @@ def _flag_a_mismatch(tmp_path) -> str:
         if entry["path"] == "passing.tslua":
             entry["sha256"] = "0" * 64
             break
-    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
     return "passing.tslua"
 
 
@@ -158,10 +158,10 @@ def _add_debug_schedule(tmp_path) -> str:
         '      :setAction(function() ATE.report(Result.PASS, "ok") end),\n'
         '  })\n'
     )
-    (defs / "debug_pause.tslua").write_text(src, encoding="utf-8")
+    (defs / "debug_pause.tslua").write_text(src, encoding="utf-8", newline="\n")
     atedef = json.loads((defs / "demo.atedef").read_text(encoding="utf-8"))
     atedef["files"].append({"path": "debug_pause.tslua", "sha256": hashlib.sha256(src.encode("utf-8")).hexdigest()})
-    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
     return "Debug pause schedule"
 
 
@@ -169,10 +169,10 @@ def _break_a_schedule(tmp_path) -> str:
     """Add a schedule that raises on load to the demo Test Definition, so the picker has a broken row."""
     defs = tmp_path / "defs"
     bad = defs / "bad.tslua"
-    bad.write_text("this is not valid lua\n", encoding="utf-8")
+    bad.write_text("this is not valid lua\n", encoding="utf-8", newline="\n")
     atedef = json.loads((defs / "demo.atedef").read_text(encoding="utf-8"))
     atedef["files"].append({"path": "bad.tslua", "sha256": hashlib.sha256(bad.read_bytes()).hexdigest()})
-    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
     return "bad.tslua"
 
 

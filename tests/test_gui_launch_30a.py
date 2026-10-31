@@ -52,7 +52,7 @@ def _launch(env, exec_=False, prompt=lambda path: True, ui=None, tmp_path=None, 
         if default_project is not None:
             data["defaultProject"] = default_project
         config_path = tmp_path / "launch-config.json"
-        config_path.write_text(json.dumps(data), encoding="utf-8")
+        config_path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     alerts: list[str] = []
     outcome = launch(
         ["--config", str(config_path)],
@@ -468,6 +468,7 @@ def test_db_migrate_yes_without_path_does_not_take_yes_as_the_path(capsys, tmp_p
     config.write_text(
         json.dumps({"format": 1, "database": {"type": "sqlite", "path": "station/ate.db"}}),
         encoding="utf-8",
+        newline="\n",
     )
     (tmp_path / "station").mkdir()
     assert main(["--config", str(config), "db", "migrate", "--yes"]) == 0

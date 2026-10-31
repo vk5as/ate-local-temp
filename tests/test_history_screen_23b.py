@@ -47,7 +47,7 @@ def _record_run(tmp_path: Path, app, uut_type="PowerSupply", serial="PS7") -> st
     # directory here would point at a different, empty database).
     store = RunStore(tmp_path / "ate.db")
     schedule_path = tmp_path / f"{uut_type}_{serial}.tslua"
-    schedule_path.write_text(DOC_FIELDS, encoding="utf-8")
+    schedule_path.write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
     engine = RunEngine(
         store,
         str(schedule_path),

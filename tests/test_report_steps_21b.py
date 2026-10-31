@@ -281,9 +281,10 @@ def _write_env(tmp_path: Path, files: dict[str, str]) -> Path:
             {"format": 1, "mediaNumber": "MR-21B", "name": "Steps release", "version": "1.0.0", "files": entries}
         ),
         encoding="utf-8",
+        newline="\n",
     )
     for rel, src in files.items():
-        (directory / rel).write_text(src, encoding="utf-8")
+        (directory / rel).write_text(src, encoding="utf-8", newline="\n")
     return root
 
 
@@ -305,6 +306,7 @@ def _run(tmp_path: Path, files: dict[str, str], schedule: str, *, enables: Optio
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
 
     session = HeadlessRunSession(config_path)

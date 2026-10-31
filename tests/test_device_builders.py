@@ -31,7 +31,7 @@ def _builder_fields(statements: str) -> dict:
     driver through :func:`_raw_params`: the table's own keys, never one of its setters."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "main.tslua"
-        path.write_text('return ScheduleParams("x"):setSchedule({})', encoding="utf-8")
+        path.write_text('return ScheduleParams("x"):setSchedule({})', encoding="utf-8", newline="\n")
         host = LuaHost(str(path))
         collected = host._runtime.execute(
             "local devices = require('ate.devices')\n"

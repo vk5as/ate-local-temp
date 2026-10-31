@@ -282,9 +282,9 @@ def _stub_bundle(directory: Path, version: str) -> Path:
     bundle = directory / "dist" / "ate"
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "_internal").mkdir(exist_ok=True)
-    (bundle / "_internal" / "stuff.dat").write_text("stub", encoding="utf-8")
+    (bundle / "_internal" / "stuff.dat").write_text("stub", encoding="utf-8", newline="\n")
     exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
-    exe.write_text(f"#!{sys.executable}\nprint({version!r})\n", encoding="utf-8")
+    exe.write_text(f"#!{sys.executable}\nprint({version!r})\n", encoding="utf-8", newline="\n")
     exe.chmod(0o755)
     return bundle
 
@@ -605,6 +605,7 @@ def test_a_failing_iscc_reports_redacted_output(tmp_path: Path, monkeypatch, cap
         f"sys.stderr.write('signtool failed for {secret}\\n')\n"
         f"sys.exit(2)\n",
         encoding="utf-8",
+        newline="\n",
     )
     fake.chmod(0o755)
     bundle = _stub_bundle(tmp_path, "1.2.3")
@@ -686,7 +687,7 @@ def test_iscc_is_found_from_the_environment(tmp_path: Path) -> None:
     """A build machine points at its compiler with ISCC; otherwise PATH, then the default location."""
     module = _build_module()
     fake = tmp_path / "ISCC.exe"
-    fake.write_text("", encoding="utf-8")
+    fake.write_text("", encoding="utf-8", newline="\n")
     original = dict(os.environ)
     try:
         os.environ["ISCC"] = str(fake)

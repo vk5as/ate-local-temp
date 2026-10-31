@@ -45,16 +45,17 @@ def _write_release(tmp_path: Path, main_src: str, extra: dict[str, str] | None =
     Test Definition module alongside a bundled one."""
     defs_dir = tmp_path / "defs"
     defs_dir.mkdir(parents=True, exist_ok=True)
-    (defs_dir / "main.tslua").write_text(main_src, encoding="utf-8")
+    (defs_dir / "main.tslua").write_text(main_src, encoding="utf-8", newline="\n")
 
     files = [{"path": "main.tslua", "sha256": hashlib.sha256(main_src.encode("utf-8")).hexdigest()}]
     for rel_path, source in (extra or {}).items():
-        (defs_dir / rel_path).write_text(source, encoding="utf-8")
+        (defs_dir / rel_path).write_text(source, encoding="utf-8", newline="\n")
         files.append({"path": rel_path, "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest()})
 
     (defs_dir / "demo.atedef").write_text(
         json.dumps({"format": 1, "mediaNumber": "REL-06D", "name": "Bundled release", "version": "1.0.0", "files": files}),
         encoding="utf-8",
+        newline="\n",
     )
     return defs_dir, read_definition(defs_dir / "demo.atedef")
 
@@ -249,7 +250,7 @@ def test_an_ate_name_cannot_walk_out_of_the_bundled_directory(app: QCoreApplicat
     is a bundled name, whatever exists on disk."""
     lua_dir = Path(str(importlib.resources.files("ate") / "lua"))
     with tempfile.TemporaryDirectory() as td:
-        (Path(td) / "escape.lua").write_text('ESCAPED = true\nreturn true\n', encoding="utf-8")
+        (Path(td) / "escape.lua").write_text('ESCAPED = true\nreturn true\n', encoding="utf-8", newline="\n")
         bad = "ate." + os.path.relpath(Path(td) / "escape", lua_dir)
         src = (
             'return ScheduleParams("Escape", "requires a file outside ate/lua") :setSchedule({\n'

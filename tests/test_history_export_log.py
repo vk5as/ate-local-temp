@@ -39,7 +39,7 @@ def _record_run(tmp_path: Path, app, source, uut_type="PowerSupply", serial="PS7
 
     store = RunStore(tmp_path / "ate.db")
     schedule_path = tmp_path / f"{uut_type}_{serial}.tslua"
-    schedule_path.write_text(source, encoding="utf-8")
+    schedule_path.write_text(source, encoding="utf-8", newline="\n")
     engine = RunEngine(
         store,
         str(schedule_path),

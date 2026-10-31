@@ -143,7 +143,7 @@ def test_open_registers_and_tracks_handle() -> None:
     try:
         with tempfile.TemporaryDirectory() as td:
             schedule_path = Path(td) / "schedule.tslua"
-            schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8")
+            schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8", newline="\n")
             host = LuaHost(str(schedule_path))
             host._context = None  # not load time, so open is allowed for a direct call
             wrapped = host.ate.__getattr__("open")
@@ -175,7 +175,7 @@ def test_close_returns_ok_table_and_double_close_noop() -> None:
     try:
         with tempfile.TemporaryDirectory() as td:
             schedule_path = Path(td) / "schedule.tslua"
-            schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8")
+            schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8", newline="\n")
             host = LuaHost(str(schedule_path))
             handle = TcpDriver().open(
                 {
@@ -243,7 +243,8 @@ def _run_with_peer(app: QCoreApplication, source: str, port: int):
         schedule_path = Path(td) / "schedule.tslua"
         # The 16a schedules target the live peer's ephemeral port via a placeholder; substitute it.
         schedule_path.write_text(
-            source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(port)), encoding="utf-8"
+            source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(port)), encoding="utf-8",
+            newline="\n",
         )
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
@@ -353,5 +354,5 @@ def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk (no Qt event loop needed)."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))

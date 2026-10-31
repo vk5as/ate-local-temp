@@ -175,9 +175,9 @@ def test_an_egg_info_from_an_editable_install_never_reaches_the_build() -> None:
     """
     fake = Path(tempfile.mkdtemp(prefix="ate-checkout-"))
     try:
-        (fake / "pyproject.toml").write_text('[project]\nname = "ate"\n', encoding="utf-8")
+        (fake / "pyproject.toml").write_text('[project]\nname = "ate"\n', encoding="utf-8", newline="\n")
         (fake / "src" / "ate.egg-info").mkdir(parents=True)
-        (fake / "src" / "ate.egg-info" / "SOURCES.txt").write_text("src/ate/lua/devices.lua\n", encoding="utf-8")
+        (fake / "src" / "ate.egg-info" / "SOURCES.txt").write_text("src/ate/lua/devices.lua\n", encoding="utf-8", newline="\n")
         copy = _clean_build_copy(fake)
         try:
             assert (copy / "pyproject.toml").is_file() and (copy / "src").is_dir(), "the copy is incomplete"
@@ -198,7 +198,7 @@ def test_package_data_decides_what_the_wheel_carries() -> None:
     out = Path(tempfile.mkdtemp(prefix="ate-wheel-mut-"))
     try:
         pyproject = source / "pyproject.toml"
-        pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('"*.lua", ', ""), encoding="utf-8")
+        pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('"*.lua", ', ""), encoding="utf-8", newline="\n")
         wheel = _build_wheel(source, out)
         with zipfile.ZipFile(wheel) as zf:
             lua = [n for n in zf.namelist() if n.endswith(".lua")]

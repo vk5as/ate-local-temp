@@ -26,7 +26,7 @@ def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk and return it."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
 
 
@@ -57,7 +57,7 @@ def test_report_at_load_time_raises_with_file_line():
     raises while the file loads. The error carries the schedule's file:line and names the function."""
     with tempfile.TemporaryDirectory() as td:
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(LOAD_REPORT, encoding="utf-8")
+        schedule_path.write_text(LOAD_REPORT, encoding="utf-8", newline="\n")
 
         raised: Exception | None = None
         try:

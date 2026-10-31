@@ -393,6 +393,7 @@ def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning() -> No
       end),
   })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
                 encoding="utf-8",
+                newline="\n",
             )
             host = LuaHost(str(path), receive_buffer_bytes=10)
             steps = host.schedule.steps
@@ -642,6 +643,7 @@ def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() ->
       end),
   })""".replace(UdpLoopbackPeer.PORT_PLACEHOLDER, str(peer.port)),
                 encoding="utf-8",
+                newline="\n",
             )
             host = LuaHost(str(path))
             steps = host.schedule.steps

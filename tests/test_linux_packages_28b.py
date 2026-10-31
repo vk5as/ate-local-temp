@@ -175,17 +175,17 @@ def _fake_bundle(root: Path, script: str = STUB_ATE) -> Path:
     (internal / "ate" / "lua").mkdir(parents=True)
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
-    exe.write_text(script, encoding="utf-8")
+    exe.write_text(script, encoding="utf-8", newline="\n")
     exe.chmod(0o755)
-    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8")
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8")
-    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8")
-    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8")
-    (internal / "ate" / "version.txt").write_text("1.2.3", encoding="utf-8")
+    (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8", newline="\n")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8", newline="\n")
+    (internal / "ate" / "version.txt").write_text("1.2.3", encoding="utf-8", newline="\n")
     return bundle
 
 
@@ -289,13 +289,13 @@ def _extract_control(deb: Path, where: Path) -> Path:
 def _fake_station_root(root: Path) -> Path:
     """A machine whose Station already has a config, a database, reports and logs."""
     (root / "etc" / "ate").mkdir(parents=True)
-    (root / "etc" / "ate" / "config.json").write_text('{"format": 1}', encoding="utf-8")
+    (root / "etc" / "ate" / "config.json").write_text('{"format": 1}', encoding="utf-8", newline="\n")
     data = root / "var" / "lib" / "ate"
     (data / "reports").mkdir(parents=True)
     (data / "logs").mkdir(parents=True)
-    (data / "ate.db").write_text("the record of every Test Run", encoding="utf-8")
-    (data / "reports" / "run.html").write_text("a report", encoding="utf-8")
-    (data / "logs" / "app.log").write_text("a log", encoding="utf-8")
+    (data / "ate.db").write_text("the record of every Test Run", encoding="utf-8", newline="\n")
+    (data / "reports" / "run.html").write_text("a report", encoding="utf-8", newline="\n")
+    (data / "logs" / "app.log").write_text("a log", encoding="utf-8", newline="\n")
     return root
 
 
@@ -311,7 +311,7 @@ def _run_script(script: Path, arg: str, root: Path, log: Path | None = None) -> 
         text = text.replace(real, fake)
     copy = root / f"{script.name}-test"
     copy.parent.mkdir(parents=True, exist_ok=True)
-    copy.write_text(text, encoding="utf-8")
+    copy.write_text(text, encoding="utf-8", newline="\n")
     copy.chmod(0o755)
     env = dict(os.environ)
     if log is not None:
@@ -432,7 +432,7 @@ def test_install_sh_installs_links_and_runs_ate_setup(tmp_path: Path) -> None:
     # Re-running is an upgrade: the bundle is replaced, the Station's files are untouched.
     station_data = tmp_path / "var" / "lib" / "ate"
     station_data.mkdir(parents=True)
-    (station_data / "ate.db").write_text("records", encoding="utf-8")
+    (station_data / "ate.db").write_text("records", encoding="utf-8", newline="\n")
     again = subprocess.run(
         ["/bin/sh", str(here / "install.sh"), "--prefix", str(prefix)],
         env=dict(os.environ, STUB_LOG=str(log)),
@@ -448,9 +448,9 @@ def test_install_sh_installs_links_and_runs_ate_setup(tmp_path: Path) -> None:
     # only ever reach the prefix, so this is the safe way to prove it deletes nothing it did not
     # install (the real /etc/ate and /var/lib/ate are never named by these tests).
     (prefix / "etc" / "ate").mkdir(parents=True)
-    (prefix / "etc" / "ate" / "config.json").write_text('{"format": 1}', encoding="utf-8")
+    (prefix / "etc" / "ate" / "config.json").write_text('{"format": 1}', encoding="utf-8", newline="\n")
     (prefix / "var" / "lib" / "ate").mkdir(parents=True)
-    (prefix / "var" / "lib" / "ate" / "ate.db").write_text("records", encoding="utf-8")
+    (prefix / "var" / "lib" / "ate" / "ate.db").write_text("records", encoding="utf-8", newline="\n")
     removed = subprocess.run(
         ["/bin/sh", str(here / "install.sh"), "--uninstall", "--prefix", str(prefix), "--bin", str(link)],
         env=dict(os.environ, STUB_LOG=str(log)),
@@ -482,10 +482,10 @@ def test_an_upgrade_replaces_the_bundle_instead_of_merging_into_it(tmp_path: Pat
     assert first.returncode == 0, first.stdout + first.stderr
 
     stale = prefix / "_internal" / "from_the_previous_version.py"
-    stale.write_text("left behind by the old cp -a merge", encoding="utf-8")
+    stale.write_text("left behind by the old cp -a merge", encoding="utf-8", newline="\n")
     nested = prefix / "_internal" / "PyQt6" / "Qt6" / "lib" / "libQt6Old.so.6"
     nested.parent.mkdir(parents=True, exist_ok=True)
-    nested.write_text("old library", encoding="utf-8")
+    nested.write_text("old library", encoding="utf-8", newline="\n")
 
     again = subprocess.run(["/bin/sh", str(here / "install.sh"), "--prefix", str(prefix)], env=dict(os.environ, STUB_LOG=str(log)), capture_output=True, text=True, timeout=60)
     assert again.returncode == 0, again.stdout + again.stderr
@@ -520,7 +520,7 @@ def test_uninstall_refuses_a_prefix_it_does_not_own(tmp_path: Path) -> None:
 
     unowned = tmp_path / "somewhere"
     unowned.mkdir()
-    (unowned / "keep.txt").write_text("not an ATE install", encoding="utf-8")
+    (unowned / "keep.txt").write_text("not an ATE install", encoding="utf-8", newline="\n")
 
     for prefix in ("/", "", str(unowned), str(tmp_path / "never-installed")):
         proc = subprocess.run(
@@ -546,6 +546,7 @@ def test_install_sh_says_so_when_ate_setup_fails(tmp_path: Path) -> None:
     (here / "ate" / "ate").write_text(
         "#!/bin/sh\nif [ \"$1\" = setup ]; then echo \"cannot write /etc/ate/config.json\" >&2; exit 1; fi\nexit 0\n",
         encoding="utf-8",
+        newline="\n",
     )
     (here / "ate" / "ate").chmod(0o755)
 
@@ -655,7 +656,7 @@ def test_the_deb_version_is_a_valid_debian_version(tmp_path: Path) -> None:
 def test_a_bundle_that_prints_no_version_is_refused(tmp_path: Path) -> None:
     """An empty `--version` would name the artifacts `ate--linux…` and `ate__amd64.deb`, so stop."""
     bundle = _fake_bundle(tmp_path)
-    (bundle / "ate").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (bundle / "ate").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     out = tmp_path / "out"
 
     proc = subprocess.run(
@@ -692,7 +693,7 @@ def test_postinst_runs_ate_setup_on_configure(tmp_path: Path) -> None:
     root = tmp_path / "machine"
     (root / "opt" / "ate").mkdir(parents=True)
     stub = root / "opt" / "ate" / "ate"
-    stub.write_text(FROZEN_STUB, encoding="utf-8")
+    stub.write_text(FROZEN_STUB, encoding="utf-8", newline="\n")
     stub.chmod(0o755)
     log = tmp_path / "stub.log"
     proc = _run_script(control / "postinst", "configure", root, log)
@@ -726,7 +727,7 @@ def test_the_maintainer_scripts_have_no_test_seam(tmp_path: Path) -> None:
     root = tmp_path / "machine"
     (root / "opt" / "ate").mkdir(parents=True)
     stub = root / "opt" / "ate" / "ate"
-    stub.write_text(FROZEN_STUB, encoding="utf-8")
+    stub.write_text(FROZEN_STUB, encoding="utf-8", newline="\n")
     stub.chmod(0o755)
     log = tmp_path / "stub.log"
 
@@ -774,7 +775,7 @@ def test_postrm_purge_removes_config_and_never_the_records(tmp_path: Path) -> No
     # A postrm that only purges the config cannot touch the data directory even if it is missing.
     empty = tmp_path / "empty"
     (empty / "etc" / "ate").mkdir(parents=True)
-    (empty / "etc" / "ate" / "config.json").write_text("{}", encoding="utf-8")
+    (empty / "etc" / "ate" / "config.json").write_text("{}", encoding="utf-8", newline="\n")
     proc = _run_script(control / "postrm", "purge", empty)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (empty / "var" / "lib" / "ate").exists(), "postrm created a data directory it should not touch"

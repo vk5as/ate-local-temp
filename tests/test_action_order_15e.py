@@ -95,9 +95,10 @@ def _release(root: Path, label: str, files: dict[str, str]) -> Path:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     for rel, src in files.items():
-        (directory / rel).write_text(src, encoding="utf-8")
+        (directory / rel).write_text(src, encoding="utf-8", newline="\n")
     return directory
 
 
@@ -111,7 +112,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     path = tmp_path / "config.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
+    path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return path
 
 

@@ -133,7 +133,7 @@ def _run_two_steps(peer: LoopbackPeer, source: str, between, limit: int | None =
     seam does; a warning sink records device failures in ``host.logs`` the way the run engine would."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "schedule.tslua"
-        path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(peer.port)), encoding="utf-8")
+        path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(peer.port)), encoding="utf-8", newline="\n")
         kwargs = {"receive_buffer_bytes": limit} if limit is not None else {}
         host = LuaHost(str(path), **kwargs)
         host.device_warning_sink = lambda: [

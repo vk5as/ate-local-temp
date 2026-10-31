@@ -54,9 +54,9 @@ def _record(app: object, source: str = DOC_FIELDS, extra_files: dict[str, str] |
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         for name, text in (extra_files or {}).items():
-            (Path(td) / name).write_text(text, encoding="utf-8")
+            (Path(td) / name).write_text(text, encoding="utf-8", newline="\n")
         engine = RunEngine(
             store,
             str(schedule_path),

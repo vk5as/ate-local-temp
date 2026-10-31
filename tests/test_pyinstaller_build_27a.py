@@ -186,12 +186,13 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
         'if [ "$1" = "_pdf" ]; then printf "%%PDF-1.4 words\\n" > "$3"; exit 0; fi\n'
         "echo 'selftest ok'\nexit 0\n",
         encoding="utf-8",
+        newline="\n",
     )
     exe.chmod(0o755)
     (internal / "ate" / "lua").mkdir(parents=True)
-    (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8")
+    (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
-    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8")
+    (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8", newline="\n")
     (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
     (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_bytes(b"ELF")
     (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)

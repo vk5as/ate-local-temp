@@ -46,8 +46,8 @@ def _write_release(tmp_path: Path, *, mismatch: bool = True, setting: str = "ask
     """
     defs = tmp_path / "defs"
     defs.mkdir(parents=True, exist_ok=True)
-    (defs / "helper.lua").write_text(HELPER_SRC, encoding="utf-8")
-    (defs / "main.tslua").write_text(SCHEDULE_SRC, encoding="utf-8")
+    (defs / "helper.lua").write_text(HELPER_SRC, encoding="utf-8", newline="\n")
+    (defs / "main.tslua").write_text(SCHEDULE_SRC, encoding="utf-8", newline="\n")
 
     helper_sha = WRONG_SHA if mismatch else _sha(HELPER_SRC)
     atedef = {
@@ -60,7 +60,7 @@ def _write_release(tmp_path: Path, *, mismatch: bool = True, setting: str = "ask
             {"path": "main.tslua", "sha256": _sha(SCHEDULE_SRC)},
         ],
     }
-    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (defs / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     config = {
         "format": 1,
@@ -71,7 +71,7 @@ def _write_release(tmp_path: Path, *, mismatch: bool = True, setting: str = "ask
         "testDefinitions": {"directories": [str(defs)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return {"config": config_path, "defs": defs, "db": tmp_path / "ate.db"}
 
 
@@ -351,10 +351,10 @@ def test_a_sibling_schedules_mismatch_does_not_flag_this_schedule(qapp, tmp_path
     starts with no confirmation and no choice needed."""
     env = _write_release(tmp_path, mismatch=False)
     other_src = 'return ScheduleParams("Other schedule", "a sibling") :setSchedule({})\n'
-    (env["defs"] / "other.tslua").write_text(other_src, encoding="utf-8")
+    (env["defs"] / "other.tslua").write_text(other_src, encoding="utf-8", newline="\n")
     atedef = json.loads((env["defs"] / "demo.atedef").read_text(encoding="utf-8"))
     atedef["files"].append({"path": "other.tslua", "sha256": WRONG_SHA})
-    (env["defs"] / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+    (env["defs"] / "demo.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
 
     session = HeadlessRunSession(env["config"])
     session.select_schedule("Checksum schedule")
@@ -378,7 +378,7 @@ def test_stored_bytes_are_the_bytes_loaded_not_a_re_read(qapp, tmp_path, monkeyp
     original = RunEngine._record_files
 
     def edit_then_record(self, *args, **kwargs):
-        (env["defs"] / "helper.lua").write_text("-- changed after it loaded\nreturn {}\n", encoding="utf-8")
+        (env["defs"] / "helper.lua").write_text("-- changed after it loaded\nreturn {}\n", encoding="utf-8", newline="\n")
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(RunEngine, "_record_files", edit_then_record)

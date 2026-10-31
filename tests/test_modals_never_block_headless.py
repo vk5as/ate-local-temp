@@ -183,6 +183,7 @@ def _write_mismatched_release(tmp_path: Path) -> dict[str, Path]:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     config = tmp_path / "config.json"
     config.write_text(
@@ -197,6 +198,7 @@ def _write_mismatched_release(tmp_path: Path) -> dict[str, Path]:
             }
         ),
         encoding="utf-8",
+        newline="\n",
     )
     return {"config": config, "defs": defs}
 

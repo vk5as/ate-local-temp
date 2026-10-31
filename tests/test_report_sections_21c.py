@@ -186,7 +186,7 @@ def _write_releases(tmp_path: Path, releases: dict[str, dict]) -> Path:
         for rel, spec in release["files"].items():
             src, declared = spec if isinstance(spec, tuple) else (spec, None)
             entries.append({"path": rel, "sha256": declared or _sha(src)})
-            (directory / rel).write_text(src, encoding="utf-8")
+            (directory / rel).write_text(src, encoding="utf-8", newline="\n")
         (directory / f"{label}.atedef").write_text(
             json.dumps(
                 {
@@ -199,6 +199,7 @@ def _write_releases(tmp_path: Path, releases: dict[str, dict]) -> Path:
                 }
             ),
             encoding="utf-8",
+            newline="\n",
         )
     return root
 
@@ -217,7 +218,7 @@ def _run(tmp_path: Path, releases: dict[str, dict], schedule: str, *, serial: st
     }
     config.update(config_extra or {})
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
 
     session = HeadlessRunSession(config_path)
     session.set_operator("Alice")

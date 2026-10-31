@@ -57,12 +57,12 @@ def _write_releases(tmp_path: Path, releases: dict[str, dict], files: dict[str, 
     for label, atedef in releases.items():
         release_dir = root / label
         release_dir.mkdir(parents=True, exist_ok=True)
-        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
         for entry in atedef["files"]:
             if entry["path"] in files:
                 target = release_dir / entry["path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(files[entry["path"]], encoding="utf-8")
+                target.write_text(files[entry["path"]], encoding="utf-8", newline="\n")
     return root
 
 
@@ -76,7 +76,7 @@ def _config(tmp_path: Path, root: Path) -> Path:
         "testDefinitions": {"directories": [str(root)]},
     }
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
     return config_path
 
 

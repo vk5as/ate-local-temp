@@ -34,7 +34,7 @@ def _drive_busy(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         engine.run_uuid_reported.connect(_capture)
 
@@ -72,7 +72,7 @@ def _drive_clean(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     with tempfile.TemporaryDirectory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
-        schedule_path.write_text(source, encoding="utf-8")
+        schedule_path.write_text(source, encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(schedule_path))
         _drive(engine, app, on_run_uuid=_capture)
 

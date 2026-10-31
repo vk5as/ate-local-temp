@@ -39,7 +39,7 @@ def build_env(tmp_path: Path, *, defs: dict[str, dict], files: dict[str, bytes])
     for label, atedef in defs.items():
         release_dir = root / label
         release_dir.mkdir(parents=True, exist_ok=True)
-        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8")
+        (release_dir / f"{label}.atedef").write_text(json.dumps(atedef), encoding="utf-8", newline="\n")
         for entry in atedef.get("files", []):
             if isinstance(entry, dict) and "path" in entry and entry["path"] in files:
                 target = release_dir / entry["path"]

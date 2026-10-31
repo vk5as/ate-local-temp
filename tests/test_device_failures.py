@@ -299,7 +299,7 @@ return ScheduleParams("Pretest failure schedule", "a pretest opens a device that
         with tempfile.TemporaryDirectory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
-            schedule_path.write_text(source, encoding="utf-8")
+            schedule_path.write_text(source, encoding="utf-8", newline="\n")
             engine = RunEngine(store, str(schedule_path))
             captured = {}
             engine.run_uuid_reported.connect(lambda u: captured.setdefault("ru", u))
@@ -355,7 +355,7 @@ return ScheduleParams("Buffer then fail then reopen", "two steps")
         with tempfile.TemporaryDirectory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
-            schedule_path.write_text(source, encoding="utf-8")
+            schedule_path.write_text(source, encoding="utf-8", newline="\n")
             engine = RunEngine(store, str(schedule_path))
             captured = {}
             engine.run_uuid_reported.connect(lambda u: captured.setdefault("ru", u))
@@ -601,7 +601,7 @@ return ScheduleParams("x") :setSchedule({{
         with tempfile.TemporaryDirectory() as td:
             store = RunStore(Path(td) / "ate.db")
             schedule_path = Path(td) / "schedule.tslua"
-            schedule_path.write_text(source, encoding="utf-8")
+            schedule_path.write_text(source, encoding="utf-8", newline="\n")
             engine = RunEngine(store, str(schedule_path), stop_on_fail=True)
             engine.run_uuid_reported.connect(lambda u: captured.setdefault("ru", u))
             prompted = threading.Event()
@@ -685,7 +685,7 @@ def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCo
         print("c")
         ATE.report(Result.PASS, "done")
       end),
-  })""", encoding="utf-8")
+  })""", encoding="utf-8", newline="\n")
         engine = RunEngine(store, str(path))
         captured = {}
         engine.run_uuid_reported.connect(lambda ru: captured.setdefault("ru", ru))
