@@ -29,6 +29,7 @@ import json
 import queue
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -770,6 +771,17 @@ class RunEngine(QThread):
         )
 
     def run(self) -> None:
+        """Run the schedule on the worker. An exception leaving a QThread's ``run`` aborts the whole
+        process under PyQt, taking the Operator's window with it, so it ends here instead: the run
+        row stays open for the next start's interrupted-run recovery to close, and the screen is
+        told the run is over rather than waiting on a worker that has gone."""
+        try:
+            self._execute()
+        except Exception:  # noqa: BLE001 - see above: nothing may leave this frame
+            traceback.print_exc()
+            self.state_changed.emit(RunStatus.FINISHED)
+
+    def _execute(self) -> None:
         """Execute the schedule and record every step's Attempt through the store."""
         # A fresh LuaRuntime per load (see lua_host); real execution is stubbed there. The
         # OperatorInput controller this run owns is injected so its ATE.input calls read/write the
