@@ -228,8 +228,10 @@ def test_the_notice_generator_lists_every_runtime_dependency(tmp_path: Path) -> 
     as copyleft so the notice that travels with the bundle says so."""
     notices = _load_module(REPO / "packaging" / "licence" / "notices.py", "licence_notices")
     text = notices.third_party_notices()
-    for name in ("pyside6-addons", "lupa", "sqlalchemy", "jinja2", "pyserial", "pyvisa", "pyvisa-py"):
+    for name in ("pyside6-addons", "pyside6-essentials", "shiboken6", "lupa", "sqlalchemy", "jinja2", "pyserial", "pyvisa", "pyvisa-py"):
         assert name in text.lower(), f"{name} is not in the notices: {text}"
+    assert "copyleft runtime libraries" in text and "pyside6-addons" in text.lower(), text
+    assert "licences the wheels do not state" in text, text  # jinja2 declares nothing, and that is said
     assert "LGPL" in text, "the Qt binding's licence is not reported"
     assert "Lua" in text, "the Lua lupa embeds is not mentioned"
 
@@ -354,6 +356,37 @@ def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
                 used.update(alias.name for alias in node.names if alias.name.startswith("PySide6."))
     clash = sorted(used & excluded)
     assert not clash, f"ATE imports {clash}, which the spec excludes"
+
+
+def test_the_spec_does_not_exclude_what_webengine_imports_itself() -> None:
+    """Nothing the WebEngine binding imports on its own may sit in the excludes list.
+
+    PyQt6's `QtWebEngineWidgets` never imported the `QtWebChannel` binding, so the list below was
+    safe with it. PySide6's reaches `PySide6.QtWebChannel` from inside the import, and no ATE
+    source line mentions it: with QtWebChannel excluded the frozen helper binary started, found
+    every .pak, and died on "could not import module 'PySide6.QtWebChannel'" (2026-11-01). ATE's own imports
+    are not enough to keep the list honest, so this asks the binding what it pulls in and checks
+    that none of it is excluded.
+    """
+    spec = _executed_spec()
+    excluded = set(spec["excludes"])
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import PySide6.QtWebEngineWidgets; "
+            "print(chr(10).join(sorted(m for m in sys.modules if m.startswith('PySide6.'))))",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"QtWebEngineWidgets would not import here: {probe.stderr.strip()}")
+
+    pulled = {name for name in probe.stdout.split() if name.startswith("PySide6.")}
+    cut = sorted(pulled & excluded)
+    assert not cut, f"the spec excludes {cut}, which QtWebEngineWidgets imports: {sorted(pulled)}"
 
 
 # Build scratch that must not be left in the checkout by a run.

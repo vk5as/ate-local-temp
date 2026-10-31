@@ -69,20 +69,28 @@ def _licence(name: str) -> str:
     return " ".join(stated.split())
 
 
+def _short(licence: str) -> str:
+    """The licence declaration cut to a line a person can read.
+
+    Some wheels paste the whole licence into the metadata field (pyvisa does), which would make this
+    file unreadable. The first words plus "see the wheel" is what the notice needs.
+    """
+    return licence if len(licence) <= 60 else licence[:60] + "..."
+
+
 def _classify(licence: str) -> str:
     """One line on what this licence means for an MIT-licensed ATE that ships the dependency."""
-    words = {part.strip() for part in licence.replace("OR", " ").split("/")}
-    if any(part in PERMISSIVE for part in words) or licence.upper() in PERMISSIVE:
-        return "compatible with MIT: redistributable as-is"
-    if any(part in COPYLEFT for part in words) or "LGPL" in licence.upper() or "GPL" in licence.upper():
+    text = " ".join(licence.lower().split())
+    if not text:
+        return "the wheel states no licence: check upstream before redistributing this, nothing is assumed here"
+    if any(word in text for word in COPYLEFT):
         return (
             "copyleft: ATE stays MIT, but this dependency keeps its own licence — its source must "
             "remain available and it may not be relicensed"
         )
-    return (
-        "not stated by the wheel in a form this script can read: check upstream before "
-        "redistributing; do not assume MIT"
-    )
+    if any(word in text for word in PERMISSIVE):
+        return "compatible with MIT: redistributable as-is"
+    return f"the wheel declares {licence!r}, which this script cannot classify: check upstream"
 
 
 def qt_notice() -> str:
@@ -151,6 +159,14 @@ def _runtime_dependency_names() -> list[str]:
         if ";" in line:  # an extra, not a runtime dependency
             continue
         names.append(line.split("[")[0].split("<")[0].split(">")[0].split("=")[0].strip().lower())
+    # PySide6-Addons is the only Qt wheel ATE asks for, but it drags in its two companions, and
+    # the bundle carries all three: shiboken6 is the C++ runtime every Qt module links against.
+    for extra in ("PySide6-Essentials", "shiboken6"):
+        try:
+            importlib.metadata.version(extra)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        names.append(extra.lower())
     return names
 
 
@@ -177,9 +193,9 @@ def third_party_notices() -> str:
         note = _classify(licence)
         if "copyleft" in note:
             copyleft.append(name)
-        if "not stated" in note:
+        if "check upstream" in note:
             unstated.append(name)
-        lines.append(f"  {name} {version} - {licence or 'no licence in the wheel metadata'}: {note}")
+        lines.append(f"  {name} {version} - {_short(licence) or 'no licence in the wheel metadata'}: {note}")
 
     lines += [
         "",
