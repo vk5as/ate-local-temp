@@ -277,9 +277,12 @@ tried. `strip=False` and `upx=False` in `ate.spec` are what "unmodified" rests o
 the bundled libraries with the wheel's.
 
 Source locations: `https://code.qt.io/cgit/pyside/pyside-setup.git/` is read from the wheels'
-`Project-URL: Repository`. The wheels name no Qt source, so `https://code.qt.io/cgit/qt/qt5.git/` is a
-constant in `notices.py`, chosen from the same host. On 2026-11-01 both URLs answered HTTP 200 and
-`git ls-remote` found tag `v6.11.3` on `pyside/pyside-setup`, `qt/qt5`, `qt/qtbase` and `qt/qtwebengine`. The
+`Project-URL: Repository`. The wheels name no Qt source, so `https://code.qt.io/qt/qt5.git` is a
+constant in `notices.py`, chosen from the same host. An earlier version of this note said `git ls-remote`
+confirmed the `/cgit/` URLs. That was wrong: those are web pages, and on 2026-11-01 `git ls-remote` on
+each answered `repository not found`. `git ls-remote` on `https://code.qt.io/qt/qt5.git` and
+`https://code.qt.io/pyside/pyside-setup.git` found tag `v6.11.3`. The notice still prints the wheels'
+`/cgit/` URL for PySide6, because it reports what the wheels name; it can be browsed, not cloned. The
 earlier GitHub and `qt.io/download-open-source` links were not from any metadata and are gone.
 
 `THIRD_PARTY_NOTICES.txt` is generated from the installed wheels at build time, so no copy is checked
@@ -300,6 +303,22 @@ dependencies' licence files reach the bundle has not been checked.
 The repo still has no `LICENSE` file even though `pyproject.toml` says MIT. Per the packet, none was
 added here — that is your call, and it is worth deciding before the next release, because an artifact
 that carries third-party LGPL text and no licence for ATE's own source is a strange thing to ship.
+
+### Final fix round
+
+- A failed log write (`LogError`, or `ValueError` from a closed handle) now still shows the Operator the
+  line, which then names no log file (`test_a_failed_log_write_still_tells_the_operator_and_reaches_the_previous_hook`,
+  `test_the_window_shows_a_failed_log_write_without_claiming_a_path`).
+- What the hook sees is narrower than the docstring said. `threading.Thread` exceptions go to
+  `threading.excepthook` and the Device readers catch their own. **The Test Run path does not use this
+  hook:** `RunEngine.run`'s guard catches a worker's exception first and reports it through the run's own
+  log and Test Report, closing the run INTERRUPTED.
+- The guard test reads the whole of stderr and the child now pumps its queue after `engine.wait()`. Without
+  that pump a planted `QTimer.singleShot(0, lambda: 1/0)` never ran at all, which is why it passed.
+  `test_a_traceback_after_the_guards_message_is_still_caught` keeps the plant as a test.
+- A licence term must be named in full. As well as the `.*` tails, this closed `lgpl[-\w.+]*` (`LGPL-proprietary`
+  read as LGPL) and the free-form parenthesis (`MIT License (but not for you)` read as permissive). `v3 or later`
+  classifiers now read as one name: the `or` used to split them into an unknown term.
 
 ### Not proven here
 
