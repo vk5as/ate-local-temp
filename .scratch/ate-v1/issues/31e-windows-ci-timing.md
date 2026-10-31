@@ -6,11 +6,11 @@
 - Later commit, windows-latest 3.14: the same test, `abort took 2.218 s`, and `tests/test_device_failures.py::test_seam_log_lines_and_device_warning_are_recorded_in_emission_order`, `'second' is stamped +0.302s off the time it was emitted`, at [15%].
 - Windows 3.13 passed the second run and 3.14 the first.
 
-**What to build:** Tests that measure what the product promises, so a slow runner does not fail them and a broken abort or stamp still does. The 0.5 s bound stays.
+**What to build:** Tests that measure what the product promises, and a broken abort or stamp still does. The 0.5 s bound stays.
 
 **Blocked by:** none
 
-**Status:** resolved
+**Status:** open until Windows CI is green: where the 2.2 s went is not established
 
 **Root cause, the abort test.** Not a first-abort cold start. [0%] is rounding: the test is the seventh of the run. The first two tests make the process's first `LuaRuntime` and first aborts, and passed the same bound in both failing runs. On Linux, the window after `request_abort()` in this test imports nothing and opens no file (audit hook), and the store statements take 1 to 2 ms each, the first `log_line` and `action` inserts included. No code path in the window waits on a timer near 2 s.
 
