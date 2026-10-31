@@ -165,8 +165,14 @@ _NO_GLYPH = chr(0xF0000)
 
 
 def _glyph_ink(qapp, text: str) -> frozenset[tuple[int, int]]:
-    """The pixels a QLabel draws for `text`, in the font the runner actually has."""
+    """The pixels a QLabel draws for `text`, in the font the runner actually has.
+
+    The ink and the background are set on the label itself rather than left to the runner's
+    palette: `grab()` of a bare widget inherits the theme, and where the theme's background is
+    dark every pixel of the box is "ink" — a glyph the font has then looks identical to the box
+    Qt draws for a glyph it has not. White on black is what both comparisons mean."""
     label = QLabel(text)
+    label.setStyleSheet("background: #ffffff; color: #000000; font-size: 16px;")
     label.show()
     qapp.processEvents()
     image = label.grab().toImage()
