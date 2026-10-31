@@ -304,14 +304,17 @@ class RunEngine(QThread):
         # carrying this Attempt's number so a retried failure is announced as Attempt 2, 3, ...
         self.failure_prompt.emit(node_seq, attempt_no)
         # Blocks until choose() puts a value and wakes us; meanwhile a device failure (run-level: the
-        # Attempt's action has ended) is still logged at once (packet 17b).
+        # Attempt's action has ended) is still logged at once (packet 17b). An abort is an answer: the
+        # Abort button sends one as ABORT only if it sees this pause, so an abort that landed just
+        # before the worker got here would otherwise wait for a choice already made (packet 32b).
         while True:
             self._drain_device_warnings()
             try:
                 choice = ch.get(timeout=0.05)
                 break
             except queue.Empty:
-                continue
+                if self.aborted:
+                    self.choose("ABORT")  # no-op if an answer took the pause first; the next get has it
         self._drain_device_warnings()
         # Stamp the chosen CONTINUE/RETRY/ABORT onto this Attempt now that we hold it (packet 12b checkbox 4).
         self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=choice)
@@ -398,6 +401,11 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return self._host.to_text(typed) or ""
 
+    @staticmethod
+    def _node_row(seq: int, node: Any, **fields: Any) -> dict[str, Any]:
+        """One row for :meth:`RunStore.insert_nodes`, stamped with its place in the expanded tree."""
+        return {"node_seq": seq, "parent_node_seq": node.parent, "instance_seq": node.instance, **fields}
+
     def _insert_node(self, run_uuid: str, seq: int, node: Any, **fields: Any) -> None:
         """Write one node row, stamped with its place in the expanded tree (packet 15b).
 
@@ -444,24 +452,29 @@ class RunEngine(QThread):
                 result="ERROR",
                 attempt_count=attempt_no,
             )
+        # One batch, not a commit per row: each commit is a sync, and this runs while an Operator waits
+        # for the abort, so its cost must not grow with the steps left (packet 32b, story 83).
+        rows: list[dict[str, Any]] = []
         for seq in range(aborted_seq + 1, len(steps)):
             later = steps[seq]
             if later.is_header:  # a header never ran, so it records no Attempt and no Result
-                self._record_header(run_uuid, seq, later)
+                rows.append(self._node_row(seq, later, **self._header_fields(seq, later)))
                 continue
             default_enabled, enabled = self._enabled(seq, later)
-            self._insert_node(
-                run_uuid,
-                seq,
-                later,
-                kind="step",
-                step_number=later.step_no or "",
-                step_name=later.name,
-                default_enabled=default_enabled,
-                enabled=enabled,
-                result="NOTRUN",
-                attempt_count=0,
+            rows.append(
+                self._node_row(
+                    seq,
+                    later,
+                    kind="step",
+                    step_number=later.step_no or "",
+                    step_name=later.name,
+                    default_enabled=default_enabled,
+                    enabled=enabled,
+                    result="NOTRUN",
+                    attempt_count=0,
+                )
             )
+        self._store.insert_nodes(run_uuid, rows)
 
     def _record_header(self, run_uuid: str, seq: int, node: Any) -> None:
         """Record one header row of the expanded tree: a row that never runs (packets 15a, 15b).
@@ -472,19 +485,20 @@ class RunEngine(QThread):
         Packet 15d: `default_enabled` is the header's own default after any enclosing header's
         :setEnable() forced it, and `enabled` is whether any Test Step beneath it is enabled —
         the header row itself is never toggled as a whole."""
+        self._insert_node(run_uuid, seq, node, **self._header_fields(seq, node))
+
+    def _header_fields(self, seq: int, node: Any) -> dict[str, Any]:
+        """A header row's node fields; see :meth:`_record_header`."""
         default_enabled, enabled = self._enabled(seq, node)
-        self._insert_node(
-            run_uuid,
-            seq,
-            node,
-            kind="header",
-            step_number=node.step_no or None,
-            step_name=node.name,
-            default_enabled=default_enabled,
-            enabled=enabled,
-            result=None,
-            attempt_count=0,
-        )
+        return {
+            "kind": "header",
+            "step_number": node.step_no or None,
+            "step_name": node.name,
+            "default_enabled": default_enabled,
+            "enabled": enabled,
+            "result": None,
+            "attempt_count": 0,
+        }
 
     @staticmethod
     def _phase_actions(schedule: Any, phase: str) -> list[Callable[..., Any]]:

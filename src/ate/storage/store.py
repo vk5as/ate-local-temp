@@ -182,6 +182,10 @@ def _norm_date(value) -> str:
     return str(value)
 
 
+#: Twelve columns a row stays under SQLite's oldest default of 999 variables a statement.
+_NODES_PER_STATEMENT = 80
+
+
 class RunStore:
     """Records Test Runs and their children in a single SQLite database.
 
@@ -343,22 +347,33 @@ class RunStore:
 
     def insert_node(self, run_uuid: str, seq: int, **fields: Any) -> None:
         """Insert one expanded-tree row keyed by ``(run_uuid, node_seq)``."""
-        self._run(
-            node.insert().values(
-                run_uuid=run_uuid,
-                node_seq=seq,
-                parent_node_seq=fields.get("parent_node_seq"),
-                instance_seq=fields.get("instance_seq"),
-                kind=fields.get("kind"),
-                step_number=fields.get("step_number"),
-                step_name=fields.get("step_name"),
-                default_enabled=_as_int(fields.get("default_enabled")),
-                enabled=_as_int(fields.get("enabled")),
-                inputs=json.dumps(fields.get("inputs", {})) if fields.get("inputs") is not None else None,
-                result=fields.get("result"),
-                attempt_count=fields.get("attempt_count", 0),
-            )
-        )
+        self._run(node.insert().values(**self._node_values(run_uuid, seq, fields)))
+
+    def insert_nodes(self, run_uuid: str, rows: list[dict[str, Any]]) -> None:
+        """Insert many expanded-tree rows, each carrying its ``node_seq``, in as few commits as SQLite allows.
+
+        Every statement here is its own synced commit, so an abort writing the steps it never ran pays
+        for one, not one per step (packet 32b). A statement carries at most :data:`_NODES_PER_STATEMENT`."""
+        for start in range(0, len(rows), _NODES_PER_STATEMENT):
+            batch = rows[start : start + _NODES_PER_STATEMENT]
+            self._run(node.insert().values([self._node_values(run_uuid, row["node_seq"], row) for row in batch]))
+
+    @staticmethod
+    def _node_values(run_uuid: str, seq: int, fields: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "run_uuid": run_uuid,
+            "node_seq": seq,
+            "parent_node_seq": fields.get("parent_node_seq"),
+            "instance_seq": fields.get("instance_seq"),
+            "kind": fields.get("kind"),
+            "step_number": fields.get("step_number"),
+            "step_name": fields.get("step_name"),
+            "default_enabled": _as_int(fields.get("default_enabled")),
+            "enabled": _as_int(fields.get("enabled")),
+            "inputs": json.dumps(fields.get("inputs", {})) if fields.get("inputs") is not None else None,
+            "result": fields.get("result"),
+            "attempt_count": fields.get("attempt_count", 0),
+        }
 
     # -- attempt ------------------------------------------------------------
 
