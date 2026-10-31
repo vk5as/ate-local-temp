@@ -281,6 +281,8 @@ def test_the_inno_step_does_not_gate_on_one_hardcoded_path():
     assert not re.search(r"Test-Path\s+\"?C:\\Program Files(?: \(x86\))?\\Inno Setup", run), run
     assert "Get-Command iscc" in run, "the check has to be on PATH, which choco adds"
     assert "choco install innosetup" in run and "6.7.1" in run, "Inno 6.3+ is pinned for x64compatible"
+    assert "--version" not in run.replace("--version=6.7.1", ""), "ISCC has no --version: it exits 1 with 'Unknown option'"
+    assert run.strip().endswith("exit 0"), "choco's exit code must not decide the step: Get-Command is the check"
 
 
 def test_release_workflow_passes_the_signing_secrets_and_nothing_else():
@@ -816,6 +818,13 @@ def test_a_benign_log_line_is_not_read_as_a_failure(tmp_path):
     checks, _, runner = _smoke(tmp_path, log_noise="- Installing file C:\\logs\\failed-to-open.log")
     assert any("clean /LOG" in check for check in checks)
     assert smoke.LOG_FAILURE_LINE.search("- Installing file C:\\logs\\failed-to-open.log") is None
+
+
+def test_a_timestamped_inno_log_line_is_read_too():
+    """Every line of a real /LOG starts with a timestamp, which an anchored pattern never gets past."""
+    assert smoke.LOG_FAILURE_LINE.search('2026-10-31 10:54:32.123   "ate setup" exited with code 1')
+    assert smoke.LOG_FAILURE_LINE.search("2026-10-31 10:54:32.123   Could not remove C:\\ATE from the machine PATH")
+    assert smoke.LOG_FAILURE_LINE.search("2026-10-31 10:54:32.123   Dest filename: C:\\logs\\failed-to-open.log") is None
 
 
 def test_an_inno_failure_line_is_read_as_a_failure(tmp_path):

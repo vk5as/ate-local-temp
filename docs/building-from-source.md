@@ -428,12 +428,15 @@ metadata, so `ate --version` has to print it):
   ```bash
   apt-get install -y --no-install-recommends python3 python3-venv pipx \
     libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    libxtst6 libxkbcommon0 libxkbfile1 libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core
+    libxtst6 libxkbcommon0 libxkbfile1 libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core \
+    libnss3 libnspr4 libgssapi-krb5-2
   pipx install dist/ate-1.2.3-py3-none-any.whl
   ```
 
   Each of those was found by taking the list apart one package at a time in a fresh container: every
-  removal makes `ate _selftest --run` fail with "cannot open shared object file".
+  removal makes `ate _selftest --run` fail with "cannot open shared object file". `libnss3`,
+  `libnspr4` and `libgssapi-krb5-2` are `NEEDED` by Qt's own libraries; a container with
+  `poppler-utils` already has them, and that hid them until the first tag's wheel smoke.
 
 Every kind has to print a version, leave `/etc/ate/config.json` and the database that config names,
 answer `ate db status` with a schema version, run `ate _selftest --run` headless, and scan the

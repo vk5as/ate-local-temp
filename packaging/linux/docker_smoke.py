@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 r"""Build the Linux artifacts and smoke-test each one in a real `debian:stable` container (28c).
 
-Everything in `packaging/linux/smoke_linux.py` is written for a Debian container, and until now no
-container has ever run it: no tag of this repository has been cut, so the release workflow has never
-started. This script is the proof that the script works, run wherever Docker is available:
+Everything in `packaging/linux/smoke_linux.py` is written for a Debian container. This script runs
+it in one without the release workflow, wherever Docker is available:
 
     python packaging/linux/docker_smoke.py                     # build, then smoke deb, tar, wheel
     python packaging/linux/docker_smoke.py --kinds deb,wheel   # just some of them
@@ -16,7 +15,8 @@ wheel; then, in three *fresh* containers, it runs the smoke script exactly as th
 
     python3 packaging/linux/smoke_linux.py --kind deb --dist artifacts --expect-version 1.2.3
 
-and finishes by rendering a report with the installed program and reading it back with
+The smoke container gets only what the release job gives it: poppler-utils pulls in libnss3, libnspr4
+and libgssapi-krb5-2, so having it there once hid that the wheel needs them. This run finishes by rendering a report with the installed program and reading it back with
 `pdftotext`, because a PDF that is valid but has no glyphs in it is the failure the release CI is
 supposed to catch. Each kind's log is written to `<out>/<kind>.log`. Containers and build output are
 removed at the end unless `--keep` is given.
@@ -222,10 +222,10 @@ def smoke(kind: str, scratch: Path, logs: Path) -> str:
     container = _start(kind, scratch)
     log = logs / f"{kind}.log"
     _exec(container, "apt-get update -qq")
-    _exec(container, "apt-get install -y -qq python3 tar poppler-utils")
+    _exec(container, "apt-get install -y -qq --no-install-recommends python3 tar")
     script = (
-        "python3 /work/checkout/packaging/linux/smoke_linux.py "
-        f"--kind {kind} --dist /work/artifacts --expect-version {VERSION}"
+        "cd /work && python3 checkout/packaging/linux/smoke_linux.py "
+        f"--kind {kind} --dist artifacts --expect-version {VERSION}"
     )
     result = _exec(container, script, timeout=3600, check=False)
     output = result.stdout + result.stderr

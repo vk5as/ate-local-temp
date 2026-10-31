@@ -4,8 +4,8 @@ Three things are checked here, and only one of them is the thing that ultimately
 
 * `.github/workflows/release.yml` — parsed with PyYAML and checked for the jobs, what they need,
   the container they run in, the artifact names that go up and come back down, and the fact that
-  every script the workflow names is a script that exists. **No job has ever run**: no tag of this
-  repository has been cut, so GitHub Actions has never started this workflow.
+  every script the workflow names is a script that exists. It says nothing about a real run: the
+  first tag, `v0.1.0-rc1`, is what found a bad `iscc` call and a relative `apt-get` path.
 * `packaging/linux/smoke_linux.py` — the script that runs inside `debian:stable`. Its install,
   upgrade, remove, purge and uninstall steps run against a fake container rooted in a temporary
   directory: `apt-get` and `dpkg` are modelled, `install.sh` is run for real with its documented
@@ -475,6 +475,11 @@ class FakeContainer:
             return smoke.CommandResult(0, "Get:1 http://deb.debian.org Debian stable InRelease\n", "")
         if args[:2] == ["install", "-y"]:
             packages = args[2:]
+            # Real apt takes an argument as a local file only with a leading /, ./ or ../: it reads
+            # `artifacts/ate.deb` as package `artifacts` from a release called `ate.deb`.
+            for package in packages:
+                if package.endswith(".deb") and not package.startswith(("/", "./", "../")):
+                    return smoke.CommandResult(100, "", f"E: Unable to locate package {package.split('/')[0]}")
             deb = [p for p in packages if p.endswith(".deb")]
             if deb:
                 return self._install_deb(Path(deb[0]))
@@ -676,6 +681,14 @@ def test_deb_happy_path(tmp_path: Path) -> None:
     assert ["apt-get", "update"] in runner.calls, runner.calls
     assert any(c[:3] == ["apt-get", "install", "-y"] and c[3].endswith(".deb") for c in runner.calls)
     assert ["apt-get", "remove", "-y", "ate"] in runner.calls and ["apt-get", "purge", "-y", "ate"] in runner.calls
+
+
+def test_deb_from_a_relative_dist_reaches_apt_as_a_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """release.yml passes `--dist artifacts`, and apt reads `artifacts/ate.deb` as a package name."""
+    artifacts = _artifacts()
+    monkeypatch.chdir(artifacts.parent)
+    runner, station = _container(tmp_path)
+    assert len(smoke.run_smoke("deb", Path(artifacts.name), runner, station, EXAMPLE)) == 8
 
 
 def test_deb_leaves_the_station_after_remove_and_before_purge(tmp_path: Path) -> None:
@@ -1036,9 +1049,21 @@ def test_the_wheel_needs_libraries_the_deb_does_not() -> None:
     only_wheel = set(packaging.WHEEL_SYSTEM_LIBS) - set(packaging.DEPENDS)
     assert only_wheel, "the wheel uses the container's Python, not the bundle"
     assert {"libglib2.0-0t64", "libdbus-1-3", "libxkbcommon0"} <= set(packaging.WHEEL_SYSTEM_LIBS)
-    # Each one was found by removing it from a fresh debian:stable container and watching
-    # `ate _selftest --run` die with "cannot open shared object file".
-    assert "libnss3" not in packaging.WHEEL_SYSTEM_LIBS, "a headless report render never loads NSS"
+    # libQt6WebEngineCore.so.6 is linked against libnspr4.so, libnss3.so, libnssutil3.so and
+    # libsmime3.so, and libQt6Network.so.6 against libgssapi_krb5.so.2, so without them QtWebEngine
+    # does not even import (the v0.1.0-rc1 wheel smoke).
+    assert {"libnss3", "libnspr4", "libgssapi-krb5-2"} <= set(packaging.WHEEL_SYSTEM_LIBS), "the dynamic linker loads them on every import"
+
+
+def test_docker_smoke_runs_the_smoke_script_in_a_container_like_the_release_job() -> None:
+    """poppler-utils pulls in NSS, NSPR and GSSAPI, which is how the container hid that gap.
+
+    A relative --dist as well, because the absolute one hid the `apt-get` path bug.
+    """
+    source = DOCKER_SMOKE.read_text(encoding="utf-8")
+    assert "apt-get install -y -qq --no-install-recommends python3 tar\"" in source
+    assert "python3 tar poppler-utils" not in source
+    assert "--dist artifacts" in source and "--dist /work/artifacts" not in source
 
 
 def test_ate_reports_the_version_baked_into_the_wheel(tmp_path: Path) -> None:
