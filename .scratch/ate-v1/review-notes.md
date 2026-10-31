@@ -792,3 +792,10 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - v0.1.0-rc2 (d6d29a9): CI and Release green, 5 of 5 jobs; run 41198438867. Windows installer passed install, PATH, database, run, upgrade and uninstall.
 - Light review: read the workflow, library list and smoke script diffs; suite once, 1409 passed + 4 skipped; no Strata/Haiku review.
 - Unverified: the Inno log is read as strict UTF-8; a real Windows GUI session and a signed installer have not been tried. No GitHub Release is published: the installer and Linux artifacts are workflow artifacts, expiring 2027-01-29.
+
+## 31c — unexpected run end releases Devices (merged 2026-11-01)
+
+- User decision (2026-10-31): an unexpected worker exception keeps closing the run `INTERRUPTED`/`FAIL` with Post-test Actions skipped, on condition the next run has a clean Lua state and open Devices are closed. Throwaway probe, then these tests, show both hold on Linux; real Windows COM ports are untested.
+- Strata implemented (149 steps, 0 compactions). Review: Strata MUST-FIX 2, Haiku MUST-FIX 2; orchestrator fixed both in the light review. Test cleanup could raise `KeyError` and hide the real failure. `serial.Serial(exclusive=True)` succeeds on Linux while the port is held, so it could not fail, and was dropped (my packet asked for it). Haiku's "mutations unproven" was settled by Strata reproducing them: 7 failed with teardown off.
+- Leftover, not fixed: `DeviceRegistry.close_device` pops a handle before `device.close()`, so a Device whose close raises is never retried and its socket and reader can leak until process exit. `stream.close` swallows `OSError`, so this needs a driver close that raises something else or `visa`. Test `test_one_device_whose_close_raises…` pins today's behaviour.
+- ATE takes no exclusive lock on serial ports on Linux, so another program can share a port during a run.
