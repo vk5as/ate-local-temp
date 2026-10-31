@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -156,6 +157,7 @@ def test_the_wheel_takes_its_version_from_the_one_parser():
     assert _version.normalise("v0.1.0-rc1") == "0.1.0rc1", "the value the wheel and version.txt carry"
 
 
+@pytest.mark.skipif(shutil.which("dpkg") is None, reason="dpkg is what is being asked; it is a Debian tool")
 def test_the_deb_version_of_a_prerelease_sorts_before_the_release(tmp_path: Path):
     """`0.1.0rc1` has to become `0.1.0~rc1`: dpkg reads a bare `rc1` as *after* `0.1.0`.
 

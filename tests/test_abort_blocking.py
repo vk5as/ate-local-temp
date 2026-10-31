@@ -9,7 +9,6 @@ real lupa runtime and end-to-end through the QThread run engine into a real SQLi
 no mocks."""
 
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -18,6 +17,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
+from tests._fixtures import scratch_directory
 
 
 def _drive_abort(
@@ -40,7 +40,7 @@ def _drive_abort(
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -82,7 +82,7 @@ def _drive_clean(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")

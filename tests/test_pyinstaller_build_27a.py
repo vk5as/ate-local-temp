@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._fixtures import executable_stub
+
 REPO = Path(__file__).resolve().parent.parent
 SPEC = REPO / "packaging" / "pyinstaller" / "ate.spec"
 ENTRY = REPO / "packaging" / "pyinstaller" / "ate_entry.py"
@@ -71,7 +73,7 @@ def test_the_spec_bundles_ate_runtime_data() -> None:
     """The report template and the bundled Lua modules are in the bundle."""
     spec = _executed_spec()
     # PyInstaller drops each data file into its destination directory.
-    bundled = {str(Path(dest) / Path(src).name) for src, dest in spec["datas"]}
+    bundled = {(Path(dest) / Path(src).name).as_posix() for src, dest in spec["datas"]}
     missing = sorted(REQUIRED_DATA - bundled)
     assert not missing, f"the spec does not bundle {missing}; datas = {sorted(bundled)}"
     # The sweep is what keeps a newly added resource in the bundle without editing the spec.
@@ -179,22 +181,21 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     bundle = tmp_path / "ate"
     bundle.mkdir()
     internal = bundle / "_internal"
-    exe = bundle / "ate"
-    exe.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then echo 1.2.3; exit 0; fi\n'
-        'if [ "$1" = "_pdf" ]; then printf "%%PDF-1.4 words\\n" > "$3"; exit 0; fi\n'
-        "echo 'selftest ok'\nexit 0\n",
-        encoding="utf-8",
-        newline="\n",
+    exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
+    executable_stub(
+        exe,
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        'if args[:1] == ["--version"]:\n    print("1.2.3")\n    sys.exit(0)\n'
+        'if args[:1] == ["_pdf"]:\n    open(args[2], "wb").write(b"%PDF-1.4 words\\n")\n    sys.exit(0)\n'
+        'print("selftest ok")\n',
     )
-    exe.chmod(0o755)
     (internal / "ate" / "lua").mkdir(parents=True)
     (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8", newline="\n")
     (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_bytes(b"ELF")
+    (internal / "PyQt6" / "Qt6" / "libexec" / ("QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")).write_bytes(b"ELF")
     (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
     (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
     (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_bytes(b"icu")

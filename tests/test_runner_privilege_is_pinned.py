@@ -30,7 +30,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 
 def test_the_runner_is_never_privileged_for_a_test(monkeypatch) -> None:
     """A root runner is pinned to ordinary user, so the 30d question is never asked."""
-    monkeypatch.setattr(os, "geteuid", lambda: 0)  # what a root runner would report
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)  # what a root runner would report
     assert pdf._elevation() is False, "conftest did not pin the runner's privilege"
     assert pdf._is_elevated() is False
 

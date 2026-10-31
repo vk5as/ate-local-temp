@@ -7,7 +7,6 @@ a real lupa runtime under offscreen Qt — no mocks."""
 
 import hashlib
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +17,7 @@ from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive
+from tests._fixtures import scratch_directory
 
 
 # A helper that counts how many times it really ran and exposes the count to steps.
@@ -83,7 +83,7 @@ def test_load_time_require_runs_and_step_uses_it(app: QCoreApplication) -> None:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td))
         store = RunStore(Path(td) / "ate.db")
         engine = RunEngine(store, str(defs_dir / "load.tslua"), modules=_modules(definition))
@@ -102,7 +102,7 @@ def test_module_is_cached_once_per_run(app: QCoreApplication) -> None:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td))
         store = RunStore(Path(td) / "ate.db")
         engine = RunEngine(store, str(defs_dir / "cache.tslua"), modules=_modules(definition))

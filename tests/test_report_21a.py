@@ -7,7 +7,6 @@ Equipment / Configuration / Run log sections are packet 21b/21c placeholders —
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 
 from ate.config import Config
@@ -16,6 +15,7 @@ from ate.report.html import render_report, write_report
 from ate.storage.store import RunStore
 
 from ._fixtures import DOC_FIELDS, FAILING, _drive
+from tests._fixtures import scratch_directory
 
 
 def _cfg(**overrides) -> Config:
@@ -30,7 +30,7 @@ def _record(app: object, source: str = DOC_FIELDS) -> tuple[RunStore, str]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -78,7 +78,7 @@ def test_cover_content_from_recorded_run(app: object) -> None:
 
 def test_logo_embedded_as_data_uri_and_no_external_urls(app: object) -> None:
     """The logo ships as a data URI; the HTML has no external (http(s)) assets."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         logo_path = Path(td) / "logo.png"
         logo_path.write_bytes(bytes(range(1, 256)))  # arbitrary bytes stand in for a PNG
         store, ru = _record(app, DOC_FIELDS)
@@ -97,7 +97,7 @@ def test_file_naming_and_content(app: object) -> None:
     is frozen with ``generated_at`` (packet 30c): left on ``datetime.now`` it ticks a second between
     the two renders, which is what made this test flake."""
     frozen = "2026-10-30T12:00:00+00:00"  # the run's own clock is +10:30, so the stamp is 22:30
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store, ru = _record(app, DOC_FIELDS)
         config = _cfg(reports_directory=Path(td) / "reports", reports_organisation="ACME")
         out = write_report(store, ru, config, generated_at=frozen)
@@ -120,7 +120,7 @@ def test_filename_replaces_windows_invalid_chars(app: object) -> None:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
@@ -147,7 +147,7 @@ def test_filename_replaces_windows_invalid_chars(app: object) -> None:
 
 def test_filename_never_overwritten_with_suffix(app: object) -> None:
     """A second write of the same run takes a free -2 suffix instead of overwriting."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store, ru = _record(app, DOC_FIELDS)
         config = _cfg(reports_directory=Path(td) / "reports")
         first = write_report(store, ru, config)

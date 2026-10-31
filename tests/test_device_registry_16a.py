@@ -5,7 +5,6 @@ TCP device through the registry; no mocks. The peer is a controlled listener on 
 accepted connections the test inspects, so "open connects" and "run-end teardown disconnects" are
 verified against real sockets."""
 
-import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +26,7 @@ from ._fixtures import (
     _drive,
     wait_for_disconnect,
 )
+from tests._fixtures import scratch_directory
 
 
 # --- Unit: the TCP driver validates params and connects -------------------------------------
@@ -141,7 +141,7 @@ def test_open_registers_and_tracks_handle() -> None:
     peer = LoopbackPeer()
     peer.start()
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             schedule_path = Path(td) / "schedule.tslua"
             schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8", newline="\n")
             host = LuaHost(str(schedule_path))
@@ -173,7 +173,7 @@ def test_close_returns_ok_table_and_double_close_noop() -> None:
     peer = LoopbackPeer()
     peer.start()
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             schedule_path = Path(td) / "schedule.tslua"
             schedule_path.write_text("return ScheduleParams('x') :setSchedule({})", encoding="utf-8", newline="\n")
             host = LuaHost(str(schedule_path))
@@ -238,7 +238,7 @@ def _run_with_peer(app: QCoreApplication, source: str, port: int):
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         # The 16a schedules target the live peer's ephemeral port via a placeholder; substitute it.
@@ -352,7 +352,7 @@ def test_bad_params_error_isolated_and_names_field(app: QCoreApplication) -> Non
 
 def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk (no Qt event loop needed)."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))

@@ -10,7 +10,6 @@ empty, and a `PRETEST_FAILED` banner that names the schedule whose Pre-test Acti
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 
 from ate._version import __version__
@@ -20,6 +19,7 @@ from ate.report.html import _duration, render_report
 from ate.storage.store import RunStore
 
 from ._fixtures import DOC_FIELDS, PRE_ERROR_POST_OK, _drive
+from tests._fixtures import scratch_directory
 
 #: A Pre-test Action in an included Sub-schedule fails: the Cover must name that schedule.
 INCLUDE_PRE_FAIL = """\
@@ -51,7 +51,7 @@ def _record(app: object, source: str = DOC_FIELDS, extra_files: dict[str, str] |
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")

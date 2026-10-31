@@ -47,6 +47,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._fixtures import executable_stub
+
 REPO = Path(__file__).resolve().parent.parent
 ISS = REPO / "packaging" / "windows" / "ate.iss"
 BUILD = REPO / "packaging" / "windows" / "build_installer.py"
@@ -284,8 +286,7 @@ def _stub_bundle(directory: Path, version: str) -> Path:
     (bundle / "_internal").mkdir(exist_ok=True)
     (bundle / "_internal" / "stuff.dat").write_text("stub", encoding="utf-8", newline="\n")
     exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
-    exe.write_text(f"#!{sys.executable}\nprint({version!r})\n", encoding="utf-8", newline="\n")
-    exe.chmod(0o755)
+    executable_stub(exe, f"print({version!r})\n")
     return bundle
 
 
@@ -598,16 +599,13 @@ def test_a_failing_iscc_reports_redacted_output(tmp_path: Path, monkeypatch, cap
     """iscc echoes the Sign Tool command it ran, password and all: nothing printed raw."""
     secret = "super-secret-signing-password"
     fake = tmp_path / "iscc.exe"
-    fake.write_text(
-        f"#!{sys.executable}\n"
+    executable_stub(
+        fake,
         f"import sys\n"
         f"sys.stdout.write('signing: /p {secret}\\n')\n"
         f"sys.stderr.write('signtool failed for {secret}\\n')\n"
         f"sys.exit(2)\n",
-        encoding="utf-8",
-        newline="\n",
     )
-    fake.chmod(0o755)
     bundle = _stub_bundle(tmp_path, "1.2.3")
     module = _build_module()
     original = dict(os.environ)
@@ -668,24 +666,24 @@ def test_version_is_read_from_the_built_bundle(tmp_path: Path) -> None:
         module._bundle_version(bundle / "nonexistent")
 
 
-def test_missing_iscc_without_dry_run_fails_clearly(tmp_path: Path) -> None:
+def test_missing_iscc_without_dry_run_fails_clearly(tmp_path: Path, monkeypatch) -> None:
     bundle = _stub_bundle(tmp_path, "0.0.0-dev")
-    proc = subprocess.run(
-        [sys.executable, str(BUILD), "--dist", str(bundle.parent)],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ, ISCC="", PATH=tempfile.mkdtemp()),
-    )
-    assert proc.returncode != 0, "a missing iscc must not look like a successful build"
-    combined = proc.stdout + proc.stderr
-    assert "iscc" in combined.lower() or "windows" in combined.lower()
-    assert "--dry-run" in combined, "the error should point at --dry-run for machines without Inno Setup"
-    assert "Traceback" not in combined, "refusing to build is a clean exit, not a crash"
+    module = _build_module()
+    monkeypatch.setenv("ISCC", "")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(module, "ISCC_LOCATIONS", ())  # a Windows runner has Inno Setup installed
+    with pytest.raises(SystemExit) as exc:  # a refusal is a clean exit with a message, not a crash
+        module.main(["--dist", str(bundle.parent)])
+    message = str(exc.value)
+    assert message and exc.value.code != 0, "a missing iscc must not look like a successful build"
+    assert "iscc" in message.lower() or "windows" in message.lower()
+    assert "--dry-run" in message, "the error should point at --dry-run for machines without Inno Setup"
 
 
-def test_iscc_is_found_from_the_environment(tmp_path: Path) -> None:
+def test_iscc_is_found_from_the_environment(tmp_path: Path, monkeypatch) -> None:
     """A build machine points at its compiler with ISCC; otherwise PATH, then the default location."""
     module = _build_module()
+    monkeypatch.setattr(module, "ISCC_LOCATIONS", ())  # a Windows runner has Inno Setup installed
     fake = tmp_path / "ISCC.exe"
     fake.write_text("", encoding="utf-8", newline="\n")
     original = dict(os.environ)

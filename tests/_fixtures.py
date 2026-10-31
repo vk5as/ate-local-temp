@@ -12,16 +12,139 @@ fixture built from a schedule string would disagree with its own manifest on a W
 
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
+import shutil
 import socket
 import struct
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 from ate.engine.operator_input import OperatorInput
 from ate.engine.run_engine import RunEngine, RunStatus
+
+# -- files a test leaves behind --------------------------------------------------------------------
+
+#: Directories made by :func:`scratch_directory`, in creation order, removed by conftest when the
+#: pytest scope that made them ends; and the root conftest points at pytest's basetemp.
+scratch_directories: list[Path] = []
+scratch_root: Path | None = None
+
+
+class scratch_directory:
+    """``with scratch_directory() as td:``, for a helper that returns a store it opened in ``td``.
+
+    ``tempfile.TemporaryDirectory`` cannot do that. It deletes the directory when the block ends,
+    while the store is still open: Linux lets a process read a deleted database, and Windows refuses
+    to delete an open file (WinError 32). This directory stays until the test (or the module, for a
+    module-scoped fixture) ends; conftest closes the stores and logs opened during that scope, and
+    then deletes it strictly, so a handle something still holds is an error on Windows too."""
+
+    def __enter__(self) -> str:
+        path = tempfile.mkdtemp(prefix="scratch-", dir=scratch_root)
+        scratch_directories.append(Path(path))
+        return path
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def remove_tree(path: Path, attempts: int = 10) -> None:
+    """Delete ``path``, raising if it cannot go. A virus scanner or a just-killed helper process can
+    hold a file for a moment on Windows, so a sharing violation is retried for a couple of seconds:
+    an unclosed handle in this process outlasts that and still fails."""
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
+
+
+def open_files_under(root: Path) -> set[str]:
+    """Every file this process holds open or mapped under ``root``, where the OS can say so (Linux).
+
+    The check that finds, on Linux, the leak only Windows would otherwise report: WAL mode maps its
+    ``-shm`` file, so the memory maps are read as well as the descriptors."""
+    prefix = str(root) + os.sep
+    found: set[str] = set()
+    try:
+        descriptors = os.listdir("/proc/self/fd")
+    except OSError:
+        return found
+    for fd in descriptors:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue  # the listing's own descriptor, or one closed since
+        if target.startswith(prefix):
+            found.add(target.removesuffix(" (deleted)"))
+    with open("/proc/self/maps", encoding="utf-8", errors="replace") as maps:
+        for line in maps:
+            target = line.split(maxsplit=5)[5].strip() if line.count(" ") >= 5 and len(line.split(maxsplit=5)) == 6 else ""
+            if target.startswith(prefix):
+                found.add(target.removesuffix(" (deleted)"))
+    return found
+
+
+def executable_stub(path: Path, source: str) -> None:
+    """Make ``path`` a program that runs the Python ``source``, as the OS itself would start it.
+
+    A shebang is enough on Linux. ``CreateProcess`` only runs a real PE file, so on Windows this
+    builds what pip builds for ``pytest.exe``: distlib's launcher, a shebang, and a zip holding
+    ``__main__.py``."""
+    if os.name != "nt":
+        path.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+        return
+    import io
+    import zipfile
+
+    import pip._vendor.distlib
+
+    launcher = (Path(pip._vendor.distlib.__file__).parent / "t64.exe").read_bytes()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundled:
+        bundled.writestr("__main__.py", source)
+    path.write_bytes(launcher + f'#!"{sys.executable}"\n'.encode() + archive.getvalue())
+
+
+# -- Qt's last words -------------------------------------------------------------------------------
+
+_fatal_stream = None
+
+
+def report_qt_fatal(previous=None):
+    """A Qt message handler that prints a fatal message and every thread's stack before Qt aborts.
+
+    Qt ends the process with ``__fastfail`` on Windows, which no handler sees, and pytest-qt keeps
+    every message for a report that an aborted run never prints: without this a dying CI job says
+    nothing at all. The stream is a duplicate of the real stderr so that pytest's capture cannot
+    swallow it. Anything but a fatal message goes to ``previous``, the handler this one replaced."""
+    from PyQt6.QtCore import QtMsgType
+
+    global _fatal_stream
+    if _fatal_stream is None:
+        _fatal_stream = os.fdopen(os.dup(sys.__stderr__.fileno()), "w", encoding="utf-8", errors="replace")
+
+    def handler(mode, context, message):
+        if mode == QtMsgType.QtFatalMsg:
+            _fatal_stream.write(f"\nQt fatal error: {message}\n")
+            _fatal_stream.flush()
+            faulthandler.dump_traceback(file=_fatal_stream, all_threads=True)
+            _fatal_stream.flush()
+        elif previous is not None:
+            previous(mode, context, message)
+
+    return handler
 
 
 # A schedule that reports PASS on its single step.

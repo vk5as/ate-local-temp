@@ -154,7 +154,7 @@ def _dist_info(wheel: zipfile.ZipFile, name: str) -> str:
     """Contents of a ``.dist-info`` file in the wheel."""
     for arc in wheel.namelist():
         if arc.endswith(f".dist-info/{name}"):
-            return wheel.read(arc).decode("utf-8")
+            return wheel.read(arc).decode("utf-8").replace("\r\n", "\n")  # CRLF from a wheel built on Windows
     return ""
 
 

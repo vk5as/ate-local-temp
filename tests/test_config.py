@@ -318,7 +318,8 @@ def test_the_windows_default_config_is_programdata_not_etc(monkeypatch):
     assert str(config._platform_default()) == r"C:\ProgramData\ATE\config.json"
     # A bare `ate db status` on Linux still reads /etc/ate, and nothing writes to ProgramData.
     monkeypatch.undo()
-    assert str(config._platform_default()) == "/etc/ate/config.json"
+    if sys.platform != "win32":
+        assert str(config._platform_default()) == "/etc/ate/config.json"
 
 
 def test_programdata_is_expanded_and_falls_back_when_unset(monkeypatch):
@@ -334,8 +335,9 @@ def test_programdata_is_expanded_and_falls_back_when_unset(monkeypatch):
     # Not Windows after the monkeypatch is undone: the Linux default is untouched, and nothing
     # on a Linux machine points at ProgramData.
     monkeypatch.undo()
-    assert not config._is_windows()
-    assert str(config._platform_default()) == "/etc/ate/config.json"
+    if sys.platform != "win32":
+        assert not config._is_windows()
+        assert str(config._platform_default()) == "/etc/ate/config.json"
 
 
 def test_config_default_data_dir_and_ate_setup_all_agree_on_windows(monkeypatch):

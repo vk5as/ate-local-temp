@@ -31,6 +31,7 @@ SPEC_FIELDS = ["time", "level", "source", "owner", "schedule", "step_number", "s
 from ate.storage.store import RunStore
 
 from .test_tcp_read_write import LoopbackPeer
+from tests._fixtures import scratch_directory
 
 
 # The 64-byte cap against a 100-byte reply: the device read asks for exactly the cap, so it
@@ -93,7 +94,7 @@ def _drive_export_run(app: QCoreApplication, source: str, *, port: int, buffer_b
         prompts.append((node_seq, attempt_no))
         engine.choose("RETRY")  # the only prompt this schedule raises
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(port)), encoding="utf-8", newline="\n")

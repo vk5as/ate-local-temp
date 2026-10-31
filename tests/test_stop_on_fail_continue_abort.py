@@ -6,7 +6,6 @@ through engine.choose() from another thread. Continue keeps the failed step's re
 real SQLite file with real .tslua schedules — no mocks."""
 
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -17,6 +16,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import STOP_ON_FAIL_FALSE
+from tests._fixtures import scratch_directory
 
 
 def _failing_node_seq(store: RunStore, run_uuid: str) -> int:
@@ -51,7 +51,7 @@ def _drive_with_choice(app: QCoreApplication, source: str, choice: str, stop_on_
         engine.choose(choice)  # answer the pending prompt; wakes the blocked worker
         prompts["count"] += 1
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")

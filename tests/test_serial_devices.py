@@ -25,7 +25,6 @@ after the open has returned and then waits for the Device's own buffer, never fo
 from __future__ import annotations
 
 import socket
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -40,6 +39,7 @@ from ate.engine.lua_host import LuaHost
 from ._fixtures import LoopbackPeer, wait_for_disconnect
 from .test_device_onerror import _dead_port
 from .test_tcp_read_write import _run_with_peer, _step_message
+from tests._fixtures import scratch_directory
 
 
 def _params(peer: LoopbackPeer, read_term: str = "", write_term: str = "") -> dict:
@@ -131,7 +131,7 @@ def _run_two_steps(peer: LoopbackPeer, source: str, between, limit: int | None =
     ``between`` hands the peer its reply and waits for the reader to have it in the buffer, so step
     2's reads can only find a buffer that is already filled. The host is driven directly, as 18b's
     seam does; a warning sink records device failures in ``host.logs`` the way the run engine would."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         path = Path(td) / "schedule.tslua"
         path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(peer.port)), encoding="utf-8", newline="\n")
         kwargs = {"receive_buffer_bytes": limit} if limit is not None else {}

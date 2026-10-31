@@ -28,6 +28,8 @@ jobs:
       # without it every test that needs `app` fails on a headless runner. Job level, so both the
       # Ubuntu and Windows matrix entries get it.
       QT_QPA_PLATFORM: offscreen
+      # A native crash in the runner or in any Python a test starts prints every thread's stack.
+      PYTHONFAULTHANDLER: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -107,4 +109,12 @@ jobs:
         # its own floor in the `[test]` extra, and it kills a stuck test rather than showing the
         # stack that explains it. faulthandler is in the standard library and pytest already
         # enables it.
-        run: pytest -v -rfE --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
+        #
+        # pwsh on both, so a job that dies without a summary still shows how: Qt ends a Windows
+        # process with __fastfail (0xC0000409), and the bare step reports only "exit code 1".
+        shell: pwsh
+        run: |
+          pytest -v -rfE --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
+          $code = $LASTEXITCODE
+          "pytest exit code: {0} (0x{0:X8})" -f $code
+          exit $code

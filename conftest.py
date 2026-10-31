@@ -27,14 +27,111 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 
+# Qt's offscreen platform on Windows looks for fonts in Qt's own (empty) library directory rather
+# than asking Windows, so every character draws as the missing-glyph box and every width is wrong.
+# The real `windows` platform an Operator uses has no such problem. Set before any Qt import, and
+# inherited by every subprocess a test starts.
+if os.name == "nt" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+    os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"))
+
 # Ticket 02 drives QThread workers headless (QT_QPA_PLATFORM=offscreen). One shared application
 # for the session avoids creating a second QApplication mid-session. This PyQt6 build's
 # ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
 # argument list and rely on that env var instead.
 import pytest  # noqa: E402
 
-from PyQt6.QtCore import QObject, QThread  # noqa: E402
+from PyQt6.QtCore import QObject, QThread, qInstallMessageHandler  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
+
+from ate.engine.run_engine import stop_live_engines  # noqa: E402
+from ate.log import AppLog  # noqa: E402
+from ate.run_session.headless import HeadlessRunSession  # noqa: E402
+from ate.storage.store import RunStore  # noqa: E402
+from tests import _fixtures  # noqa: E402
+
+# -- everything a test opens is released before its files are deleted ------------------------------
+
+#: Sessions, stores and application logs in the order they were opened. Tests drop these freely: on Linux an
+#: unreferenced one does no harm, and on Windows it keeps its file undeletable (WinError 32).
+_opened: list = []
+
+
+def _remember_opened(cls: type) -> None:
+    original = cls.__init__
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        _opened.append(self)
+
+    cls.__init__ = __init__
+
+
+_remember_opened(HeadlessRunSession)
+_remember_opened(RunStore)
+_remember_opened(AppLog)
+
+
+def _release_since(opened_mark: int, scratch_mark: int) -> None:
+    """End every run, close what was opened after the marks, then delete the scratch directories
+    made after them. The order is the point: the deletion is strict, so it proves the closes."""
+    stuck = stop_live_engines()
+    if stuck:
+        raise RuntimeError(f"{len(stuck)} RunEngine worker(s) did not stop")
+    for item in reversed(_opened[opened_mark:]):
+        item.close()
+    del _opened[opened_mark:]
+    directories = _fixtures.scratch_directories[scratch_mark:]
+    del _fixtures.scratch_directories[scratch_mark:]
+    for path in directories:
+        _fixtures.remove_tree(path)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _release_files_session(tmp_path_factory):
+    """Point scratch directories at pytest's basetemp and release what session fixtures opened."""
+    _fixtures.scratch_root = tmp_path_factory.getbasetemp()
+    marks = len(_opened), len(_fixtures.scratch_directories)
+    yield
+    _release_since(*marks)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _release_files_module(_release_files_session):
+    """Release what a module-scoped fixture opened, once the tests sharing it are done."""
+    marks = len(_opened), len(_fixtures.scratch_directories)
+    yield
+    _release_since(*marks)
+
+
+@pytest.fixture(autouse=True)
+def _release_files(_release_files_module, tmp_path_factory):
+    """Release what this test opened, and fail it if a file under pytest's temp directory stays open.
+
+    Linux will happily delete an open file, so without this check a handle that only Windows would
+    refuse to give up is invisible until CI runs there. Files of stores still open for an enclosing
+    scope are that scope's, and are excluded."""
+    root = tmp_path_factory.getbasetemp()
+    before = _fixtures.open_files_under(root)
+    marks = len(_opened), len(_fixtures.scratch_directories)
+    yield
+    outer = {
+        str(item.path) + suffix
+        for item in _opened[: marks[0]]
+        if isinstance(item, RunStore)
+        for suffix in ("", "-wal", "-shm")
+    }
+    _release_since(*marks)
+    leaked = _fixtures.open_files_under(root) - before - outer
+    assert not leaked, f"still open after the test closed everything it opened: {sorted(leaked)}"
+
+
+@pytest.fixture(autouse=True)
+def _report_qt_fatal():
+    """Keep Qt's fatal message from dying inside pytest-qt's capture (see report_qt_fatal)."""
+    previous = qInstallMessageHandler(None)
+    qInstallMessageHandler(_fixtures.report_qt_fatal(previous))
+    yield
+    qInstallMessageHandler(previous)
 
 
 def _stop_workers(app: QApplication) -> None:
@@ -114,7 +211,7 @@ def app(qapp: QApplication) -> QApplication:
 
 
 @pytest.fixture(autouse=True)
-def _stop_pdf_jobs_after_test() -> None:
+def _stop_pdf_jobs_after_test(_release_files) -> None:
     """End every Test Report PDF helper before the next test starts (packet 25b review).
 
     The helper is a ``QProcess`` parented to the session that started it. A test that finishes with
@@ -216,7 +313,7 @@ _started_engines: "weakref.WeakSet" = weakref.WeakSet()
 
 
 @pytest.fixture(autouse=True)
-def _stop_running_engines(monkeypatch):
+def _stop_running_engines(monkeypatch, _release_files):
     """After each test, abort and join any RunEngine worker still running.
 
     RunEngines have no Qt parent, so :func:`_stop_workers` never sees them. A test that ends with
@@ -241,12 +338,7 @@ def _stop_running_engines(monkeypatch):
         if not running:
             continue
         try:
-            if engine.pause_pending():
-                # A worker parked in a Stop-on-Fail pause only wakes on a choice, so an abort
-                # requested from outside would sit here for the whole join timeout.
-                engine.choose("ABORT")
-            engine.request_abort()
-            joined = engine.wait(5000)
+            joined = engine.stop_and_wait()
         except RuntimeError:  # its C++ side is already gone
             continue
         if not joined:

@@ -6,7 +6,6 @@ Actions log their phase and the pass_fail they were called with, then asserting 
 pass_fail. Verified against a real SQLite file; no mocks."""
 
 import sqlite3
-import tempfile
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
@@ -16,6 +15,7 @@ from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
 from ._fixtures import PASSING, PRE_ERROR_POST_OK, PRE_POST_FAIL, PRE_POST_PASS, _drive
+from tests._fixtures import scratch_directory
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -25,7 +25,7 @@ def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -49,7 +49,7 @@ def _actions(conn: sqlite3.Connection, run_uuid: str) -> dict[str, dict]:
 def test_run_action_forwards_pass_fail_and_restores_context() -> None:
     """Seam-1 — _run_action passes the run's pass_fail as the closure's first argument to a Pre-test/
     Post-test Action, and restores the idle context afterwards so lockdown still applies."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(PRE_POST_PASS, encoding="utf-8", newline="\n")
         host = LuaHost(str(schedule_path))

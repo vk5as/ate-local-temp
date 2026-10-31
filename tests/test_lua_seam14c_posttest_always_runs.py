@@ -9,7 +9,6 @@ leaves its End Reason untouched. Each outcome's End Reason is checked. Verified 
 runtime + QThread RunEngine into a real SQLite file — no mocks."""
 
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -21,6 +20,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive, PRE_ERROR_POST_OK
+from tests._fixtures import scratch_directory
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -30,7 +30,7 @@ def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -75,7 +75,7 @@ def _drive_with_choice(app: QCoreApplication, source: str, choice: str, stop_on_
         engine.choose(choice)  # answer the pending prompt; wakes the blocked worker
         prompts["count"] += 1
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -106,7 +106,7 @@ def _drive_abort(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -145,7 +145,7 @@ def _drive_abort_twice(app: QCoreApplication, source: str) -> tuple[RunStore, di
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -306,7 +306,7 @@ def test_remaining_posttest_actions_still_run_after_one_aborted(app: QCoreApplic
     """Checkbox 2 — with two Post-test Actions, the one a second abort lands in records outcome
     "aborted", and the next still runs (outcome "ok"). Drives _record_phase_action in reverse exactly
     as run() does; the busy action is aborted from another thread so it can be interrupted."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(MINIMAL, encoding="utf-8", newline="\n")

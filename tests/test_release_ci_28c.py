@@ -342,6 +342,8 @@ def _clean_the_fake_artifacts():
 
 def _artifacts() -> Path:
     """One set of artifacts (tarball, .deb, wheel, glibc marker) built once, from a stub bundle."""
+    if os.name == "nt":
+        pytest.skip("build_linux.py makes a .deb and a Linux tarball from a Linux bundle")
     if "dist" not in _CACHE:
         where = Path(tempfile.mkdtemp(prefix="ate-28c-artifacts-"))
         bundle = _fake_bundle(where)

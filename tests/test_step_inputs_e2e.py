@@ -15,7 +15,6 @@ e Every type is one ``input_value`` row — CHECKBOX stored as JSON — with the
 
 import json
 import sqlite3
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -33,6 +32,7 @@ from ._fixtures import (
     INPUTS_POLL,
     _default_input_value,
 )
+from tests._fixtures import scratch_directory
 
 
 def _rows(conn, run_uuid: str) -> dict[int, tuple[str, str]]:
@@ -101,7 +101,7 @@ def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, 
 
 def _write_and_run(app, op, schedule_text, strategy=INPUTS_BLOCKING, values_by_index=None):
     """Write ``schedule_text`` to a fresh store-backed engine and drive it; return (store, run_uuid)."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(schedule_text, encoding="utf-8", newline="\n")
@@ -137,7 +137,7 @@ def test_poll_recorded_when_clicked(app):
 def test_blocking_input_announced_once_per_step_and_recorded(app):
     """One declared input is announced once under its step; the supplied value is typed and stored."""
     op = OperatorInput()
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "blocking.tslua"
         schedule_path.write_text(BLOCKING_INPUT, encoding="utf-8", newline="\n")

@@ -6,7 +6,6 @@ the Sub-schedule is packet 15b — so the header has no children and the run sti
 """
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from ate.storage.store import RunStore
 from ate.ui.staged_run_screen import RunView, StepsOptionsStage
 
 from ._fixtures import _drive, _sha256
+from tests._fixtures import scratch_directory
 
 
 # --- schedules ---------------------------------------------------------------
@@ -373,7 +373,7 @@ def test_catalog_reports_a_header_misuse_as_a_load_error(tmp_path) -> None:
 
 def test_run_screen_step_list_shows_no_none_for_an_unnamed_step(qapp) -> None:
     """The Steps & options rows for an unnamed step are blank after the number, never "None"."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule = Path(td) / "schedule.tslua"
         schedule.write_text(HEADER_WITHOUT_NUMBER, encoding="utf-8", newline="\n")
         (Path(td) / "sub.tslua").write_text(EMPTY_SUB, encoding="utf-8", newline="\n")  # packet 15b expands the header
