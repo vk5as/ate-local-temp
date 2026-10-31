@@ -244,7 +244,7 @@ def test_two_devices_left_open_are_closed_before_finished(tmp_path, monkeypatch)
 
 
 def test_a_crash_while_closing_the_run_row_still_closes_the_devices(tmp_path, monkeypatch):
-    """``update_run_end` raising cannot undo the teardown that already ran.
+    """`update_run_end` raising cannot undo the teardown that already ran.
 
     The row stays open until the next launch's recovery closes it; what matters here is that no
     Device and no reader thread is left behind."""
