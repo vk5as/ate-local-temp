@@ -320,6 +320,10 @@ that carries third-party LGPL text and no licence for ATE's own source is a stra
   read as LGPL) and the free-form parenthesis (`MIT License (but not for you)` read as permissive). `v3 or later`
   classifiers now read as one name: the `or` used to split them into an unknown term.
 
+Three full runs after this round, in the same venv, on Linux only: `1475 passed, 4 skipped` each (272.61 s,
+276.92 s, 274.69 s). The changed test files passed 10 times under CPU load (6 busy loops on 3 cores). No
+abort test warned past 0.5 s, apart from the injected 2 s stall that expects the warning.
+
 ### Not proven here
 
 - CI on Linux and Windows, and a manual `release.yml` run with all 5 jobs: never executed from this
