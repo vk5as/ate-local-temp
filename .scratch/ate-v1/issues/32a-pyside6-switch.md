@@ -85,6 +85,18 @@ packet's dependencies), `QT_QPA_PLATFORM=offscreen`:
 1431 passed, 4 skipped in 332.98s (0:05:32)
 ```
 
+After the review rework, three more runs in the same venv:
+
+```
+1462 passed, 4 skipped in 272.36s (0:04:32)
+1462 passed, 4 skipped in 270.70s (0:04:30)
+1462 passed, 4 skipped in 267.10s (0:04:27)
+```
+
+The same four tests skip. After the rework, `ATE_BUILD_TESTS=1 pytest -m build` was re-run on
+`tests/test_pyinstaller_build_27a.py` only (`1 passed`), so the new generator ran in a build venv. The
+`.deb` and container gates below predate the rework and were not re-run.
+
 Those wall-clock times are from a loaded box and do not measure the binding. A reviewer ran both
 suites on the same box and got 265 s (PySide6) against 246 s (PyQt6), about 7% slower. The reviewer
 puts that at per-Qt-call overhead, which was not measured separately here.
@@ -179,6 +191,7 @@ This host has no `libxcb-cursor.so.0`, so the run used a `dpkg -x`-extracted cop
   with eight busy-loop processes competing for three cores: `73 passed in 29.90s`
   (`tests/test_abort_blocking.py`, `tests/test_lua_seam13c_abort.py`, `tests/test_gui_launch_30a.py`,
   `tests/test_headless_session.py`). A worker running Lua finished, and `wait(5000)` returned True.
+  Repeated after the rework with the signal and exception-log tests added: `82 passed in 34.61s`.
 - **Object lifetime.** The message differs: PyQt6 raises `RuntimeError: wrapped C/C++ object of type
   Thing has been deleted`; PySide6 raises `RuntimeError: libshiboken: Internal C++ object (Thing)
   already deleted.` Every catch in `pdf_job.py`, `stop_pdf_jobs()`, `HeadlessRunSession.close`/`__del__`
