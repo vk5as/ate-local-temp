@@ -62,6 +62,8 @@ jobs:
         # there, and Python reports "Windows fatal exception: code 0xc0000139"
         # (STATUS_ENTRYPOINT_NOT_FOUND) while importing it. Fail here, in one line, rather than
         # letting a third of the suite quietly skip because PDF rendering is unavailable.
+        # bash, because the Windows default (PowerShell) cannot parse the heredoc.
+        shell: bash
         run: |
           python - <<'PY'
           import importlib.metadata as m
