@@ -1,10 +1,12 @@
-"""A bare `%` in an argparse help string is a crash on Python 3.14.
+"""A bare `%` in an argparse help string is a crash.
 
-CPython 3.14 formats every help string when the argument is registered: `packaging/windows/
-smoke_installer.py`'s `--data-dir` help said `default: %PROGRAMDATA%\\ATE`, and on the 3.14 CI
-matrix entry the smoke script died with `ValueError: badly formed help string` before the
-installer was ever run. 3.13 prints such a string untouched, so the bug is invisible on the
-older half of the matrix while the frozen bundles (3.14) are broken.
+argparse runs every help string through `%` formatting (`HelpFormatter._expand_help` does
+`self._get_help_string(action) % params`), so `packaging/windows/smoke_installer.py`'s
+`--data-dir` help, which said `default: %PROGRAMDATA%\\ATE`, was never a plain sentence. CPython
+3.14 expands it when the argument is registered and the smoke script died on the 3.14 CI matrix
+entry with `ValueError: badly formed help string` before the installer ran; 3.13 only breaks when
+the help is printed, with `ValueError: unsupported format character 'P'`, which is why the Linux
+half of the matrix never noticed it.
 
 Two checks, because a source scan alone cannot prove a parser is buildable and building one
 alone cannot catch a string that only meets an un-imported module:
@@ -36,11 +38,11 @@ HELP_KEYWORDS = ("help", "description", "epilog")
 
 
 def _percent_is_escaped(text: str, where: str) -> None:
-    """Fail on a help string argparse 3.14 would reject, on any Python.
+    """Fail on a help string argparse would reject, on any Python.
 
-    3.14 formats the help with `%(prog)s`-style mappings at `add_argument` time; 3.13 only does
-    that when the string contains `%(prog)`. Formatting by hand is the version-independent test:
-    `%%` and `%(prog)s` survive, a bare `%WORD%` or a stray `%s` does not."""
+    Formatting the string by hand is the version-independent check: 3.14 does it when the argument
+    is registered, 3.13 when the help is printed. `%%` and `%(prog)s` survive; a bare `%WORD%` or
+    a stray `%s` does not."""
     try:
         text % {"prog": "ate"}
     except (TypeError, ValueError) as exc:
@@ -130,8 +132,12 @@ def test_the_app_and_packager_parsers_build_and_format_help() -> None:
         _parsers_from(module_path, ["--help"])
 
 
-def test_the_smoke_installer_help_still_names_programdata(capsys) -> None:
-    """The escape is a `%%`, not a deleted path: `--help` still says where the data lives."""
+def test_the_smoke_installer_help_prints_one_percent_sign(capsys) -> None:
+    """The escape is `%%` in the source and one `%` on the screen: not two, and not a lost path.
+
+    Over-escaping is the mistake this guards against: `%%%%` formats happily and then reads as
+    `%%PROGRAMDATA%%` to an Operator looking for the data directory."""
     _parsers_from(PACKAGING / "windows" / "smoke_installer.py", ["--help"])
     out = capsys.readouterr().out
     assert "%PROGRAMDATA%" in out, out
+    assert "%%PROGRAMDATA%%" not in out, out
