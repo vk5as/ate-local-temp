@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
@@ -240,6 +241,12 @@ print("leaving", engine.isRunning())
     result = _child(tmp_path, source)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
     assert "leaving True" in result.stdout, result.stdout
+    conn = sqlite3.connect(tmp_path / "a.db")
+    try:
+        rows = conn.execute("SELECT end_reason FROM test_run").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("ABORTED",)], "the worker was killed mid-run rather than stopped: the run row is open"
 
 
 def test_closing_a_session_mid_run_ends_the_worker_before_the_store(app, tmp_path):
