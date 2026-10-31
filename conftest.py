@@ -163,9 +163,12 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
     ate.config._platform_data_dir = original
 
 
-@pytest.fixture(autouse=True)
-def _runner_privilege_is_not_a_test_variable(monkeypatch) -> None:
-    """Pin "is ATE elevated?" to False for every test, on every runner.
+@pytest.fixture(scope="session", autouse=True)
+def _runner_privilege_is_not_a_test_variable() -> None:
+    """Pin "is ATE elevated?" to False for the whole session, on every runner.
+
+    Session scope on purpose: a module-scoped fixture that starts a Test Run (the example
+    harness) runs before any per-test fixture, so a function-scoped pin would arrive too late.
 
     A GitHub Windows runner is an administrator and a container runs as root, so the runner's own
     privilege decides which PDF path a test takes (packet 30d): a root or admin process asks the
@@ -175,7 +178,13 @@ def _runner_privilege_is_not_a_test_variable(monkeypatch) -> None:
     child through the inherited environment."""
     from ate.report.pdf import ELEVATION_ENV
 
-    monkeypatch.setenv(ELEVATION_ENV, "0")
+    previous = os.environ.get(ELEVATION_ENV)
+    os.environ[ELEVATION_ENV] = "0"
+    yield
+    if previous is None:
+        os.environ.pop(ELEVATION_ENV, None)
+    else:
+        os.environ[ELEVATION_ENV] = previous
 
 
 @pytest.fixture(autouse=True)

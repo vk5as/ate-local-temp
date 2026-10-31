@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from ate.log import AppLog, LogError, open_app_log
+from ._fixtures import chmod_can_deny_access
 
 
 def _basename(path: str) -> str:
@@ -138,7 +139,7 @@ def test_context_manager_closes_and_keeps_the_file(tmp_path):
 
 def test_unwritable_directory_refuses_to_open(tmp_path):
     """A directory ATE cannot write to refuses to open the log (not a silent no-op)."""
-    if os.name != "posix" or os.geteuid() == 0:  # no euid on Windows; root ignores the mode bits
+    if not chmod_can_deny_access():
         pytest.skip("running as root, or on a platform where chmod is advisory")
 
     ro = tmp_path / "ro"
@@ -152,7 +153,7 @@ def test_a_log_directory_that_cannot_be_created_is_a_log_error(tmp_path):
     """Creating the log directory fails the same way: a :class:`LogError`, not the raw
     ``PermissionError`` the bare ``mkdir`` used to raise (packet 30c review). The launch layer
     catches :class:`LogError` and shows a dialog, so anything else is a traceback."""
-    if os.name != "posix" or os.geteuid() == 0:  # chmod is advisory for root and on Windows
+    if not chmod_can_deny_access():
         pytest.skip("cannot make a directory unreadable for this process")
 
     ro = tmp_path / "ro"

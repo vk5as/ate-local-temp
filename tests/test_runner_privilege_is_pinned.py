@@ -60,6 +60,15 @@ def test_the_pin_reaches_a_spawned_helper(monkeypatch) -> None:
     assert proc.stdout.strip() == "False", f"the helper saw the runner's real privilege: {proc.stdout}"
 
 
+def test_the_pin_is_in_the_environment_of_the_whole_session() -> None:
+    """The variable, not a monkeypatch: a module-scoped fixture that runs a Test Run, and every
+    subprocess it spawns, must see the same answer as the test body.
+
+    The example harness builds its session before any per-test fixture runs, so a pin that only
+    existed per test would let a root or admin runner skip the Test Report PDF there."""
+    assert os.environ.get(pdf.ELEVATION_ENV) == "0", "conftest pins privilege too late, or not at all"
+
+
 def test_a_pinned_launch_writes_the_pdf_instead_of_skipping_it(monkeypatch) -> None:
     """The default `launch()` answer is sandboxed, so no modal box is ever opened in a test.
 
