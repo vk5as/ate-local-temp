@@ -942,8 +942,10 @@ class RunEngine(QThread):
                 # to it (a retried Attempt re-asks under its own number, packet 12c). The `blocking`
                 # argument carries in any answer the operator gave before this step's first
                 # ATE.input(n) ran — without it that answer is wiped, the ask waits forever, and the
-                # run hangs (14d review: the status-bar test's flake was this race).
-                self._op.reset(blocking)
+                # run hangs (14d review: the status-bar test's flake was this race). Only the step's
+                # first Attempt may inherit: an answer supplied during a Stop-on-Fail pause belongs
+                # to the Attempt that just ended, and a retry has to ask for its own (12c).
+                self._op.reset(blocking if attempt_count == 1 else ())
                 # Packet 10a review: a blocking input opens only when its ``ATE.input(n)`` call
                 # actually blocks — the OperatorInput's ``asked`` signal, wired to ``input_asked`` in
                 # __init__ — while a POLL is live for the whole Attempt, so it is announced here,
