@@ -5,6 +5,8 @@ next launch's recovery closed it.
 """
 
 
+import time
+
 from PyQt6.QtWidgets import QApplication
 
 from ate.engine.run_engine import RunEngine
