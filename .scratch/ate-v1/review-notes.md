@@ -763,3 +763,12 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - CI: `-rfE --tb=short`, `faulthandler_exit_on_timeout`, 40 min on Windows.
 - Light review: 8 of 9 full runs clean on Linux (1358 passed + 4 skipped). **1 of 9 died with `Fatal Python error: Aborted`; no stack captured, cause unknown, not reproduced in 6 more runs.** Strata saw one earlier in `test_gui_launch_30a.py`. Open.
 - Unknown until Windows reports: 7 `test_abort_blocking.py` failures, 2 05b glyph tests. User: if this batch is not enough, the next fixer runs on Opus.
+
+## Windows CI fixes (Opus, by user request; merged 2026-10-31)
+- First full Windows run (2c261f5): 3.13 had 297 failed + 10 errors; 3.14 died silently at ~44%; Linux 3.14 hit `QThread: Destroyed while thread is still running`.
+- **QThread abort cause:** a queued FINISHED let the session drop its only engine reference while `run()` was still ending. A started engine now keeps itself alive until its thread ends; `session.close()` stops the worker first. Likely the 1-in-9 local abort (never had a stack to compare).
+- Product bugs fixed: exception leaving `run()` aborted the process; close didn't stop the worker; closed `RunStore` silently reopened; `ate db migrate`/`ate setup` didn't close the store; History open-file used `xdg-open` on Windows; a stalled write couldn't time out on Winsock (64 KiB chunks); UDP refusal failed the whole device; reset wording differed; rooted paths skipped the module-name rule on Windows; `ate setup` wrote mixed separators.
+- Tests: `scratch_directory` plus per-scope cleanup; Linux leak check for open files; `executable_stub`; `QT_QPA_FONTDIR`; UTF-8 on 10 `subprocess` calls. Skips: dpkg test without dpkg; `_artifacts()` on Windows; `needs_proc` (5 tests).
+- Light review: 1389 passed + 4 skipped ×3; collection 1362 → 1393, none lost.
+- **Known gap to fix:** when an exception ends a run, the traceback goes only to stderr, not the application log, and the run row stays open until the next start's recovery.
+- Unknown until CI: font fix, launcher stub, 64 KiB write timeout, strict delete, 3.14 cause, failures hidden behind WinError 32.
