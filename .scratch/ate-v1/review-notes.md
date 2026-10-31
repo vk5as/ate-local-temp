@@ -746,3 +746,12 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Found while preparing the first tag: `v0.1.0-rc1` failed to parse, so builds would have reported `0.0.0-dev`. Strata fix: `0.1.0rc1` (app, wheel), `0.1.0~rc1` (.deb), `0.1.0.0` (Windows); the smoke normalises the expected version. No reviewer pass: small and mutation-proven. Light review: 1321 passed + 4 skipped ×3, none lost.
 - Strata saw one unexplained `Fatal Python error: Aborted` in `tests/test_gui_launch_30a.py`, not reproduced. Watch it.
 - First real GitHub CI (repo made public; private Actions minutes had run out): Linux failed at conftest, `libEGL.so.1` missing. `ci.yml` now installs Qt's system libraries (orchestrator tiny fix).
+
+## First real CI: fixes (merged 2026-10-31)
+- **The hang was a 30d bug:** an elevated process with no one to answer blocked forever in `QMessageBox.exec()`. Stack from a root container: `_pdf_sandbox_dialog` ← `decide` ← `_write_run_report`. Reviews and tests had only simulated elevation. Probably the Windows hang too (the runners are admin), but no Windows stack yet.
+- Fixes: `ATE_ELEVATED=0` pinned for the test session; `_dismiss_if_headless` also closes dialogs on offscreen/minimal platforms (answer: No); `timeout-minutes` and `faulthandler_timeout` in CI.
+- `⛔` drew as a missing-glyph box with DejaVu only: a real UI bug. Marker is now `×`, with a test against missing-glyph boxes.
+- One unescaped `%` in `smoke_installer.py` help (3.14 rejects it); test builds every parser.
+- Docker full suites, per Strata: no hangs, but 3.13 root 31 failed, 3.13 non-root 24 failed, 3.14 root 34 failed; attributed to the container environment, NOT verified by me. CI decides.
+- Light review: 1339 passed + 4 skipped ×3; collection 1325 → 1343, none lost.
+- Leftovers: `ATE_ELEVATED=0` as real root makes `ate setup` skip permissions; `=1` as a normal user plus the flag turns the sandbox off. Both are deliberate acts, and documented as test seams, but they are production-visible.
