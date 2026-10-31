@@ -759,11 +759,12 @@ def write_report(
     target_dir = directory / uut_type
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    name = _sanitize_filename(f"{uut_type}_{serial}_{stamp}_{result}.html")
+    stem = _sanitize_filename(f"{uut_type}_{serial}_{stamp}_{result}")
+    name = f"{stem}.html"
     suffix = 2
-    while (target_dir / name).exists():
-        # Insert the next free "-N" before ".html" so an existing report is never overwritten.
-        stem = name[: -len(".html")]
+    # The PDF takes this name too, so a name is free only when neither file has it: an existing
+    # report of either format is never overwritten.
+    while (target_dir / name).exists() or (target_dir / name).with_suffix(".pdf").exists():
         name = f"{stem}-{suffix}.html"
         suffix += 1
 

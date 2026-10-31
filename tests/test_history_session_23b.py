@@ -153,6 +153,24 @@ def test_regenerate_html_only_is_synchronous(tmp_path: Path, app: object):
     assert done == []  # synchronous HTML path never fires on_done
 
 
+def test_repeated_regenerates_count_up_the_suffix_for_both_formats(tmp_path: Path, app: object):
+    """Regenerating five times gives <name>, -2, -3, -4, -5, each PDF beside its own HTML."""
+    store, _dir, ru = _record_open(tmp_path, app, DOC_FIELDS)
+    done: list[object] = []
+    s = HistorySession(store, config=_cfg(_dir))
+
+    htmls = []
+    for count in range(1, 6):
+        result = s.regenerate(ru, html=True, pdf=True, on_done=done.append)
+        htmls.append(Path(result["html"]))
+        assert _pump_until(app, lambda: len(done) == count), "the PDF helper never finished"
+
+    assert done == [None] * 5
+    base = htmls[0].stem
+    assert [p.name for p in htmls] == [f"{base}{s}.html" for s in ("", "-2", "-3", "-4", "-5")]
+    assert all(p.with_suffix(".pdf").exists() for p in htmls)
+
+
 def test_regenerate_html_and_pdf_fires_on_done_success(tmp_path: Path, app: object):
     """With the helper faked to write a valid PDF, regenerate starts it and reports success."""
     store, _dir, ru = _record_open(tmp_path, app, DOC_FIELDS)
