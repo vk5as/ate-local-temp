@@ -755,3 +755,11 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Docker full suites, per Strata: no hangs, but 3.13 root 31 failed, 3.13 non-root 24 failed, 3.14 root 34 failed; attributed to the container environment, NOT verified by me. CI decides.
 - Light review: 1339 passed + 4 skipped ×3; collection 1325 → 1343, none lost.
 - Leftovers: `ATE_ELEVATED=0` as real root makes `ate setup` skip permissions; `=1` as a normal user plus the flag turns the sandbox off. Both are deliberate acts, and documented as test seams, but they are production-visible.
+
+## CI fixes, batch 2 (merged 2026-10-31)
+- **Qt mismatch (product):** pip took PyQt6 6.12 with PyQt6-WebEngine 6.11; Windows could not load WebEngine (0xc0000139). Both banded `>=6.11,<6.12`; CI fails on a mismatch.
+- **Engine race (product):** an answer supplied before the step's ask was wiped by `reset()` at Attempt start and the run hung. Carried for the first Attempt only.
+- Fixtures wrote CRLF on Windows (74 `write_text` calls, tests only; production hashes bytes). Every modal self-dismisses headless (`src/ate/dialogs.py`); a headless mismatch starts the run and stores nothing.
+- CI: `-rfE --tb=short`, `faulthandler_exit_on_timeout`, 40 min on Windows.
+- Light review: 8 of 9 full runs clean on Linux (1358 passed + 4 skipped). **1 of 9 died with `Fatal Python error: Aborted`; no stack captured, cause unknown, not reproduced in 6 more runs.** Strata saw one earlier in `test_gui_launch_30a.py`. Open.
+- Unknown until Windows reports: 7 `test_abort_blocking.py` failures, 2 05b glyph tests. User: if this batch is not enough, the next fixer runs on Opus.
