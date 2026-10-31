@@ -815,3 +815,10 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 ## Abort timing relaxed (user, 2026-11-01)
 
 - Story 83: an abort **should** stop within 0.5 s and **must** stop within 10 s. Tests fail only past 10 s; past 0.5 s they report it without failing. This also settles 31e's open product question: a slow database write delaying an abort by a couple of seconds is acceptable, past 10 s it is not.
+
+## 32a — PyQt6 to PySide6 (merged 2026-11-01, CI and release run pending)
+
+- Strata implemented (462 steps, 2 compactions, no handoff although the rule asks for one). Review round 1: Strata MUST-FIX 2, Haiku 7. Round 2: Strata 3, Haiku 4 (overlapping). Both reworks by Opus.
+- Product change beyond the rename: an escaped slot exception no longer aborts, so `ate/exception_log.py` writes it to the per-launch log and shows one status-bar line. `RunEngine.run`'s guard still reports worker exceptions through the run's log and report.
+- `src` otherwise a pure rename. Shared `.venv` now has PySide6.
+- Left open: PySide6 notice prints the wheels' `/cgit/` URL; lupa reads "check upstream"; dependency licence files in the bundle unchecked; replacing Qt never tried; repo has no `LICENSE`; `ate _selftest` does not get the new hook; a broken abort in 13c busy-loop tests takes 133 s to fail.
