@@ -51,6 +51,7 @@ from .run_widgets import (
     StatusBar,
     StepEnabler,
     StepInputWidget,
+    BROKEN_MARKER,
     load_schedule_steps,
     _BROKEN_BG,
     _BROKEN_ERR,
@@ -1142,5 +1143,5 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.steps_options_stage.run_button.setEnabled(runnable and bool(project))
         if runnable:
             self.steps_options_stage.error_label.setText(
-                "" if project else "⛔ Project is required before a Test Run can start"
+                "" if project else f"{BROKEN_MARKER} Project is required before a Test Run can start"
             )

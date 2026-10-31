@@ -49,6 +49,7 @@ from .run_widgets import (
     StatusBar,
     StepEnabler,
     StepInputWidget,
+    BROKEN_MARKER,
     _BROKEN_ERR,
     _FAILED_BG,
     _HEADER_BG,
@@ -548,7 +549,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.start_button.setEnabled(runnable and bool(project) and self.state != SessionState.STARTED)
         if runnable:
             self.error_label.setText(
-                "" if project else "⛔ Project is required before a Test Run can start"
+                "" if project else f"{BROKEN_MARKER} Project is required before a Test Run can start"
             )
         else:
             self.error_label.setText("")

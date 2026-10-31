@@ -85,7 +85,7 @@ def _pick(screen, name):
                 list_widget.setCurrentItem(item)
                 return item
             continue
-        # A widget row paints its name on a label; the broken ones start with ⛔.
+        # A widget row paints its name on a label; the broken ones start with the picker's marker.
         for label in widget.findChildren(QLabel):
             if name in label.text():
                 list_widget.setCurrentItem(item)
