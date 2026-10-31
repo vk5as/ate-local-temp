@@ -1100,7 +1100,11 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         its step's inputs are announced, which is while that step runs. The mockup's `focusActive`
         puts the cursor in the input that is currently asking, which `activate` does. Nothing here
         decides whether the input is answerable — the session announced it, so the layout renders it.
+
+        The ask is also when the log is most worth reading: what the step logged before it blocked
+        is in the store now, and step_started may well have read the store before that.
         """
+        self._refresh_log()
         widget = self.input_widget(node_seq, index)
         if widget is None:
             return

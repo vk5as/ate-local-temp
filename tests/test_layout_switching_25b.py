@@ -383,6 +383,24 @@ def test_a_mid_run_switch_answers_the_input_in_the_new_layout(qapp, tmp_path, fa
     assert any("PASS" in row for row in step_rows), step_rows
 
 
+def test_the_staged_log_shows_what_the_step_logged_before_it_asked(qapp, tmp_path):
+    """Both layouts read the log at an ask. step_started can arrive before the step has logged
+    anything, so emptying the pane here stands in for that read having found nothing."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = add_logging_input_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    asked, _ = _pick_and_start(qapp, window, schedule)
+    assert _wait(qapp, lambda: any(a[2] == 1 for a in asked)), "the step is waiting for its input"
+    staged = window.staged_screen
+    staged.log_pane.clear()
+    seq, attempt, _index = next(a for a in asked if a[2] == 1)
+    window.session.input_asked.emit(seq, attempt, 1)
+    assert any("measuring before the Operator answers" in line for line in staged.log_pane.rendered_lines())
+    _finish(qapp, window)
+
+
 def test_the_hidden_layout_ignores_its_own_clicks(qapp, tmp_path, fake_pdf):
     """Controls on the layout that is not showing cannot touch the run."""
     env = write_ate_env(tmp_path)

@@ -7,7 +7,6 @@ rotates or deletes its log for a launch. No Qt, no mocks: the logger is plain fi
 """
 
 import glob
-import os
 import re
 from pathlib import Path
 
