@@ -10,19 +10,20 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive
-from tests._fixtures import scratch_directory
+from tests._fixtures import scratch_directory, wait_for_aborted_run
 
 
 def _drive_busy(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
     """Start a fresh engine for one schedule; request abort from this thread while step 1 runs.
 
-    Step 1 is an infinite busy loop, so once the worker enters it any abort lands mid-loop (the count
+    Step 1 is a busy loop far longer than the abort's 10 s bound (1e9 alone is 5.6 s here under the
+    count hook, which is why it is 1e10), so once the worker enters it any abort lands mid-loop (the count
     hook trips on its next check). The record is identical whether the hook fires mid-step or the flag
     was set just before the boundary: the running step becomes ERROR "Aborted by Operator" and every
     later step NOTRUN. Returns ``(store, run_row)``."""
@@ -46,18 +47,11 @@ def _drive_busy(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
         deadline = time.time() + 5.0
         while not captured.get("run_uuid") and time.time() < deadline:
             app.processEvents()
-        engine.request_abort()
-
         finished = threading.Event()
         engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
-        # The worker emits FINISHED on its own thread; state_changed is a queued signal, so it only
-        # reaches this (operator/main) thread once the event loop is pumped. Pump in small slices
-        # rather than blocking idle — a bare ``finished.wait`` never processes posted slots.
-        deadline = time.time() + 5.0
-        while not finished.is_set() and time.time() < deadline:
-            app.processEvents()
-            finished.wait(0.05)
-        assert finished.is_set(), "engine did not reach FINISHED within 5 s after abort"
+        t0 = time.monotonic()
+        engine.request_abort()
+        wait_for_aborted_run(app, finished, t0)
 
     return store, store.get_test_run(captured["run_uuid"])
 
@@ -89,13 +83,10 @@ def _nodes(store: RunStore, run_uuid: str):
 
 def test_abort_busy_loop_records_running_step_and_marks_rest_notrun(app: QCoreApplication) -> None:
     """Checkbox 2/13c — a busy loop is interrupted mid-step; the running step records ERROR 'Aborted by
-    Operator' and every later step NOTRUN, closing ABORTED / FAIL well within a bound."""
-    t0 = time.time()
+    Operator' and every later step NOTRUN, closing ABORTED / FAIL within story 83's bound (`_drive_busy`)."""
     store, row = _drive_busy(app, BUSY_SOURCE)
 
     assert row is not None
-    # Finished quickly: the busy loop never ran to completion.
-    assert time.time() - t0 < 5.0
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "ABORTED"
 
@@ -108,11 +99,9 @@ def test_abort_pcall_busy_loop_records_running_step_and_marks_rest_notrun(app: Q
     """Checkbox 2/13c — a pcall'd busy loop is interrupted too. The re-raising pcall wrapper turns the
     caught "aborted" back into an error, so it can't be swallowed; the running step records ERROR and
     later steps NOTRUN."""
-    t0 = time.time()
     store, row = _drive_busy(app, PCALL_BUSY_SOURCE)
 
     assert row is not None
-    assert time.time() - t0 < 5.0
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "ABORTED"
 
@@ -141,7 +130,7 @@ BUSY_SOURCE = """\
 return ScheduleParams("Busy schedule", "step 1 is an infinite busy loop")
   :setSchedule({
     StepParams("spin"):setStepNo("1.")
-      :setAction(function() for i=1,1e9 do end end),
+      :setAction(function() for i=1,1e10 do end end),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "should not run") end),
   })
@@ -151,7 +140,7 @@ PCALL_BUSY_SOURCE = """\
 return ScheduleParams("Pcall busy schedule", "step 1 pcalls an infinite busy loop")
   :setSchedule({
     StepParams("spin"):setStepNo("1.")
-      :setAction(function() local ok,_=pcall(function() for i=1,1e9 do end end) end),
+      :setAction(function() local ok,_=pcall(function() for i=1,1e10 do end end) end),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "should not run") end),
   })

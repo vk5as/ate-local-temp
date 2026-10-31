@@ -10,7 +10,7 @@ on it must fail as a Device failure does — through ``onError``, or as a raised
 import re
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ._fixtures import LoopbackPeer
 from .test_tcp_read_write import _run_with_peer, _step_message

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from ate.catalog import _search_chain, definition_mismatches, find_definitions, include_map, list_schedule_rows, module_map
 from ate.engine.lua_host import HostError, LuaHost

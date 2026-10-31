@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.catalog import find_definitions, include_map, module_map
 from ate.engine.lua_host import LuaHost

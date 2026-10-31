@@ -12,7 +12,7 @@ import sys
 import time
 
 import pytest
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from ate.devices.serial import SerialDriver
 from ate.engine.run_engine import RunEngine

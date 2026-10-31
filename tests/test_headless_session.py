@@ -16,7 +16,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QObject, QProcess, Qt
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
@@ -27,11 +27,11 @@ from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, fake_pdf_help
 # The real end-to-end PDF test needs QtWebEngineCore; if it can't import here the helper process
 # can never build its page, so skip that one test rather than fail the whole module.
 try:
-    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 
-    PYQT_WEBENGINE_IMPORT_ERROR = None
+    WEBENGINE_IMPORT_ERROR = None
 except Exception as _exc:  # noqa: BLE001 - any import failure means no real PDF rendering here
-    PYQT_WEBENGINE_IMPORT_ERROR = _exc
+    WEBENGINE_IMPORT_ERROR = _exc
 
 
 def _pump_until(predicate, *, deadline: float | None = None) -> bool:
@@ -282,7 +282,7 @@ def test_run_end_pdf_is_not_blocking(tmp_path, monkeypatch) -> None:
 
 def test_run_end_writes_real_pdf_report(tmp_path) -> None:
     """End-to-end with the real helper process; skipped unless QtWebEngineCore can import."""
-    if PYQT_WEBENGINE_IMPORT_ERROR is not None:
+    if WEBENGINE_IMPORT_ERROR is not None:
         pytest.skip("QtWebEngineCore unavailable for real PDF rendering")
 
     env = write_ate_env(tmp_path)

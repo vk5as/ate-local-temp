@@ -136,8 +136,8 @@ jobs:
           ldd --version | head -n 1 | tee dist/glibc-build.txt
 
       - name: Install the libraries PyInstaller's Qt hooks need
-        # The hooks for PyQt6.QtWebEngineCore collect QtWebEngineProcess, its .pak resources and the
-        # Qt platform plugins only if PyQt6 can be *imported* in the build environment. In a bare
+        # The hooks for PySide6.QtWebEngineCore collect QtWebEngineProcess, its .pak resources and the
+        # Qt platform plugins only if PySide6 can be *imported* in the build environment. In a bare
         # container the import fails on libGL/libglib, the hooks are skipped silently, and the
         # bundle ships a renderer that cannot start: `ate _pdf` then dies with "Could not find the
         # Qt platform plugin offscreen". A debian:stable container proved this (packaging/linux/
@@ -175,7 +175,7 @@ jobs:
           if-no-files-found: error
 
   # One smoke run per artifact, each in its own untouched Debian stable container: nothing is
-  # preinstalled, so apt-get resolving the .deb's Depends and pipx's PyQt6 finding libGL are real
+  # preinstalled, so apt-get resolving the .deb's Depends and pipx's PySide6 finding libGL are real
   # checks. The runner only hosts the container; the glibc the smoke script compares against is
   # Debian's, and the container runs as root, so `ate setup` really creates the ate group and sets
   # the ownership of /etc/ate and /var/lib/ate.

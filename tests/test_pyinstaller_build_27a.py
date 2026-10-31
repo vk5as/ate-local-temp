@@ -19,8 +19,10 @@ Two kinds of test here:
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._fixtures import executable_stub
+from tests._fixtures import executable_stub, stub_licence_notices
 
 REPO = Path(__file__).resolve().parent.parent
 SPEC = REPO / "packaging" / "pyinstaller" / "ate.spec"
@@ -38,8 +40,8 @@ BUILD_SCRIPT = REPO / "packaging" / "build_pyinstaller.py"
 
 # What a frozen bundle must carry, whatever platform or CPython builds it.
 REQUIRED_HIDDEN = {
-    "PyQt6.QtWebEngineCore",
-    "PyQt6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
     "lupa.lua55",
     "pyvisa_py",
     "pyvisa_py.tcpip",
@@ -88,7 +90,7 @@ def test_the_spec_bundles_qtwebengine_and_names_the_helper() -> None:
     ``QtWebEngineProcess`` lives.
     """
     text = SPEC.read_text(encoding="utf-8")
-    assert "PyQt6.QtWebEngineCore" in text and "PyQt6.QtWebEngineWidgets" in text
+    assert "PySide6.QtWebEngineCore" in text and "PySide6.QtWebEngineWidgets" in text
     entry = ENTRY.read_text(encoding="utf-8")
     assert "QtWebEngineProcess" in entry and "QTWEBENGINEPROCESS_PATH" in entry
 
@@ -170,7 +172,7 @@ def test_the_ticked_box_claims_only_what_was_built_here() -> None:
 def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> None:
     """A bundle with the WebEngine helper and no platform plugin has no Qt at all.
 
-    PyInstaller's Qt hooks only collect the plugins when PyQt6 can be imported in the build
+    PyInstaller's Qt hooks only collect the plugins when PySide6 can be imported in the build
     environment; in a container without libGL/libglib the import fails, the hooks are skipped, and
     the bundle ships `QtWebEngineProcess` and its .pak files while `_pdf` dies with "Could not
     find the Qt platform plugin". Checking the helper alone is not enough: the smoke check has to
@@ -194,22 +196,59 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "libexec" / ("QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")).write_bytes(b"ELF")
-    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_bytes(b"icu")
+    stub_licence_notices(internal)
+    (internal / "PySide6" / "Qt" / "libexec").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "libexec" / ("QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")).write_bytes(b"ELF")
+    (internal / "PySide6" / "Qt" / "resources").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
+    (internal / "PySide6" / "Qt" / "resources" / "icudtl.dat").write_bytes(b"icu")
 
     build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
     with pytest.raises(SystemExit) as caught:
         build._run_smoke(exe, "1.2.3")
     assert "platform plugin" in str(caught.value), f"the smoke check only looked at the helper: {caught.value}"
 
-    plugin = internal / "PyQt6" / "Qt6" / "plugins" / "platforms"
+    plugin = internal / "PySide6" / "Qt" / "plugins" / "platforms"
     plugin.mkdir(parents=True)
     (plugin / "libqoffscreen.so").write_bytes(b"ELF")
     lines = build._run_smoke(exe, "1.2.3")
     assert any("platform plugin" in line for line in lines), lines
+
+    # Qt and PySide6 are LGPL, so the bundle also carries the licence texts and the notice (32a).
+    # A bundle missing one is refused the same way a bundle missing a platform plugin is.
+    (internal / "licences" / "LGPL-3.0.txt").unlink()
+    with pytest.raises(SystemExit) as no_licence:
+        build._run_smoke(exe, "1.2.3")
+    assert "licence" in str(no_licence.value), no_licence.value
+
+
+def test_the_notice_generator_lists_every_runtime_dependency(tmp_path: Path) -> None:
+    """THIRD_PARTY_NOTICES.txt is read off the installed wheels, and the copyleft ones are named.
+
+    The point of generating it is that nothing is guessed: a dependency whose wheel states no
+    licence is reported as unstated rather than assumed MIT, and the LGPL Qt binding is called out
+    as copyleft so the notice that travels with the bundle says so."""
+    notices = _load_module(REPO / "packaging" / "licence" / "notices.py", "licence_notices")
+    text = notices.third_party_notices()
+    for name in ("pyside6-addons", "pyside6-essentials", "shiboken6", "lupa", "sqlalchemy", "jinja2", "pyserial", "pyvisa", "pyvisa-py"):
+        assert name in text.lower(), f"{name} is not in the notices: {text}"
+    assert "copyleft runtime libraries" in text and "pyside6-addons" in text.lower(), text
+    # Jinja2's wheel has no License field, but it does have a licence classifier, which is read.
+    assert re.search(r"jinja2 \S+ - BSD License: permissive", text), text
+    assert "markupsafe" in text.lower() and "typing-extensions" in text.lower().replace("_", "-"), (
+        f"a dependency of a dependency is in the bundle but not in the notices: {text}"
+    )
+    # lupa's wheel says "MIT style", which is not a licence this script can name: reported, not guessed.
+    assert re.search(r"licences to check upstream: .*lupa", text), text
+    assert "LGPL" in text, "the Qt binding's licence is not reported"
+    assert "Lua" in text, "the Lua lupa embeds is not mentioned"
+
+    qt_notice = notices.qt_notice()
+    assert "LGPL" in qt_notice and "source" in qt_notice.lower(), qt_notice
+    assert "replaced" in qt_notice.lower() or "replace" in qt_notice.lower(), "the notice never says Qt can be replaced"
+    for text_file in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        full = (REPO / "packaging" / "licence" / text_file).read_text(encoding="utf-8")
+        assert "GNU" in full and len(full) > 3000, f"{text_file} is not the licence text"
 
 
 def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
@@ -233,7 +272,7 @@ def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
 
 
 def test_the_frozen_helper_search_covers_both_platform_layouts(tmp_path: Path) -> None:
-    """PyQt6 keeps QtWebEngineProcess in Qt6/libexec on Linux and Qt6/bin on Windows.
+    """PySide6 puts QtWebEngineProcess in ``PySide6/Qt/libexec`` on Linux and in ``PySide6`` on Windows.
 
     The entry point points Qt at the bundled helper, so it has to find it in the layout the hooks
     collect into on the platform the bundle is built for — and in any other layout a Qt build
@@ -242,9 +281,9 @@ def test_the_frozen_helper_search_covers_both_platform_layouts(tmp_path: Path) -
     entry = _load_module(ENTRY, "ate_entry")
     for index, rel in enumerate(
         (
-            ("PyQt6", "Qt6", "bin", "QtWebEngineProcess.exe"),  # PyQt6 wheel, Windows
-            ("PyQt6", "Qt6", "libexec", "QtWebEngineProcess"),  # PyQt6 wheel, Linux
-            ("PyQt6", "Qt", "libexec", "QtWebEngineProcess"),  # PyQt6 before the Qt6 layout
+            ("PySide6", "QtWebEngineProcess.exe"),  # PySide6 hook, Windows: Qt sits in PySide6/
+            ("PySide6", "Qt", "libexec", "QtWebEngineProcess"),  # PySide6 hook, Linux
+            ("PySide6", "Qt", "bin", "QtWebEngineProcess.exe"),  # a Qt build that keeps it in bin
         )
     ):
         base = tmp_path / f"bundle{index}"
@@ -309,9 +348,9 @@ def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
     spec = _executed_spec()
     excluded = set(spec["excludes"])
     expected = {
-        "PyQt6.QtQml", "PyQt6.QtQuick", "PyQt6.QtQuickWidgets", "PyQt6.QtQuick3D",
-        "PyQt6.Qt3DCore", "PyQt6.Qt3DRender", "PyQt6.QtMultimedia", "PyQt6.QtMultimediaWidgets",
-        "PyQt6.QtBluetooth",
+        "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQuick3D",
+        "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+        "PySide6.QtBluetooth",
     }
     missing = sorted(expected - excluded)
     assert not missing, f"the spec stopped excluding {missing}"
@@ -319,12 +358,42 @@ def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
     used = set()
     for source in (REPO / "src" / "ate").rglob("*.py"):
         for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("PyQt6."):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("PySide6."):
                 used.add(node.module)
             elif isinstance(node, ast.Import):
-                used.update(alias.name for alias in node.names if alias.name.startswith("PyQt6."))
+                used.update(alias.name for alias in node.names if alias.name.startswith("PySide6."))
     clash = sorted(used & excluded)
     assert not clash, f"ATE imports {clash}, which the spec excludes"
+
+
+def test_the_spec_does_not_exclude_what_webengine_imports_itself() -> None:
+    """Nothing the WebEngine binding imports on its own may sit in the excludes list.
+
+    PyQt6's `QtWebEngineWidgets` never imported the `QtWebChannel` binding, so the list below was
+    safe with it. PySide6's reaches `PySide6.QtWebChannel` from inside the import, and no ATE
+    source line mentions it: with QtWebChannel excluded the frozen helper binary started, found
+    every .pak, and died on "could not import module 'PySide6.QtWebChannel'" (2026-11-01). ATE's own imports
+    are not enough to keep the list honest, so this asks the binding what it pulls in and checks
+    that none of it is excluded.
+    """
+    spec = _executed_spec()
+    excluded = set(spec["excludes"])
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import PySide6.QtWebEngineWidgets; "
+            "print(chr(10).join(sorted(m for m in sys.modules if m.startswith('PySide6.'))))",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    assert probe.returncode == 0, f"QtWebEngineWidgets would not import, so nothing was checked: {probe.stderr.strip()}"
+
+    pulled = {name for name in probe.stdout.split() if name.startswith("PySide6.")}
+    cut = sorted(pulled & excluded)
+    assert not cut, f"the spec excludes {cut}, which QtWebEngineWidgets imports: {sorted(pulled)}"
 
 
 # Build scratch that must not be left in the checkout by a run.
@@ -375,3 +444,167 @@ def test_the_frozen_build_builds_and_smoke_tests() -> None:
     # The build writes only under the work/dist directories it was given: dist/ and build/
     # are gitignored and must not be created in the checkout by a test run.
     assert before == _repo_build_state(), "the build left output in the checkout"
+
+
+def _notices_module():
+    return _load_module(REPO / "packaging" / "licence" / "notices.py", "licence_notices")
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        "Proprietary EULA: no redistribution; unlimited seats",  # "unlimited" holds "mit"
+        "Admit one; submitted under a commercial agreement",  # "admit" and "submitted" hold "mit"
+        "Not MIT",  # the word is there and means the opposite
+        "MIT style",
+        "MIT AND Proprietary",
+        "MPL-2.0",
+        "",
+        "Lesser General Public License v3 proprietary",
+        "GNU General Public License except for commercial use",
+        "Affero General Public License with extra terms",
+        "LGPL-proprietary",
+        "GPL-with-a-private-exception",
+        "MIT License (but not for you)",
+    ],
+)
+def test_the_classifier_reports_what_it_cannot_name(stated: str) -> None:
+    assert "check upstream" in _notices_module()._classify([stated] if stated else []), stated
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        "MIT",
+        "The MIT License",
+        "BSD",
+        "BSD-3-Clause",
+        "BSD License",
+        "Apache-2.0",
+        "Apache Software License",
+        "ISC License (ISCL)",
+        "PSF-2.0",
+        "Python Software Foundation License",
+        "MIT OR GPL-3.0-only",
+    ],
+)
+def test_the_classifier_names_permissive_licences(stated: str) -> None:
+    assert _notices_module()._classify([stated]).startswith("permissive"), stated
+
+
+def test_the_classifier_separates_lgpl_from_gpl_and_keeps_disagreements_open() -> None:
+    notices = _notices_module()
+    assert notices._classify(["LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"]).startswith("copyleft (LGPL)")
+    for classifier in (
+        "GNU Lesser General Public License v3 (LGPLv3)",
+        "GNU Lesser General Public License v3 or later (LGPLv3+)",
+        "GNU Lesser General Public License v2 or later (LGPLv2+)",
+        "GNU Library or Lesser General Public License (LGPL)",
+        "LGPL-2.1-or-later",
+        "LGPLv3+",
+    ):
+        assert notices._classify([classifier]).startswith("copyleft (LGPL)"), classifier
+    assert notices._classify(["GNU General Public License v3 or later (GPLv3+)"]).startswith("GPL with no LGPL")
+    assert notices._classify(["GNU Affero General Public License v3"]).startswith("GPL with no LGPL")
+    # GPL with no LGPL or permissive option is a question for the user, not a footnote.
+    assert "check upstream" in notices._classify(["GPL-3.0-only"])
+    assert "check upstream" in notices._classify(["AGPL-3.0-or-later"])
+    assert "check upstream" in notices._classify(["MIT", "GPL-3.0-only"]), "field and classifier disagree"
+    assert notices._classify(["MIT", "MIT License"]).startswith("permissive")
+
+
+def test_the_licence_is_read_from_the_classifier_when_no_field_states_it(monkeypatch) -> None:
+    notices = _notices_module()
+    wheels = {
+        "only-classifier": {"Classifier": ["Topic :: X", "License :: OSI Approved :: BSD License"]},
+        "pasted-text": {"License": ["The MIT License\n\nCopyright (c) someone\n\nPermission is hereby granted"], "Classifier": ["License :: OSI Approved :: MIT License"]},
+        "pasted-no-classifier": {"License": ["The MIT License\n\nCopyright (c) someone\n\nPermission is hereby granted"]},
+        "unknown": {"License": ["UNKNOWN"]},
+    }
+
+    class Metadata:
+        def __init__(self, fields: dict) -> None:
+            self.fields = fields
+
+        def get(self, key: str, default=None):
+            return (self.fields.get(key) or [default])[0]
+
+        def get_all(self, key: str):
+            return self.fields.get(key)
+
+    monkeypatch.setattr(notices.importlib.metadata, "metadata", lambda name: Metadata(wheels[name]))
+    assert notices._declared("only-classifier") == ["BSD License"]
+    assert notices._declared("pasted-text") == ["MIT License"], "a pasted licence text is not a licence name"
+    assert notices._declared("pasted-no-classifier") == ["The MIT License"]
+    assert "check upstream" in notices._classify([]) and notices._declared("unknown") == []
+
+
+def test_the_inventory_walks_the_whole_requirement_closure(monkeypatch) -> None:
+    """Everything a requirement pulls in, once, and nothing behind an extra or a false marker."""
+    notices = _notices_module()
+    requires = {
+        "ate": ["Top>=1", "Skipped; extra == 'dev'", "NeverHere; sys_platform == 'no-such-platform'", "WithExtra[fast]"],
+        "top": ["Dep_One==2", "top"],  # a cycle ends
+        "dep-one": ["Dep.Two"],
+        "dep-two": [],
+        "withextra": ["OnlyWithFast; extra == 'fast'", "NotThis; extra == 'slow'"],
+        "onlywithfast": [],
+    }
+
+    class Dist:
+        def __init__(self, name: str) -> None:
+            self.requires = requires[name]
+
+    def distribution(name: str):
+        key = notices.canonicalize_name(name)
+        if key not in requires:
+            raise notices.importlib.metadata.PackageNotFoundError(name)
+        return Dist(key)
+
+    monkeypatch.setattr(notices.importlib.metadata, "distribution", distribution)
+    assert notices._runtime_dependency_names() == ["dep-one", "dep-two", "onlywithfast", "top", "withextra"]
+
+
+def test_the_notice_gives_the_source_the_wheels_name_and_claims_no_compliance() -> None:
+    """A version, a source location read from the wheel, what the build does, and no legal verdict."""
+    notices = _notices_module()
+    text = notices.qt_notice()
+    version = importlib.metadata.version("PySide6-Addons")
+    urls = importlib.metadata.metadata("PySide6-Addons").get_all("Project-URL")
+    repository = next(entry.split(", ", 1)[1] for entry in urls if entry.startswith("Repository"))
+    assert repository in text and f"v{version}" in text, text
+    assert version in text
+    # A link nobody checked is worse than none: these were in the notice and were never real sources.
+    for invented in ("github.com/qt/pyside", "github.com/qt/pyside-addons", "qt.io/download-open-source"):
+        assert invented not in text, invented
+    lowered = " ".join(text.lower().split())
+    for claim in ("compliance", "complies", "compliant", "satisfies", "what the lgpl asks"):
+        assert claim not in lowered, f"the notice makes a legal claim: {claim!r}"
+    assert "separate" in lowered and "unmodified" in lowered and "replace" in lowered, text
+
+
+def test_the_notice_does_not_say_the_lua_source_is_in_the_wheel() -> None:
+    assert "source is inside" not in _notices_module().LUA_NOTE
+
+
+def test_the_inno_setup_source_carries_the_notices() -> None:
+    """The installer ships `_internal/licences` only because of the recursive wildcard entry."""
+    iss = (REPO / "packaging" / "windows" / "ate.iss").read_text(encoding="utf-8")
+
+    def carries(text: str) -> bool:
+        section = re.search(r"^\[Files\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+        assert section, "the .iss has no [Files] section"
+        for line in section.group(1).splitlines():
+            if not re.match(r'Source:\s*"\{#SourceDir\}\\\*"', line.strip()):
+                continue
+            excludes = re.search(r'Excludes:\s*"([^"]*)"', line)
+            names = excludes.group(1).lower() if excludes else ""
+            return "recursesubdirs" in line and not any(word in names for word in ("licen", "_internal", ".txt"))
+        return False
+
+    assert carries(iss), "the installer's [Files] does not carry _internal/licences"
+    # The check itself can fail: an exclude, or a wildcard that stops at the top directory.
+    assert not carries(iss.replace('Excludes: "ate.exe"', 'Excludes: "ate.exe,licences"'))
+    assert not carries(iss.replace("recursesubdirs ", ""))
+    delete = re.search(r"^\[InstallDelete\]\s*$(.*?)(?=^\[|\Z)", iss, re.M | re.S)
+    assert not delete or "licen" not in delete.group(1).lower(), "the installer deletes the notices"

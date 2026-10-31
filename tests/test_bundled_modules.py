@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication, Qt
+from PySide6.QtCore import QCoreApplication, Qt
 
 from ate import _version
 from ate.catalog import module_map, read_definition

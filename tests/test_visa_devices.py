@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 import pytest
 import pyvisa
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 from pyvisa import constants, errors
 from pyvisa_py.tcpip import TCPIPSocketSession
 

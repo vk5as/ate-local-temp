@@ -7,7 +7,7 @@ state keyed by ``(node_seq, attempt_no, index)``. Every change emits :attr:`valu
 GUI can refresh.
 
 Blocking delivery uses a per-index :class:`queue.Queue` rather than a :class:`threading.Condition`:
-the Condition's ``wait()`` deadlocks in this Qt 6.11 / PyQt6 6.11 build once an offscreen
+the Condition's ``wait()`` deadlocks in this Qt 6.11 / PySide6 6.11 build once an offscreen
 ``QApplication`` is present (a session-wide fixture pumps the event loop around every test), so the
 worker never wakes on ``notify_all()``. A plain queue has no such interaction with Qt's signal
 handling and still blocks-and-wakes correctly under the same conditions."""
@@ -19,7 +19,7 @@ import threading
 from typing import Any, Optional, Sequence
 
 from ..storage.store import _now_iso
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class OperatorInput(QObject):
@@ -29,10 +29,10 @@ class OperatorInput(QObject):
     this controller only stores/serves raw values and tracks which are waiting on a supply."""
 
     # Emitted whenever a value is supplied or a POLL click changes state, so the GUI refreshes.
-    values_changed = pyqtSignal()
+    values_changed = Signal()
     # Emitted the moment a blocking ``ATE.input(n)`` actually starts waiting — the exact instant
     # the n-th input becomes answerable (packet 10a review: only then is its widget live).
-    asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): 1-based index
+    asked = Signal(int, int, int)  # (node_seq, attempt_no, index): 1-based index
 
     def __init__(self) -> None:
         super().__init__()

@@ -4,33 +4,46 @@ The abort flag is now waitable (packet 13b): ATE.sleep waits on it, and a blocki
 get_raw slices its queue wait so the flag is observed within 50 ms. An abort requested while
 either is in flight raises "aborted" into Lua through the same path as the count hook (13c):
 the running step records ERROR "Aborted by Operator", every later step NOTRUN, and the run
-closes ABORTED / FAIL within a fraction of a second of request_abort(). Verified against a
-real lupa runtime and end-to-end through the QThread run engine into a real SQLite file —
-no mocks."""
+closes ABORTED / FAIL within story 83's bound of request_abort(): it should stop within 0.5 s (past
+that a test warns, and stays visible in CI's summary) and must stop within 10 s (past that it fails).
+Verified against a real lupa runtime and end-to-end through the QThread run engine into a real SQLite
+file — no mocks, but for the stalls the tests of the bound inject."""
 
 import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
-from PyQt6.QtCore import QCoreApplication
+import pytest
+from PySide6.QtCore import QCoreApplication
 
-from ate.engine.lua_host import _AteTable
+from ate.engine.lua_host import _AbortFlag, _AteTable
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
-from tests._fixtures import scratch_directory
+from tests._fixtures import ABORT_MUST_STOP_S, ABORT_SHOULD_STOP_S, SlowAbortWarning, scratch_directory, wait_for_aborted_run
 
 
-def _drive_abort(app: QCoreApplication, source: str, *, wait_input_asked: bool = False) -> tuple[RunStore, dict]:
+def _drive_abort(
+    app: QCoreApplication,
+    source: str,
+    *,
+    wait_input_asked: bool = False,
+    prepare: Callable[[RunStore, threading.Event, list], None] | None = None,
+    must_stop_s: float = ABORT_MUST_STOP_S,
+) -> tuple[RunStore, dict]:
     """Start a fresh engine for one schedule, abort it once its action is blocked in an ATE call, and
     return ``(store, run_row)``, asserting the abort's bound.
+
+    ``prepare(store, blocked, timeline)`` is for a test that decides itself when to abort, by setting
+    ``blocked`` from whatever it injected.
 
     The clock runs from ``request_abort()`` to the engine reaching FINISHED, read on the main thread
     (``time.monotonic()``). It starts only when the worker has shown it is blocked: inside ATE.sleep's
     wait on the abort flag, or, with ``wait_input_asked``, having announced a step input. So nothing a
     run does before its action starts, on any machine, is counted as abort latency, and whatever is
-    counted is what an Operator would wait for. A breach prints the worker's store calls, which tell a
-    stalled write from a late wake-up."""
+    counted is what an Operator would wait for. Past 10 s it fails and past 0.5 s it warns, each printing
+    the worker's store calls, which tell a stalled write from a late wake-up."""
     captured = {}
     blocked = threading.Event()
     timeline: list[tuple[float, str]] = []
@@ -63,6 +76,8 @@ def _drive_abort(app: QCoreApplication, source: str, *, wait_input_asked: bool =
             return result
 
         engine._abort_flag.wait, store._run = _wait, _run
+        if prepare is not None:
+            prepare(store, blocked, timeline)
 
         engine.start()
 
@@ -75,17 +90,10 @@ def _drive_abort(app: QCoreApplication, source: str, *, wait_input_asked: bool =
         t0 = time.monotonic()
         engine.request_abort()
 
-        # The worker emits FINISHED on its own thread; state_changed is a queued signal, so it only
-        # reaches this (operator/main) thread once the event loop is pumped. Pump in small slices
-        # rather than blocking idle.
-        while not finished.is_set() and time.monotonic() - t0 < 5.0:
-            app.processEvents()
-            finished.wait(0.05)
-        elapsed = time.monotonic() - t0
-        assert finished.is_set(), "engine did not reach FINISHED within 5 s after abort"
-        assert elapsed < 0.5, f"abort took {elapsed:.3f} s; must stop within 0.5 s; worker: " + ", ".join(
-            f"{at - t0:+.3f} s {what}" for at, what in timeline
-        )
+        try:
+            wait_for_aborted_run(app, finished, t0, must_stop_s=must_stop_s, timeline=timeline)
+        finally:
+            engine.wait(60_000)  # a failed bound still must not leave the worker writing to a removed directory
         app.processEvents()  # the uuid signal, if the wait above saw the action block first
         assert captured.get("run_uuid"), "run did not report its uuid"
 
@@ -157,7 +165,7 @@ def _posttest_outcome(store: RunStore, run_uuid: str) -> str:
 
 
 def test_abort_interrupts_ate_sleep_within_bound(app: QCoreApplication) -> None:
-    """Checkbox: an abort during ATE.sleep(30) ends the run ABORTED within 0.5 s of
+    """Checkbox: an abort during ATE.sleep(30) ends the run ABORTED within story 83's bound of
     request_abort(); the running step records ERROR "Aborted by Operator" and later steps NOTRUN."""
     store, row = _drive_abort(app, SLEEP_SOURCE)
 
@@ -172,7 +180,7 @@ def test_abort_interrupts_ate_sleep_within_bound(app: QCoreApplication) -> None:
 
 
 def test_abort_interrupts_blocked_ate_input_within_bound(app: QCoreApplication) -> None:
-    """Checkbox: an abort while ATE.input blocks also ends the run ABORTED within 0.5 s;
+    """Checkbox: an abort while ATE.input blocks also ends the run ABORTED within story 83's bound;
     the running step records ERROR "Aborted by Operator" and later steps NOTRUN."""
     store, row = _drive_abort(app, BLOCKED_INPUT_SOURCE, wait_input_asked=True)
 
@@ -184,6 +192,70 @@ def test_abort_interrupts_blocked_ate_input_within_bound(app: QCoreApplication) 
     assert nodes["1."]["result"] == "ERROR"  # the running input step
     assert _attempt_msg(store, row["run_uuid"], 0) == "Aborted by Operator"
     assert nodes["2."]["result"] == "NOTRUN"  # later steps never ran
+
+
+def _stall_in_the_commit(seconds: float) -> Callable[[RunStore, threading.Event, list], None]:
+    """Stall the worker inside the store call that writes ``LOGGED_BEFORE_SLEEP``, as a slow disk would."""
+
+    def prepare(store: RunStore, blocked: threading.Event, timeline: list) -> None:
+        real_insert = store.insert_log_lines
+
+        def insert_log_lines(run_uuid, seq, lines, **kwargs) -> None:
+            if any(line["text"] == LOGGED_BEFORE_SLEEP for line in lines):
+                timeline.append((time.monotonic(), f"store call stalled for {seconds} s"))
+                blocked.set()
+                time.sleep(seconds)
+            real_insert(run_uuid, seq, lines, **kwargs)
+
+        store.insert_log_lines = insert_log_lines
+
+    return prepare
+
+
+def test_abort_during_a_stalled_store_call_ends_the_run_and_warns(app: QCoreApplication) -> None:
+    """The window `_drive_abort`'s own clock never opens: ATE.sleep commits just before its wait, so an
+    abort can land inside a commit. It cannot cut one short, so a 2 s stall misses the 0.5 s aim, says
+    so with what the worker was doing, and still meets the 10 s requirement with a clean record."""
+    with pytest.warns(SlowAbortWarning, match=r"abort took \d\.\d+ s; should stop within 0\.5 s; worker: .*store call stalled") as seen:
+        store, row = _drive_abort(app, COMMIT_THEN_SLEEP_SOURCE, prepare=_stall_in_the_commit(2.0))
+
+    (warning,) = [w for w in seen if w.category is SlowAbortWarning]
+    elapsed = float(str(warning.message).split()[2])
+    assert 1.5 < elapsed < ABORT_MUST_STOP_S, f"the stall was not what the abort waited for: {warning.message}"
+    assert row["result"] == "FAIL" and row["end_reason"] == "ABORTED"
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["result"] == "ERROR" and nodes["2."]["result"] == "NOTRUN"
+    assert LOGGED_BEFORE_SLEEP in [line["text"] for line in store.log_lines(row["run_uuid"])], "the stalled write was lost"
+
+
+def test_a_stall_past_the_must_stop_bound_fails_and_the_bound_is_the_requirement(app: QCoreApplication) -> None:
+    """The bound can fail: the same stall outlasting a short injected bound does, naming what the
+    worker was doing. The default it stands in for is what story 83 says."""
+    with pytest.raises(AssertionError, match=r"must stop within 0\.3 s; worker: .*store call stalled"):
+        _drive_abort(app, COMMIT_THEN_SLEEP_SOURCE, prepare=_stall_in_the_commit(1.0), must_stop_s=0.3)
+    assert (ABORT_SHOULD_STOP_S, ABORT_MUST_STOP_S) == (0.5, 10.0)
+
+
+def test_abort_interrupts_a_busy_loop_with_no_ate_calls_within_bound(app: QCoreApplication, monkeypatch) -> None:
+    """Story 83's "even in a busy Lua loop". The clock starts inside the loop: the count hook reads the
+    flag once per 1000 instructions, so a thousand reads is more Lua than the whole schedule outside it."""
+    real_aborted = _AbortFlag.aborted.fget
+    reads: list[None] = []
+    in_loop: list[threading.Event] = []
+
+    def counted(flag: _AbortFlag) -> bool:
+        reads.append(None)
+        if len(reads) >= 1000 and in_loop:
+            in_loop[0].set()
+        return real_aborted(flag)
+
+    monkeypatch.setattr(_AbortFlag, "aborted", property(counted))
+    store, row = _drive_abort(app, BUSY_LOOP_SOURCE, prepare=lambda _store, blocked, _timeline: in_loop.append(blocked))
+
+    assert row["result"] == "FAIL" and row["end_reason"] == "ABORTED"
+    nodes = _nodes(store, row["run_uuid"])
+    assert nodes["1."]["result"] == "ERROR" and nodes["2."]["result"] == "NOTRUN"
+    assert _attempt_msg(store, row["run_uuid"], 0) == "Aborted by Operator"
 
 
 def test_small_sleep_completes_step(app: QCoreApplication, monkeypatch) -> None:
@@ -271,6 +343,29 @@ return ScheduleParams("Sleep schedule", "step 1 sleeps 30 s, step 2 would pass")
   :setSchedule({
     StepParams("sleep"):setStepNo("1.")
       :setAction(function() ATE.sleep(30) end),
+    StepParams("after"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "should not run") end),
+  })
+"""
+
+LOGGED_BEFORE_SLEEP = "committed just before the wait"
+
+COMMIT_THEN_SLEEP_SOURCE = f"""\
+return ScheduleParams("Commit schedule", "step 1 logs, so its sleep commits before it waits")
+  :setSchedule({{
+    StepParams("sleep"):setStepNo("1.")
+      :setAction(function() ATE.log(Log.INFO, "{LOGGED_BEFORE_SLEEP}"); ATE.sleep(30) end),
+    StepParams("after"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "should not run") end),
+  }})
+"""
+
+# Outlasts the 10 s bound by far (1e9 is 5.6 s here, under the count hook), and still ends if abort breaks.
+BUSY_LOOP_SOURCE = """\
+return ScheduleParams("Busy schedule", "step 1 spins and makes no ATE call")
+  :setSchedule({
+    StepParams("spin"):setStepNo("1.")
+      :setAction(function() for i=1,1e10 do end end),
     StepParams("after"):setStepNo("2.")
       :setAction(function() ATE.report(Result.PASS, "should not run") end),
   })

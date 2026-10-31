@@ -12,10 +12,10 @@ import time
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 from pytestqt.exceptions import capture_exceptions
 
 from ate.app import launch
@@ -1031,7 +1031,7 @@ def _window_shot(window) -> QImage:
 
 def _menu_shot(window) -> QImage:
     """The View menu open, with its Layout submenu, drawn on top of the window it belongs to."""
-    from PyQt6.QtGui import QPainter
+    from PySide6.QtGui import QPainter
 
     view = window.view_menu
     view.adjustSize()

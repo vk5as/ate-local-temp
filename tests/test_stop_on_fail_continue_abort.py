@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore

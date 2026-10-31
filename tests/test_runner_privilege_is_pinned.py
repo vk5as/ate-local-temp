@@ -24,6 +24,7 @@ import pytest
 from ate.app import _pdf_sandbox_dialog
 from ate.report import pdf
 from ate.report.pdf import PDF_SANDBOXED, pdf_sandbox_choice
+from tests._fixtures import assert_no_swallowed_exception
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -117,6 +118,7 @@ def test_an_elevated_offscreen_dialog_returns_in_a_fresh_process() -> None:
         timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
+    assert_no_swallowed_exception(proc.stderr)
     assert proc.stdout.strip() == "False False", (
         f"a headless ATE answered {proc.stdout.strip()!r} where it should answer its negative branch"
     )

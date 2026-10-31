@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.catalog import module_map, read_definition
 from ate.engine.run_engine import RunEngine

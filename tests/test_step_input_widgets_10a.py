@@ -24,10 +24,10 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6 import sip
-from PyQt6.QtCore import Qt
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import (
+import shiboken6
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLineEdit,
@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StepInputWidget, StagedRunScreen
+from tests._fixtures import assert_no_swallowed_exception
 
 #: The mockup's `.inp.inp-on` (line 54): background and left border, read off the pixels.
 ACTIVE_BG = (255, 246, 204)  # #fff6cc
@@ -179,10 +180,10 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6 import sip
-from PyQt6.QtCore import Qt
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+import shiboken6
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
@@ -229,7 +230,7 @@ screen.show()
 def answer(seq, index, value):
     """Type `value` into that step's line edit and click OK, whenever it is live."""
     widget = screen.run_view.input_widget(seq, index)
-    if widget is None or sip.isdeleted(widget) or widget.line_edit is None:
+    if widget is None or not shiboken6.isValid(widget) or widget.line_edit is None:
         return
     if widget.ok_button.isEnabled():
         widget.line_edit.setText(str(value))
@@ -257,7 +258,7 @@ QTest.qWait(150)
 app.processEvents()
 
 widgets = [w for ws in screen.run_view.input_widgets.values() for w in ws]
-alive = all(not sip.isdeleted(w) for w in widgets)
+alive = all(shiboken6.isValid(w) for w in widgets)
 print("prompts", prompts, "widgets", len(widgets), "alive", alive)
 if session._state != SessionState.FINISHED or not alive:
     print("run did not finish cleanly")
@@ -547,10 +548,10 @@ def test_the_answered_widget_survives_the_end_of_the_run(qapp, tmp_path):
     qapp.processEvents()
     QTest.qWait(50)
     qapp.processEvents()
-    assert not sip.isdeleted(widget), "the input widget was deleted when the run finished"
+    assert shiboken6.isValid(widget), "the input widget was deleted when the run finished"
     assert screen.run_view.input_widget(0, 1) is widget, "the finished run rebuilt a different widget"
     assert widget.line_edit.text() == "4", widget.line_edit.text()
-    assert not sip.isdeleted(widget.line_edit)
+    assert shiboken6.isValid(widget.line_edit)
 
 
 def test_an_out_of_range_integer_shows_the_error_and_is_not_submitted(qapp, tmp_path):
@@ -706,7 +707,7 @@ def test_a_poll_button_stays_live_for_the_whole_of_its_step(qapp, tmp_path):
     # Both steps have run: nothing may click a POLL any more.
     assert all(not b.isEnabled() for b in poll.choice_buttons), "the POLL stayed clickable after its step"
     assert all(not b.isEnabled() for b in later_poll.choice_buttons), "an unclosed POLL is still live"
-    assert not sip.isdeleted(poll) and not sip.isdeleted(later_poll)
+    assert shiboken6.isValid(poll) and shiboken6.isValid(later_poll)
 
     recorded = _recorded_inputs(session.store, session.run_uuid)
     assert (1, "POLL", "Not working") in recorded, recorded
@@ -890,6 +891,7 @@ def test_pause_with_input_rows_exits_cleanly_on_continue(qapp, tmp_path):
     SIGSEGV the process (exit 139). The pause must keep those widgets alive."""
     result = _run_pause_child("CONTINUE", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout
 
 
@@ -897,6 +899,7 @@ def test_pause_with_input_rows_exits_cleanly_on_retry(qapp, tmp_path):
     """RETRY reruns the failing step, re-asking its input: the retried Attempt's widgets stay alive."""
     result = _run_pause_child("RETRY", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout
 
 
@@ -904,4 +907,5 @@ def test_pause_with_input_rows_exits_cleanly_on_abort(qapp, tmp_path):
     """ABORT ends the run from the pause with the input rows still on screen."""
     result = _run_pause_child("ABORT", tmp_path)
     assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    assert_no_swallowed_exception(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout

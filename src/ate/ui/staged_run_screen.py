@@ -22,9 +22,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -258,7 +258,7 @@ class StepsOptionsStage(QWidget):
     def _on_check_toggled(self, item: QListWidgetItem, *_args: int) -> None:
         """A checkbox toggle reaches the session as ``toggle_node(row, checked)`` — no logic here.
 
-        PyQt6's ``itemChanged`` signal passes only the row, so the handler reads the row's new
+        PySide6's ``itemChanged`` signal passes only the row, so the handler reads the row's new
         check state and compares it against the state it last saw; flag re-syncs (set_checkable),
         same-state events and the load_steps re-sync are all ignored, so only a real toggle
         reaches the session. A locked box (a run in progress) has no toggle: the handler

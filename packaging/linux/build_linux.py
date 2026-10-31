@@ -22,7 +22,7 @@ text at all when there is none. That is the `Depends` list below, established by
 bundle in a clean `debian:stable` container (packaging/linux/docker_smoke.py), not by reading a
 manifest.
 
-The wheel is a different animal: it uses the container's own CPython and PyPI's PyQt6, so it needs
+The wheel is a different animal: it uses the container's own CPython and PyPI's PySide6, so it needs
 more system libraries than the bundle does. `WHEEL_SYSTEM_LIBS` is that list, kept here so the
 smoke run and the docs install the same set.
 """
@@ -53,7 +53,7 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+")
 # at all.
 #
 # That claim is only true of a bundle whose hooks actually ran, and only of the libraries the build
-# machine had installed: on a machine without libGL or libglib, PyInstaller's PyQt6 hooks import
+# machine had installed: on a machine without libGL or libglib, PyInstaller's PySide6 hooks import
 # nothing, collect nothing, and still write an executable. Such a bundle (99 files, 356 MB, built in a
 # bare debian:stable container on 2026-10-31) has no platform plugin at all and needs libglib, libdbus,
 # libxkbcommon, libxkbfile, libasound, libXtst, libXrandr, libXfixes, libXdamage and libXcomposite from
@@ -92,16 +92,21 @@ DEPENDS = (
     "fonts-dejavu-core",  # DejaVu Sans, the smallest font Debian ships that Chromium accepts
 )
 
-# The wheel uses the container's own CPython and PyPI's PyQt6/QtWebEngine, so the system libraries
+# The wheel uses the container's own CPython and PyPI's PySide6/QtWebEngine, so the system libraries
 # it needs are not the bundle's: PyPI's Qt is linked against a wider set of X and GL libraries than
-# the bundle's own Qt, and it carries no fonts either. Established in a fresh debian:stable
-# container by installing the wheel with pipx and then removing one package at a time: each entry
-# below makes `ate _selftest --run` die with "cannot open shared object file". libdrm, libxcb and
-# libxkbcommon come in as libgl1's and libegl1's own dependencies, so they are not repeated here;
-# libpulse, libpcsclite and the rest of the xcb family turned out not to be needed at all by a headless
-# report render. libnss3, libnspr4 and libgssapi-krb5-2 looked unneeded too, only because the container
-# that test ran in had poppler-utils, which pulls them in: the v0.1.0-rc1 wheel smoke, without it, died
-# on libnspr4.so, and with NSS installed a bare container dies next on libgssapi_krb5.so.2.
+# the bundle's own Qt, and it carries no fonts either. Re-derived on 2026-11-01 in a fresh
+# debian:stable container with `PySide6-Addons>=6.11,<6.12` (6.11.3, a manylinux_2_34 wheel, which
+# Debian stable's glibc 2.41 accepts): `ldd` over every .so in the wheel, then `apt-get install` of
+# this list, then `ate --allow-unsandboxed-pdf _selftest --run` — which came back
+# "run end-to-end: ok ... 65961 bytes PDF, with text". Everything else the wheel is linked against
+# (libX11, libXext, libdrm, libgbm, libfreetype, libexpat, libudev, libpng, libzstd, libbrotli) is
+# pulled in by apt as a dependency of a package named here, so naming it would only duplicate apt.
+# libdrm, libxcb and libxkbcommon come in as libgl1's and libegl1's own dependencies, so they are not
+# repeated here. The list ends with the six xcb libraries: with only the GL and WebEngine packages
+# installed, `QApplication()` under `xvfb-run` aborts — the wheel's `libqxcb.so` is linked against
+# libxcb-cursor, libxcb-icccm, libxcb-keysyms, libxcb-shape, libxcb-xkb and libxkbcommon-x11 and a
+# Station with a screen loads all six. A headless render never opens them, which is why they were not
+# needed before; libpulse, libpcsclite and the Wayland plugins turned out not to be needed at all.
 WHEEL_SYSTEM_LIBS = (
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0
     "libegl1",  # libEGL.so.1
@@ -119,6 +124,12 @@ WHEEL_SYSTEM_LIBS = (
     "libnss3",  # libnss3.so, libnssutil3.so, libsmime3.so: NEEDED by libQt6WebEngineCore.so.6
     "libnspr4",  # libnspr4.so, also NEEDED by libQt6WebEngineCore.so.6
     "libgssapi-krb5-2",  # libgssapi_krb5.so.2: NEEDED by libQt6Network.so.6
+    "libxcb-cursor0",  # the xcb platform plugin: `QApplication()` aborts without it (2026-11-01)
+    "libxcb-icccm4",
+    "libxcb-keysyms1",
+    "libxcb-shape0",
+    "libxcb-xkb1",
+    "libxkbcommon-x11-0",
     "fonts-dejavu-core",  # without a font the report PDF renders with no text in it at all
 )
 
@@ -142,7 +153,7 @@ def _verify_bundle(bundle: Path) -> None:
     """Refuse to package a bundle that cannot render a Test Report (packet 30d review).
 
     `build_pyinstaller.py --verify` checks the bundle for a Qt platform plugin, the WebEngine helper
-    and its resources. A bundle whose PyQt6 hooks collected nothing has no Qt at all and still has an
+    and its resources. A bundle whose PySide6 hooks collected nothing has no Qt at all and still has an
     executable in it: packaging it into a `.deb` ships that as ATE, and the only sign anything is
     wrong is an abort at the first PDF. This runs on a bundle handed in with `--dist` too, not just
     one this script built.

@@ -16,9 +16,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtWidgets import (
     QCheckBox,
     QLabel,
     QLineEdit,
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QTableWidget,
+    QWidget,
 )
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
@@ -601,12 +602,20 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     assert screen.table.table.item(other_row, COLUMNS.index("Result")).background().color().name().lower() == "#ffffff", "a step not paused is tinted"
     assert screen.status_bar.status_label.text() == "Paused"
 
+    # The header's phase at the instant the pause is answered. The pause's end reaches this session
+    # twice (once from choose(), once forwarded from the worker), and the second one's timing is the
+    # worker's, so this is about every phase seen at a prompt_answered, not about how many there are.
+    phases: list[str] = []
+    session.prompt_answered.connect(lambda *_seen: phases.append(screen.status_bar.status_label.text()))
     bar.continue_button.click()
     qapp.processEvents()
     assert answered == ["CONTINUE"]
     assert screen.table.banner.isVisible() is False
     assert screen.table.table.isRowHidden(prompt_row)
-    assert screen.status_bar.status_label.text() == "Running"
+    assert phases and set(phases) == {"Running"}, f"the header never went back to Running after the pause: {phases}"
+    # The end state too. The worker is already free, so it can legally have finished within this pump
+    # (seen about 1 run in 8), but it must never still read Paused.
+    assert screen.status_bar.status_label.text() in {"Running", "Finished"}, screen.status_bar.status_label.text()
     assert _wait_finished(qapp, session)
     assert screen.status_bar.status_label.text() == "Finished"
     assert screen.table.table.item(row, COLUMNS.index("Result")).text() == "FAIL"
@@ -728,7 +737,11 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
     panes = [screen.left_pane, screen.centre_pane, screen.right_pane]
     for pane in panes:
         groups: dict = {}
-        for widget in pane.findChildren((QLabel, QPushButton, QCheckBox, QLineEdit)):
+        # PySide6's findChildren takes one type, not a tuple of them: walk every widget in the
+        # pane and keep the four kinds this test looks at.
+        for widget in pane.findChildren(QWidget):
+            if not isinstance(widget, (QLabel, QPushButton, QCheckBox, QLineEdit)):
+                continue
             if not widget.isVisible():
                 continue
             groups.setdefault(_painter_of(widget, pane), []).append(widget)
@@ -1122,7 +1135,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
     ):
         path = R2_SHOTS / name
         assert path.exists(), name
-        from PyQt6.QtGui import QImage
+        from PySide6.QtGui import QImage
 
         image = QImage(str(path))
         assert image.width() == 1280 and image.height() == 800, name

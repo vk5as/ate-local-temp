@@ -345,10 +345,10 @@ def render_pdf(html_path: str, pdf_path: str, paper: str = "A4", unsandboxed: bo
     if _apply_sandbox_decision(unsandboxed):
         return 1
 
-    from PyQt6.QtCore import QMarginsF, QUrl, QTimer
-    from PyQt6.QtGui import QPageLayout, QPageSize
-    from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtCore import QMarginsF, QUrl, QTimer
+    from PySide6.QtGui import QPageLayout, QPageSize
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWebEngineCore import QWebEnginePage
 
     app = QApplication.instance() or QApplication(sys.argv)
     html_path = Path(html_path)

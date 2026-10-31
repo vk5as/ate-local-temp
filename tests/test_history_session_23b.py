@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.config import Config
 from ate.engine.run_engine import RunEngine

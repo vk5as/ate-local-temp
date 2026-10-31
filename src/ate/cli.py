@@ -209,7 +209,7 @@ def _selftest_checks() -> list[tuple[str, bool, str]]:
     # the PDF helper uses; QtWebEngineWidgets is only collected (its hook's attribute must be
     # set before the first QCoreApplication, so importing it here would fail in a test run).
     try:
-        from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+        from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 
         checks.append(("QtWebEngine", True, "QWebEnginePage importable"))
     except Exception as exc:
@@ -324,7 +324,7 @@ def _selftest_end_to_end(allow_unsandboxed_pdf: bool = False) -> tuple[str, bool
             encoding="utf-8",
         )
 
-        from PyQt6.QtCore import QCoreApplication
+        from PySide6.QtCore import QCoreApplication
 
         from .config import read_config
         from .report.pdf import pdf_helper_command, pdf_has_text, pdf_sandbox_choice

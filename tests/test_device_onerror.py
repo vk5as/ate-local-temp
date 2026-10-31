@@ -9,7 +9,7 @@ closed Device fails the same way, a second close succeeds, and a bad param never
 import re
 import socket
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ._fixtures import LoopbackPeer
 from .test_tcp_read_write import _run_with_peer, _step_message

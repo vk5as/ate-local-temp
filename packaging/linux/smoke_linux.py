@@ -13,7 +13,7 @@ and `python -m build --wheel` made the wheel, and after the workflow downloaded 
 One artifact per run, from a container nothing else has touched: the `.deb` is installed with
 `apt-get`, which proves its `Depends` resolve on Debian stable; the tarball is unpacked and
 `install.sh` run, then run again (an upgrade) and finally with `--uninstall`; the wheel is installed
-with `pipx`, which pulls PyQt6 and QtWebEngine from PyPI and needs the same GL/X libraries. Every
+with `pipx`, which pulls PySide6 and QtWebEngine from PyPI and needs the same GL/X libraries. Every
 kind then has to leave a Station behind: `/etc/ate/config.json`, the database it names,
 `ate db status` printing a schema version, `ate _selftest --run` running a Test Schedule, and
 `ate _selftest --scan <definitions>` scanning the shipped example Media Release with nothing broken
@@ -182,9 +182,9 @@ def runtime_libs() -> tuple[str, ...]:
 
 
 def wheel_libs() -> tuple[str, ...]:
-    """The system libraries PyPI's PyQt6 and QtWebEngine need — more than the bundle's own Qt.
+    """The system libraries PyPI's PySide6 and QtWebEngine need — more than the bundle's own Qt.
 
-    The wheel runs on the container's CPython with PyQt6 from PyPI, which is linked against a
+    The wheel runs on the container's CPython with PySide6 from PyPI, which is linked against a
     wider set of X, GL, NSS and font libraries than the frozen bundle carries. The list lives in
     `packaging/linux/build_linux.py` (`WHEEL_SYSTEM_LIBS`) so the smoke run and
     docs/building-from-source.md install the same set. It was established in a fresh
@@ -389,7 +389,7 @@ def install_tar(runner: Runner, station: Station, artifact: Path) -> tuple[str, 
 
 
 def install_wheel(runner: Runner, station: Station, artifact: Path) -> str:
-    """pipx installs the wheel; PyQt6 and QtWebEngine come from PyPI, so their system libraries must be there."""
+    """pipx installs the wheel; PySide6 and QtWebEngine come from PyPI, so their system libraries must be there."""
     apt(runner, "update")
     apt(runner, "install", "-y", "python3", "python3-venv", "pipx", *wheel_libs())
     result = runner.run(["pipx", "install", str(artifact)])
@@ -519,7 +519,7 @@ def run_smoke(kind: str, dist: Path, runner: Runner, station: Station, sample: P
             note("install.sh installed the bundle from the tarball and ran 'ate setup'")
         else:
             ate = install_wheel(runner, station, artifact)
-            note("pipx installed the wheel and pulled PyQt6 from PyPI")
+            note("pipx installed the wheel and pulled PySide6 from PyPI")
 
         check_ate_runs(runner, ate, expect_version)
         note("ate runs from where it was installed, printing the version the tag built")

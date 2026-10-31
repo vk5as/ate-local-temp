@@ -18,9 +18,9 @@ import math
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QPointF, Qt
-from PyQt6.QtGui import QColor, QFontMetrics, QMouseEvent
-from PyQt6.QtWidgets import QLabel, QWidget
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QMouseEvent
+from PySide6.QtWidgets import QLabel, QWidget
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.run_widgets import BROKEN_MARKER
@@ -561,9 +561,11 @@ def test_broken_rows_show_a_not_allowed_cursor(qapp, tmp_path):
     list_widget = _list(screen)
     for item in _broken_items(screen):
         widget = list_widget.itemWidget(item)
-        assert widget.cursor() == Qt.CursorShape.ForbiddenCursor, item.text()
+        # `cursor()` is a QCursor in both bindings; PyQt compares it straight against the enum,
+        # PySide6 does not, so read the shape.
+        assert widget.cursor().shape() == Qt.CursorShape.ForbiddenCursor, item.text()
         for label in widget.findChildren(QLabel):
-            assert label.cursor() == Qt.CursorShape.ForbiddenCursor, item.text()
+            assert label.cursor().shape() == Qt.CursorShape.ForbiddenCursor, item.text()
     for item in _usable_items(screen):
         assert list_widget.itemWidget(item) is None, item.text()
 

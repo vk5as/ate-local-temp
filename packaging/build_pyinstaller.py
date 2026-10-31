@@ -40,7 +40,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = REPO / "packaging" / "pyinstaller" / "ate.spec"
+NOTICES = REPO / "packaging" / "licence" / "notices.py"
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
+
+#: Every artifact that ships the bundle has to carry these: the two licence texts Qt and PySide6
+#: can be used under, the notice naming them and where their source is, and the inventory of
+#: runtime dependencies generated from the wheels the bundle was built with (packet 32a).
+LICENCE_FILES = ("LGPL-3.0.txt", "GPL-3.0.txt", "NOTICE-Qt-PySide6.txt", "THIRD_PARTY_NOTICES.txt")
 
 # A page small enough to render in a second; the smoke check only cares that the frozen
 # QWebEngine can load a file and print it.
@@ -115,9 +121,21 @@ def _version(python: Path) -> str:
     return _run([str(python), "-c", "from ate._version import __version__; print(__version__)"], env=env).stdout.strip()
 
 
-def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
+def _notices(python: Path, work: Path) -> Path:
+    """Generate the licence notices the bundle carries, from the wheels in the build venv.
+
+    Qt and PySide6 are LGPL, so a bundle that ships them has to say so and carry the texts
+    (packet 32a). Generating them here means the versions in the notice are the versions the
+    bundle actually holds, rather than a file someone remembered to update.
+    """
+    out = work / "bundle" / "licences"
+    _run([str(python), str(NOTICES), "--out", str(out)], cwd=work, timeout=300)
+    return out
+
+
+def _build(python: Path, dist: Path, work: Path, version_file: Path, notices: Path) -> Path:
     """Run PyInstaller and return the one-directory bundle (``dist/ate``)."""
-    env = dict(os.environ, ATE_BUILD_VERSION_FILE=str(version_file))
+    env = dict(os.environ, ATE_BUILD_VERSION_FILE=str(version_file), ATE_BUILD_NOTICES_DIR=str(notices))
     # PyInstaller is run from the work directory so its scratch never lands in the checkout.
     _run(
         [
@@ -144,8 +162,8 @@ def _build(python: Path, dist: Path, work: Path, version_file: Path) -> Path:
 def verify_bundle(exe: Path) -> list[str]:
     """Check that the bundle can actually render a Test Report, before anything ships it.
 
-    PyInstaller's PyQt6 hooks wrap their collection in `if pyqt6_library_info.version is not None:`:
-    when PyQt6 cannot be imported while PyInstaller is running — no libGL, no libglib, no X library —
+    PyInstaller's PySide6 hooks wrap their collection in `if pyside6_library_info.version is not None:`:
+    when PySide6 cannot be imported while PyInstaller is running — no libGL, no libglib, no X library —
     the version is None, the hooks collect nothing, and PyInstaller still writes the executable and
     reports success. That bundle has no Qt platform plugin, no `QtWebEngineProcess` and no WebEngine
     resources: `ate --version` prints fine, every `ate _pdf` dies at "Could not find the Qt platform
@@ -173,7 +191,7 @@ def verify_bundle(exe: Path) -> list[str]:
 
     if not plugins:
         raise SystemExit(
-            f"bundle check: no Qt platform plugin under {internal}: PyQt6 could not be "
+            f"bundle check: no Qt platform plugin under {internal}: PySide6 could not be "
             "imported while PyInstaller ran, so its hooks collected nothing and this bundle cannot "
             "start Qt at all. Install what Qt is linked against (libgl1, libegl1, libglib2.0-0t64, "
             "libX11, libXext, libxcb, libxkbcommon) or build on a machine that has them, and rebuild."
@@ -181,7 +199,7 @@ def verify_bundle(exe: Path) -> list[str]:
     if not helper:
         raise SystemExit(
             f"bundle check: no {helper_name} in the bundle: the QtWebEngine helper is not there, so a "
-            "Test Report PDF has nothing to render it. The PyQt6 hook collected part of Qt only."
+            "Test Report PDF has nothing to render it. The PySide6 hook collected part of Qt only."
         )
     if not paks or not icu:
         raise SystemExit(
@@ -189,10 +207,23 @@ def verify_bundle(exe: Path) -> list[str]:
             "the renderer has no ICU data and no web resources to load a page with."
         )
 
+    # Qt and PySide6 are LGPL: whoever receives the bundle has to be able to read that licence,
+    # see which Qt it is, and find the source (packet 32a). A bundle without them is not a release.
+    licences = internal / "licences"
+    missing = [name for name in LICENCE_FILES if not (licences / name).is_file()]
+    if missing:
+        raise SystemExit(
+            f"bundle check: no licence notices under {licences} (missing {', '.join(missing)}): "
+            "Qt and PySide6 ship under the LGPL, which requires the licence text, a notice naming "
+            "the version and where its source is, and the statement that Qt can be replaced. "
+            "packaging/build_pyinstaller.py writes them with packaging/licence/notices.py."
+        )
+
     return [
         f"qt platform plugins: {len(plugins)} files (one per platform Qt can open)",
         f"webengine helper: {helper[0].name}",
         f"webengine resources: {len(paks)} .pak files, {len(icu)} icudtl.dat",
+        f"licence notices: {len(LICENCE_FILES)} files under licences/",
     ]
 
 
@@ -295,9 +326,10 @@ def main(argv: list[str] | None = None) -> int:
     version_file = work / "bundle" / "version.txt"  # collected as ate/version.txt in the bundle
     version_file.parent.mkdir(parents=True, exist_ok=True)
     version_file.write_text(version, encoding="utf-8")
+    notices = _notices(python, work)  # the licence files the bundle carries (packet 32a)
 
     started = time.monotonic()
-    exe = _build(python, dist, work, version_file)
+    exe = _build(python, dist, work, version_file, notices)
     elapsed = time.monotonic() - started
     total, files = _size(dist / "ate")
     print(f"built {exe} in {elapsed:.1f}s: {files} files, {total / 1e6:.1f} MB")

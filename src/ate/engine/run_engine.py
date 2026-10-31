@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 from ..catalog import _search_chain, include_map
 from ..errors import ATEError
@@ -90,15 +90,15 @@ atexit.register(stop_live_engines)  # a worker running as the interpreter exits 
 class RunEngine(QThread):
     """Runs one Test Schedule on a worker thread and records it through the store."""
 
-    run_uuid_reported = pyqtSignal(str)  # the freshly generated run key, on start
-    state_changed = pyqtSignal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
-    input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
-    step_finished = pyqtSignal(int)  # node_seq: this step's Attempts are done, so its POLL inputs close
-    failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    run_uuid_reported = Signal(str)  # the freshly generated run key, on start
+    state_changed = Signal(RunStatus)  # IDLE -> RUNNING -> FINISHED, main thread
+    input_asked = Signal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    step_finished = Signal(int)  # node_seq: this step's Attempts are done, so its POLL inputs close
+    failure_prompt = Signal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
     # (node_seq, attempt_no, choice): the worker has taken the answer to the pause above and moved on.
-    prompt_answered = pyqtSignal(int, int, str)
-    action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
-    step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
+    prompt_answered = Signal(int, int, str)
+    action_started = Signal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
+    step_started = Signal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
 
     def __init__(
         self,
@@ -191,7 +191,7 @@ class RunEngine(QThread):
         # Stop-on-Fail failure pause (packet 12b). When set and a step fails, the worker blocks in
         # :meth:`_pause_for_operator` until choose() records a choice; every failure pauses. Pending pauses
         # are keyed by (node_seq, attempt_no) and delivered through plain queues — the same Qt 6.11 /
-        # PyQt6 6.11 offscreen deadlock that makes OperatorInput avoid a Condition means no
+        # PySide6 6.11 offscreen deadlock that makes OperatorInput avoid a Condition means no
         # threading.Condition here either; a queue blocks-and-wakes correctly under the fixture's
         # event-loop pump.
         self._pause_lock = threading.Lock()
@@ -777,8 +777,11 @@ class RunEngine(QThread):
         )
 
     def run(self) -> None:
-        """Run the schedule on the worker. An exception leaving a QThread's ``run`` aborts the whole
-        process under PyQt, taking the Operator's window with it, so it ends here instead."""
+        """Run the schedule on the worker. An exception leaving a QThread's ``run`` is swallowed by
+        the binding with only a printed message: PySide6 prints "Error calling Python override of
+        QThread::run()" and the thread simply ends, so nothing below would ever record the run as
+        INTERRUPTED and the screen would wait for a FINISHED that never comes. (Under PyQt6 the same
+        exception aborted the process.) It is caught here instead of being allowed to escape."""
         try:
             self._execute()
         except Exception:  # noqa: BLE001 - see above: nothing may leave this frame

@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 from lupa import LuaError
 
 from ate.engine.lua_host import ATE_RUN_READONLY, _RUN_FIELDS, LuaHost

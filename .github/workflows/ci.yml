@@ -23,7 +23,7 @@ jobs:
     # timeout instead of letting faulthandler print the stack that explains it.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 30 }}
     env:
-      # conftest.py builds the shared QApplication with no `platform=` kwarg (this PyQt6 build's
+      # conftest.py builds the shared QApplication with no `platform=` kwarg (this PySide6 build's
       # binding does not accept one), so Qt's offscreen platform has to come from the environment:
       # without it every test that needs `app` fails on a headless runner. Job level, so both the
       # Ubuntu and Windows matrix entries get it.
@@ -58,35 +58,41 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Check Qt and QtWebEngine are the same Qt
-        # PyQt6 6.12.0 pulls Qt 6.12, while PyQt6-WebEngine stops at 6.11 and drags in
-        # PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process is what killed the Windows
-        # runner: the WebEngine DLL resolves its entry points against Qt 6.11 DLLs that are not
-        # there, and Python reports "Windows fatal exception: code 0xc0000139"
-        # (STATUS_ENTRYPOINT_NOT_FOUND) while importing it. Fail here, in one line, rather than
-        # letting a third of the suite quietly skip because PDF rendering is unavailable.
+        # PySide6-Addons is the wheel that carries QtWebEngine, and it pins PySide6-Essentials and
+        # shiboken6 to the exact same version, so one Qt serves the whole app. If pip ever resolves
+        # those differently, or a runner's system Qt shadows the bundled one, QtWebEngine ends up
+        # loading a second Qt build in one process: Linux tolerates it until it does not, and
+        # Windows dies with "Windows fatal exception: code 0xc0000139" (STATUS_ENTRYPOINT_NOT_FOUND)
+        # the moment WebEngine is imported — the crash the first Windows run hit when pip put a Qt
+        # 6.12 core next to a Qt 6.11 WebEngine. Fail here, in one line, rather than letting a third
+        # of the suite quietly skip because PDF rendering is unavailable.
         # bash, because the Windows default (PowerShell) cannot parse the heredoc.
         shell: bash
         run: |
           python - <<'PY'
           import importlib.metadata as m
 
-          from PyQt6.QtCore import qVersion
+          from PySide6.QtCore import qVersion
 
           def band(value: str) -> tuple[int, int]:
               parts = value.split(".")
               return (int(parts[0]), int(parts[1]))
 
-          core, webengine = band(qVersion()), band(m.version("PyQt6-WebEngine-Qt6"))
-          print(f"PyQt6 {m.version('PyQt6')} / Qt runtime {qVersion()} "
-                f"/ PyQt6-WebEngine {m.version('PyQt6-WebEngine')} / WebEngine-Qt6 {m.version('PyQt6-WebEngine-Qt6')}")
-          if core != webengine:
+          addons, essentials, shiboken = (m.version(name) for name in ("PySide6-Addons", "PySide6-Essentials", "shiboken6"))
+          print(f"PySide6-Addons {addons} / PySide6-Essentials {essentials} / shiboken6 {shiboken} "
+                f"/ Qt runtime {qVersion()}")
+          if not addons == essentials == shiboken:
               raise SystemExit(
-                  f"Qt {core[0]}.{core[1]} and WebEngine's Qt {webengine[0]}.{webengine[1]} are "
-                  "different builds: PyQt6-WebEngine has no release for Qt "
-                  f"{core[0]}.{core[1]}, so PyQt6 must stay in the band WebEngine can reach."
+                  f"PySide6-Addons {addons}, PySide6-Essentials {essentials} and shiboken6 {shiboken} "
+                  "are not the same Qt: QtWebEngine would load a second Qt build in this process."
+              )
+          if band(qVersion()) != band(addons):
+              raise SystemExit(
+                  f"the Qt actually loaded is {qVersion()} but the bindings are {addons}: "
+                  "a system Qt is shadowing the one the wheel installed."
               )
           try:
-              from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+              from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
           except Exception as exc:
               raise SystemExit(f"QtWebEngine cannot be imported on this runner: {exc}")
           print("QtWebEngine imports")

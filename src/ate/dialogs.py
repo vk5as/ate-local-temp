@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QTimer
+from PySide6.QtCore import QTimer
 
 #: Qt platforms with no window server: nothing is ever drawn, so a dialog on them can never be
 #: answered. `offscreen` is what CI and every headless test run uses.

@@ -22,6 +22,8 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 from ate.engine.operator_input import OperatorInput
@@ -162,7 +164,7 @@ def report_qt_fatal(previous=None):
     every message for a report that an aborted run never prints: without this a dying CI job says
     nothing at all. The stream is a duplicate of the real stderr so that pytest's capture cannot
     swallow it (see open_fatal_stream). Anything but a fatal message goes to ``previous``, the handler this one replaced."""
-    from PyQt6.QtCore import QtMsgType
+    from PySide6.QtCore import QtMsgType
 
     open_fatal_stream()
 
@@ -1236,3 +1238,54 @@ def recording_pdf_helper(record: list, script: str = WRITES_PDF):
         return sys.executable, ["-c", script, str(pdf_path)], env
 
     return command
+
+
+#: The licence files a bundle has to carry (packet 32a): the two texts Qt and PySide6 can be used
+#: under, the notice naming them, and the generated inventory of runtime dependencies.
+LICENCE_NOTICES = ("LGPL-3.0.txt", "GPL-3.0.txt", "NOTICE-Qt-PySide6.txt", "THIRD_PARTY_NOTICES.txt")
+
+
+def stub_licence_notices(internal: Path) -> None:
+    """Write the licence notices into a stub bundle, so `verify_bundle` has something to accept."""
+    licences = internal / "licences"
+    licences.mkdir(parents=True, exist_ok=True)
+    for name in LICENCE_NOTICES:
+        (licences / name).write_text("stub notice", encoding="utf-8", newline="\n")
+
+
+#: Spec story 83 (user, 2026-11-01): an abort should stop within 0.5 s and must stop within 10 s.
+ABORT_SHOULD_STOP_S = 0.5
+ABORT_MUST_STOP_S = 10.0
+
+
+class SlowAbortWarning(UserWarning):
+    """An abort met the 10 s requirement and missed the 0.5 s aim. Shown in pytest's summary."""
+
+
+def wait_for_aborted_run(
+    app, finished: threading.Event, t0: float, *, must_stop_s: float = ABORT_MUST_STOP_S, timeline: Sequence[tuple[float, str]] = ()
+) -> float:
+    """Pump until ``finished``; hold the abort requested at ``t0`` (``time.monotonic()``) to story 83.
+
+    Past ``must_stop_s`` fails, past 0.5 s warns, each naming the time and the worker's ``timeline``,
+    which tells a stalled write from a late wake-up. Returns the seconds taken. The signal is queued,
+    so it only reaches this thread while the event loop is pumped."""
+    while not finished.is_set() and time.monotonic() - t0 < must_stop_s:
+        app.processEvents()
+        finished.wait(0.05)
+    elapsed = time.monotonic() - t0
+    worker = "worker: " + (", ".join(f"{at - t0:+.3f} s {what}" for at, what in timeline) or "no timeline kept")
+    assert finished.is_set() and elapsed < must_stop_s, f"abort took {elapsed:.3f} s; must stop within {must_stop_s} s; {worker}"
+    if elapsed > ABORT_SHOULD_STOP_S:
+        warnings.warn(SlowAbortWarning(f"abort took {elapsed:.3f} s; should stop within {ABORT_SHOULD_STOP_S} s; {worker}"), stacklevel=2)
+    return elapsed
+
+
+def assert_no_swallowed_exception(stderr: str) -> None:
+    """A child's exit code cannot show a slot exception: PySide6 prints it and carries on.
+
+    PyQt6 aborted the process on one, so a child test could rely on exit 0. Under PySide6 the
+    only trace a child leaves is on stderr: the traceback, and for a `QThread.run` override this
+    line as well."""
+    assert "Traceback" not in stderr, f"a slot raised in the child:\n{stderr[-2000:]}"
+    assert "Error calling Python override" not in stderr, f"a Qt override raised in the child:\n{stderr[-2000:]}"

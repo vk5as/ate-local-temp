@@ -1,7 +1,7 @@
 """Packet 29e: CI sets the offscreen Qt platform the suite depends on.
 
 `conftest.py` builds one `QApplication` for the whole session with an empty argument list — this
-PyQt6 build's binding does not accept a `platform=` kwarg — so Qt gets its offscreen platform from
+PySide6 build's binding does not accept a `platform=` kwarg — so Qt gets its offscreen platform from
 `QT_QPA_PLATFORM`. The workflow must set it for every matrix entry (Ubuntu and Windows), or every
 test that needs `app` fails on a runner with no display.
 """

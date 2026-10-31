@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 from ate.config import Config
 from ate.engine.run_engine import RunEngine
