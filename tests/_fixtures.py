@@ -683,7 +683,9 @@ class LoopbackPeer:
                 conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
             except OSError:
                 pass  # connection already gone; nothing to send
-        while self._running:
+        # To the connection's end, not to stop(): a thread starved until after stop() must still record
+        # what the device sent, and recv blocks until the end either way.
+        while True:
             try:
                 chunk = conn.recv(4096)
             except OSError:

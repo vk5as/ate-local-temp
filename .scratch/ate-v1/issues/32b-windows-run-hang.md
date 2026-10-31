@@ -77,11 +77,14 @@ Post-test Actions run after an abort by design (story 84), and a second abort en
 
 **Also seen, not changed.** `_selftest_checks` in `cli.py` closes pyvisa's shared `ResourceManager`. Run in-process after a Device open, it breaks the cached manager in `visa._manager`, which is how a new test first turned 30 VISA tests red. The CLI exits after its self-test, so only tests can hit it; `test_device_abort_32b` keeps its manager out of the cache.
 
-**A test race fixed on the way.** Two VISA tests read `peer.received` straight after the run, but the peer records it only when it sees the connection end. One hit `KeyError` once in 10 runs under load. The TCP tests already wait with `wait_for_disconnect`, and these two now do.
+**Two test races fixed on the way, both older than this packet, each seen once in 10 runs under load.**
+
+- Two VISA tests read `peer.received` straight after the run, but the peer records it only when it sees the connection end (`KeyError`). The TCP tests already wait with `wait_for_disconnect`, and these two now do.
+- `LoopbackPeer` stopped reading once `stop()` was called, so a handler thread starved until then recorded `b''` for bytes the device had sent (`test_lua_write_sends_raw_0xFF`). It now reads to the connection's end.
 
 **For the user: `PRAGMA synchronous`, left as it is.** See "Left open" above. `NORMAL` would remove the sync from most commits, so a stalled disk would delay runs and aborts far less. Its price is that a power cut can lose the last commits of a record that is otherwise crash-safe.
 
-- [x] New tests, the Device tests and the sixty-step test pass 10 times under load (6 busy loops on 3 cores); the slowest abort there, excluding the simulated stuck close, took 1.5 s, on a 200 MB write, against 0.5 s unloaded. Full suite `1512 passed, 4 skipped`.
+- [x] New tests, the Device tests and the sixty-step test pass 10 times under load (6 busy loops on 3 cores); the slowest abort there, excluding the simulated stuck close, took 1.7 s, on a 200 MB write, against 0.5 s unloaded. Full suite `1512 passed, 4 skipped`.
 
 Unproven until Windows CI runs: that the failure stays away, and what caused the stall. If it returns, the report's `store writes` line separates the readings: long or in-flight writes mean the disk, normal ones with the worker's stack elsewhere mean a fault this packet did not find.
 
