@@ -772,3 +772,10 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Light review: 1389 passed + 4 skipped ×3; collection 1362 → 1393, none lost.
 - **Known gap to fix:** when an exception ends a run, the traceback goes only to stderr, not the application log, and the run row stays open until the next start's recovery.
 - Unknown until CI: font fix, launcher stub, 64 KiB write timeout, strict delete, 3.14 cause, failures hidden behind WinError 32.
+
+## Windows CI fixes 2 (Opus; merged 2026-10-31)
+- CI 453896e: Linux green; Windows 3-4 failures, 49 skips.
+- Product: worker exception now logged to the app and Run logs, devices closed, run closed INTERRUPTED/FAIL, report written, Post-test Actions not run; an answer clears the prompt in both layouts at once; a closed session forwards no signals; staged layout reads the log at each ask; VISA refused vs timed out distinguished by a second connect.
+- Tests: TCP refused timeout 5 s (Windows refuses after ~2 s). 11 skips turned back on (`icacls`, rename check); 38 expected on Windows; `-rfEs` lists them.
+- Light review: 1400 passed + 4 skipped ×3, none lost.
+- Unknown until CI: the 11 re-enabled tests, `icacls`, VISA text on real pyvisa-py.
