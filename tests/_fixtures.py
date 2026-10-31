@@ -69,6 +69,31 @@ def remove_tree(path: Path, attempts: int = 10) -> None:
             time.sleep(0.2)
 
 
+def files_refusing_a_rename_under(root: Path) -> set[str]:
+    """Every file under ``root`` Windows will not rename because something holds it open.
+
+    Windows has no /proc to read, but SQLite and Python both open files without FILE_SHARE_DELETE, so
+    a rename fails with a sharing violation (WinError 32) exactly while a handle or mapping is live.
+    Any other refusal, such as the ACLs `ate setup` applies, says nothing about handles."""
+    held: set[str] = set()
+    for folder, _dirs, names in os.walk(root):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                os.rename(path, path + ".held-check")
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 32:
+                    held.add(path)
+            else:
+                os.rename(path + ".held-check", path)
+    return held
+
+
+def files_held_open_under(root: Path) -> set[str]:
+    """Every file this process holds under ``root``, by whichever means this OS can say."""
+    return files_refusing_a_rename_under(root) if sys.platform == "win32" else open_files_under(root)
+
+
 def open_files_under(root: Path) -> set[str]:
     """Every file this process holds open or mapped under ``root``, where the OS can say so (Linux).
 
@@ -1167,6 +1192,16 @@ def chmod_can_deny_access() -> bool:
     GitHub runner that happens to be privileged must not fail one."""
     geteuid = getattr(os, "geteuid", None)
     return os.name == "posix" and geteuid is not None and geteuid() != 0
+
+
+def deny_writes_command(path: Path) -> list[str]:
+    """Windows' version of ``chmod 0o555``: an explicit deny, which binds an administrator too."""
+    return ["icacls", str(path), "/deny", "*S-1-1-0:(OI)(CI)(WD,AD)"]
+
+
+def allow_writes_command(path: Path) -> list[str]:
+    """Undo :func:`deny_writes_command`, so the directory can be deleted."""
+    return ["icacls", str(path), "/remove:d", "*S-1-1-0"]
 
 
 def fake_pdf_helper(script: str):

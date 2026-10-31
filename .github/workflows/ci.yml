@@ -94,8 +94,8 @@ jobs:
 
       - name: Run tests
         # -v names each test as it finishes, so a runner that dies mid-test shows the last one it
-        # reached. -rfE prints the short summary of failures and errors at the end even when the
-        # run is long, and --tb=short keeps that summary readable. `--durations=20` reports the
+        # reached. -rfEs prints the short summary of failures, errors and skips (with each reason) at the end even
+        # when the run is long, and --tb=short keeps that summary readable. `--durations=20` reports the
         # slowest tests, which is how a hang is told apart from a merely slow suite.
         #
         # `faulthandler_timeout=300` makes pytest dump the traceback of every thread when a single
@@ -114,7 +114,7 @@ jobs:
         # process with __fastfail (0xC0000409), and the bare step reports only "exit code 1".
         shell: pwsh
         run: |
-          pytest -v -rfE --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
+          pytest -v -rfEs --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
           $code = $LASTEXITCODE
           "pytest exit code: {0} (0x{0:X8})" -f $code
           exit $code

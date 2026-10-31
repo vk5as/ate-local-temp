@@ -29,11 +29,13 @@ from ate.log import AppLog
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 from ate.ui import history_screen
-from tests._fixtures import open_files_under, write_ate_env
+from tests._fixtures import files_held_open_under, files_refusing_a_rename_under, write_ate_env
 
 REPO = Path(__file__).resolve().parents[1]
 
-needs_proc = pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="the OS cannot list a process's open files")
+needs_proc = pytest.mark.skipif(
+    sys.platform != "win32" and not Path("/proc/self/fd").is_dir(), reason="the OS cannot list a process's open files"
+)
 
 #: One step that passes, as a Test Schedule file.
 PASSING_SCHEDULE = (
@@ -87,10 +89,10 @@ def test_a_closed_store_holds_nothing_open_even_after_a_worker_thread_used_it(ap
     session.set_project("P")
     session.start()
     assert _pump_until(lambda: session.state == SessionState.FINISHED)
-    assert any(path.endswith("ate.db") for path in open_files_under(tmp_path)), "the check sees nothing"
+    assert any(path.endswith("ate.db") for path in files_held_open_under(tmp_path)), "the check sees nothing"
 
     session.close()
-    assert open_files_under(tmp_path) == set()
+    assert files_held_open_under(tmp_path) == set()
 
 
 @needs_proc
@@ -98,11 +100,11 @@ def test_the_check_sees_a_mapped_shm_and_a_plain_open_file(tmp_path):
     """The conftest leak check only means something if it can see each kind of handle."""
     store = RunStore(tmp_path / "a.db")
     store.close_interrupted_runs()
-    assert str(tmp_path / "a.db") in open_files_under(tmp_path)
+    assert str(tmp_path / "a.db") in files_held_open_under(tmp_path)
     store.close()
-    assert open_files_under(tmp_path) == set()
+    assert files_held_open_under(tmp_path) == set()
     with open(tmp_path / "plain.txt", "w", encoding="utf-8"):
-        assert str(tmp_path / "plain.txt") in open_files_under(tmp_path)
+        assert str(tmp_path / "plain.txt") in files_held_open_under(tmp_path)
 
 
 def test_a_closed_store_refuses_rather_than_reopening_its_file(tmp_path):
@@ -127,7 +129,7 @@ def test_db_migrate_leaves_the_database_closed(tmp_path, capsys):
         "database": {"type": "sqlite", "path": str(db)},
     }), encoding="utf-8", newline="\n")
     assert main(["--config", str(config), "db", "migrate", "--yes"]) == 0, capsys.readouterr().err
-    assert open_files_under(tmp_path) == set()
+    assert files_held_open_under(tmp_path) == set()
 
 
 @needs_proc
@@ -135,15 +137,36 @@ def test_setup_leaves_the_database_closed(tmp_path, capsys):
     from ate.cli import main
 
     assert main(["setup", "--root", str(tmp_path / "station")]) == 0, capsys.readouterr().err
-    assert open_files_under(tmp_path) == set()
+    assert files_held_open_under(tmp_path) == set()
 
 
 @needs_proc
 def test_a_closed_application_log_holds_nothing_open(tmp_path):
     log = AppLog(tmp_path / "logs")
-    assert open_files_under(tmp_path) == {str(log.path)}
+    assert files_held_open_under(tmp_path) == {str(log.path)}
     log.close()
-    assert open_files_under(tmp_path) == set()
+    assert files_held_open_under(tmp_path) == set()
+
+
+def test_a_sharing_violation_is_what_windows_calls_held_open(tmp_path, monkeypatch):
+    """The rename check counts only WinError 32, and leaves every file it probes where it was."""
+    (tmp_path / "held.db").write_text("x", encoding="utf-8")
+    (tmp_path / "acl.db").write_text("x", encoding="utf-8")
+    (tmp_path / "free.db").write_text("x", encoding="utf-8")
+    real_rename = os.rename
+
+    def rename(source, target):
+        if source.endswith("held.db"):
+            error = PermissionError(13, "in use")
+            error.winerror = 32
+            raise error
+        if source.endswith("acl.db"):
+            raise PermissionError(13, "access denied")
+        real_rename(source, target)
+
+    monkeypatch.setattr(os, "rename", rename)
+    assert files_refusing_a_rename_under(tmp_path) == {str(tmp_path / "held.db")}
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["acl.db", "free.db", "held.db"]
 
 
 def test_no_test_deletes_a_directory_its_store_may_still_hold():

@@ -4,7 +4,6 @@ An exception leaving the run engine used to reach stderr alone, with the row lef
 next launch's recovery closed it.
 """
 
-
 import time
 
 from PyQt6.QtWidgets import QApplication
