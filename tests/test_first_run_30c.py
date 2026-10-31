@@ -436,12 +436,30 @@ def test_rooted_setup_creates_the_definitions_directory(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("value,dismissed", [("1", True), ("true", True), ("yes", True), ("", False), ("0", False), ("false", False), ("no", False), ("off", False)])
 def test_auto_dismiss_seam_treats_falsy_values_as_unset(qapp, monkeypatch, value: str, dismissed: bool) -> None:
-    """``ATE_AUTO_DISMISS_DIALOG=""``/``"0"``/``"false"`` means unset, so the real dialog stays."""
+    """``ATE_AUTO_DISMISS_DIALOG=""``/``"0"``/``"false"`` means unset, so the real dialog stays.
+
+    The test pretends there is a display: with none (``offscreen``, which CI and every container
+    use) the box dismisses itself whatever the variable says, which is the next test."""
     scheduled: list[int] = []
+    monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
     monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
     monkeypatch.setenv("ATE_AUTO_DISMISS_DIALOG", value)
     ate_app._dismiss_if_headless(ate_app.QMessageBox())
     assert bool(scheduled) is dismissed
+
+
+def test_a_box_with_no_display_to_show_on_closes_itself(qapp, monkeypatch) -> None:
+    """A modal on an offscreen platform has no Operator, so it must not wait for one.
+
+    GitHub's Windows runners are administrators, so packet 30d's question is asked there, and
+    `exec()` on a box nothing is drawn on never returns: the first CI run sat in "Run tests"
+    until the job was killed."""
+    monkeypatch.delenv("ATE_AUTO_DISMISS_DIALOG", raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    scheduled: list[int] = []
+    monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
+    ate_app._dismiss_if_headless(ate_app.QMessageBox())
+    assert scheduled, "a headless ATE left a dialog open waiting for a click that can never come"
 
 
 # --- launch refusals in real subprocesses -------------------------------------------------------

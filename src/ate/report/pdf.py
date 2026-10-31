@@ -63,7 +63,16 @@ def pdf_has_text(pdf: bytes) -> bool:
     return False
 
 
-def _elevation() -> Optional[bool]:
+#: Force the privilege answer for this process and every helper it spawns. `conftest.py` sets it
+#: to 0 for every test: a GitHub Windows runner is an administrator and a container runs as root,
+#: so without it the 30d dialog opens in a test that meant to run as an ordinary user and blocks
+#: forever in `QMessageBox.exec()`. Unset means "ask the operating system".
+ELEVATION_ENV = "ATE_ELEVATED"
+_NOT_ELEVATED = ("0", "false", "no", "off")
+_ELEVATED = ("1", "true", "yes", "on")
+
+
+def _os_elevation() -> Optional[bool]:
     """True for root or an administrator, False for an ordinary user, None when it cannot be known.
 
     On Linux the renderer refuses to start as root at all: `ERROR:zygote_host_impl_linux.cc
@@ -85,6 +94,25 @@ def _elevation() -> Optional[bool]:
             return None
     geteuid = getattr(os, "geteuid", None)
     return geteuid is not None and geteuid() == 0
+
+
+def _elevation_override() -> Optional[bool]:
+    """The answer :data:`ELEVATION_ENV` gives, or None when it is unset or not a yes/no."""
+    forced = os.environ.get(ELEVATION_ENV, "").strip().lower()
+    if forced in _NOT_ELEVATED:
+        return False
+    if forced in _ELEVATED:
+        return True
+    return None
+
+
+def _elevation() -> Optional[bool]:
+    """This process's privilege, with :data:`ELEVATION_ENV` answering first.
+
+    A child helper inherits the environment, so the seam pins the answer for the parent and for
+    every `ate _pdf` it spawns; the operating system is only consulted when nothing was set."""
+    override = _elevation_override()
+    return override if override is not None else _os_elevation()
 
 
 def _is_elevated() -> bool:

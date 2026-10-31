@@ -138,8 +138,8 @@ def test_context_manager_closes_and_keeps_the_file(tmp_path):
 
 def test_unwritable_directory_refuses_to_open(tmp_path):
     """A directory ATE cannot write to refuses to open the log (not a silent no-op)."""
-    if os.geteuid() == 0:  # root bypasses permission bits; skip rather than fail
-        pytest.skip("running as root")
+    if os.name != "posix" or os.geteuid() == 0:  # no euid on Windows; root ignores the mode bits
+        pytest.skip("running as root, or on a platform where chmod is advisory")
 
     ro = tmp_path / "ro"
     ro.mkdir()
@@ -152,8 +152,8 @@ def test_a_log_directory_that_cannot_be_created_is_a_log_error(tmp_path):
     """Creating the log directory fails the same way: a :class:`LogError`, not the raw
     ``PermissionError`` the bare ``mkdir`` used to raise (packet 30c review). The launch layer
     catches :class:`LogError` and shows a dialog, so anything else is a traceback."""
-    if os.geteuid() == 0:
-        pytest.skip("running as root")
+    if os.name != "posix" or os.geteuid() == 0:  # chmod is advisory for root and on Windows
+        pytest.skip("cannot make a directory unreadable for this process")
 
     ro = tmp_path / "ro"
     ro.mkdir()

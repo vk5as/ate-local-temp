@@ -75,8 +75,8 @@ def test_missing_file_abort_refuses_to_start(tmp_path):
 
 def test_create_defaults_when_file_is_unwritable_refuses_showing_path(tmp_path):
     """If the default file cannot be written, startup is refused showing the path."""
-    if os.geteuid() == 0:  # root bypasses permission bits; skip rather than fail
-        pytest.skip("running as root")
+    if os.name != "posix" or os.geteuid() == 0:  # no euid on Windows; root ignores the mode bits
+        pytest.skip("running as root, or on a platform where chmod is advisory")
 
     ro = tmp_path / "ro"
     ro.mkdir()

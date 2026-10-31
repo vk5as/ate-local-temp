@@ -321,19 +321,32 @@ class MainWindow(QMainWindow):
                 pass
 
 
-def _dismiss_if_headless(box: QMessageBox) -> None:
-    """Auto-close a dialog when ``ATE_AUTO_DISMISS_DIALOG`` is set.
+#: Qt platforms with no window server: nothing is ever drawn, so a dialog on them can never be
+#: answered. `offscreen` is what CI and every headless test run uses.
+_HEADLESS_PLATFORMS = ("offscreen", "minimal")
 
-    The seam for headless subprocess tests (packet 30c): offscreen Qt still blocks in
-    ``exec()``, so tests that want to prove a refusal exits 1 rather than aborts need the
-    dialog to close on its own. It closes through ``accept()``, which clicks no button, so
-    ``clickedButton()`` is None and every prompt answers its *negative* branch: the
-    missing-config prompt aborts, the "abort the run and quit?" confirmation keeps the run
-    going, and an alert is acknowledged. ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"``
-    mean unset. Documented in ``docs/building-from-source.md``.
-    """
+
+def _has_no_display_to_answer() -> bool:
+    """True when Qt has no display to show a box on, so `exec()` would wait for no one."""
+    return os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in _HEADLESS_PLATFORMS
+
+
+def _dismiss_if_headless(box: QMessageBox) -> None:
+    """Close a dialog rather than block on an Operator who cannot see it.
+
+    Two ways in. ``ATE_AUTO_DISMISS_DIALOG`` is the explicit seam for headless subprocess tests
+    (packet 30c); and a platform with no window server (`QT_QPA_PLATFORM=offscreen`) is the case
+    GitHub's runners and every container are in: the 30d question, the missing-config prompt and
+    the close confirmation all reach `QMessageBox.exec()`, which never returns when nobody is
+    watching — that is what made the first Windows CI run hang in "Run tests".
+
+    Either way the box closes through ``accept()``, which clicks no button, so ``clickedButton()``
+    is None and every prompt answers its *negative* branch: the missing-config prompt aborts, the
+    "abort the run and quit?" confirmation keeps the run going, an unsandboxed PDF is skipped, and
+    an alert is acknowledged. ``""``, ``"0"``, ``"false"``, ``"no"`` and ``"off"`` mean unset.
+    Documented in ``docs/building-from-source.md``."""
     value = os.environ.get("ATE_AUTO_DISMISS_DIALOG", "").strip().lower()
-    if value and value not in ("0", "false", "no", "off"):
+    if (value and value not in ("0", "false", "no", "off")) or _has_no_display_to_answer():
         QTimer.singleShot(0, box.accept)
 
 

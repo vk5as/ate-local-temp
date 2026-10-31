@@ -41,6 +41,11 @@ from pathlib import Path
 
 import pytest
 
+if os.name != "posix":
+    # install.sh, dpkg-deb and /bin/sh do not exist on a Windows runner: the packaging these
+    # tests exercise is Linux-only, so running them there would fail for the wrong reason.
+    pytest.skip("the tarball's install.sh and the .deb are POSIX-only", allow_module_level=True)
+
 REPO = Path(__file__).resolve().parent.parent
 BUILD_LINUX = REPO / "packaging" / "linux" / "build_linux.py"
 BUILD_PYINSTALLER = REPO / "packaging" / "build_pyinstaller.py"

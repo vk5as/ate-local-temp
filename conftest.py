@@ -164,6 +164,21 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _runner_privilege_is_not_a_test_variable(monkeypatch) -> None:
+    """Pin "is ATE elevated?" to False for every test, on every runner.
+
+    A GitHub Windows runner is an administrator and a container runs as root, so the runner's own
+    privilege decides which PDF path a test takes (packet 30d): a root or admin process asks the
+    Operator before every Test Report PDF, and `QMessageBox.exec()` blocks forever offscreen. Every
+    test therefore starts as an ordinary user; one that wants to be privileged sets
+    ``ATE_ELEVATED=1`` (``ate.report.pdf.ELEVATION_ENV`), which also reaches a spawned `ate _pdf`
+    child through the inherited environment."""
+    from ate.report.pdf import ELEVATION_ENV
+
+    monkeypatch.setenv(ELEVATION_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _fake_pdf_helper(request, monkeypatch):
     """Every finished run with a config starts the PDF helper; outside the real end-to-end tests, run
     a trivial stand-in process instead of QWebEngine. Tests wanting other helper behaviour patch

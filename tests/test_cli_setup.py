@@ -301,6 +301,7 @@ def test_is_root_asks_windows_for_admin(monkeypatch):
 
     Patching only os.name and ctypes keeps this true on a Linux runner as well as on Windows.
     """
+    monkeypatch.delenv("ATE_ELEVATED", raising=False)  # conftest pins it; this test drives the probe
     monkeypatch.setattr(os, "name", "nt")
 
     _fake_ctypes(monkeypatch, 1)
@@ -312,12 +313,14 @@ def test_is_root_asks_windows_for_admin(monkeypatch):
 
 def test_is_root_is_false_when_the_windows_check_fails(monkeypatch):
     """No ctypes, no windll: never claim elevation we cannot prove."""
+    monkeypatch.delenv("ATE_ELEVATED", raising=False)
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setitem(sys.modules, "ctypes", types.ModuleType("ctypes"))
     assert _is_root() is False
 
 
 def test_is_root_still_reads_the_euid_on_posix(monkeypatch):
+    monkeypatch.delenv("ATE_ELEVATED", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
@@ -339,6 +342,7 @@ def test_an_elevated_windows_ate_applies_the_acl_grants(tmp_path, monkeypatch, c
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("ATE_ELEVATED", raising=False)  # conftest pins privilege; this test fakes it
     monkeypatch.setattr(sys, "platform", "win32")  # pretend this run is on Windows
     _fake_ctypes(monkeypatch, 1)  # elevated
     monkeypatch.setattr(ate_setup, "_current_platform", lambda: "windows")
@@ -364,6 +368,7 @@ def test_unprivileged_ate_still_prepares_without_the_acl_grants(tmp_path, monkey
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("ATE_ELEVATED", raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     _fake_ctypes(monkeypatch, 0)  # not elevated
     monkeypatch.setattr(ate_setup, "_current_platform", lambda: "windows")
