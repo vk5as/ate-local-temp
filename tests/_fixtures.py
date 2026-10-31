@@ -22,6 +22,8 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 from ate.engine.operator_input import OperatorInput
@@ -1249,6 +1251,34 @@ def stub_licence_notices(internal: Path) -> None:
     licences.mkdir(parents=True, exist_ok=True)
     for name in LICENCE_NOTICES:
         (licences / name).write_text("stub notice", encoding="utf-8", newline="\n")
+
+
+#: Spec story 83 (user, 2026-11-01): an abort should stop within 0.5 s and must stop within 10 s.
+ABORT_SHOULD_STOP_S = 0.5
+ABORT_MUST_STOP_S = 10.0
+
+
+class SlowAbortWarning(UserWarning):
+    """An abort met the 10 s requirement and missed the 0.5 s aim. Shown in pytest's summary."""
+
+
+def wait_for_aborted_run(
+    app, finished: threading.Event, t0: float, *, must_stop_s: float = ABORT_MUST_STOP_S, timeline: Sequence[tuple[float, str]] = ()
+) -> float:
+    """Pump until ``finished``; hold the abort requested at ``t0`` (``time.monotonic()``) to story 83.
+
+    Past ``must_stop_s`` fails, past 0.5 s warns, each naming the time and the worker's ``timeline``,
+    which tells a stalled write from a late wake-up. Returns the seconds taken. The signal is queued,
+    so it only reaches this thread while the event loop is pumped."""
+    while not finished.is_set() and time.monotonic() - t0 < must_stop_s:
+        app.processEvents()
+        finished.wait(0.05)
+    elapsed = time.monotonic() - t0
+    worker = "worker: " + (", ".join(f"{at - t0:+.3f} s {what}" for at, what in timeline) or "no timeline kept")
+    assert finished.is_set() and elapsed < must_stop_s, f"abort took {elapsed:.3f} s; must stop within {must_stop_s} s; {worker}"
+    if elapsed > ABORT_SHOULD_STOP_S:
+        warnings.warn(SlowAbortWarning(f"abort took {elapsed:.3f} s; should stop within {ABORT_SHOULD_STOP_S} s; {worker}"), stacklevel=2)
+    return elapsed
 
 
 def assert_no_swallowed_exception(stderr: str) -> None:

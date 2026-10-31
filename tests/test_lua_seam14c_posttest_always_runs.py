@@ -20,7 +20,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive, PRE_ERROR_POST_OK
-from tests._fixtures import scratch_directory
+from tests._fixtures import ABORT_MUST_STOP_S, scratch_directory, wait_for_aborted_run
 
 
 def _run_schedule(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -120,18 +120,11 @@ def _drive_abort(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
         deadline = time.time() + 5.0
         while not captured.get("run_uuid") and time.time() < deadline:
             app.processEvents()
-        engine.request_abort()
-
         finished = threading.Event()
         engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
-        # The worker emits FINISHED on its own thread; state_changed is a queued signal, so it only
-        # reaches this (operator/main) thread once the event loop is pumped. Pump in small slices
-        # rather than blocking idle — a bare ``finished.wait`` never processes posted slots.
-        deadline = time.time() + 5.0
-        while not finished.is_set() and time.time() < deadline:
-            app.processEvents()
-            finished.wait(0.05)
-        assert finished.is_set(), "engine did not reach FINISHED within 5 s after abort"
+        t0 = time.monotonic()
+        engine.request_abort()
+        wait_for_aborted_run(app, finished, t0)
 
     return store, store.get_test_run(captured["run_uuid"])
 
@@ -158,12 +151,11 @@ def _drive_abort_twice(app: QCoreApplication, source: str) -> tuple[RunStore, di
         deadline = time.time() + 5.0
         while not captured.get("run_uuid") and time.time() < deadline:
             app.processEvents()
-        t0 = time.time()
         engine.request_abort()
 
         # Wait until the running step is recorded ERROR "Aborted by Operator" — that proves we are
         # past the step loop and about to enter the Post-test phase.
-        deadline = time.time() + 5.0
+        deadline = time.time() + ABORT_MUST_STOP_S
         while time.time() < deadline:
             app.processEvents()
             conn = store._conn
@@ -176,14 +168,14 @@ def _drive_abort_twice(app: QCoreApplication, source: str) -> tuple[RunStore, di
         # Now request abort again, repeatedly, until the busy Post-test Action records "aborted".
         finished = threading.Event()
         engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
-        deadline = time.time() + 5.0
-        while time.time() < deadline and not finished.is_set():
+        # The Post-test Action's 1e9 Python calls outlast the bound by far, so only the abort ends it in time.
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < ABORT_MUST_STOP_S and not finished.is_set():
             engine.request_abort()
             app.processEvents()
             finished.wait(0.05)
 
-        assert finished.is_set(), "engine did not reach FINISHED within 5 s after the second abort"
-        assert time.time() - t0 < 5.0, "second abort did not land during the busy Post-test Action"
+        assert finished.is_set(), f"second abort did not end the busy Post-test Action within {ABORT_MUST_STOP_S} s"
 
     return store, store.get_test_run(captured["run_uuid"])
 
@@ -195,7 +187,7 @@ POSTTEST_AFTER_ABORT = """\
 return ScheduleParams("Posttest after abort", "a busy step; a Post-test Action that reports PASS")
   :setSchedule({
     StepParams("spin"):setStepNo("1.")
-      :setAction(function() for i=1,1e9 do end end),
+      :setAction(function() for i=1,1e10 do end end),
   })
   :setPostTestAction(function(passFail) ATE.log(Log.INFO, "teardown ran "..passFail) end)
 """
@@ -218,7 +210,7 @@ BUSY_POSTTEST = """\
 return ScheduleParams("Busy posttest", "a busy step; a busy Post-test Action that checks aborted()")
   :setSchedule({
     StepParams("spin"):setStepNo("1.")
-      :setAction(function() for i=1,1e9 do end end),
+      :setAction(function() for i=1,1e10 do end end),
   })
   :setPostTestAction(function(passFail)
     local n=0

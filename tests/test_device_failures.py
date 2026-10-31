@@ -110,31 +110,39 @@ def _at(line: dict) -> float:
     return datetime.fromisoformat(line["at"]).timestamp()
 
 
+#: How long a line waits for its drain in these tests, far past `_STAMP_TOLERANCE`, so a stamp taken at
+#: drain time, not emission, cannot pass (`_DRAIN_SLICE` alone is 0.05 s, inside any usable tolerance).
+_HOLD_BEFORE_DRAIN = 0.4
+#: The two clocks are read side by side here and in the drain, so what can separate them is a coarse
+#: clock (16 ms on an older Windows Python), `at`'s millisecond cut, and a rare preemption between reads.
+_STAMP_TOLERANCE = 0.2
+
+
 def _emissions(monkeypatch) -> dict[str, tuple[float, float]]:
-    """Wall-clock times just before and just after each line of text was logged, read on the worker.
+    """For each line of text, the monotonic time ``record_log`` recorded and the clocks' offset then.
 
     A line's ``at`` promises the moment the worker logged it (``record_log`` takes it, the drain only
     maps it to wall-clock), not that the worker got there on schedule: a loaded runner can reach a
-    line late, and the stamp is then rightly late too. So stamps are checked against when the line
-    really was logged, never against the time a sleep should have ended."""
+    line late, and the stamp is then rightly late too. So a stamp is checked against what was recorded,
+    which no lateness can move, never against the time a sleep should have ended. The worker then holds
+    each line back from its drain, which is the only way to tell an emission stamp from a drain stamp."""
     emitted: dict[str, tuple[float, float]] = {}
     real_record_log = LuaHost.record_log
 
     def _record_log(host: LuaHost, level, *args, **kwargs) -> None:
-        before = time.time()
         real_record_log(host, level, *args, **kwargs)
-        emitted[" ".join(str(a) for a in args)] = (before, time.time())
+        emitted[host.logs[-1][2]] = (host.log_times[-1], time.time() - time.monotonic())
+        time.sleep(_HOLD_BEFORE_DRAIN)
 
     monkeypatch.setattr(LuaHost, "record_log", _record_log)
     return emitted
 
 
 def _assert_stamped_when_emitted(line: dict, emitted: dict[str, tuple[float, float]]) -> None:
-    """``at`` lies within its emission, give or take 0.1 s: ``at`` is cut to the millisecond and the
-    drain's monotonic-to-wall offset comes from two clock reads the scheduler can separate."""
-    before, after = emitted[line["text"]]
-    assert before - 0.1 < _at(line) < after + 0.1, \
-        f"{line['text']!r} is stamped {_at(line) - before:+.3f}s off the time it was emitted"
+    """``at`` is what ``record_log`` recorded, on the wall clock."""
+    recorded, wall_offset = emitted[line["text"]]
+    off = _at(line) - (recorded + wall_offset)
+    assert abs(off) < _STAMP_TOLERANCE, f"{line['text']!r} is stamped {off:+.3f}s off the time record_log recorded"
 
 
 def _device_warnings(store: RunStore, ru: str) -> list[dict]:
@@ -701,6 +709,28 @@ def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: Q
     assert _at(first) < _at(warning) < _at(second), f"stamps must follow emission order: {lines!r}"
     lag = _at(warning) - peer.reset_at
     assert -0.05 < lag < 0.3, f"the WARNING must carry the failure time, it lags the reset by {lag:.3f}s"
+
+
+def test_a_logged_lua_boolean_is_stamped_under_the_text_lua_gave_it(app: QCoreApplication, monkeypatch) -> None:
+    """``record_log`` writes a value as Lua's tostring does, so `true`, not Python's `True`."""
+    emitted = _emissions(monkeypatch)
+    with scratch_directory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        path = Path(td) / "schedule.tslua"
+        path.write_text("""return ScheduleParams("x") :setSchedule({
+    StepParams("logs"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.INFO, true)
+        ATE.report(Result.PASS, "done")
+      end),
+  })""", encoding="utf-8", newline="\n")
+        engine = RunEngine(store, str(path))
+        captured = {}
+        engine.run_uuid_reported.connect(lambda ru: captured.setdefault("ru", ru))
+        _drive(engine, app)
+        (line,) = [ln for ln in store.log_lines(captured["ru"]) if ln["text"] == "true"]
+
+    _assert_stamped_when_emitted(line, emitted)
 
 
 def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCoreApplication, monkeypatch) -> None:
