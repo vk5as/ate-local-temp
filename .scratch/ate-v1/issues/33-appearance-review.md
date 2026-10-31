@@ -8,7 +8,7 @@
 
 **Blocked by:** none (review only)
 
-**Status:** ready-for-human once both reports are in
+**Status:** ready-for-human (both reports in; see `design-review/33-summary.md`)
 
 ## Brief for each reviewer
 
