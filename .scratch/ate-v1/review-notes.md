@@ -779,3 +779,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Tests: TCP refused timeout 5 s (Windows refuses after ~2 s). 11 skips turned back on (`icacls`, rename check); 38 expected on Windows; `-rfEs` lists them.
 - Light review: 1400 passed + 4 skipped ×3, none lost.
 - Unknown until CI: the 11 re-enabled tests, `icacls`, VISA text on real pyvisa-py.
+
+## Last CI fixes (Opus; merged 2026-10-31)
+- CI 81d9378: Linux 3.14 green; Linux 3.13 1 failure; Windows 1-2 failures; the 11 re-enabled tests pass; 38 Windows skips confirmed legitimate.
+- Product: report names compounded (`-2-3`, `-2-3-4`) on a third collision; now `-2`, `-3`. A kept PDF whose HTML was deleted could be overwritten; a name is free only if both are.
+- Tests: the sleep test times the real `ATE.sleep`; `_drive` has a 60 s wall-clock deadline and says what was outstanding. POLL-timeout cause is inferred (tick bound too short), not proven.
+- Light review: 1406 passed + 4 skipped ×3, none lost.
