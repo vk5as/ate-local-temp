@@ -15,6 +15,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
 
+from ate.engine.lua_host import _AteTable
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 from tests._fixtures import scratch_directory
@@ -171,17 +172,23 @@ def test_abort_interrupts_blocked_ate_input_within_bound(app: QCoreApplication) 
     assert nodes["2."]["result"] == "NOTRUN"  # later steps never ran
 
 
-def test_small_sleep_completes_step(app: QCoreApplication) -> None:
+def test_small_sleep_completes_step(app: QCoreApplication, monkeypatch) -> None:
     """A fractional ATE.sleep really waits and returns normally: the step passes, the run completes,
-    and the run takes at least that long longer than the same schedule sleeping 0 s (so a no-op or a
-    sleep that truncates fractions fails)."""
-    t0 = time.monotonic()
-    _drive_clean(app, SHORT_SLEEP_SOURCE.replace("ATE.sleep(0.05)", "ATE.sleep(0)"))
-    baseline = time.monotonic() - t0
-    t0 = time.monotonic()
+    and the call itself takes at least the time asked for (so a no-op or a sleep that truncates
+    fractions fails). The call is timed on the worker: two whole runs compared from this thread differ
+    by far more than the sleep on a Windows runner, the first one carrying the cold start."""
+    real_sleep = _AteTable.sleep
+    slept: list[float] = []
+
+    def _timed_sleep(table: _AteTable, seconds: float) -> bool:
+        t0 = time.monotonic()
+        result = real_sleep(table, seconds)
+        slept.append(time.monotonic() - t0)
+        return result
+
+    monkeypatch.setattr(_AteTable, "sleep", _timed_sleep)
     store, row = _drive_clean(app, SHORT_SLEEP_SOURCE.replace("ATE.sleep(0.05)", "ATE.sleep(0.4)"))
-    slept = time.monotonic() - t0
-    assert slept - baseline >= 0.3, (slept, baseline)
+    assert len(slept) == 1 and slept[0] >= 0.4, slept
 
     assert row is not None
     assert row["result"] == "PASS"
