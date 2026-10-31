@@ -16,8 +16,11 @@ e Every type is one ``input_value`` row — CHECKBOX stored as JSON — with the
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from ate.engine.operator_input import OperatorInput
 from ate.engine.run_engine import RunEngine, RunStatus
@@ -34,6 +37,16 @@ from ._fixtures import (
 )
 from tests._fixtures import scratch_directory
 
+DRIVE_DEADLINE_S = 60.0  # a run that never finishes fails loudly here instead of hanging
+
+SLOW_SCHEDULE = """\
+return ScheduleParams("Slow schedule", "a step that takes a while")
+  :setSchedule({
+    StepParams("wait"):setStepNo("1.")
+      :setAction(function() ATE.sleep(2); ATE.report(Result.PASS, "done") end),
+  })
+"""
+
 
 def _rows(conn, run_uuid: str) -> dict[int, tuple[str, str]]:
     """Return ``{input_index: (type, value_text)}`` recorded for a run."""
@@ -46,7 +59,14 @@ def _rows(conn, run_uuid: str) -> dict[int, tuple[str, str]]:
     }
 
 
-def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, values_by_index=None):
+def _drive(
+    app,
+    engine: RunEngine,
+    op: OperatorInput,
+    strategy=INPUTS_BLOCKING,
+    values_by_index=None,
+    deadline_s: float = DRIVE_DEADLINE_S,
+):
     """Start an unstarted ``engine`` and pump until FINISHED with a single ``input_asked`` handler.
 
     Returns ``(asked, run_uuid)`` where ``asked`` is the list of ``(seq, attempt_no, index)`` tuples
@@ -57,12 +77,13 @@ def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, 
     only after every POLL that step announced has been clicked: a POLL click never blocks the worker,
     so answering the blocking ask first would let the worker close the Attempt's input window while
     the click is still in flight (packet 29c review: that race made the POLL test flaky under load).
-    The pump is bounded in ticks, not sleeps, and the bound names what never arrived."""
+    The pump is bounded by the wall clock: a tick count says nothing about how long the run was given
+    (50,000 idle ticks are about 0.2 s on Linux, shorter than a whole run on a Windows runner). The bound
+    names what never arrived."""
     asked: list[tuple[int, int, int]] = []
     sink: dict[str, Any] = {}
     polls: list[tuple[int, int, int]] = []  # (node_seq, attempt_no, 0-based key) of every POLL asked
     held: list[tuple[int, Any]] = []  # blocking asks waiting for the POLL clicks to land
-    MAX_TICKS = 50_000  # a run that never finishes fails loudly here instead of hanging
 
     def _on_input_asked(seq, attempt_no, index):
         key = index - 1  # 0-based position into this step's declarations
@@ -82,20 +103,24 @@ def _drive(app, engine: RunEngine, op: OperatorInput, strategy=INPUTS_BLOCKING, 
     finished = threading.Event()
     engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
     engine.start()
-    ticks = 0
+    deadline = time.monotonic() + deadline_s
     while not finished.is_set():
         app.processEvents()
-        ticks += 1
         if held and all(op.poll_value(seq, attempt, key) is not None for seq, attempt, key in polls):
             for key, value in held:
                 op.supply_input(key, value)
             held.clear()
-        if ticks > MAX_TICKS:
+        if time.monotonic() > deadline:
             unclicked = [p for p in polls if op.poll_value(*p) is None]
-            raise TimeoutError(
-                f"run did not reach FINISHED in {ticks} pump ticks: "
-                f"POLL clicks never delivered {unclicked}, blocking asks never answered {[k for k, _ in held]}"
+            blocked = sorted(op._waiting)
+            message = (
+                f"run did not reach FINISHED in {deadline_s} s: asks announced {asked}, "
+                f"POLL clicks never delivered {unclicked}, blocking asks never answered {[k for k, _ in held]}, "
+                f"worker blocked in ATE.input on {blocked}"
             )
+            engine.stop_and_wait()  # the worker must not outlive the test that failed on it
+            raise TimeoutError(message)
+        finished.wait(0.002)  # pump in slices: a hot loop only takes the GIL from the worker
     return asked, sink["u"]
 
 
@@ -129,6 +154,33 @@ def test_poll_recorded_when_clicked(app):
     assert rows == {1: ("POLL", "clicked"), 2: ("PROMPT", "go")}
     # The worker read the POLL after the click landed, so the step's own Message carries the text.
     assert [a["msg"] for a in store.attempts(run_uuid)] == ["status clicked"]
+
+
+def test_a_run_outlasting_many_idle_ticks_is_not_called_stuck(app):
+    """How long a run may take is a matter of time, not of how fast this machine pumps: a run that
+    idles for 2 s (the old 50,000-tick bound was 0.2 s here) finishes and is recorded."""
+    store, run_uuid = _write_and_run(app, OperatorInput(), SLOW_SCHEDULE)
+    assert [a["pass_fail"] for a in store.attempts(run_uuid)] == ["PASS"]
+
+
+def test_a_stuck_run_fails_at_the_deadline_naming_what_was_outstanding(app, monkeypatch):
+    """A click that never lands leaves the step's blocking ask unanswered: the driver stops at its
+    wall-clock deadline, says what was outstanding, and leaves no worker behind."""
+    op = OperatorInput()
+    monkeypatch.setattr(op, "click_poll", lambda **_kwargs: None)
+    with scratch_directory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        schedule_path = Path(td) / "schedule.tslua"
+        schedule_path.write_text(POLL_INPUT, encoding="utf-8", newline="\n")
+        engine = RunEngine(store, str(schedule_path), operator_input=op)
+        with pytest.raises(TimeoutError) as caught:
+            _drive(app, engine, op, INPUTS_POLL, values_by_index={1: "go"}, deadline_s=1.0)
+        assert not engine.isRunning()
+    message = str(caught.value)
+    assert "in 1.0 s" in message
+    assert "POLL clicks never delivered [(0, 1, 0)]" in message
+    assert "blocking asks never answered [1]" in message
+    assert "worker blocked in ATE.input on [1]" in message
 
 
 # --- d: per-step announcement + blocking value recorded ------------------------
