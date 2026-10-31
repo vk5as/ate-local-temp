@@ -150,9 +150,9 @@ def test_a_closed_application_log_holds_nothing_open(tmp_path):
 
 def test_a_sharing_violation_is_what_windows_calls_held_open(tmp_path, monkeypatch):
     """The rename check counts only WinError 32, and leaves every file it probes where it was."""
-    (tmp_path / "held.db").write_text("x", encoding="utf-8")
-    (tmp_path / "acl.db").write_text("x", encoding="utf-8")
-    (tmp_path / "free.db").write_text("x", encoding="utf-8")
+    (tmp_path / "held.db").write_text("x", encoding="utf-8", newline="\n")
+    (tmp_path / "acl.db").write_text("x", encoding="utf-8", newline="\n")
+    (tmp_path / "free.db").write_text("x", encoding="utf-8", newline="\n")
     real_rename = os.rename
 
     def rename(source, target):
