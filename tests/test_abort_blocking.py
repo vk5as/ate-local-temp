@@ -21,22 +21,19 @@ from ate.storage.store import RunStore
 from tests._fixtures import scratch_directory
 
 
-def _drive_abort(
-    app: QCoreApplication,
-    source: str,
-    *,
-    pre_abort_s: float = 0.1,
-    wait_input_asked: bool = False,
-) -> tuple[RunStore, dict, float]:
-    """Start a fresh engine for one schedule; request an abort and return (store, run_row, elapsed).
+def _drive_abort(app: QCoreApplication, source: str, *, wait_input_asked: bool = False) -> tuple[RunStore, dict]:
+    """Start a fresh engine for one schedule, abort it once its action is blocked in an ATE call, and
+    return ``(store, run_row)``, asserting the abort's bound.
 
-    ``elapsed`` is wall-clock seconds from ``request_abort()`` to the engine reaching FINISHED
-    (measured with ``time.monotonic()`` on the main thread). ``wait_input_asked`` waits until the
-    worker has announced a step input, so the abort lands while the action is blocked in
-    ATE.input. An abort that lands at the step boundary instead of mid-call records the same
-    result, so the timing bound is not racing the schedule."""
+    The clock runs from ``request_abort()`` to the engine reaching FINISHED, read on the main thread
+    (``time.monotonic()``). It starts only when the worker has shown it is blocked: inside ATE.sleep's
+    wait on the abort flag, or, with ``wait_input_asked``, having announced a step input. So nothing a
+    run does before its action starts, on any machine, is counted as abort latency, and whatever is
+    counted is what an Operator would wait for. A breach prints the worker's store calls, which tell a
+    stalled write from a late wake-up."""
     captured = {}
-    input_asked = threading.Event()
+    blocked = threading.Event()
+    timeline: list[tuple[float, str]] = []
 
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
@@ -50,18 +47,31 @@ def _drive_abort(
         finished = threading.Event()
         engine.state_changed.connect(lambda status: finished.set() if status == RunStatus.FINISHED else None)
         if wait_input_asked:
-            engine.input_asked.connect(lambda *_args: input_asked.set())
+            engine.input_asked.connect(lambda *_args: blocked.set())
+        real_wait, real_run = engine._abort_flag.wait, store._run
+
+        def _wait(timeout: float | None = None) -> bool:
+            blocked.set()
+            woke = real_wait(timeout)
+            if woke:
+                timeline.append((time.monotonic(), "ATE.sleep woke"))
+            return woke
+
+        def _run(stmt) -> object:
+            result = real_run(stmt)
+            timeline.append((time.monotonic(), f"{type(stmt).__name__} {getattr(getattr(stmt, 'table', None), 'name', '?')} done"))
+            return result
+
+        engine._abort_flag.wait, store._run = _wait, _run
 
         engine.start()
 
         deadline = time.time() + 5.0
-        seen_asked = input_asked.is_set()
-        while (not captured.get("run_uuid") or (wait_input_asked and not seen_asked)) and time.time() < deadline:
+        while not blocked.is_set() and time.time() < deadline:
             app.processEvents()
-            seen_asked = input_asked.is_set()
-        assert captured.get("run_uuid"), "run did not report its uuid within 5 s"
+            blocked.wait(0.01)
+        assert blocked.is_set(), "the action did not block in an ATE call within 5 s"
 
-        time.sleep(pre_abort_s)  # let the worker reach the blocking ATE call
         t0 = time.monotonic()
         engine.request_abort()
 
@@ -71,9 +81,15 @@ def _drive_abort(
         while not finished.is_set() and time.monotonic() - t0 < 5.0:
             app.processEvents()
             finished.wait(0.05)
+        elapsed = time.monotonic() - t0
         assert finished.is_set(), "engine did not reach FINISHED within 5 s after abort"
+        assert elapsed < 0.5, f"abort took {elapsed:.3f} s; must stop within 0.5 s; worker: " + ", ".join(
+            f"{at - t0:+.3f} s {what}" for at, what in timeline
+        )
+        app.processEvents()  # the uuid signal, if the wait above saw the action block first
+        assert captured.get("run_uuid"), "run did not report its uuid"
 
-    return store, store.get_test_run(captured["run_uuid"]), time.monotonic() - t0
+    return store, store.get_test_run(captured["run_uuid"])
 
 
 def _drive_clean(app: QCoreApplication, source: str) -> tuple[RunStore, dict]:
@@ -143,10 +159,9 @@ def _posttest_outcome(store: RunStore, run_uuid: str) -> str:
 def test_abort_interrupts_ate_sleep_within_bound(app: QCoreApplication) -> None:
     """Checkbox: an abort during ATE.sleep(30) ends the run ABORTED within 0.5 s of
     request_abort(); the running step records ERROR "Aborted by Operator" and later steps NOTRUN."""
-    store, row, elapsed = _drive_abort(app, SLEEP_SOURCE)
+    store, row = _drive_abort(app, SLEEP_SOURCE)
 
     assert row is not None
-    assert elapsed < 0.5, f"abort took {elapsed:.3f} s; must stop within 0.5 s"
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "ABORTED"
 
@@ -159,10 +174,9 @@ def test_abort_interrupts_ate_sleep_within_bound(app: QCoreApplication) -> None:
 def test_abort_interrupts_blocked_ate_input_within_bound(app: QCoreApplication) -> None:
     """Checkbox: an abort while ATE.input blocks also ends the run ABORTED within 0.5 s;
     the running step records ERROR "Aborted by Operator" and later steps NOTRUN."""
-    store, row, elapsed = _drive_abort(app, BLOCKED_INPUT_SOURCE, wait_input_asked=True)
+    store, row = _drive_abort(app, BLOCKED_INPUT_SOURCE, wait_input_asked=True)
 
     assert row is not None
-    assert elapsed < 0.5, f"abort took {elapsed:.3f} s; must stop within 0.5 s"
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "ABORTED"
 
@@ -236,11 +250,11 @@ def test_nonnumber_sleep_argument_errors_step(app: QCoreApplication) -> None:
 
 
 def test_posttest_actions_run_after_abort(app: QCoreApplication) -> None:
-    """An abort during a step still lets the Post-test Action run (story 84): its row records ok."""
-    store, row, elapsed = _drive_abort(app, POSTTEST_SOURCE)
+    """An abort during a step still lets the Post-test Action run (story 84), within the abort's
+    bound: its row records ok."""
+    store, row = _drive_abort(app, POSTTEST_SOURCE)
 
     assert row is not None
-    assert elapsed < 0.5, f"abort took {elapsed:.3f} s; must stop within 0.5 s"
     assert row["result"] == "FAIL"
     assert row["end_reason"] == "ABORTED"
 

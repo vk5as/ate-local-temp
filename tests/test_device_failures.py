@@ -110,6 +110,33 @@ def _at(line: dict) -> float:
     return datetime.fromisoformat(line["at"]).timestamp()
 
 
+def _emissions(monkeypatch) -> dict[str, tuple[float, float]]:
+    """Wall-clock times just before and just after each line of text was logged, read on the worker.
+
+    A line's ``at`` promises the moment the worker logged it (``record_log`` takes it, the drain only
+    maps it to wall-clock), not that the worker got there on schedule: a loaded runner can reach a
+    line late, and the stamp is then rightly late too. So stamps are checked against when the line
+    really was logged, never against the time a sleep should have ended."""
+    emitted: dict[str, tuple[float, float]] = {}
+    real_record_log = LuaHost.record_log
+
+    def _record_log(host: LuaHost, level, *args, **kwargs) -> None:
+        before = time.time()
+        real_record_log(host, level, *args, **kwargs)
+        emitted[" ".join(str(a) for a in args)] = (before, time.time())
+
+    monkeypatch.setattr(LuaHost, "record_log", _record_log)
+    return emitted
+
+
+def _assert_stamped_when_emitted(line: dict, emitted: dict[str, tuple[float, float]]) -> None:
+    """``at`` lies within its emission, give or take 0.1 s: ``at`` is cut to the millisecond and the
+    drain's monotonic-to-wall offset comes from two clock reads the scheduler can separate."""
+    before, after = emitted[line["text"]]
+    assert before - 0.1 < _at(line) < after + 0.1, \
+        f"{line['text']!r} is stamped {_at(line) - before:+.3f}s off the time it was emitted"
+
+
 def _device_warnings(store: RunStore, ru: str) -> list[dict]:
     return [ln for ln in store.log_lines(ru) if ln["level"] == "WARNING" and ln["source"] == "device"]
 
@@ -645,11 +672,12 @@ return ScheduleParams("x") :setSchedule({{
 # --- Seam: schedule lines and device warnings share one timeline -----------------------------
 
 
-def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: QCoreApplication) -> None:
+def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: QCoreApplication, monkeypatch) -> None:
     """A line logged before a device failure is recorded before its WARNING, and one logged after
     it, after it — ``seq`` follows emission order — and every line carries the time it was emitted,
-    not the time the step ended. The peer resets on the write, 0.3 s after ``first``; ``second``
-    comes 0.6 s after the reset."""
+    not the time the step ended. The peer resets on the write, at least 0.3 s after ``first``;
+    ``second`` comes at least 0.6 s after the write, and the step runs on for 0.6 s after it."""
+    emitted = _emissions(monkeypatch)
     peer = _ManualPeer(reset_on_first_byte=True)
     try:
         store, ru = _run_with_peer(app, _step("""
@@ -658,6 +686,7 @@ def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: Q
         ATE.write(dev, {data = "go"})  -- the peer resets once it sees this
         ATE.sleep(0.6)
         ATE.log(Log.INFO, "second")
+        ATE.sleep(0.6)
         ATE.report(Result.PASS, "done")"""), peer.port)
     finally:
         peer.stop()
@@ -667,14 +696,17 @@ def test_seam_log_lines_and_device_warning_are_recorded_in_emission_order(app: Q
         f"seq order must be emission order: {[(ln['seq'], ln['text']) for ln in lines]!r}"
     first, warning, second = lines
     assert all(ln["node_seq"] == 0 and ln["attempt_no"] == 1 for ln in lines), f"all owned by the step: {lines!r}"
-    for line, expected in ((first, peer.reset_at - 0.3), (warning, peer.reset_at), (second, peer.reset_at + 0.6)):
-        assert abs(_at(line) - expected) < 0.1, \
-            f"{line['text']!r} is stamped {_at(line) - expected:+.3f}s off the time it was emitted"
+    _assert_stamped_when_emitted(first, emitted)
+    _assert_stamped_when_emitted(second, emitted)
+    assert _at(first) < _at(warning) < _at(second), f"stamps must follow emission order: {lines!r}"
+    lag = _at(warning) - peer.reset_at
+    assert -0.05 < lag < 0.3, f"the WARNING must carry the failure time, it lags the reset by {lag:.3f}s"
 
 
-def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCoreApplication) -> None:
+def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCoreApplication, monkeypatch) -> None:
     """Several ATE.log lines in one step, no device: recorded in the order logged, each stamped
-    with its own emission time (0.3 s apart), not one shared end-of-step time."""
+    with its own emission time (at least 0.3 s apart), not one shared end-of-step time."""
+    emitted = _emissions(monkeypatch)
     with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         path = Path(td) / "schedule.tslua"
@@ -697,5 +729,5 @@ def test_seam_log_lines_without_a_device_keep_their_order_and_own_times(app: QCo
 
     assert [ln["text"] for ln in lines] == ["a", "b", "c"], f"recorded order: {lines!r}"
     assert [ln["seq"] for ln in lines] == sorted(ln["seq"] for ln in lines)
-    gaps = [_at(lines[i + 1]) - _at(lines[i]) for i in range(2)]
-    assert all(abs(gap - 0.3) < 0.1 for gap in gaps), f"each line keeps its own time; gaps were {gaps!r}"
+    for line in lines:
+        _assert_stamped_when_emitted(line, emitted)
