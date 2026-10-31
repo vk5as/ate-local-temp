@@ -68,7 +68,9 @@ class HeadlessRunSession(QObject):
     input_answered = pyqtSignal(int, int, int, object)
     step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
     failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
-    # (node_seq, attempt_no, choice): that pause was answered and the worker moved on (packet 25b).
+    # (node_seq, attempt_no, choice): that pause is over. Sent when it is answered, so no layout shows
+    # an answered prompt, and again when the worker moves on, which keeps it behind a failure_prompt
+    # still queued when the answer was given (packet 25b).
     prompt_answered = pyqtSignal(int, int, str)
     action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
     step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
@@ -499,7 +501,9 @@ class HeadlessRunSession(QObject):
         choice and unblocks. Raises if there is no run to answer."""
         if self._engine is None:
             raise SessionError("cannot choose when no run is in progress")
-        self._engine.choose(choice)
+        answered = self._engine.choose(choice)
+        if answered is not None:
+            self.prompt_answered.emit(*answered, choice)
 
     def supply_input(self, node_seq: int, attempt_no: int, index: int, value: Any) -> None:
         """Answer one blocking Step Input, exactly as the Operator's widget does (ticket 10a).
@@ -632,6 +636,7 @@ class HeadlessRunSession(QObject):
             receive_buffer_bytes=self._config.receive_buffer_bytes,  # packet 17a: the per-device receive cap
             device_trace_enabled=self._config.device_trace_enabled,  # packet 17c: deviceTrace.enabled
             device_trace_max_bytes=self._config.device_trace_max_bytes,  # packet 17c: deviceTrace.maxBytes
+            on_error=self._log_error,  # called on the worker: AppLog takes its own lock
         )
 
         # Announce STARTED on this thread before the worker runs. The worker's queued
@@ -647,13 +652,13 @@ class HeadlessRunSession(QObject):
         # grabbing the engine after start() has already begun.
         self._engine.input_asked.connect(self._on_input_asked)
         # A step's Attempt loop ending closes its POLL widgets: the layout watches this signal.
-        self._engine.step_finished.connect(self.step_finished.emit)
+        self._engine.step_finished.connect(self._on_step_finished)
         # Forward the worker's Stop-on-Fail failure prompt so an operator (or a staged-run test) can
         # answer it through this session once it fires — same connection timing as input asks above.
         self._engine.failure_prompt.connect(self._on_failure_prompt)
         # The pause's end, not each layout's own button, is what clears a prompt UI (packet 25b):
         # whichever layout is showing, both see the run resume.
-        self._engine.prompt_answered.connect(self.prompt_answered.emit)
+        self._engine.prompt_answered.connect(self._on_prompt_answered)
         # Forward the worker's phase announcements (packet 14d) so the Run screen's status bar can
         # count Pre-/Post-test Actions and restart its current-item timer without polling the worker.
         self._engine.action_started.connect(self._on_action_started)
@@ -669,24 +674,40 @@ class HeadlessRunSession(QObject):
     def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
         """Forward the worker's ``input_asked`` so an operator (or test) can answer it through this session.
 
-        Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
-        self.input_asked.emit(node_seq, attempt_no, index)
+        Emitted on the owning thread; delivery rides the event loop like every other queued signal.
+        These forwards stop at ``close()``: what the worker queued before it stopped would otherwise
+        reach layouts that read a store that is closed by then."""
+        if not self._closed:
+            self.input_asked.emit(node_seq, attempt_no, index)
 
     def _on_failure_prompt(self, node_seq: int, attempt_no: int) -> None:
         """Forward the worker's Stop-on-Fail failure prompt so an operator (or test) can answer it.
 
         Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
-        self.failure_prompt.emit(node_seq, attempt_no)
+        if not self._closed:
+            self.failure_prompt.emit(node_seq, attempt_no)
+
+    def _on_step_finished(self, node_seq: int) -> None:
+        """Forward the end of a step's Attempts: its POLL widgets close on this."""
+        if not self._closed:
+            self.step_finished.emit(node_seq)
+
+    def _on_prompt_answered(self, node_seq: int, attempt_no: int, choice: str) -> None:
+        """Forward the worker moving on from a pause, whoever answered it."""
+        if not self._closed:
+            self.prompt_answered.emit(node_seq, attempt_no, choice)
 
     def _on_action_started(self, phase: str, done: int, total: int) -> None:
         """Forward the worker's Pre-/Post-test Action announcement for the status bar (packet 14d).
 
         ``phase`` is "pre" or "post"; ``done`` is the 1-based position of the Action that has just
         begun within its phase and ``total`` how many Actions that phase has."""
-        self.action_started.emit(phase, done, total)
+        if not self._closed:
+            self.action_started.emit(phase, done, total)
 
     def _on_step_started(self, node_seq: int) -> None:
         """Forward the worker's Test Step start so the status bar restarts its current-item timer.
 
         Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
-        self.step_started.emit(node_seq)
+        if not self._closed:
+            self.step_started.emit(node_seq)

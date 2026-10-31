@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
+from pytestqt.exceptions import capture_exceptions
 
 from ate.app import launch
 from ate.run_session.headless import SessionState
@@ -659,17 +660,18 @@ def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_
     bar = three.table._prompt_bars[prompts[0][0]]
     assert bar.isVisible()
     bar.continue_button.click()
-    qapp.processEvents()
-    assert _wait(qapp, lambda: not window.session.pause_pending()), "the pause never resumed"
-    assert window.session.state == SessionState.STARTED, "the run is still up"
 
-    # Both layouts say the run is running again: no bar, no banner, no "Paused". The choice leaves
-    # the pause at once; the worker still has to wake and announce it, so that takes a moment.
-    assert _wait(qapp, lambda: not staged.run_view.failure_prompt_bar.isVisible()), "the hidden layout kept its prompt bar"
+    # Both layouts say the run is running again: no bar, no banner, no "Paused". No event has been
+    # pumped, so this is the answer itself clearing them, not the worker's later announcement.
+    # isHidden, because isVisible is False for anything on a layout that is not showing.
+    assert not window.session.pause_pending(), "the pause never resumed"
+    assert staged.run_view.failure_prompt_bar.isHidden(), "the hidden layout kept its prompt bar"
     assert staged._failed_row is None, "the hidden layout still highlights the paused step"
     assert three.table.banner.isVisible() is False
     assert three.status_bar.status_label.text() == "Running"
     assert staged.run_view.status_bar.status_label.text() != "Paused"
+    qapp.processEvents()
+    assert window.session.state == SessionState.STARTED, "the run is still up"
 
     window.staged_layout_action.trigger()
     qapp.processEvents()
@@ -849,10 +851,71 @@ def test_a_hidden_three_pane_layouts_prompt_and_abort_answer_nothing(qapp, tmp_p
     assert window.session.state == SessionState.STARTED, "the hidden layout ended the run"
 
     staged.run_view.failure_prompt_bar.continue_button.click()
-    qapp.processEvents()
-    assert _wait(qapp, lambda: not window.session.pause_pending()), "the visible layout did not resume the run"
-    assert three._paused_seq is None and three.table.banner.isVisible() is False, "the hidden layout kept the pause"
+    assert not window.session.pause_pending(), "the visible layout did not resume the run"
+    assert three._paused_seq is None and three.table.banner.isHidden(), "the hidden layout kept the pause"
     _finish(qapp, window)
+
+
+def test_an_answer_given_before_the_prompt_is_drawn_leaves_no_prompt(qapp, tmp_path):
+    """The worker can pause and be answered before its queued prompt reaches the layouts. The prompt
+    is drawn late, and the worker's own announcement, queued behind it, must still clear it."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    session = window.session
+    session.select_schedule(schedule)
+    session.set_operator("Ada Lovelace")
+    session.set_project("PSU-200 Production")
+    session.set_uut_type("PowerSupply")
+    session.set_uut_serial("PS-1")
+    session.set_stop_on_fail(True)
+    answered: list[str] = []
+    session.prompt_answered.connect(lambda _seq, _attempt, choice: answered.append(choice))
+    session.start()
+    deadline = time.time() + 10
+    while not session.pause_pending():  # no event is pumped, so the prompt stays queued
+        assert time.time() < deadline, "the run never paused"
+        time.sleep(0.005)
+    session.choose("CONTINUE")
+    assert answered == ["CONTINUE"], "the answer did not end the pause at once"
+    assert _wait(qapp, lambda: len(answered) == 2), "the worker never announced that it moved on"
+    assert window.staged_screen.run_view.failure_prompt_bar.isHidden(), "the late prompt stayed up"
+    assert window.staged_screen._failed_row is None
+    assert window.staged_screen.run_view.status_bar.status_label.text() != "Paused"
+    _finish(qapp, window)
+
+
+def test_what_the_worker_queued_before_a_close_reaches_no_closed_store(qapp, tmp_path):
+    """Closing the window mid-run stops the worker with its signals still queued. They must not reach
+    a layout that answers them by reading the store that has just closed."""
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"])
+    schedule = _add_pause_and_block_schedule(tmp_path)
+    outcome, _ = _launch(env, tmp_path)
+    window = outcome.window
+    window.show()
+    qapp.processEvents()
+    session = window.session
+    session.select_schedule(schedule)
+    session.set_operator("Ada Lovelace")
+    session.set_project("PSU-200 Production")
+    session.set_uut_type("PowerSupply")
+    session.set_uut_serial("PS-1")
+    session.set_stop_on_fail(True)
+    session.start()
+    deadline = time.time() + 10
+    while not session.pause_pending():  # no event is pumped, so step_started and the rest stay queued
+        assert time.time() < deadline, "the run never paused"
+        time.sleep(0.005)
+    session.close()
+    with capture_exceptions() as exceptions:
+        for _ in range(20):
+            qapp.processEvents()
+    assert not exceptions, exceptions
 
 
 def test_abort_on_the_visible_layout_answers_a_pending_pause_with_abort(qapp, tmp_path):
@@ -1049,9 +1112,8 @@ def test_the_two_review_shots_are_saved(qapp, tmp_path):
     qapp.processEvents()
     _pick_and_start(qapp, window2, schedule)
     window2.three_pane_screen.table._prompt_bars[0].continue_button.click()
-    qapp.processEvents()
-    assert _wait(qapp, lambda: not window2.session.pause_pending())
-    assert _wait(qapp, lambda: not window2.staged_screen.run_view.failure_prompt_bar.isVisible())
+    assert not window2.session.pause_pending()
+    assert window2.staged_screen.run_view.failure_prompt_bar.isHidden()
     window2.staged_layout_action.trigger()
     qapp.processEvents()
     staged2 = window2.staged_screen
