@@ -785,3 +785,10 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Product: report names compounded (`-2-3`, `-2-3-4`) on a third collision; now `-2`, `-3`. A kept PDF whose HTML was deleted could be overwritten; a name is free only if both are.
 - Tests: the sleep test times the real `ATE.sleep`; `_drive` has a 60 s wall-clock deadline and says what was outstanding. POLL-timeout cause is inferred (tick bound too short), not proven.
 - Light review: 1406 passed + 4 skipped ×3, none lost.
+
+## First release runs (Opus; merged 2026-10-31)
+- v0.1.0-rc1 (b3ac702): 3 of 5 jobs failed: `iscc --version` (no such option), relative `.deb` path to apt, wheel library list missing libnss3, libnspr4, libgssapi-krb5-2. docker_smoke hid the libraries because poppler-utils pulled them in; it no longer installs that before the smoke.
+- Also fixed: the Inno log failure pattern could never match a timestamped line.
+- v0.1.0-rc2 (d6d29a9): CI and Release green, 5 of 5 jobs; run 41198438867. Windows installer passed install, PATH, database, run, upgrade and uninstall.
+- Light review: read the workflow, library list and smoke script diffs; suite once, 1409 passed + 4 skipped; no Strata/Haiku review.
+- Unverified: the Inno log is read as strict UTF-8; a real Windows GUI session and a signed installer have not been tried. No GitHub Release is published: the installer and Linux artifacts are workflow artifacts, expiring 2027-01-29.
