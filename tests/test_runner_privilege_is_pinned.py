@@ -93,3 +93,30 @@ def test_linux_packaging_tests_do_not_run_on_windows() -> None:
     """`install.sh`, `dpkg` and `/bin/sh` do not exist on a Windows runner."""
     text = (SRC.parent / "tests" / "test_linux_packages_28b.py").read_text(encoding="utf-8")
     assert "allow_module_level" in text, "the POSIX-only packaging module runs on Windows anyway"
+
+
+def test_an_elevated_offscreen_dialog_returns_in_a_fresh_process() -> None:
+    """Production code never blocks on a question nobody is there to answer, in a new process.
+
+    A monkeypatch cannot reach a subprocess, so this is the case the seams are really for: a
+    separate interpreter that *is* elevated (the variable says so, as it does on a Windows runner
+    or in a root container), has no window server, and is not given `ATE_AUTO_DISMISS_DIALOG`.
+    Every modal ATE opens goes through `_dismiss_if_headless`; if that guard is removed, `exec()`
+    waits for a click that can never happen and this test times out instead of passing."""
+    env = dict(os.environ, PYTHONPATH=str(SRC), QT_QPA_PLATFORM="offscreen")
+    env[pdf.ELEVATION_ENV] = "1"
+    code = (
+        "from ate.app import _pdf_sandbox_dialog, _close_confirm_dialog; "
+        "print(_pdf_sandbox_dialog(), _close_confirm_dialog('Close ATE and stop the run?'))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "False False", (
+        f"a headless ATE answered {proc.stdout.strip()!r} where it should answer its negative branch"
+    )
