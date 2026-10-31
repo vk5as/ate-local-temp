@@ -1,0 +1,59 @@
+-- Example Media Release, schedule 2: every Result a step can record.
+--
+-- What it demonstrates:
+--   * ATE.report(passFail, msg, actual, expected) with numbers, strings and booleans.
+--   * Several reports in one step: only the last one counts for the step.
+--   * Every value of the Result enum: PASS, FAIL, ERROR, SKIPPED, NOTRUN, FORCED_NOTRUN.
+--   * A step that never reports records NOREPORT and logs a warning.
+--   * A step whose Action raises a Lua error records ERROR.
+--   * setStopOnFail(false) here so the run walks all the way through the failures.
+
+return ScheduleParams("Report every Result", "One step for each outcome a Test Step can record")
+  :setDocTitle("Example Media Release - Results")
+  :setDocId("MR-EXAMPLE-RESULTS")
+  :setDocRev("1.0")
+  :setStopOnFail(false)
+  :setSchedule({
+    -- 1. Strings for actual and expected.
+    StepParams("String values"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "LED colour", "Green", "Green") end),
+
+    -- 2. Numbers.
+    StepParams("Numeric values"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "rail current", 42, 42) end),
+
+    -- 3. Booleans; ATE stores them as text.
+    StepParams("Boolean values"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.PASS, "fan running", true, true) end),
+
+    -- 4. Reporting twice: the second report replaces the first for this Attempt.
+    StepParams("Updated report"):setStepNo("4.")
+      :setAction(function()
+        ATE.report(Result.FAIL, "first reading", 3.1, 5.0)
+        ATE.report(Result.PASS, "second reading", 5.0, 5.0)
+      end),
+
+    -- 5. FAIL: the run's overall result goes FAIL, but this schedule continues on fail.
+    StepParams("A failure"):setStepNo("5.")
+      :setAction(function() ATE.report(Result.FAIL, "rail low", 3.1, 5.0) end),
+
+    -- 6. Discretionary results, recorded as reported.
+    StepParams("Skipped"):setStepNo("6.")
+      :setAction(function() ATE.report(Result.SKIPPED, "not applicable on this board") end),
+    StepParams("Not run"):setStepNo("7.")
+      :setAction(function() ATE.report(Result.NOTRUN, "the step chose not to run") end),
+    StepParams("Forced not run"):setStepNo("8.")
+      :setAction(function() ATE.report(Result.FORCED_NOTRUN, "disabled by the Operator") end),
+
+    -- 9. A step that never calls ATE.report records NOREPORT and warns.
+    StepParams("Never reports"):setStepNo("9.")
+      :setAction(function() ATE.log(Log.INFO, "did some work, forgot to report") end),
+
+    -- 10. A Lua error: ATE records ERROR for the Attempt and the step.
+    StepParams("Lua error"):setStepNo("10.")
+      :setAction(function() error("example: the instrument did not answer") end),
+
+    -- 11. A schedule may report Result.ERROR itself.
+    StepParams("Reported error"):setStepNo("11.")
+      :setAction(function() ATE.report(Result.ERROR, "probe not connected") end),
+  })

@@ -4,7 +4,9 @@
 
 **Blocked by:** 04 (Application config in full, and interrupted-run recovery)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 26a, 26b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] Creates the data directories (`%PROGRAMDATA%\ATE`, `/var/lib/ate`) and the config directory
 - [ ] Gives ordinary users modify rights on the database and WAL files, `reports` and `logs`, keeping `config.json` admin-only; on Linux creates an `ate` group for this

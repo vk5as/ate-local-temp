@@ -4,7 +4,9 @@
 
 **Blocked by:** 23 (History screen)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 24a, 24b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] An export dialog with Level, Source and Owner checkboxes (all ticked each time); Export disabled when nothing would be exported
 - [ ] Save As offering CSV (default, UTF-8 with BOM), JSON Lines and Text, defaulting to the report folder with `_log` added

@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ate"
+dynamic = ["version"]
+description = "Automated Test Execution — run Lua 5.5 Test Schedules against hardware UUTs."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+classifiers = [
+    # The wheel targets Debian stable's system Python (3.13) and the frozen
+    # builds' CPython (3.14); see docs/building-from-source.md.
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+# Floors, not exact pins: the wheel floats to whatever PyPI has that works.
+# Lower bounds are the oldest versions this suite is known to pass against.
+# tests/test_wheel_build_28a.py compares each floor with the version installed in the
+# venv running the suite, so a floor that was never released (pyvisa>=1.22) fails.
+#
+# The two Qt packages carry an upper bound because they have to be the *same* Qt:
+# PyQt6 6.12 installs Qt 6.12, while PyQt6-WebEngine tops out at 6.11 and brings in
+# PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process work on Linux and kill the
+# Windows runner with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) when WebEngine is
+# imported. Keeping both in one band is what makes the PDF report render on Windows.
+# See the "Check Qt and QtWebEngine are the same Qt" step in .github/workflows/ci.yml.
+dependencies = [
+    "PyQt6>=6.11,<6.12",
+    "PyQt6-WebEngine>=6.11,<6.12",
+    "lupa>=2.8",
+    "SQLAlchemy>=2.0",
+    "Jinja2>=3.1",
+    "pyserial>=3.3",
+    "pyvisa>=1.16",  # PyPI's newest is 1.16.2; 1.22 was never released
+    "pyvisa-py>=0.7",
+]
+
+# Version is derived from the git tag at build time (see src/ate/_version.py),
+# which is also what `ate --version` prints at runtime. Falls back to a safe dev
+# version when untagged or when git is unavailable, so building never fails.
+[tool.setuptools.dynamic]
+version = {attr = "ate._version.__version__"}
+
+# setuptools and build are here because a fresh venv ships pip only: the wheel test
+# builds a wheel with --no-isolation and docs/building-from-source.md says
+# `python -m build --wheel`, and both fail with a bare `pip install -e ".[test]"`
+# without them. PyYAML is here because tests/test_release_ci_27c.py parses
+# .github/workflows/release.yml rather than grepping it.
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-qt", "PyYAML>=6", "setuptools>=64", "build>=1.0"]
+
+[project.scripts]
+ate = "ate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Ship everything the app reads at runtime, not just Python: the Jinja2 report template,
+# the bundled Lua modules, and CSS/HTML/text/JSON files. The wildcard key covers every
+# package, so a new resource needs no pyproject change ONLY if its extension is one of
+# the six listed here. A file with a new extension (.png, .yaml, .xml, ...) must be added
+# to the list: tests/test_wheel_build_28a.py builds a wheel and fails on every non-.py
+# file under src/ate that the wheel does not carry.
+[tool.setuptools.package-data]
+"*" = ["*.j2", "*.css", "*.lua", "*.html", "*.txt", "*.json"]
+
+[tool.pytest.ini_options]
+# `examples` holds the seam-1 harness for the example Media Release (packet 29a), so the regular
+# suite runs it too and CI catches an example schedule that stops working.
+testpaths = ["tests", "examples"]
+addopts = "-ra"
+markers = [
+    "slow: seconds of work or a network; deselect with -m 'not slow'",
+    "build: builds the frozen bundle with PyInstaller; skipped unless ATE_BUILD_TESTS=1",
+]
+# The engine and run session must never import widgets. This is enforced by a
+# dedicated test (see tests/test_architecture_rules.py); keep this note here
+# so the rule is documented at configuration time too.

@@ -1,0 +1,69 @@
+-- Example Media Release, schedule 1: the shape of a Test Schedule.
+--
+-- What it demonstrates:
+--   * ScheduleParams: name, description, doc title, doc id, doc revision.
+--   * setStopOnFail: this schedule turns the pause off, so every step runs.
+--   * Step Numbers (setStepNo) and setEnable defaults: step 4 starts disabled and records NOTRUN.
+--   * A blocking Step Input (FLOAT with a range), answered by the harness.
+--   * ATE.log at every level, print (redirected to INFO), ATE.sleep, ATE.addEquipment,
+--     and reading the read-only ATE.run table.
+
+return ScheduleParams("Example basics", "Schedule metadata, step numbers and the simple ATE calls")
+  :setDocTitle("Example Media Release - Basics")
+  :setDocId("MR-EXAMPLE-BASIC")
+  :setDocRev("1.0")
+  :setStopOnFail(false)
+  :setSchedule({
+    -- 1. ATE.run is the run's own context, read-only: UUT_serial, Operator, Station, Project,
+    --    Test_Schedule_Name and Media_Release_Media_Number. Reading them here puts them in the log.
+    StepParams("Who is running"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.DEBUG, "reading ATE.run for the run context")
+        ATE.log(Log.INFO, "station " .. ATE.run.Station .. " project " .. ATE.run.Project
+                             .. " uut " .. ATE.run.UUT_serial)
+        ATE.log(Log.INFO, "schedule " .. ATE.run.Test_Schedule_Name
+                             .. " release " .. ATE.run.Media_Release_Media_Number)
+        ATE.report(Result.PASS, "operator " .. ATE.run.Operator, ATE.run.Operator, "Ada Lovelace")
+      end),
+
+    -- 2. Every log level, and print, which ATE redirects to ATE.log(Log.INFO, ...).
+    StepParams("Logging"):setStepNo("2.")
+      :setAction(function()
+        ATE.log(Log.DEBUG, "debug detail")
+        ATE.log(Log.INFO, "info message")
+        ATE.log(Log.WARNING, "warning", 42)
+        ATE.log(Log.ERROR, "error message")
+        print("print lands at INFO")
+        ATE.report(Result.PASS, "logged at every level")
+      end),
+
+    -- 3. ATE.sleep pauses the step (fractions of a second are allowed) and can be aborted.
+    StepParams("Sleep then measure"):setStepNo("3.")
+      :setAction(function()
+        ATE.sleep(0.05)
+        ATE.report(Result.PASS, "rail settled", 1.23, 1.23)
+      end),
+
+    -- 4. Disabled by default: the Operator can enable it, and a run start records NOTRUN.
+    StepParams("Optional check"):setStepNo("4.")
+      :setEnable(false)
+      :setAction(function() ATE.report(Result.PASS, "only runs when enabled") end),
+
+    -- 5. Equipment the Test Run used, for the report's Equipment section.
+    StepParams("Equipment used"):setStepNo("5.")
+      :setAction(function()
+        ATE.addEquipment("Bench power supply", "PSU-123", "GPIB::1", "2026-12-01", "0-60 V, 4 quadrant")
+        ATE.report(Result.PASS, "equipment declared")
+      end),
+
+    -- 6. A blocking Step Input: the run waits until the Operator answers, then ATE.input(1)
+    --    returns the typed value (a Lua float here, checked against its range).
+    StepParams("Operator input"):setStepNo("6.")
+      :setInputs({ [1] = { desc = "settling time, seconds", type = "FLOAT",
+                          range = { min = 0.1, max = 10 }, orient = "VERT",
+                          tooltip = "Seconds to wait before measuring" } })
+      :setAction(function()
+        local seconds = ATE.input(1)
+        ATE.report(Result.PASS, "operator settled for " .. seconds .. " s", seconds, 1.5)
+      end),
+  })

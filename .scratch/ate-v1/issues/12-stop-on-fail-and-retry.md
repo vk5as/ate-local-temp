@@ -4,7 +4,9 @@
 
 **Blocked by:** 09 (Lua lockdown, errors and `ATE.run`)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 12a, 12b, 12c, 12d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `ScheduleParams:setStopOnFail(b)` sets the default (`true` when unset); stage 3 has a Stop on fail / Continue on fail radio button; the run records the setting
 - [ ] On `FAIL` or `ERROR` with Stop on Fail, the run pauses with the step highlighted and a full-width Continue / Retry / Abort bar, with no timeout

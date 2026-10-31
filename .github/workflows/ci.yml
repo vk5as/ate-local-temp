@@ -1,0 +1,120 @@
+name: CI
+
+# Run the test suite on every push across the supported platforms and Python
+# versions. Per the spec's testing decisions, that is Windows and Linux, each on
+# CPython 3.13 and 3.14 (GIL builds).
+
+on:
+  push:
+    branches:
+      - main
+      - "integration/*"
+      - "ticket-*"
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    # The first real run of this workflow hung on windows-latest with no output for an hour: a
+    # modal dialog waiting for an Operator who is not there. A job that cannot finish is a bug to
+    # read, not a job to wait for, so the wall clock is bounded and pytest is asked to say where it
+    # stopped. Windows gets the larger bound: its runner is slower to install 130 MB of Qt and
+    # slower at every Qt call, and a bound tighter than the job needs just hides the hang behind a
+    # timeout instead of letting faulthandler print the stack that explains it.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 30 }}
+    env:
+      # conftest.py builds the shared QApplication with no `platform=` kwarg (this PyQt6 build's
+      # binding does not accept one), so Qt's offscreen platform has to come from the environment:
+      # without it every test that needs `app` fails on a headless runner. Job level, so both the
+      # Ubuntu and Windows matrix entries get it.
+      QT_QPA_PLATFORM: offscreen
+      # A native crash in the runner or in any Python a test starts prints every thread's stack.
+      PYTHONFAULTHANDLER: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Qt's system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxtst6 libxkbcommon0 libxkbfile1 \
+            libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0
+
+      - name: Install ATE and test extras (editable)
+        run: pip install -e ".[test]"
+
+      - name: Check Qt and QtWebEngine are the same Qt
+        # PyQt6 6.12.0 pulls Qt 6.12, while PyQt6-WebEngine stops at 6.11 and drags in
+        # PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process is what killed the Windows
+        # runner: the WebEngine DLL resolves its entry points against Qt 6.11 DLLs that are not
+        # there, and Python reports "Windows fatal exception: code 0xc0000139"
+        # (STATUS_ENTRYPOINT_NOT_FOUND) while importing it. Fail here, in one line, rather than
+        # letting a third of the suite quietly skip because PDF rendering is unavailable.
+        # bash, because the Windows default (PowerShell) cannot parse the heredoc.
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.metadata as m
+
+          from PyQt6.QtCore import qVersion
+
+          def band(value: str) -> tuple[int, int]:
+              parts = value.split(".")
+              return (int(parts[0]), int(parts[1]))
+
+          core, webengine = band(qVersion()), band(m.version("PyQt6-WebEngine-Qt6"))
+          print(f"PyQt6 {m.version('PyQt6')} / Qt runtime {qVersion()} "
+                f"/ PyQt6-WebEngine {m.version('PyQt6-WebEngine')} / WebEngine-Qt6 {m.version('PyQt6-WebEngine-Qt6')}")
+          if core != webengine:
+              raise SystemExit(
+                  f"Qt {core[0]}.{core[1]} and WebEngine's Qt {webengine[0]}.{webengine[1]} are "
+                  "different builds: PyQt6-WebEngine has no release for Qt "
+                  f"{core[0]}.{core[1]}, so PyQt6 must stay in the band WebEngine can reach."
+              )
+          try:
+              from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+          except Exception as exc:
+              raise SystemExit(f"QtWebEngine cannot be imported on this runner: {exc}")
+          print("QtWebEngine imports")
+          PY
+
+      - name: Run tests
+        # -v names each test as it finishes, so a runner that dies mid-test shows the last one it
+        # reached. -rfEs prints the short summary of failures, errors and skips (with each reason) at the end even
+        # when the run is long, and --tb=short keeps that summary readable. `--durations=20` reports the
+        # slowest tests, which is how a hang is told apart from a merely slow suite.
+        #
+        # `faulthandler_timeout=300` makes pytest dump the traceback of every thread when a single
+        # test runs for five minutes: that stack is what identifies a modal `QMessageBox.exec()`
+        # waiting for a click nobody can give. `faulthandler_exit_on_timeout=true` then ends the
+        # session instead of carrying on from a test that is still stuck, so the job reports the
+        # hang as a failed run with the stack in the log rather than being killed by GitHub at the
+        # wall clock with nothing printed.
+        #
+        # `pytest-timeout` is deliberately not a dependency: it would need its own install step,
+        # its own floor in the `[test]` extra, and it kills a stuck test rather than showing the
+        # stack that explains it. faulthandler is in the standard library and pytest already
+        # enables it.
+        #
+        # pwsh on both, so a job that dies without a summary still shows how: Qt ends a Windows
+        # process with __fastfail (0xC0000409), and the bare step reports only "exit code 1".
+        shell: pwsh
+        run: |
+          pytest -v -rfEs --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
+          $code = $LASTEXITCODE
+          "pytest exit code: {0} (0x{0:X8})" -f $code
+          exit $code

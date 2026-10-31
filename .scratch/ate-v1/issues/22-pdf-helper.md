@@ -4,7 +4,9 @@
 
 **Blocked by:** 21 (HTML Test Report at run end)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 22a, 22b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A helper process loads the saved HTML file (never `setHtml`) in QWebEngine and runs `printToPdf` with `QPageLayout` margins equal to the CSS `@page` margins; A4 or Letter
 - [ ] Page furniture via CSS `@page` margin boxes with "Page X of Y"

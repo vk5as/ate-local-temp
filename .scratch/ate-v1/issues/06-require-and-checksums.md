@@ -4,7 +4,9 @@
 
 **Blocked by:** 05 (Test Definition catalog and `ate definition update`)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 06a, 06b, 06c, 06d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `require` resolves only module names listed in the Test Definition (dependencies come later), never `package.path`; modules run once per Test Run and are cached
 - [ ] `ate.` module names resolve to modules bundled with ATE; the bundled modules' checksums and the ATE version are recorded

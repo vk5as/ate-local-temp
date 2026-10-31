@@ -4,7 +4,9 @@
 
 **Blocked by:** 03 (Minimal staged Run screen)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 11a, 11b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] `setEnable` sets each step's default; the Operator can toggle any step in stage 3 before Start
 - [ ] A step disabled at start isn't executed and records `NOTRUN` with no Attempt

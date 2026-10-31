@@ -1,0 +1,791 @@
+"""The only storage interface in ATE: :class:`RunStore`.
+
+Everything that records a Test Run goes through this class; nothing else sees SQL.
+It opens SQLite (WAL mode) at ``database.path`` and writes the v1 tables
+(``test_run``, ``node``, ``attempt``), plus the ``media_release``/``run_file`` rows ticket 06b records for every run. Writes are incremental — each row is committed
+as it happens, so a run left unfinished by a crash can be closed as INTERRUPTED later.
+
+Portable types only: UUIDs as 36-character text, times as ISO-8601 UTC text with
+milliseconds, booleans as 0/1 integers, structured values (inputs) as JSON text. No
+SQLite-only features — the same tables and column types work on any backend a later
+ticket swaps in behind this interface.
+"""
+
+from __future__ import annotations
+
+import enum
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+from sqlalchemy import create_engine, event, func, select
+
+from ._uuid import new_uuid7
+from .schema import (
+    SCHEMA_VERSION,
+    action,
+    attempt,
+    equipment,
+    input_value,
+    log_line,
+    media_release,
+    metadata,
+    node,
+    run_file,
+    schedule_instance,
+    test_run,
+)
+
+
+@dataclass(frozen=True)
+class DbLaunchResult:
+    """The outcome of checking a database at launch (never migrates)."""
+
+    status: DbLaunchStatus
+    user_version: Optional[int] = None  # PRAGMA user_version, or None if unreadable/missing
+    path: Optional[Path] = None  # the database checked, so the message can name it (30c)
+    config_file: Optional[Path] = None  # a non-default config in use, to carry into the hint
+
+    @property
+    def message(self) -> str:
+        """A human-readable refusal message for non-OK statuses; empty when OK.
+
+        It names the database path, and the migrate hint carries ``--config <path>`` when the
+        Station is reading a config that is not the platform default (packet 30c review)."""
+        if self.status == DbLaunchStatus.NEEDS_MIGRATE:
+            hint = "ate db migrate"
+            if self.config_file is not None:
+                hint += f" --config {self.config_file}"
+            where = f" at {self.path}" if self.path else ""
+            return f"run `{hint}` to create or upgrade the database{where}"
+        if self.status == DbLaunchStatus.TOO_OLD:
+            where = f"the database at {self.path}" if self.path else "this database"
+            return f"this ATE is too old for {where}; update ATE"
+        return ""
+
+
+class DbLaunchStatus(enum.Enum):
+    """Why a database refuses launch (or why it allows it)."""
+
+    OK = "OK"  # schema version matches; safe to open
+    NEEDS_MIGRATE = "NEEDS_MIGRATE"  # missing, empty, or older than this ATE
+    TOO_OLD = "TOO_OLD"  # built by a newer ATE
+
+
+def _inspect_db(path: str | Path) -> tuple[bool, Optional[int]]:
+    """Inspect ``path`` read-only without creating it.
+
+    Returns ``(has_v1_table, user_version)``. A missing file yields ``(False, None)``;
+    an existing but empty database (no v1 table yet) yields ``(False, 0)``. Opening in
+    ``mode=ro`` never creates the file, so a refusal at launch leaves nothing behind.
+    """
+    path = Path(path)
+    if not path.exists():
+        return False, None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        has_tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('test_run','node','attempt')"
+        ).fetchone() is not None
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0] or 0
+    finally:
+        conn.close()
+    return has_tables, int(user_version)
+
+
+def check_database_at_launch(path: str | Path, config_file: str | Path | None = None) -> DbLaunchResult:
+    """Decide whether ATE may launch against ``path``; never migrates.
+
+    Compares the database's PRAGMA user_version to :data:`SCHEMA_VERSION`: a missing,
+    empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), and a
+    newer one refuses with TOO_OLD ("this ATE is too old"). Only an exact match returns OK.
+
+    ``config_file`` is the config this launch read, already filtered by
+    :func:`ate.config.config_hint` to ``None`` when it is the platform default: it lets the
+    refusal tell the Operator which config to migrate (packet 30c review).
+    """
+    has_tables, user_version = _inspect_db(path)
+    database = Path(path)
+    hint = Path(config_file) if config_file is not None else None
+    if not has_tables or user_version < SCHEMA_VERSION:
+        return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version, database, hint)
+    if user_version > SCHEMA_VERSION:
+        return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version, database, hint)
+    return DbLaunchResult(DbLaunchStatus.OK, user_version, database, hint)
+
+
+def _enable_wal(engine) -> None:
+    """Set SQLite's WAL journal mode on every connection the Engine opens."""
+    def _set_wal(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+        finally:
+            cursor.close()
+
+    event.listen(engine, "connect", _set_wal)
+
+
+def _create_schema(path: str) -> None:
+    """Create the v1 tables if missing and set the schema version.
+
+    Dialect-neutral: ``metadata.create_all`` reflects each table's existence through
+    its own backend catalog (SQLite's ``sqlite_master``, Postgres'
+    ``information_schema``), so it never raises on an already-populated database, and
+    needs no hand-written DDL or SQLite-only introspection. The Engine is disposed
+    immediately after; the running :class:`RunStore` keeps its own stdlib connection.
+
+    PRAGMA user_version and journal_mode are SQLite-only settings (there is no
+    portable equivalent), so they are applied directly on the store's stdlib
+    connection rather than through Core — that is the one place raw SQL touches the
+    database, and it stays confined to pragmas here.
+    """
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+
+def _now_iso() -> str:
+    """UTC now as ISO-8601 text with milliseconds (e.g. ``2026-10-23T12:34:56.789+00:00``)."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """Store booleans as 0/1 and pass through ints; coerce ``None`` to ``None``."""
+    if value is None or isinstance(value, int):
+        return value
+    return 1 if value else 0
+
+
+# Ticket 23a — the History screen's columns. These eight are what a run exposes to history;
+# ``run_uuid`` (the primary key) is not shown but is always ordered last so paging never repeats
+# or skips rows, even when several runs share a sort value.
+HISTORY_COLUMNS = ("started_at", "uut_type", "uut_serial", "result", "end_reason", "schedule_name", "project", "operator")
+HISTORY_SORT_KEYS = tuple(HISTORY_COLUMNS)  # exactly these eight are valid sort keys
+_COLUMN_BY_NAME = {name: test_run.c[name] for name in HISTORY_COLUMNS}
+
+
+def _norm_date(value) -> str:
+    """Normalise a date filter to ISO-8601 UTC text so it compares like ``started_at``.
+
+    Accepts an ISO string or a datetime; datetimes are made explicit UTC with millisecond
+    precision, matching the stored format (e.g. ``2026-10-23T12:34:56.789+00:00``) so lexical
+    comparison is correct."""
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.isoformat(timespec="milliseconds")
+    return str(value)
+
+
+class RunStore:
+    """Records Test Runs and their children in a single SQLite database.
+
+    Writes go through SQLAlchemy Core statements executed on an Engine (autocommit, so
+    each row commits immediately — that is what makes the record append-only and
+    crash-safe; an open run simply has no ``ended_at`` yet). A stdlib connection
+    (:attr:`_conn`) to the same file holds the pragmas (WAL mode, schema version) and
+    is available for direct inspection.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        # A SQLAlchemy Engine over stdlib sqlite3 (the pysqlite dialect). Core
+        # statements are executed through it; isolation_level="AUTOCOMMIT" commits
+        # every statement on its own so the record is append-only and crash-safe —
+        # an open run simply has no ``ended_at`` yet. In SQLAlchemy 2.x there is no
+        # Engine.execute(), so each statement runs inside a connection context.
+        self._engine = create_engine(f"sqlite:///{self.path}", isolation_level="AUTOCOMMIT")
+        _enable_wal(self._engine)
+        # A stdlib connection to the same file for pragmas and direct inspection.
+        # check_same_thread=False lets a later QThread run worker share it; callers
+        # that use it cross-thread (the run engine) serialise access themselves.
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._closed = False
+        # Per-run next log-line seq, so a batch can hold several lines (an INFO print and
+        # an ERROR warning from the same step) without colliding on ``(run_uuid, seq)``.
+        # The store spans one whole run, so this counter stays monotonic across every
+        # step's batches and preserves emission order within and between them.
+        self._log_seq: dict[str, int] = {}
+        # Per-run seq counters for the record tables that carry their own ``(run_uuid, seq)`` PK.
+        # media_release and run_file each order their rows from 0 within the run on a counter of
+        # their own, so recording them never shifts the log-line/test-run numbering other records
+        # rely on; input_value shares _log_seq with actions because it is emitted inline with steps.
+        self._media_seq: dict[str, int] = {}
+        self._runfile_seq: dict[str, int] = {}
+        self._ensure_schema()
+
+    def _run(self, stmt) -> Any:
+        """Execute a Core statement on the Engine's connection, with every row read inside the context.
+
+        Packet 25a review: returning the open ``Result`` left the connection's read statement
+        alive after the context closed — the GUI thread fetched it later. QueuePool then handed
+        that same sqlite3 connection (cursor still open) to the run worker, and a worker INSERT
+        colliding with the unfinalised read on the shared connection aborts the run with
+        "database is locked" on long schedules. Materialising the rows here closes the statement
+        before the connection goes back to the pool, so reads never outlive their context.
+        """
+        if self._closed:  # the Engine would quietly open the file again, and hold it open
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        with self._engine.connect() as conn:
+            result = conn.execute(stmt)
+            return result.fetchall() if result.returns_rows else result
+
+    def _ensure_schema(self) -> None:
+        # Idempotent table creation via a throwaway engine (reflects existence, so
+        # reopening an existing database never fails), then set the pragmas on our
+        # own stdlib connection. Both persist in the database file header, so they
+        # survive reopen and WAL mode stays enabled for every future connection.
+        _create_schema(str(self.path))
+        # Set the pragmas on our own stdlib connection. Both persist in the database
+        # file header, so they survive reopen and WAL mode stays enabled for every
+        # future connection.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    # -- test_run -----------------------------------------------------------
+
+    def insert_test_run(self, data: Mapping[str, Any]) -> dict:
+        """Insert a new run row (started, not yet ended) and return its values.
+
+        ``run_uuid`` is generated here if the caller omits it, so the store can open
+        a run on its own (for example when closing an interrupted run at launch)."""
+        now = _now_iso()
+        run_uuid = str(data["run_uuid"]) if "run_uuid" in data else new_uuid7()
+        row = {
+            "run_uuid": run_uuid,
+            "station_uuid": data.get("station_uuid"),
+            "station_name": data.get("station_name"),
+            "operator": data.get("operator", ""),
+            "project": data.get("project", ""),
+            "uut_type": data.get("uut_type"),
+            "uut_serial": data.get("uut_serial"),
+            "ate_version": data.get("ate_version"),
+            "schedule_name": data.get("schedule_name"),
+            "schedule_file": data.get("schedule_file"),
+            "schedule_description": data.get("schedule_description"),
+            "doc_title": data.get("doc_title"),
+            "doc_id": data.get("doc_id"),
+            "doc_rev": data.get("doc_rev"),
+            "media_number": data.get("media_number"),
+            "stop_on_fail": _as_int(data.get("stop_on_fail")),
+            "started_at": now,
+            "ended_at": None,
+            "utc_offset": data.get("utc_offset", "+00:00"),
+            "result": None,
+            "end_reason": None,
+        }
+        self._run(test_run.insert().values(**row))
+        return dict(row)
+
+    def update_run_end(self, run_uuid: str, result: str, end_reason: str) -> None:
+        """Close a running run: stamp ``ended_at`` and its final result/reason."""
+        now = _now_iso()
+        self._run(
+            test_run.update()
+            .where(test_run.c.run_uuid == run_uuid)
+            .values(ended_at=now, result=result, end_reason=end_reason)
+        )
+
+    def query_runs(self, *, filters=None, sort_key="started_at", descending=True, limit=10 ** 9, offset=0) -> list[dict]:
+        """Return past Test Runs as dicts (ticket 23a).
+
+        ``filters`` is an optional mapping of exact-match columns (uut_type, uut_serial, result,
+        end_reason, project), a case-insensitive serial substring (uut_serial) and/or a date range
+        on started_at (date_from inclusive, date_to exclusive). Every present filter is ANDed.
+
+        ``sort_key`` must be one of the eight History columns; anything else raises ValueError. The
+        result is ordered by that column then run_uuid ascending so every row has a unique position —
+        paging with LIMIT/OFFSET therefore never repeats or skips rows. ``limit``/``offset`` page it."""
+        if sort_key not in HISTORY_SORT_KEYS:
+            raise ValueError(f"unknown sort key {sort_key!r}; expected one of {HISTORY_SORT_KEYS}")
+        # The eight display columns plus run_uuid: the primary key is not shown but is returned so
+        # rows stay identifiable across pages and can break ties when several runs share a sort value.
+        names = list(HISTORY_COLUMNS) + ["run_uuid"]
+        stmt = select(*[test_run.c[n] for n in names])
+        if filters:
+            stmt = self._filter_runs(stmt, filters)
+        col = _COLUMN_BY_NAME[sort_key]
+        if descending:
+            stmt = stmt.order_by(col.desc(), test_run.c.run_uuid.asc())
+        else:
+            stmt = stmt.order_by(col.asc(), test_run.c.run_uuid.asc())
+        rows = self._run(stmt.limit(limit).offset(offset))
+        return [ {name: row[i] for i, name in enumerate(names)} for row in rows ]
+
+    def _filter_runs(self, stmt, filters):
+        """AND together the SQL predicates for ``filters`` (exact columns, serial substring, date range)."""
+        f = dict(filters)  # copy so we never mutate the caller's mapping
+        for key in ("uut_type", "result", "end_reason", "project"):
+            if f.get(key) is not None:
+                stmt = stmt.where(_COLUMN_BY_NAME[key] == f[key])
+        if needle := f.get("uut_serial"):
+            # Case-insensitive substring via LOWER(...); escape LIKE metacharacters so a serial that
+            # literally contains % or _ matches itself, and double any single quote.
+            needle = str(needle).lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # The metacharacters are escaped with a backslash, so the LIKE clause's own escape
+            # character must be that same backslash (not '!'); otherwise an unescaped '%'/'_' would
+            # act as a wildcard and match every serial.
+            stmt = stmt.where(func.lower(test_run.c.uut_serial).like(f"%{needle}%", escape="\\"))
+        if f.get("date_from") is not None:
+            lo = _norm_date(f["date_from"])
+            stmt = stmt.where(test_run.c.started_at >= lo)
+        if f.get("date_to") is not None:
+            hi = _norm_date(f["date_to"])
+            stmt = stmt.where(test_run.c.started_at < hi)
+        return stmt
+
+    # -- node ---------------------------------------------------------------
+
+    def insert_node(self, run_uuid: str, seq: int, **fields: Any) -> None:
+        """Insert one expanded-tree row keyed by ``(run_uuid, node_seq)``."""
+        self._run(
+            node.insert().values(
+                run_uuid=run_uuid,
+                node_seq=seq,
+                parent_node_seq=fields.get("parent_node_seq"),
+                instance_seq=fields.get("instance_seq"),
+                kind=fields.get("kind"),
+                step_number=fields.get("step_number"),
+                step_name=fields.get("step_name"),
+                default_enabled=_as_int(fields.get("default_enabled")),
+                enabled=_as_int(fields.get("enabled")),
+                inputs=json.dumps(fields.get("inputs", {})) if fields.get("inputs") is not None else None,
+                result=fields.get("result"),
+                attempt_count=fields.get("attempt_count", 0),
+            )
+        )
+
+    # -- attempt ------------------------------------------------------------
+
+    def insert_attempt(self, run_uuid: str, node_seq: int, attempt_no: int, **fields: Any) -> None:
+        """Insert one Attempt row keyed by ``(run_uuid, node_seq, attempt_no)``."""
+        self._run(
+            attempt.insert().values(
+                run_uuid=run_uuid,
+                node_seq=node_seq,
+                attempt_no=attempt_no,
+                started_at=fields.get("started_at") or _now_iso(),
+                ended_at=fields.get("ended_at") or _now_iso(),
+                pass_fail=fields.get("pass_fail"),
+                msg=fields.get("msg"),
+                actual=fields.get("actual"),
+                expected=fields.get("expected"),
+                prompt_choice=fields.get("prompt_choice"),
+            )
+        )
+
+    def update_attempt(self, run_uuid: str, node_seq: int, attempt_no: int, **fields: Any) -> None:
+        """Update one Attempt row by its composite key (e.g. stamp a Stop-on-Fail prompt_choice)."""
+        self._run(
+            attempt.update()
+            .where(attempt.c.run_uuid == run_uuid)
+            .where(attempt.c.node_seq == node_seq)
+            .where(attempt.c.attempt_no == attempt_no)
+            .values(**fields)
+        )
+
+    # -- action -------------------------------------------------------------
+
+    def insert_action(
+        self,
+        run_uuid: str,
+        *,
+        instance_seq: Optional[int] = None,
+        phase: Optional[str] = None,
+        run_order: int = 0,
+        outcome: str = "ok",
+        error: Optional[str] = None,
+        started_at: Optional[str] = None,
+        ended_at: Optional[str] = None,
+    ) -> dict:
+        """Insert one Pre-test/Post-test Action row keyed by ``(run_uuid, seq)``.
+
+        ``phase`` is "pre" or "post"; ``instance_seq`` names the schedule instance it belongs to;
+        ``run_order`` is its position within that phase's order (0 for a lone action). ``started_at``
+        and ``ended_at`` are stamped from the run clock unless the caller supplies them, so a skipped
+        action can leave both null. Each row takes the next unique value of the run's log-line counter
+        (:attr:`_log_seq`) so ``(run_uuid, seq)`` stays globally unique within the run."""
+        now = _now_iso()
+        started_at = started_at or now
+        ended_at = ended_at or now
+        row = {
+            "run_uuid": run_uuid,
+            "seq": self._log_seq.get(run_uuid, 0),
+            "instance_seq": instance_seq,
+            "phase": phase,
+            "run_order": run_order,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "outcome": outcome,
+            "error": error,
+        }
+        self._run(action.insert().values(**row))
+        next_seq = row["seq"] + 1
+        if next_seq > 0:
+            self._log_seq[run_uuid] = next_seq
+
+    def actions(self, run_uuid: str) -> list[dict]:
+        """Return this run's Action rows as dicts (empty when the run is unknown)."""
+        stmt = action.select().where(action.c.run_uuid == run_uuid)
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(action.columns, row)} for row in rows
+        ]
+
+    # -- input_value ---------------------------------------------------------
+
+    def insert_input_values(self, run_uuid: str, values: list[dict[str, Any]]) -> None:
+        """Insert every recorded Operator input value for a step's Attempt.
+
+        ``values`` is an ordered list of dicts each carrying ``node_seq``, ``attempt_no``,
+        ``input_index``, ``type``, ``value_text`` and ``at``; the run engine diffs this around
+        each step's action closure so ownership lands on that Attempt (index, type, value and
+        time). ``value_text`` is already serialised — a CHECKBOX selection arrives as a JSON
+        array of labels. Each row gets its own unique ``seq`` from :attr:`_log_seq`'s run counter
+        shared with log lines so ``(run_uuid, seq)`` stays globally unique within the run."""
+        next_seq = self._log_seq.get(run_uuid, 0)
+        for value in values:
+            row = {
+                "run_uuid": run_uuid,
+                "seq": next_seq,
+                "node_seq": value["node_seq"],
+                "attempt_no": value["attempt_no"],
+                "input_index": value["input_index"],
+                "type": value["type"],
+                "value": value["value_text"],
+                "at": value["at"],
+            }
+            next_seq += 1
+            self._run(input_value.insert().values(**row))
+        if next_seq > 0:
+            self._log_seq[run_uuid] = next_seq
+
+    # -- equipment -----------------------------------------------------------
+
+    def insert_equipment(self, run_uuid: str, *, name: Optional[str] = None, serial: Optional[str] = None,
+                         connection: Optional[str] = None, cal_due: Optional[str] = None,
+                         notes: Optional[str] = None, at: Optional[str] = None,
+                         action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> dict:
+        """Insert one Equipment row keyed by ``(run_uuid, seq)`` (packet 20).
+
+        One row per `ATE.addEquipment` call, in the order the calls happened: ``seq`` comes from the
+        run's shared log-line counter (:attr:`_log_seq`), like an Action or an input value, so it is
+        unique within the run and its ordering matches the run's timeline. Ownership works exactly as
+        a log line's — an owning Pre-test/Post-test Action call puts its ``action_seq`` on the row, a
+        step Attempt its ``node_seq`` + ``attempt_no``. Only ``name`` is required by the Lua call; the
+        other fields stay null when the schedule passed nil."""
+        now = _now_iso()
+        row = {
+            "run_uuid": run_uuid,
+            "seq": self._log_seq.get(run_uuid, 0),
+            "name": name,
+            "serial": serial,
+            "connection": connection,
+            "cal_due": cal_due,
+            "notes": notes,
+            "at": at or now,
+            "action_seq": action_seq,
+            "node_seq": node_seq,
+            "attempt_no": attempt_no,
+        }
+        self._run(equipment.insert().values(**row))
+        self._log_seq[run_uuid] = row["seq"] + 1
+        return dict(row)
+
+    # -- media_release -------------------------------------------------------
+
+    def insert_media_release(
+        self,
+        run_uuid: str,
+        *,
+        seq: int = 0,
+        media_number: Optional[str] = None,
+        name: Optional[str] = None,
+        version: Optional[str] = None,
+        atedef_sha256: Optional[str] = None,
+    ) -> dict:
+        """Insert one Media Release row keyed by ``(run_uuid, seq)``.
+
+        ``seq`` is the release's position in resolution order (0 for the top-level release that
+        owns this run). Each row takes the next value of the run's media-release counter
+        (:attr:`_media_seq`) so rows are numbered 0..n within the run and stay unique to this table."""
+        now = self._media_seq.get(run_uuid, 0)
+        row = {
+            "run_uuid": run_uuid,
+            "seq": now,
+            "media_number": media_number or None,
+            "name": name or None,
+            "version": version or None,
+            "atedef_sha256": atedef_sha256 or None,
+        }
+        self._run(media_release.insert().values(**row))
+        next_seq = now + 1
+        if next_seq > 0:
+            self._media_seq[run_uuid] = next_seq
+        return dict(row)
+
+    # -- run_file ------------------------------------------------------------
+
+    def insert_run_file(
+        self,
+        run_uuid: str,
+        *,
+        path: Optional[str] = None,
+        media_number: Optional[str] = None,
+        kind: str = "tslua",
+        expected_sha256: Optional[str] = None,
+        computed_sha256: Optional[str] = None,
+        mismatch: bool = False,
+        content: Optional[bytes] = None,
+    ) -> dict:
+        """Insert one file-used row keyed by ``(run_uuid, seq)``.
+
+        ``kind`` is ``tslua``, ``lua`` or ``ate-module``; bundled ``ate.`` modules carry a null
+        ``media_number`` and ``expected_sha256`` (only this build records release files, so both are
+        set here). ``mismatch`` stores as 0/1. ``content`` is the raw bytes of a mismatched file
+        (ticket 06c): it is recorded only when the row is flagged, so a matching file never carries
+        bytes and an ``ate.`` module never can."""
+        now = self._runfile_seq.get(run_uuid, 0)
+        row = {
+            "run_uuid": run_uuid,
+            "seq": now,
+            "path": path or None,
+            "media_number": media_number if kind != "ate-module" else None,
+            "kind": kind,
+            "expected_sha256": expected_sha256 if kind != "ate-module" else None,
+            "computed_sha256": computed_sha256 or None,
+            "mismatch": _as_int(mismatch),
+            "content": content if (mismatch and content is not None) else None,
+        }
+        self._run(run_file.insert().values(**row))
+        next_seq = now + 1
+        if next_seq > 0:
+            self._runfile_seq[run_uuid] = next_seq
+        return dict(row)
+
+    # -- schedule_instance ---------------------------------------------------
+
+    def insert_schedule_instance(
+        self,
+        run_uuid: str,
+        *,
+        instance_seq: int,
+        parent_instance_seq: Optional[int] = None,
+        header_node_seq: Optional[int] = None,
+        schedule_name: Optional[str] = None,
+        file: Optional[str] = None,
+        media_number: Optional[str] = None,
+        prefix: str = "",
+        keyvals: str = "{}",
+    ) -> dict:
+        """Insert one schedule-instance row keyed by ``(run_uuid, instance_seq)``.
+
+        Packet 15b: the top-level schedule is instance 0 and every `setInclude` is its own
+        instance, numbered in tree order as the tree is walked; ``instance_seq`` is the host's own
+        index for it. ``keyvals`` is already JSON text (an empty table is ``"{}"``)."""
+        row = {
+            "run_uuid": run_uuid,
+            "instance_seq": instance_seq,
+            "parent_instance_seq": parent_instance_seq,
+            "header_node_seq": header_node_seq,
+            "schedule_name": schedule_name or None,
+            "file": file or None,
+            "media_number": media_number or None,
+            "prefix": prefix or "",
+            "keyvals": keyvals if keyvals is not None else "{}",
+        }
+        self._run(schedule_instance.insert().values(**row))
+        return dict(row)
+
+    # -- reads --------------------------------------------------------------
+
+    def media_releases(self, run_uuid: str) -> list[dict]:
+        """Return this run's Media Release rows as dicts in seq order (empty when the run is unknown)."""
+        stmt = (
+            media_release.select()
+            .where(media_release.c.run_uuid == run_uuid)
+            .order_by(media_release.c.seq)
+        )
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(media_release.columns, row)} for row in rows
+        ]
+
+    def run_files(self, run_uuid: str) -> list[dict]:
+        """Return this run's file-used rows as dicts in seq order (empty when the run is unknown)."""
+        stmt = (
+            run_file.select()
+            .where(run_file.c.run_uuid == run_uuid)
+            .order_by(run_file.c.seq)
+        )
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(run_file.columns, row)} for row in rows
+        ]
+
+    def schedule_instances(self, run_uuid: str) -> list[dict]:
+        """Return this run's schedule-instance rows as dicts in instance_seq order (packet 15b).
+
+        One row per schedule in the expanded tree: instance 0 is the top-level schedule, then one
+        row per `setInclude`, in tree order. Empty when the run is unknown."""
+        stmt = (
+            schedule_instance.select()
+            .where(schedule_instance.c.run_uuid == run_uuid)
+            .order_by(schedule_instance.c.instance_seq)
+        )
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(schedule_instance.columns, row)} for row in rows
+        ]
+
+    def equipment(self, run_uuid: str) -> list[dict]:
+        """Return this run's Equipment rows as dicts in declaration order (packet 20).
+
+        `seq` is the order the `ATE.addEquipment` calls happened, so reading by it gives the
+        Equipment exactly as the schedule declared it. Empty when the run is unknown."""
+        stmt = equipment.select().where(equipment.c.run_uuid == run_uuid).order_by(equipment.c.seq)
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(equipment.columns, row)} for row in rows
+        ]
+
+    # -- log_line ------------------------------------------------------------
+
+    @staticmethod
+    def _log_line_row(run_uuid: str, seq: int, level: str, source: str, text: str, *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None, at: Optional[str] = None) -> dict:
+        """Build a :class:`schema.log_line` row from a ``level``/``source``/``text`` line.
+
+        Ownership is expressed structurally through the foreign keys rather than a
+        separate column: ``action_seq`` ties the line to an owning Pre-test/Post-test
+        Action, while ``node_seq`` + ``attempt_no`` tie it to a step Attempt; a line with
+        neither belongs to the run as a whole. ``at`` defaults to now; a line recorded after the
+        fact (a device failure, packet 17b) passes the time it happened.
+        """
+        return {
+            "run_uuid": run_uuid,
+            "seq": seq,
+            "at": at or _now_iso(),
+            "level": level.upper(),
+            "source": source,
+            "action_seq": action_seq,
+            "node_seq": node_seq,
+            "attempt_no": attempt_no,
+            "text": text,
+        }
+
+    def insert_log_lines(self, run_uuid: str, seq: int, lines: list[dict[str, Any]], *, action_seq: Any = None, node_seq: Any = None, attempt_no: Any = None) -> None:
+        """Insert a batch of log lines keyed by ``(run_uuid, seq)``.
+
+        ``lines`` is an ordered list; each entry needs ``level``, ``source`` and ``text``, and may
+        carry ``at`` (ISO-8601 UTC) when the line happened before it is inserted.
+        Ownership (which Action or Attempt owns the line) applies to every line in the
+        batch — within one step's action all schedule lines are owned by that Attempt, so a
+        single call batches them with shared ownership rather than writing one row per line.
+
+        Each line gets its own unique ``seq``: ``(run_uuid, seq)`` is the primary key and a
+        batch can hold several lines (an INFO print plus an ERROR warning from the same step),
+        so they are numbered from the run's log-line counter (:attr:`_log_seq`) rather than
+        sharing one value. The ``seq`` argument stays for call-site clarity; ownership is set
+        through ``node_seq``/``attempt_no`` instead."""
+        next_seq = self._log_seq.get(run_uuid, 0)
+        rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no, at=line.get("at")) for line in lines]
+        for i, row in enumerate(rows):
+            row["seq"] = next_seq + i  # unique within this batch
+            self._run(log_line.insert().values(**row))
+        self._log_seq[run_uuid] = next_seq + len(rows)  # keep later batches monotonic
+
+    def log_lines(self, run_uuid: str) -> list[dict]:
+        """Return this run's recorded log lines as dicts (empty when the run is unknown)."""
+        stmt = log_line.select().where(log_line.c.run_uuid == run_uuid).order_by(log_line.c.seq)  # recorded order
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
+        ]
+
+    # -- reads --------------------------------------------------------------
+
+    def get_test_run(self, run_uuid: str) -> Optional[dict]:
+        """Return the run row as a dict, or ``None`` if it was never recorded."""
+        stmt = test_run.select().where(test_run.c.run_uuid == run_uuid)
+        rows = self._run(stmt)
+        # This build's native Row iterates values-only (no .keys(), no dict()), so
+        # rebuild the mapping from the selected columns in declaration order.
+        return {str(c.name): value for c, value in zip(test_run.columns, rows[0])} if rows else None
+
+    def open_runs(self) -> list[str]:
+        """Run UUIDs with no end time — runs left unfinished by a crash or abort."""
+        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None)))
+        return [row[0] for row in rows]
+
+    def nodes(self, run_uuid: str) -> list[dict]:
+        """Return this run's expanded-tree rows as dicts (empty when the run is unknown).
+
+        Dialect-neutral and value-only, mirroring :meth:`get_test_run`: each mapping is
+        rebuilt from the selected columns in declaration order because this build's native
+        Row iterates values without ``.keys()`` or ``dict()``."""
+        stmt = node.select().where(node.c.run_uuid == run_uuid)
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(node.columns, row)} for row in rows
+        ]
+
+    def attempts(self, run_uuid: str) -> list[dict]:
+        """Return this run's Attempt rows as dicts (empty when the run is unknown)."""
+        stmt = attempt.select().where(attempt.c.run_uuid == run_uuid)
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(attempt.columns, row)} for row in rows
+        ]
+
+    def input_values(self, run_uuid: str) -> list[dict]:
+        """Return this run's Operator input value rows as dicts, in the order they were recorded.
+
+        The report needs them to print each Step Input under the step that asked for it, so the
+        read mirrors :meth:`nodes`/:meth:`attempts` rather than reaching into SQLite directly."""
+        stmt = input_value.select().where(input_value.c.run_uuid == run_uuid).order_by(input_value.c.seq)  # recorded order
+        rows = self._run(stmt)
+        return [
+            {str(c.name): value for c, value in zip(input_value.columns, row)} for row in rows
+        ]
+
+    # -- interrupted-run recovery -------------------------------------------
+
+    def close(self) -> None:
+        """Release the store's database handles (stdlib connection and Engine).
+
+        Idempotent; the application calls it when the main window closes (packet 30a). A closed
+        store holds no file open, which is what lets Windows delete or move the database, and it
+        stays closed: any later statement raises."""
+        self._closed = True
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+        self._engine.dispose()
+
+    def close_interrupted_runs(self, on_log: Optional[callable] = None) -> list[str]:
+        """Close every open run as INTERRUPTED / FAIL. Returns the closed UUIDs.
+
+        ``on_log`` is ATE's logger; when supplied it records that ATE closed each
+        interrupted run (spec rule 98). Without one, only the row is updated — used
+        by tests and by CLI paths that don't hold a logger yet.
+        """
+        rows = self._run(test_run.select().where(test_run.c.ended_at.is_(None)))
+        closed: list[str] = []
+        for row in rows:
+            run_uuid = row[0]
+            now = _now_iso()
+            self._run(
+                test_run.update()
+                .where(test_run.c.run_uuid == run_uuid)
+                .values(ended_at=now, result="FAIL", end_reason="INTERRUPTED")
+            )
+            closed.append(run_uuid)
+        if on_log is not None and closed:
+            on_log("ERROR", "ate", f"Closed {len(closed)} interrupted run(s) at launch.")
+        return closed

@@ -4,7 +4,9 @@
 
 **Blocked by:** 22 (PDF via the helper process)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 23a, 23b, 23c, 23d — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] A flat table of runs, newest first, sortable by start time, UUT Type, serial, result, End Reason, Test Schedule, Project and Operator; filters for UUT Type, serial (substring), result, End Reason, date range and Project; loaded page by page
 - [ ] A summary panel with run fields, `Result` counts and mismatches, and actions Open report (newest file in the system viewer), Regenerate (HTML and/or PDF, Include Run log toggle on by default), Show all runs of this UUT, New run for this UUT (prefills UUT Type, serial, Project and Test Schedule)

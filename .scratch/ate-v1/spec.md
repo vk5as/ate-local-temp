@@ -229,7 +229,7 @@ The Run screen comes in two layouts, staged (default) and three-pane, both built
 - **Device read results**: complete reads return `{data, count, partial=false}`. A timeout after some bytes returns `partial=true` and logs a warning. A timeout with no bytes returns `err="timeout"` and goes through `onError`. Any read result may carry `overflow=true`. Writes return `{ok, count}`, where `count` is the bytes actually sent. `close` returns `{ok}` and `flush` returns `{ok, count}`.
 - **`onError(opResult, opArgs)`**: a non-`nil` return value becomes the call's return value and the script continues. A `nil` return, or no handler at all, raises. Errors that aren't Device failures always raise.
 - **Where calls are allowed**: at load time only the builders, `require`, `ATE.log` and the enums; Pre-test and Post-test Actions can use everything except `input` and `report`; steps can use everything.
-- **Mismatch handling**: a checksum mismatch warns and still loads. It is flagged on the Run screen and the Test Report, and recorded. With `storeMismatchedFiles=ask`, the run-start confirmation (shown only when there is a mismatch) has a "Store mismatched files" checkbox, ticked by default.
+- **Mismatch handling**: a checksum mismatch warns and still loads. It is flagged on the Run screen and the Test Report, and recorded. With `storeMismatchedFiles=ask`, the run-start confirmation (shown only when there is a mismatch) has a "Store mismatched files" checkbox, ticked by default. Headless, nobody answers it: the run starts and the setting decides, so `always` stores the bytes while `ask` and `never` store nothing.
 
 ### Packaging
 

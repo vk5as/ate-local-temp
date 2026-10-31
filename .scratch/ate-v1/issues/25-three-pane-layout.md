@@ -4,7 +4,9 @@
 
 **Blocked by:** 10 (Step Inputs), 12 (Stop on Fail, the failure prompt and Retry), 15 (Sub-schedules)
 
-**Status:** ready-for-agent
+**Status:** split
+
+**Split into:** 25a, 25b — work happens in those packets; this ticket is resolved when all of them are.
 
 - [ ] Left pane: setup fields, a filterable schedule list with errors and mismatches inline, live `Result` counts during the run
 - [ ] Centre pane: a step table with Result, Attempts, Actual, Expected and Message; the failure prompt inline under the failed step with a sticky banner; inputs under steps

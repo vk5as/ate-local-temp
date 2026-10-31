@@ -1,0 +1,115 @@
+-- Example Media Release, schedule 4: every Step Input type and widget.
+--
+-- What it demonstrates:
+--   * ENUM with each widget: RADIOBUT picks one option, CHECKBOX ticks several (ATE.input returns
+--     one Lua table holding every label, recorded as a JSON array), PUSHBUT answers by pressing one
+--     of its buttons.
+--   * INTEGER and FLOAT with a range. The harness first answers each out of range and the session
+--     refuses it with a ValueError before the valid value is recorded (packet 10a).
+--   * STRING with a pattern, refused the same way.
+--   * PROMPT: blocking - the step waits for the Operator to press the button.
+--   * POLL: non-blocking - the step reads it in a bounded loop until it is clicked, sleeping between
+--     reads. It is sticky: once clicked it keeps returning that button's text.
+--   * tooltip and orient on every declaration: the format gives both to all input types, the
+--     line-edit ones included.
+
+return ScheduleParams("Step inputs", "Every Step Input type and widget, answered by the harness")
+  :setDocTitle("Example Media Release - Step Inputs")
+  :setDocId("MR-EXAMPLE-INPUTS")
+  :setDocRev("1.0")
+  :setStopOnFail(false)
+  :setSchedule({
+    -- 1. ENUM as RADIOBUT: one radio per option, OK submits the one picked. ATE.input gives the label.
+    StepParams("Pick one with RADIOBUT"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "led colour", type = "ENUM", input = "RADIOBUT",
+                          enum = { "Green", "Red", "Off" }, orient = "HORIZ",
+                          tooltip = "Which LED the board lights" } })
+      :setAction(function()
+        local colour = ATE.input(1)
+        ATE.report(Result.PASS, "led is " .. colour, colour, "Green")
+      end),
+
+    -- 2. ENUM as CHECKBOX: tick as many as apply. One call returns one table of labels; nothing
+    --    ticked returns an empty table, so #channels is the count either way.
+    StepParams("Tick several with CHECKBOX"):setStepNo("2.")
+      :setInputs({ [1] = { desc = "channels to measure", type = "ENUM", input = "CHECKBOX",
+                          enum = { "A", "B", "C" }, orient = "VERT",
+                          tooltip = "Tick every channel to measure" } })
+      :setAction(function()
+        local channels = ATE.input(1)
+        ATE.report(Result.PASS, "channels " .. table.concat(channels, ", "),
+                   table.concat(channels, ","), "A,B")
+      end),
+
+    -- 3. ENUM as PUSHBUT: pressing one of the buttons is the whole answer.
+    StepParams("Press a button with PUSHBUT"):setStepNo("3.")
+      :setInputs({ [1] = { desc = "what to do next", type = "ENUM", input = "PUSHBUT",
+                          enum = { "RETEST", "SKIP" }, orient = "HORIZ",
+                          tooltip = "One press answers the step" } })
+      :setAction(function()
+        local choice = ATE.input(1)
+        ATE.report(Result.PASS, "operator pressed " .. choice, choice, "RETEST")
+      end),
+
+    -- 4. INTEGER with a range: the harness answers 500 first, which the session refuses. tooltip and
+    --    orient apply here too - they are the hover help and the widget's layout, not extra fields.
+    StepParams("Whole number with a range"):setStepNo("4.")
+      :setInputs({ [1] = { desc = "test current, mA", type = "INTEGER",
+                          range = { min = 1, max = 200 }, orient = "VERT",
+                          tooltip = "Read the current clamp, not the supply" } })
+      :setAction(function()
+        local current = ATE.input(1)
+        ATE.report(Result.PASS, "current " .. current .. " mA", current, 42)
+      end),
+
+    -- 5. FLOAT with a range, also refused out of range first: the harness answers 9.0 before 1.25.
+    StepParams("Decimal with a range"):setStepNo("5.")
+      :setInputs({ [1] = { desc = "rail voltage, V", type = "FLOAT",
+                          range = { min = 0.5, max = 2.5 }, orient = "HORIZ",
+                          tooltip = "Measured at the rail header" } })
+      :setAction(function()
+        local volts = ATE.input(1)
+        ATE.report(Result.PASS, "rail " .. volts .. " V", volts, 1.25)
+      end),
+
+    -- 6. STRING with a pattern: the harness's first answer fails the pattern and is refused.
+    StepParams("Text with a pattern"):setStepNo("6.")
+      :setInputs({ [1] = { desc = "probe part number", type = "STRING",
+                          pattern = "^[A-Z]{2}-[0-9]{4}$", orient = "VERT",
+                          tooltip = "Two letters, a hyphen, four digits" } })
+      :setAction(function()
+        local part = ATE.input(1)
+        ATE.report(Result.PASS, "probe " .. part, part, "AB-1234")
+      end),
+
+    -- 7. PROMPT: blocking. The step does not continue until the Operator presses the button.
+    StepParams("Blocking PROMPT"):setStepNo("7.")
+      :setInputs({ [1] = { desc = "is the probe connected?", type = "PROMPT",
+                          prompt = { "CONTINUE" }, orient = "HORIZ",
+                          tooltip = "Press CONTINUE when the probe is clipped on" } })
+      :setAction(function()
+        local answer = ATE.input(1)
+        ATE.report(Result.PASS, "probe confirmed with " .. answer, answer, "CONTINUE")
+      end),
+
+    -- 8. POLL: non-blocking, so the step reads it in a loop and sleeps between reads. The harness
+    --    clicks STOP only after the loop has read nil a few times, so the loop ends on the click.
+    StepParams("POLL read in a loop"):setStepNo("8.")
+      :setInputs({ [1] = { desc = "stop this step?", type = "POLL",
+                          prompt = { "KEEP GOING", "STOP" }, orient = "HORIZ",
+                          tooltip = "Click STOP at any time while this step runs" } })
+      :setAction(function()
+        local clicked, reads = nil, 0
+        while reads < 8 do
+          reads = reads + 1
+          clicked = ATE.input(1)     -- nil until the Operator clicks a POLL button
+          if clicked then break end
+          ATE.sleep(0.1)             -- give the Operator time to click before reading again
+        end
+        if clicked then
+          ATE.report(Result.PASS, "clicked " .. clicked .. " after " .. reads .. " reads", clicked, "STOP")
+        else
+          ATE.report(Result.FAIL, "poll not clicked in " .. reads .. " reads")
+        end
+      end),
+  })
