@@ -23,6 +23,7 @@ a snapshot of the host's report log before invoking it and diffing afterwards.
 
 from __future__ import annotations
 
+import atexit
 import enum
 import json
 import queue
@@ -65,6 +66,23 @@ class RunStatus(enum.Enum):
 # the internal execution context string the Lua host uses for lockdown and error location. A step
 # keeps "step"; loading/idle is None.
 PHASE_CONTEXT = {"pre": "pretest", "post": "posttest"}
+
+
+#: Every worker started and not yet known to have ended. Qt aborts the process when a QThread is
+#: destroyed while its thread still runs ("QThread: Destroyed while thread is still running"), and
+#: a worker's owner can let go of it first: the session drops its engine on FINISHED, which is
+#: queued while the worker is still returning from ``run()``. Whichever side lets go last then
+#: destroys a running thread (Linux: SIGABRT; Windows: 0xC0000409, with nothing printed). A started
+#: engine therefore owns itself until its thread has really ended.
+_live_engines: set["RunEngine"] = set()
+
+
+def stop_live_engines(timeout_ms: int = 5000) -> list["RunEngine"]:
+    """Abort every worker still running and wait for it; returns those that did not stop."""
+    return [engine for engine in list(_live_engines) if not engine.stop_and_wait(timeout_ms)]
+
+
+atexit.register(stop_live_engines)  # a worker running as the interpreter exits is destroyed running
 
 
 class RunEngine(QThread):
@@ -194,6 +212,27 @@ class RunEngine(QThread):
         self._poll_open: set[tuple[int, int, int]] = set()
         # A blocking ask announced by the worker (get_raw) reaches the GUI through input_asked.
         self._op.asked.connect(self._on_asked)
+
+    def start(self, *args: Any) -> None:
+        """Start the worker, which keeps this engine alive until its thread has ended."""
+        _live_engines.difference_update([engine for engine in _live_engines if engine.isFinished()])
+        _live_engines.add(self)
+        self.finished.connect(self._forget_ended_worker)  # queued to this (the owning) thread
+        super().start(*args)
+
+    def _forget_ended_worker(self) -> None:
+        """The worker emitted ``finished``: wait out its last instructions and let go of it."""
+        self.wait()
+        _live_engines.discard(self)
+
+    def stop_and_wait(self, timeout_ms: int = 5000) -> bool:
+        """Abort the run, answering any pause it is parked in, and wait for the worker to end."""
+        if not self.isRunning():
+            return True
+        if self.pause_pending():  # a worker parked in a pause only wakes on a choice
+            self.choose("ABORT")
+        self.request_abort()
+        return self.wait(timeout_ms)
 
     @property
     def aborted(self) -> bool:

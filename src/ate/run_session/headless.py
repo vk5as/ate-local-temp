@@ -119,6 +119,7 @@ class HeadlessRunSession(QObject):
         # knows whether it still owes one; `report_written` has fired once `_report_written` is set.
         self._report_pending = False
         self._report_written = False
+        self._closed = False
         self._pdf_error: Optional[str] = None
         # Spec 08: Project is prefilled from config's `defaultProject` — the same value the Run
         # screen shows — and the Operator's typing replaces it. A run cannot start without one.
@@ -156,8 +157,12 @@ class HeadlessRunSession(QObject):
         # announced, so a session closed in the same breath would never write its HTML. Write it
         # here instead — the report itself is not optional (spec 21a) — but never start a helper
         # process for a session that is going away.
-        if self._report_pending and self._state is SessionState.FINISHED:
+        # A worker still recording must end before the store closes under it.
+        if self._engine is not None and not self._engine.stop_and_wait():
+            self._log("ERROR", "the run worker did not stop within 5 s of closing the session")
+        if self._report_pending or self._engine is not None:
             self._write_run_report(render_pdf=False)
+        self._closed = True  # a FINISHED still queued from that worker finds nothing left to write
         stop_pdf_jobs(self)  # a helper still running when the session dies aborts the process
         if self._store is not None:
             self._store.close()
@@ -240,7 +245,7 @@ class HeadlessRunSession(QObject):
         disabled, the status bar saying "Running", and the Operator answering a question about a run
         the screen had not yet finished.
         """
-        if state != self._state:
+        if state != self._state and not self._closed:
             self._state = state
             if state == SessionState.FINISHED:
                 self._engine = None
@@ -263,7 +268,7 @@ class HeadlessRunSession(QObject):
         instead of leaving the UI or the harness waiting. A failure here never raises.
         """
         config = self._config
-        if config is None or self._run_uuid is None or self._store is None or self._report_written:
+        if config is None or self._run_uuid is None or self._store is None or self._report_written or self._closed:
             return
         self._report_pending = False
         try:

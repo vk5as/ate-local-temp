@@ -62,16 +62,19 @@ def _settle(qapp, session, timeout=5.0):
     Every finished run starts a PDF helper process (packet 22a); if the session is destroyed while
     it is still running, Qt aborts the test process at teardown. A session that never ran has no
     helper to wait for."""
-    if session.run_uuid is None:
-        session.close()
-        return
+    if session.run_uuid is not None:
+        _await_report(qapp, session, timeout)
+    session.close()
+
+
+def _await_report(qapp, session, timeout=5.0):
+    """Pump until the run's report helper has finished; the session stays open for another run."""
     finished = {"done": False}
     session.report_written.connect(lambda *_seen: finished.__setitem__("done", True))
     deadline = time.monotonic() + timeout
     while not finished["done"] and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.01)
-    session.close()
 
 
 def _pick(screen, name):
@@ -905,7 +908,7 @@ def test_a_second_run_starts_with_the_counts_zeroed(qapp, tmp_path):
     screen.start_button.click()
     assert _wait_finished(qapp, session)
     assert screen.counts.counts()["FAIL"] == 1 and screen.counts.counts()["PASS"] == 1
-    _settle(qapp, session)
+    _await_report(qapp, session)
 
     _pick(screen, "Passing schedule")
     screen.start_button.click()
@@ -1101,7 +1104,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
     _pick(screen4, "Fail then pass schedule")
     screen4.start_button.click()
     assert _wait_finished(qapp, session4)
-    _settle(qapp, session4)
+    _await_report(qapp, session4)
     _pick(screen4, "Passing schedule")
     screen4.start_button.click()
     qapp.processEvents()
