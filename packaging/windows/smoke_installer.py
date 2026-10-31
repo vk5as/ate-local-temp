@@ -59,11 +59,11 @@ UNINSTALL_FLAGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES")
 MARKER = "27c-smoke-marker.txt"
 STALE = Path("_internal") / "stale-from-the-previous-build.py"  # a file the previous build shipped
 
-# What a failed install looks like in Inno's /LOG, line by line. Inno prefixes its own error
-# lines with "Error", and ate.iss logs `ate setup`'s exit code as "exited with code N" and a
+# What a failed install looks like in Inno's /LOG, line by line. A real line starts with a timestamp
+# ("2026-10-31 10:54:32.123   "). Inno prefixes its own error lines with "Error", and ate.iss logs `ate setup`'s exit code as "exited with code N" and a
 # failed PATH cleanup as "Could not remove ...". A line that merely mentions "failed" in prose
 # — a file named failed.log, a warning about a skipped component — is not a failure.
-LOG_FAILURE_LINE = re.compile(r"^\s*-?\s*(error\b|could not\b|failed to\b|exited with code [1-9])", re.IGNORECASE)
+LOG_FAILURE_LINE = re.compile(r"^(?:\d{4}-\d{2}-\d{2} [\d:.]+)?\s*-?\s*\"?(?:ate setup\" )?(error\b|could not\b|failed to\b|exited with code [1-9])", re.IGNORECASE)
 # ate.iss logs this before running setup; tests pin the line in the script so this is not a guess.
 SETUP_LOG_LINE = "Preparing the Station"
 # The scan line `ate _selftest --scan` prints: "<dir>: N schedules, N broken, N mismatched".

@@ -5,14 +5,12 @@ name: Release
 # manual run are the only triggers: an artifact is only ever made for a release, so an ordinary
 # push to a branch must not start this job. The per-push test matrix is .github/workflows/ci.yml.
 #
-# NEVER RUN HERE. This file was written on Linux machines with no Windows and no Inno Setup, and no
-# tag of this repository has been cut, so neither this workflow nor `packaging/windows/ate.iss` nor
-# `packaging/windows/smoke_installer.py` has ever executed. The Linux side has run, but not through
-# Actions: `packaging/linux/docker_smoke.py` builds the bundle, the `.deb`, the tarball and the wheel
-# in a `debian:stable` container and runs `packaging/linux/smoke_linux.py` in three fresh ones. The
-# first tag is this workflow's first run. `tests/test_release_ci_27c.py` and
-# `tests/test_release_ci_28c.py` check the workflow's shape and the smoke scripts' logic, never an
-# installed program.
+# First run: tag v0.1.0-rc1 (2026-10-31). The Linux build and the tarball's smoke passed; the .deb and
+# wheel smokes and the Windows job failed, and the Windows job stopped at the Inno Setup step, so
+# `packaging/windows/ate.iss` and `packaging/windows/smoke_installer.py` have still never executed.
+# `packaging/linux/docker_smoke.py` runs the Linux side in `debian:stable` containers without Actions.
+# `tests/test_release_ci_27c.py` and `tests/test_release_ci_28c.py` check the workflow's shape and the
+# smoke scripts' logic, never an installed program.
 
 on:
   push:
@@ -59,13 +57,17 @@ jobs:
           # Chocolatey installs Inno Setup 6 under "C:\Program Files (x86)\Inno Setup 6", so this
           # step does not test one directory — that check fails on a clean runner. iscc lands on
           # PATH, and packaging/windows/build_installer.py resolves it from $ISCC, then PATH, then
-          # both standard locations.
+          # both standard locations. The runner image may already have it, and choco then installs
+          # nothing. ISCC has no version switch ("Unknown option", exit 1), so finding it is the
+          # check, and the last line stops the step ending on choco's exit code.
           choco install innosetup --no-progress -y --version=6.7.1
-          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue)) {
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
             Write-Error "iscc.exe is not on PATH after installing Inno Setup: the installer cannot be compiled"
             exit 1
           }
-          iscc --version
+          Write-Output "iscc: $($iscc.Source)"
+          exit 0
 
       - name: Build the frozen bundle (27a smoke checks)
         run: python packaging/build_pyinstaller.py --smoke
@@ -83,7 +85,6 @@ jobs:
       - name: Smoke-test the installer
         # Installs silently, checks the machine PATH and the /LOG file and the exit code, runs
         # ate setup, scans the example Media Release headless, upgrades, then uninstalls.
-        # Never executed anywhere: no Windows runner has ever run this workflow.
         run: python packaging/windows/smoke_installer.py
 
       - name: Upload the installer
@@ -146,7 +147,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 \
             libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxtst6 libxkbcommon0 libxkbfile1 \
-            libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core \
+            libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core libnss3 libnspr4 \
             libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0
 
       - name: Build the frozen bundle (27a smoke checks)
@@ -214,8 +215,8 @@ jobs:
           path: artifacts
 
       - name: Smoke-test the ${{ matrix.kind }}
-        # Never run: no Debian container has ever started on these machines. install.sh is called
-        # with its documented --prefix/--bin seam so the smoke script's root is the container's.
+        # install.sh is called with its documented --prefix/--bin seam so the smoke script's root is
+        # the container's.
         # --expect-version is the tag the release was cut from: the bundle carries it in
         # ate/version.txt and the wheel in its metadata, so `ate --version` must print it.
         # The tag arrives as cut, minus the leading v: `v0.1.0-rc1` comes in as `0.1.0-rc1` and

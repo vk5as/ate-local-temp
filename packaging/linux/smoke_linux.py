@@ -22,7 +22,7 @@ and nothing mismatched (assets/packaging.md, "CI").
 **RUN IN DEBIAN CONTAINERS, NEVER IN THE WORKFLOW.** `packaging/linux/docker_smoke.py` runs this
 script in fresh `debian:stable` containers with `ATE_DOCKER_TESTS=1`: `dpkg` has installed the
 `.deb`, `install.sh` has installed the tarball and `pipx` has installed the wheel. GitHub Actions
-has still never run it, because no tag of this repository has been cut.
+first ran it on tag `v0.1.0-rc1`.
 `tests/test_release_ci_28c.py` runs the same sequence against a fake container rooted in a
 temporary directory — a modelled `apt-get` and `install.sh`, and the real source CLI for every
 `ate` call — so it proves this script *notices* a broken install.
@@ -358,7 +358,8 @@ def check_scan(runner: Runner, station: Station, ate: str, prepared: dict[str, o
 def install_deb(runner: Runner, station: Station, artifact: Path) -> str:
     """`apt-get install ./ate_*.deb`: apt resolving the Depends is the check (assets/packaging.md)."""
     apt(runner, "update")
-    apt(runner, "install", "-y", str(artifact))
+    # Absolute: apt reads a relative `artifacts/ate.deb` as a package name, "Unable to locate package".
+    apt(runner, "install", "-y", str(artifact.resolve()))
     if not (station.app_dir / "ate").is_file():
         fail(f"the .deb installed but {station.app_dir}/ate is not there: the package carries no bundle")
     if not station.bin.is_file():
