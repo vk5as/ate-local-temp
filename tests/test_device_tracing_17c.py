@@ -281,13 +281,16 @@ def test_max_bytes_of_zero_traces_no_bytes_but_still_the_operation(app: QCoreApp
 
 def test_a_refused_open_is_traced_as_a_failed_open(app: QCoreApplication) -> None:
     """An open to a port nothing listens on still gets its line: `open … failed: <err> (n.n ms)`,
-    owned by the Attempt; the step carries on through its onError."""
+    owned by the Attempt; the step carries on through its onError.
+
+    The timeout is well above the 2 s Windows spends retrying a closed port before it says refused:
+    with less, the connect times out first and the line is true but says "timed out"."""
     port = _dead_port()
     source = r"""
 return ScheduleParams("trace") :setSchedule({
   StepParams("io"):setStepNo("1.")
     :setAction(function()
-      ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=1, readTerm="", writeTerm=""}, function() return "skipped" end)
+      ATE.open(DeviceType.TCP, {host="127.0.0.1", port=__PORT__, timeout=5, readTerm="", writeTerm=""}, function() return "skipped" end)
       ATE.report("PASS", "open failed but was traced")
     end),
 })

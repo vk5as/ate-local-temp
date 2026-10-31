@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import select
 import socket
 import time
@@ -44,6 +45,9 @@ from .stream import READ_FIELDS, SEND_CHUNK, WRITE_FIELDS, transport_error_text
 
 #: Bytes one on-demand read asks the instrument for when the schedule gave no ``size``.
 READ_CHUNK = 4096
+
+#: A TCPIP SOCKET resource name: its host and port are what a plain socket needs to reach it.
+_SOCKET_RESOURCE = re.compile(r"TCPIP\d*::([^:]+)::(\d+)::SOCKET", re.IGNORECASE)
 
 #: The process-wide pyvisa ResourceManager, built on the first open and reused after that.
 _manager: Any = None
@@ -95,6 +99,27 @@ def _check_connected(resource: Any) -> None:
     code = session.interface.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
     if code:
         raise OSError(code, os.strerror(code))
+
+
+def _why_it_did_not_connect(name: str, exc: Exception, seconds: float) -> str | None:
+    """What really happened to a pyvisa-py SOCKET connect that reports only its timeout, or None.
+
+    pyvisa-py selects on the readable and writable sets alone. Winsock signals a failed connect in
+    the third set, so on Windows a refused connect waits out the whole ``open_timeout`` and comes back
+    as ``could not connect: -1073807339``, with no socket left to ask. Only a second connect can name
+    the cause, and it is made only after the open has already failed."""
+    match = _SOCKET_RESOURCE.fullmatch(name)
+    if match is None or str(exc) != f"could not connect: {constants.StatusCode.error_timeout}":
+        return None
+    try:
+        socket.create_connection((match[1], int(match[2])), timeout=seconds).close()
+    except ConnectionRefusedError:
+        return "could not connect: connection refused"
+    except TimeoutError:
+        return "could not connect: timed out"
+    except OSError as probe:
+        return f"could not connect: {probe}"
+    return "could not connect: timed out"  # it answers now, but it did not within the timeout
 
 
 def _error_text(exc: Exception) -> str:
@@ -426,7 +451,8 @@ class VisaDriver(Driver):
             # open_timeout bounds pyvisa-py's TCP connect, which would otherwise wait 10 s.
             resource = manager.open_resource(name, open_timeout=milliseconds)
         except Exception as exc:  # noqa: BLE001 - pyvisa-py raises bare Exception, ValueError, ...
-            raise OSError(f"{name}: {_error_text(exc)}") from exc
+            reason = _why_it_did_not_connect(name, exc, milliseconds / 1000) or _error_text(exc)
+            raise OSError(f"{name}: {reason}") from exc
         try:
             if not hasattr(resource, "write_raw"):
                 raise OSError("not a message-based resource")
