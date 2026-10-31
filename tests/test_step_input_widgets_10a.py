@@ -198,18 +198,18 @@ work = schedule.parent
 
 defs = work / "defs"
 defs.mkdir(parents=True, exist_ok=True)
-(defs / "pause.tslua").write_text(source, encoding="utf-8", newline="\n")
+(defs / "pause.tslua").write_text(source, encoding="utf-8", newline="\\n")
 (defs / "pause.atedef").write_text(json.dumps({
     "format": 1, "mediaNumber": "MR-10a", "name": "Pause release", "version": "1.0.0",
     "files": [{"path": "pause.tslua", "sha256": hashlib.sha256(source.encode()).hexdigest()}],
-}), encoding="utf-8", newline="\n")
+}), encoding="utf-8", newline="\\n")
 config = {"format": 1, "station": {"name": "BENCH-03", "uuid": "3f6c1e2a-9b7d-4c1e-8a55-0d2f4b9e7c10"}, "defaultProject": "Power board",
           "database": {"type": "sqlite", "path": str(work / "ate.db")},
           "reports": {"directory": str(work / "reports")},
           "testDefinitions": {"directories": [str(defs)]},
           "log": {"directory": str(work / "logs")}}
 config_path = work / "config.json"
-config_path.write_text(json.dumps(config), encoding="utf-8", newline="\n")
+config_path.write_text(json.dumps(config), encoding="utf-8", newline="\\n")
 
 app = QApplication([])
 session = HeadlessRunSession(config_path)
