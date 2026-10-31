@@ -192,9 +192,12 @@ def cc_records():
             title, role = "Opus helper", "opus-helper"
         elif "ATE v1 spec" in prompt and len(steps) >= 5:  # an Opus rework implementer (T3's 1-2 step branch-naming calls also quote the brief)
             title, role = "Opus rework", "opus-implementer"
+        elif "Your reviewer name is" in prompt and len(steps) >= 5:  # an Opus review-only packet (33)
+            title, role = "Opus review", "opus-reviewer"
         else:  # T3 also runs Claude here (branch naming etc.)
             continue
-        m = re.search(r"handoff-(\d\d[a-z]?)\b", prompt) or re.search(r"\bpacket[ -](\d\d[a-z])\b", prompt, re.I)
+        m = (re.search(r"handoff-(\d\d[a-z]?)\b", prompt) or re.search(r"\bpacket[ -](\d\d[a-z])\b", prompt, re.I)
+             or re.search(r"issues/(\d\d[a-z]?)-", prompt))
         yield _cc_record(path, steps, comps, tok, first, last, title=title,
                          ticket=m.group(1) if m else None, role=role, outcome="done",
                          directory=os.path.basename(os.path.dirname(path)))
