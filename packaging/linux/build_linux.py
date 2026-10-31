@@ -121,7 +121,7 @@ WHEEL_SYSTEM_LIBS = (
 def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess:
     """Run a command, printing it, and exit loudly on failure."""
     print("$ " + " ".join(str(part) for part in cmd))
-    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if proc.returncode != 0:
         raise SystemExit(f"{' '.join(map(str, cmd))}\nfailed with exit {proc.returncode}:\n{(proc.stdout + proc.stderr)[-1500:]}")
     return proc
@@ -154,7 +154,7 @@ def _bundle_version(bundle: Path) -> str:
     if not exe.is_file():
         raise SystemExit(f"{exe} is not a built one-directory bundle (run packaging/build_pyinstaller.py first)")
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
-    proc = subprocess.run([str(exe), "--version"], env=env, capture_output=True, text=True)
+    proc = subprocess.run([str(exe), "--version"], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         print(f"warning: {exe} --version failed ({proc.returncode}); using 0.0.0-dev", file=sys.stderr)
         return "0.0.0-dev"

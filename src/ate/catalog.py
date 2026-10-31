@@ -234,13 +234,13 @@ def _needs_module(rel_path: str) -> bool:
     """Whether a ``.lua`` path needs an explicit ``module`` (absolute, or containing ``..``)."""
     if Path(rel_path).is_absolute():
         return True
-    parts = rel_path.split("/")
-    if ".." in parts:
+    if ".." in re.split(r"[\\/]", rel_path):
         return True
-    # Absolute forms not caught by pathlib on POSIX (a Windows drive letter or UNC path) still need a module.
+    # Absolute forms one platform's pathlib misses still need a module, so that a release means the
+    # same on every Station: a drive letter or UNC path on Linux, a rooted "/opt/x" on Windows.
     if re.match(r"^[A-Za-z]:[\\/]", rel_path):
         return True
-    if rel_path.startswith("//"):
+    if rel_path.startswith(("/", "\\")):
         return True
     return False
 

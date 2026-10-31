@@ -448,7 +448,7 @@ def run_pdf_helper(
 
     program, args, env = pdf_helper_command(html_path, pdf_path, paper, unsandboxed, log)
     try:
-        proc = subprocess.run([program, *args], env=env, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run([program, *args], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired as exc:  # subprocess.run kills the child before raising
         raise TimeoutError(f"pdf helper timed out after {timeout:g}s") from exc
     except OSError as exc:

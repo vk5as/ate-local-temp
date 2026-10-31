@@ -63,7 +63,7 @@ class LinuxPermissions(Permissions):
 
     def ensure_group(self, name: str) -> None:
         """Create the group only if it is missing (``groupadd --system <name>``)."""
-        result = subprocess.run(["getent", "group", name], capture_output=True, text=True)
+        result = subprocess.run(["getent", "group", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0 or not result.stdout.strip():
             subprocess.run(["groupadd", "--system", name], check=True)
 

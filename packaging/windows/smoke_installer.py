@@ -383,7 +383,7 @@ class SubprocessRunner:
     def run(self, argv: list[str], env: dict[str, str] | None = None) -> CommandResult:
         if not IS_WINDOWS:
             raise SmokeError("smoke_installer runs setup.exe and unins000.exe: it needs Windows")
-        proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=900)
+        proc = subprocess.run(argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
         return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
 
