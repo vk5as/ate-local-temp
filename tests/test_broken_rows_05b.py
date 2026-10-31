@@ -14,6 +14,7 @@ exactly how the mockup draws it, and the test reads the pixel it paints.
 
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 
@@ -143,6 +144,20 @@ def _pixels(widget) -> set[tuple[int, int, int]]:
             for y in range(image.height()) for x in range(image.width())}
 
 
+#: A glyph is never painted in one flat colour. The strokes are anti-aliased against the row's
+#: background, and the Linux runner's subpixel rendering fringes them blue: on that runner the
+#: error text's ink was (184, 31, 60) and never literally #b71c1c, so an exact-pixel assertion
+#: there tests the runner's font rather than ATE's stylesheet. Any ink within this distance of the
+#: mockup's red is that red as this machine draws it; a colour that is not red is far outside it.
+_ERR_INK_TOLERANCE = 45
+
+
+def _nearest_ink(colours: set[tuple[int, int, int]], target: tuple[int, int, int]):
+    """The painted colour closest to `target`, and its distance from it."""
+    nearest = min(colours, key=lambda c: sum((c[i] - target[i]) ** 2 for i in range(3)))
+    return nearest, math.sqrt(sum((nearest[i] - target[i]) ** 2 for i in range(3)))
+
+
 #: A Unicode non-character, written with chr() because Python's \U escape takes only four hex
 #: digits. No font anywhere contains it, so Qt draws the box it draws for any glyph it cannot find.
 #: A marker whose ink is this box is a marker the Operator never sees.
@@ -256,7 +271,15 @@ def test_broken_rows_are_styled_like_the_mockup(qapp, tmp_path):
         assert BROKEN_BG in _pixels(widget), item.text()
 
         error_label = widget.findChild(QLabel, "schedule_error")
-        assert error_label is not None and BROKEN_ERR in _pixels(error_label), item.text()
+        assert error_label is not None, item.text()
+        nearest, distance = _nearest_ink(_pixels(error_label), BROKEN_ERR)
+        assert distance <= _ERR_INK_TOLERANCE, (
+            f"{item.text()} paints no ink near the mockup's #b71c1c: the closest pixel is "
+            f"{nearest}, {distance:.0f} away"
+        )
+        assert nearest[0] > nearest[1] and nearest[0] > nearest[2], (
+            f"{item.text()} paints {nearest}, which is not red"
+        )
         assert "#b71c1c" in error_label.styleSheet()
 
     # A usable row keeps its plain look: no error widget, no broken background.
