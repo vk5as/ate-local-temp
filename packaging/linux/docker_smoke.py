@@ -15,8 +15,8 @@ wheel; then, in three *fresh* containers, it runs the smoke script exactly as th
 
     python3 packaging/linux/smoke_linux.py --kind deb --dist artifacts --expect-version 1.2.3
 
-The smoke container gets only what the release job gives it: poppler-utils depends on libnss3 and
-libnspr4, so having it there once hid that the wheel needs them. This run finishes by rendering a report with the installed program and reading it back with
+The smoke container gets only what the release job gives it: poppler-utils pulls in libnss3, libnspr4
+and libgssapi-krb5-2, so having it there once hid that the wheel needs them. This run finishes by rendering a report with the installed program and reading it back with
 `pdftotext`, because a PDF that is valid but has no glyphs in it is the failure the release CI is
 supposed to catch. Each kind's log is written to `<out>/<kind>.log`. Containers and build output are
 removed at the end unless `--keep` is given.

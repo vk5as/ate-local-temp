@@ -1050,12 +1050,13 @@ def test_the_wheel_needs_libraries_the_deb_does_not() -> None:
     assert only_wheel, "the wheel uses the container's Python, not the bundle"
     assert {"libglib2.0-0t64", "libdbus-1-3", "libxkbcommon0"} <= set(packaging.WHEEL_SYSTEM_LIBS)
     # libQt6WebEngineCore.so.6 is linked against libnspr4.so, libnss3.so, libnssutil3.so and
-    # libsmime3.so, so without them QtWebEngine does not even import (the v0.1.0-rc1 wheel smoke).
-    assert {"libnss3", "libnspr4"} <= set(packaging.WHEEL_SYSTEM_LIBS), "the dynamic linker loads NSS on every import"
+    # libsmime3.so, and libQt6Network.so.6 against libgssapi_krb5.so.2, so without them QtWebEngine
+    # does not even import (the v0.1.0-rc1 wheel smoke).
+    assert {"libnss3", "libnspr4", "libgssapi-krb5-2"} <= set(packaging.WHEEL_SYSTEM_LIBS), "the dynamic linker loads them on every import"
 
 
 def test_docker_smoke_runs_the_smoke_script_in_a_container_like_the_release_job() -> None:
-    """poppler-utils depends on libnss3 and libnspr4, which is how the container hid that gap.
+    """poppler-utils pulls in NSS, NSPR and GSSAPI, which is how the container hid that gap.
 
     A relative --dist as well, because the absolute one hid the `apt-get` path bug.
     """

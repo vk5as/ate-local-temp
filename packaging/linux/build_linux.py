@@ -98,10 +98,10 @@ DEPENDS = (
 # container by installing the wheel with pipx and then removing one package at a time: each entry
 # below makes `ate _selftest --run` die with "cannot open shared object file". libdrm, libxcb and
 # libxkbcommon come in as libgl1's and libegl1's own dependencies, so they are not repeated here;
-# libgssapi, libpulse, libpcsclite and the rest of the xcb family turned out not to be needed at all
-# by a headless report render. libnss3 and libnspr4 looked unneeded too, only because the container
-# that test ran in had poppler-utils, which depends on both: the v0.1.0-rc1 wheel smoke, without it,
-# died on libnspr4.so.
+# libpulse, libpcsclite and the rest of the xcb family turned out not to be needed at all by a headless
+# report render. libnss3, libnspr4 and libgssapi-krb5-2 looked unneeded too, only because the container
+# that test ran in had poppler-utils, which pulls them in: the v0.1.0-rc1 wheel smoke, without it, died
+# on libnspr4.so, and with NSS installed a bare container dies next on libgssapi_krb5.so.2.
 WHEEL_SYSTEM_LIBS = (
     "libgl1",  # libGL.so.1, libGLX.so.0, libGLdispatch.so.0
     "libegl1",  # libEGL.so.1
@@ -118,6 +118,7 @@ WHEEL_SYSTEM_LIBS = (
     "libfontconfig1",  # libfontconfig.so.1, the font matcher PyPI's Qt is linked against
     "libnss3",  # libnss3.so, libnssutil3.so, libsmime3.so: NEEDED by libQt6WebEngineCore.so.6
     "libnspr4",  # libnspr4.so, also NEEDED by libQt6WebEngineCore.so.6
+    "libgssapi-krb5-2",  # libgssapi_krb5.so.2: NEEDED by libQt6Network.so.6
     "fonts-dejavu-core",  # without a font the report PDF renders with no text in it at all
 )
 
