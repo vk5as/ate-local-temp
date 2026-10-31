@@ -1520,7 +1520,7 @@ class MismatchConfirmation(QDialog):
         """True once Start was clicked; False if Cancel was (or nothing was)."""
         return self._accepted
 
-    def answer_from_setting(self) -> bool:
+    def answer_from_setting(self) -> None:
         """Close this dialog the way a run nobody is watching has to be answered: Start, and store by the config.
 
         `database.storeMismatchedFiles` is the only authority (ticket 31d): `always` stores the
@@ -1528,13 +1528,11 @@ class MismatchConfirmation(QDialog):
         ticked by default and a default nobody chose is not an answer. Cancel would answer `None` and
         start no run at all, so the run starts in all three cases. This is what `dismiss_if_headless`
         answers on a runner with no display, where `exec()` otherwise waits for a click that never
-        comes; an Operator at a screen still answers for themselves. Returns what was stored."""
-        store = self.store_setting == "always"
-        self._stored_override = store
-        if not store and self.store_checkbox is not None:
+        comes; an Operator at a screen still answers for themselves."""
+        self._stored_override = self.store_setting == "always"
+        if self.store_checkbox is not None:  # only `ask` has one
             self.store_checkbox.setChecked(False)
         self.accept()
-        return store
 
     def store_choice(self) -> Optional[bool]:
         """Whether this run stores the mismatched bytes, or ``None`` if the run was cancelled."""

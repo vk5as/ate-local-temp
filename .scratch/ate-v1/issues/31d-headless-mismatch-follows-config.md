@@ -1,6 +1,6 @@
 # 31d: A headless mismatch follows `database.storeMismatchedFiles`
 
-**Parent:** none. User decision, 2026-10-31. Today a run with no display answers the run-start mismatch confirmation "start, store nothing", even when the config says `always`, so a Station configured to keep suspect files silently keeps none.
+**Parent:** none. User decision, 2026-10-31. Today a run with no display answers the run-start mismatch confirmation "start, store nothing", even when the config says `always`. (Corrected at review: `store_mismatched_files` already ignored that answer for `always` and `never`, so no bytes were ever lost. This packet makes the answer and the documents truthful; stored bytes do not change.)
 
 **What to build:** With nobody to answer the confirmation, the run still starts, and the config decides whether the mismatched files' bytes are stored. An Operator at a display sees no change.
 

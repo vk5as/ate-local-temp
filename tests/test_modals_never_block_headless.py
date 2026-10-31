@@ -197,13 +197,13 @@ def test_a_mismatched_run_starts_in_a_fresh_headless_process(tmp_path, setting: 
 def test_the_dismiss_seam_answers_a_real_run_the_same_way(tmp_path) -> None:
     """`ATE_AUTO_DISMISS_DIALOG` and `minimal` give the same mismatch answer as `offscreen`.
 
-    A subprocess cannot be monkeypatched, so the seam is proved in a real run: the `always` Station
-    still stores the bytes when the dialog is closed by the seam, and again on the other headless
-    platform, `minimal`."""
+    A subprocess cannot be monkeypatched, so this is a real run. `ask` is the setting where the
+    answer matters: a bare accept would take the ticked box and store the bytes."""
     for seam, platform in ((True, "offscreen"), (False, "minimal"), (True, "minimal")):
-        lines = _headless_mismatch_run(_write_mismatched_release(tmp_path / f"seam{seam}{platform}", "always"), dismiss_seam=seam, platform=platform)
-        assert lines[0] == "answer True", f"{platform} seam={seam}: {lines}"
-        assert lines[2] == "stored True", f"{platform} seam={seam}: {lines}"
+        lines = _headless_mismatch_run(_write_mismatched_release(tmp_path / f"seam{seam}{platform}", "ask"), dismiss_seam=seam, platform=platform)
+        assert lines[0] == "answer False", f"{platform} seam={seam}: {lines}"
+        assert lines[1] == "finished True", f"{platform} seam={seam}: {lines}"
+        assert lines[2] == "stored False", f"{platform} seam={seam}: {lines}"
 
 
 def _write_mismatched_release(tmp_path: Path, setting: str) -> Path:
