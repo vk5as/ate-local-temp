@@ -158,6 +158,39 @@ def test_filename_never_overwritten_with_suffix(app: object) -> None:
         assert second.name == first.name.replace(".html", "-2.html", 1)
 
 
+def test_every_collision_takes_the_first_free_suffix(app: object) -> None:
+    """Five writes of one name are <name>, -2, -3, -4, -5: the suffix counts up, it never stacks
+    (a third write used to be -2-3, and a fourth -2-3-4)."""
+    with scratch_directory() as td:
+        store, ru = _record(app, DOC_FIELDS)
+        config = _cfg(reports_directory=Path(td) / "reports")
+        names = [write_report(store, ru, config).name for _ in range(5)]
+
+    base = names[0][: -len(".html")]
+    assert names == [f"{base}.html", f"{base}-2.html", f"{base}-3.html", f"{base}-4.html", f"{base}-5.html"]
+
+
+def test_a_name_held_only_by_a_pdf_is_not_free(app: object) -> None:
+    """The HTML's name is the PDF's name too: with the HTML gone but its PDF kept, a new report
+    takes the next suffix, and a gap left by a removed report is the first free one."""
+    with scratch_directory() as td:
+        store, ru = _record(app, DOC_FIELDS)
+        config = _cfg(reports_directory=Path(td) / "reports")
+        first = write_report(store, ru, config)
+        second = write_report(store, ru, config)
+        third = write_report(store, ru, config)
+        pdf = first.with_suffix(".pdf")
+        pdf.write_bytes(b"%PDF-1.4 kept")
+        first.unlink()
+        second.unlink()
+
+        again = write_report(store, ru, config)
+
+        assert again == second
+        assert pdf.read_bytes() == b"%PDF-1.4 kept"
+        assert third.exists()
+
+
 def test_failures_section_lists_failing_steps(app: object) -> None:
     """A FAIL run lists its failing step with name and message in the Failures section."""
     store, ru = _record(app, FAILING)

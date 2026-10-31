@@ -189,6 +189,32 @@ def test_run_end_writes_html_and_pdf_reports(tmp_path, monkeypatch) -> None:
     assert Path(pdf).name == written[0].with_suffix(".pdf").name
 
 
+def test_runs_starting_in_the_same_second_count_up_the_suffix(tmp_path, monkeypatch) -> None:
+    """Five quick runs of one UUT in one second: the run-end reports are <name>, -2, -3, -4, -5, each
+    PDF beside its own HTML (a third run in the second used to be named -2-3)."""
+    env = write_ate_env(tmp_path)
+    monkeypatch.setattr("ate.report.html._local_stamp", lambda *_args: "20261031-095007")
+    monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", _fake_helper("import sys; open(sys.argv[1], 'wb').write(b'%PDF-1.4')"))
+
+    written: list[tuple[str, str]] = []
+    for _ in range(5):
+        session = HeadlessRunSession(env["config"])
+        events: list[tuple[str, str]] = []
+        session.report_written.connect(lambda html, pdf, sink=events: sink.append((html, pdf)), Qt.ConnectionType.QueuedConnection)
+        session.set_operator("Ada")
+        session.set_uut_type("PSU")
+        session.set_uut_serial("PS-1")
+        session.select_schedule("Passing schedule")
+        session.start()
+        assert _wait_finished(session)
+        assert _pump_until_report_written(session, events)
+        written.append(events[-1])
+
+    base = "PSU_PS-1_20261031-095007_PASS"
+    assert [Path(html).name for html, _ in written] == [f"{base}{s}.html" for s in ("", "-2", "-3", "-4", "-5")]
+    assert [Path(pdf).name for _, pdf in written] == [f"{base}{s}.pdf" for s in ("", "-2", "-3", "-4", "-5")]
+
+
 def test_run_end_pdf_failure_keeps_html_and_logs_error(tmp_path, monkeypatch) -> None:
     """A failing PDF helper leaves the HTML, logs an ERROR (source ate), and reports an empty pdf path."""
     env = write_ate_env(tmp_path)
