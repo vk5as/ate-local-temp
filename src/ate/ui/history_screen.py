@@ -10,7 +10,9 @@ here imports the engine or run session.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -41,7 +43,10 @@ def _default_open_file(path: str | None) -> None:
     """Open ``path`` in the system viewer; a no-op when nothing was written (spec 23b)."""
     if path is None or not Path(path).exists():
         return
-    subprocess.Popen(["xdg-open", path])
+    if sys.platform == "win32":
+        os.startfile(path)  # there is no xdg-open on Windows
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 def _default_file_dialog(title: str, default_path: str, filters: str) -> Optional[tuple]:

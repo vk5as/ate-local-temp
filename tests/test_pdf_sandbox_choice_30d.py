@@ -727,6 +727,7 @@ def test_an_unreadable_admin_check_leaves_the_sandbox_on_and_says_so(monkeypatch
     """IsUserAnAdmin can fail; a failed render must not blame the sandbox for a guess."""
     monkeypatch.delenv(pdf.ELEVATION_ENV, raising=False)  # conftest pins it; this test needs the real probe
     monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr("ctypes.windll", None, raising=False)  # no shell32 to ask, on any machine
     assert pdf._elevation() is None, "the Windows check should report that it could not tell"
     assert pdf._is_elevated() is False, "unknown elevation must not disable the sandbox"
     hint = pdf._render_failure_hint(False)

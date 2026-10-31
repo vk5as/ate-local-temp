@@ -10,7 +10,6 @@ defaults (9600 baud, 8 data bits, 1 stop bit, ``Parity.NONE``, ``FlowControl.NON
 ``data``, because a per-call field left out falls back to the Device's open configuration. Setters do not
 validate: the same open/read/write check raises and names the field."""
 
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +21,7 @@ from ate.engine.lua_host import LuaHost
 
 from ._fixtures import LoopbackPeer, UdpLoopbackPeer, wait_for_disconnect
 from .test_tcp_read_write import _run_with_peer, _step_message
+from tests._fixtures import scratch_directory
 
 
 def _builder_fields(statements: str) -> dict:
@@ -29,7 +29,7 @@ def _builder_fields(statements: str) -> dict:
 
     A real LuaHost loads the bundled module, so what comes back is exactly what the host hands the
     driver through :func:`_raw_params`: the table's own keys, never one of its setters."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         path = Path(td) / "main.tslua"
         path.write_text('return ScheduleParams("x"):setSchedule({})', encoding="utf-8", newline="\n")
         host = LuaHost(str(path))

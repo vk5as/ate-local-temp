@@ -16,7 +16,6 @@ and :meth:`close_device` are where the operations are timed and logged.
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication
@@ -28,6 +27,7 @@ from ate.storage.store import RunStore
 
 from ._fixtures import LoopbackPeer, UdpLoopbackPeer, _drive
 from .test_device_onerror import _dead_port
+from tests._fixtures import scratch_directory
 
 #: A trace line ends with the operation's wall-clock time, one decimal, in ms.
 _TIMING = re.compile(r"\((\d+\.\d) ms\)$")
@@ -66,7 +66,7 @@ def _run(
     def _capture(run_uuid: str) -> None:
         captured.setdefault("run_uuid", run_uuid)
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(port)), encoding="utf-8", newline="\n")

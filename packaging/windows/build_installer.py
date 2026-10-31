@@ -86,7 +86,7 @@ def _bundle_version(exe: Path) -> str:
             "(or pass --version, or --dry-run to see the command without building)"
         )
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
-    proc = subprocess.run([str(exe), "--version"], env=env, capture_output=True, text=True)
+    proc = subprocess.run([str(exe), "--version"], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise SystemExit(f"{exe} --version failed with exit {proc.returncode}: {(proc.stdout + proc.stderr)[-500:]}")
     version = proc.stdout.strip()
@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     secret = sign[1] if sign else ""
     print("$ " + _display(command, secret))
-    proc = subprocess.run(command, capture_output=True, text=True)
+    proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     # iscc echoes the Sign Tool command it ran, password and all: redact before printing.
     print(_redact(proc.stdout, secret))
     if proc.returncode != 0:

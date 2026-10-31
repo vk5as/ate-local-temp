@@ -663,8 +663,9 @@ def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_
     assert _wait(qapp, lambda: not window.session.pause_pending()), "the pause never resumed"
     assert window.session.state == SessionState.STARTED, "the run is still up"
 
-    # Both layouts say the run is running again: no bar, no banner, no "Paused".
-    assert staged.run_view.failure_prompt_bar.isVisible() is False, "the hidden layout kept its prompt bar"
+    # Both layouts say the run is running again: no bar, no banner, no "Paused". The choice leaves
+    # the pause at once; the worker still has to wake and announce it, so that takes a moment.
+    assert _wait(qapp, lambda: not staged.run_view.failure_prompt_bar.isVisible()), "the hidden layout kept its prompt bar"
     assert staged._failed_row is None, "the hidden layout still highlights the paused step"
     assert three.table.banner.isVisible() is False
     assert three.status_bar.status_label.text() == "Running"
@@ -815,7 +816,9 @@ def test_a_hidden_staged_layouts_prompt_and_abort_answer_nothing(qapp, tmp_path)
     three.table._prompt_bars[0].continue_button.click()
     qapp.processEvents()
     assert _wait(qapp, lambda: not window.session.pause_pending()), "the visible layout did not resume the run"
-    assert any(row.get("prompt_choice") == "CONTINUE" for row in window.session.store.attempts(window.session.run_uuid))
+    assert _wait(qapp, lambda: any(
+        row.get("prompt_choice") == "CONTINUE" for row in window.session.store.attempts(window.session.run_uuid)
+    )), "the worker never recorded the answer"
     _finish(qapp, window)
 
 
@@ -1048,10 +1051,10 @@ def test_the_two_review_shots_are_saved(qapp, tmp_path):
     window2.three_pane_screen.table._prompt_bars[0].continue_button.click()
     qapp.processEvents()
     assert _wait(qapp, lambda: not window2.session.pause_pending())
+    assert _wait(qapp, lambda: not window2.staged_screen.run_view.failure_prompt_bar.isVisible())
     window2.staged_layout_action.trigger()
     qapp.processEvents()
     staged2 = window2.staged_screen
-    assert staged2.run_view.failure_prompt_bar.isVisible() is False
     assert staged2.run_view.status_bar.status_label.text() != "Paused"
     shot2 = _window_shot(window2)
     assert shot2.save(str(SHOTS / "staged-after-pause-answered-in-three-pane.png")), "shot 2 did not save"

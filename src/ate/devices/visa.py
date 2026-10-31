@@ -40,7 +40,7 @@ import pyvisa
 from pyvisa import constants, errors
 
 from .registry import Driver, validate_params
-from .stream import READ_FIELDS, WRITE_FIELDS
+from .stream import READ_FIELDS, SEND_CHUNK, WRITE_FIELDS, transport_error_text
 
 #: Bytes one on-demand read asks the instrument for when the schedule gave no ``size``.
 READ_CHUNK = 4096
@@ -188,7 +188,7 @@ def _socket_write(sock: socket.socket, payload: bytes, seconds: float) -> tuple[
                 return False, sent, "timeout"
             sock.settimeout(remaining)
             try:
-                sent += sock.send(view[sent:])
+                sent += sock.send(view[sent:sent + SEND_CHUNK])
             except TimeoutError:
                 return False, sent, "timeout"
     finally:
@@ -275,7 +275,7 @@ class _VisaDevice:
                     break
                 return None, 0, False, _error_text(exc)
             except OSError as exc:  # the instrument went away: this call fails, the Device does not
-                return None, 0, False, str(exc)
+                return None, 0, False, transport_error_text(exc)
             except Exception as exc:  # noqa: BLE001 - e.g. a torn-down session: still this call's failure, not a crash
                 return None, 0, False, f"{type(exc).__name__}: {exc}"
             buffer.extend(chunk)
@@ -344,7 +344,7 @@ class _VisaDevice:
             try:
                 return _socket_write(session.interface, payload, seconds)
             except OSError as exc:
-                return False, 0, str(exc)
+                return False, 0, transport_error_text(exc)
         self.resource.timeout = _milliseconds(seconds)
         try:
             count = self.resource.write_raw(payload)

@@ -67,7 +67,7 @@ def _run(cmd: list[str], *, cwd: Path = REPO, env: dict | None = None, timeout: 
     shared CI runner, especially the Windows one, and a timeout that fires mid-build reads as a
     PyInstaller failure rather than a slow machine."""
     print("$ " + " ".join(str(part) for part in cmd))
-    proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if proc.returncode != 0:
         detail = (proc.stdout + "\n" + proc.stderr)[-1500:]
         raise SystemExit(f"{' '.join(map(str, cmd))}\nfailed with exit {proc.returncode}:\n{detail}")

@@ -66,7 +66,7 @@ class DockerError(Exception):
 
 def _run(argv: list[str], *, timeout: int = 1800, check: bool = True) -> subprocess.CompletedProcess:
     print("$ " + " ".join(str(part) for part in argv))
-    proc = subprocess.run([str(part) for part in argv], capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run([str(part) for part in argv], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if check and proc.returncode != 0:
         raise DockerError(f"{' '.join(map(str, argv))} exited {proc.returncode}:\n{(proc.stdout + proc.stderr)[-2000:]}")
     return proc

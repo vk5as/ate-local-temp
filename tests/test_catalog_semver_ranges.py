@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
 from pathlib import Path
 
 from ate.catalog import _version_key, find_definitions, matches_range, parse_version
 
 from .test_catalog_definitions import _valid_tslua, build_env
+from tests._fixtures import scratch_directory
 
 
 def _sha256(data: bytes) -> str:
@@ -335,7 +335,7 @@ def test_seam_transitive_dependency_chain_resolves(tmp_path):
         },
     }
     files = {"a.tslua": tslua, "b.lua": b"return {}\n", "c.lua": b"return {}\n"}
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_directory() as tmp:
         root = build_env(Path(tmp), defs=defs, files=files)
         by_media = {d.media_number: d for d in find_definitions(root)}
 

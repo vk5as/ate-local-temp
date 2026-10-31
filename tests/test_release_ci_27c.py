@@ -618,7 +618,8 @@ def test_resolve_command_finds_ate_by_full_path_and_expands_the_registry_value(t
 
     assert smoke.expand_path_value(value) == f"C:\\Windows\\system32;{bin_dir}"
     assert smoke.normalise_entry("%ATE_SMOKE_BIN%") == str(bin_dir).lower()
-    assert smoke.resolve_command("ate", value) == str(exe)
+    # Windows' `which` tries each %PATHEXT%, so on its case-blind disk `ate` may come back `ate.EXE`.
+    assert os.path.normcase(smoke.resolve_command("ate", value)) == os.path.normcase(str(exe))
 
     with pytest.raises(smoke.SmokeError) as exc:
         smoke.resolve_command("ate", r"C:\Windows\system32")
@@ -898,8 +899,8 @@ def test_smoke_prints_install_log_when_it_crashes_on_something_else(tmp_path, ca
     assert "could not copy _internal" in captured, "a crash without the log is not diagnosable"
 
 
-def test_smoke_refuses_to_run_where_setup_exe_cannot_run(tmp_path, capsys):
-    assert smoke.IS_WINDOWS is False, "these tests run on Linux"
+def test_smoke_refuses_to_run_where_setup_exe_cannot_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(smoke, "IS_WINDOWS", False)
     code = smoke.main(["--installer", str(tmp_path / "does-not-exist.exe")])
     assert code == 1
     assert "release CI" in capsys.readouterr().err

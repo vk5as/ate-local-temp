@@ -9,7 +9,6 @@ offscreen Qt — no mocks."""
 
 import hashlib
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive
+from tests._fixtures import scratch_directory
 
 
 def _helper_source() -> str:
@@ -76,7 +76,7 @@ def _drive_capture(app: QCoreApplication, engine: RunEngine, captured: dict) -> 
 def test_clean_run_records_release_and_files_with_no_mismatch(app: QCoreApplication) -> None:
     """A clean run records the release (seq 0) and both files with matching checksums."""
     captured = {}
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td))
         store = RunStore(Path(td) / "ate.db")
         engine = RunEngine(
@@ -108,7 +108,7 @@ def test_clean_run_records_release_and_files_with_no_mismatch(app: QCoreApplicat
 def test_mismatched_file_is_flagged_and_warns_but_still_runs(app: QCoreApplication) -> None:
     """Editing a file after its checksum was recorded flags that row and logs one WARNING."""
     captured = {}
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td))
 
         # Corrupt the helper on disk *after* the .atedef recorded its original bytes.

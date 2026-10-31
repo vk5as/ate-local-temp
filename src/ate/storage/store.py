@@ -205,6 +205,7 @@ class RunStore:
         # check_same_thread=False lets a later QThread run worker share it; callers
         # that use it cross-thread (the run engine) serialise access themselves.
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._closed = False
         # Per-run next log-line seq, so a batch can hold several lines (an INFO print and
         # an ERROR warning from the same step) without colliding on ``(run_uuid, seq)``.
         # The store spans one whole run, so this counter stays monotonic across every
@@ -228,6 +229,8 @@ class RunStore:
         "database is locked" on long schedules. Materialising the rows here closes the statement
         before the connection goes back to the pool, so reads never outlive their context.
         """
+        if self._closed:  # the Engine would quietly open the file again, and hold it open
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
         with self._engine.connect() as conn:
             result = conn.execute(stmt)
             return result.fetchall() if result.returns_rows else result
@@ -755,7 +758,10 @@ class RunStore:
     def close(self) -> None:
         """Release the store's database handles (stdlib connection and Engine).
 
-        Idempotent; the application calls it when the main window closes (packet 30a)."""
+        Idempotent; the application calls it when the main window closes (packet 30a). A closed
+        store holds no file open, which is what lets Windows delete or move the database, and it
+        stays closed: any later statement raises."""
+        self._closed = True
         try:
             self._conn.close()
         except sqlite3.Error:

@@ -99,6 +99,15 @@ def test_setup_never_overwrites_an_existing_config(tmp_path):
     assert written["station"]["uuid"] == "keep-me"
 
 
+def _user_version(db_path) -> int:
+    """The schema version, through a connection that is closed again."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
 def test_setup_migrates_an_existing_database_without_recreating_it(tmp_path):
     """An existing database is migrated, not recreated — its identity and version are preserved."""
     root = tmp_path / "station"
@@ -109,13 +118,13 @@ def test_setup_migrates_an_existing_database_without_recreating_it(tmp_path):
     # Bootstrap a real database (the current schema) before setup runs.
     RunStore(db_path)  # creates the tables and sets user_version to SCHEMA_VERSION
     inode_before = db_path.stat().st_ino
-    version_before = int(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True).execute("PRAGMA user_version").fetchone()[0])
+    version_before = _user_version(db_path)
 
     main(["setup", "--root", str(root)])
 
     # The file was not recreated (same inode) and its schema version is unchanged.
     assert db_path.stat().st_ino == inode_before
-    version_after = int(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True).execute("PRAGMA user_version").fetchone()[0])
+    version_after = _user_version(db_path)
     assert version_after == version_before
 
 
@@ -131,10 +140,11 @@ def test_setup_unwritable_target_fails_with_nonzero_exit(tmp_path, capsys):
     assert "failed" in captured.err.lower()
 
 
-def test_prepare_station_applies_permissions_via_seam(tmp_path):
+def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     """prepare_station drives the permissions seam: data tree group-writable, config admin-only."""
     root = tmp_path / "station"
     perms = RecordingPermissions()
+    monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
 
     prepare_station(root / "data", root / "config", permissions=perms)
 

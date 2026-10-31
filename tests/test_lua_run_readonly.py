@@ -8,7 +8,6 @@ whether an already-seeded one or a new one — raises ``ATE.run: read-only`` ins
 Verified against a real lupa runtime and end-to-end through the QThread run engine — no mocks."""
 
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,11 +19,12 @@ from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
 from ._fixtures import READS_RUN, WRITES_RUN, _drive
+from tests._fixtures import scratch_directory
 
 
 def _make_host(source: str) -> LuaHost:
     """Construct a host for one schedule on disk and return it."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
@@ -37,7 +37,7 @@ def _run_schedule(app: QCoreApplication, source: str, **kwargs) -> tuple[RunStor
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")

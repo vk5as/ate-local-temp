@@ -599,7 +599,7 @@ def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
         print(result.message, file=sys.stderr)
         return 1
 
-    store = RunStore(path)  # creates the tables if missing and sets the schema version
+    RunStore(path).close()  # creates the tables if missing and sets the schema version
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])

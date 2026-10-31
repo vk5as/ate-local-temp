@@ -12,7 +12,6 @@ ATE.read/ATE.write wrappers behind it; ``LoopbackPeer`` + ``_drive`` exercise th
 import re
 import select
 import socket
-import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +26,7 @@ from ._fixtures import (
     _drive,
     wait_for_disconnect,
 )
+from tests._fixtures import scratch_directory
 
 
 def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = ""):
@@ -254,7 +254,7 @@ def _run_with_peer(app: QCoreApplication, source: str, port: int):
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source.replace(LoopbackPeer.PORT_PLACEHOLDER, str(port)), encoding="utf-8", newline="\n")

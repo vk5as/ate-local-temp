@@ -235,15 +235,17 @@ def build_default_config(hostname: str = "", data_dir: str | Path | None = None)
     (packet 30c); without it the file keeps the documented ``<data>`` placeholders and the
     reader resolves them against the platform data directory.
     """
-    data = str(Path(data_dir).resolve()) if data_dir is not None else _DATA
+    def under_data(name: str) -> str:
+        return str(Path(data_dir).resolve() / name) if data_dir is not None else f"{_DATA}/{name}"
+
     return {
         "format": 1,
         "station": {"name": str(hostname), "uuid": new_uuid7()},
         "defaultProject": "",
-        "testDefinitions": {"directories": [f"{data}/definitions"]},
-        "database": {"type": "sqlite", "path": f"{data}/ate.db", "storeMismatchedFiles": "ask"},
-        "reports": {"directory": f"{data}/reports", "organisation": "", "logo": None, "paperSize": "A4"},
-        "log": {"directory": f"{data}/logs", "level": "info"},
+        "testDefinitions": {"directories": [under_data("definitions")]},
+        "database": {"type": "sqlite", "path": under_data("ate.db"), "storeMismatchedFiles": "ask"},
+        "reports": {"directory": under_data("reports"), "organisation": "", "logo": None, "paperSize": "A4"},
+        "log": {"directory": under_data("logs"), "level": "info"},
         "devices": {"receiveBufferBytes": 16_777_216},
         "deviceTrace": {"enabled": False, "maxBytes": 256},
         "ui": {"theme": "system", "layout": "staged", "allowLayoutSwitch": True, "allowHistoryDuringRun": True},

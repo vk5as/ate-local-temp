@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import contextlib
 import socket
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -37,6 +36,7 @@ from ate.storage.store import RunStore
 from ._fixtures import LoopbackPeer, _drive
 from .test_device_builders import _builder_fields
 from .test_tcp_read_write import _run_with_peer, _step_message
+from tests._fixtures import scratch_directory
 
 
 # --- the scripted fake: a resource that records every call --------------------------------------
@@ -144,7 +144,7 @@ def _run_fake(app: QCoreApplication, source: str, manager: _FakeManager):
     original = visa._manager
     visa._manager = manager
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             store = RunStore(Path(td) / "ate.db")
             path = Path(td) / "schedule.tslua"
             path.write_text(source, encoding="utf-8", newline="\n")

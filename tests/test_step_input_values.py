@@ -5,7 +5,6 @@ controller: blocking types block the worker thread until supplied from another t
 return their typed value; POLL reads sticky state that becomes available once its button is
 clicked; an undeclared ``n`` raises. Verified against real .tslua schedules on disk — no mocks."""
 
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ from ate.engine.step_inputs import InvalidStepInput, StepInput
 from ate.storage.store import RunStore
 
 from ._fixtures import _drive
+from tests._fixtures import scratch_directory
 
 
 # A minimal schedule that loads cleanly and has no steps; the tests set up per-step inputs directly.
@@ -30,7 +30,7 @@ _MINIMAL = (
 
 def _host(op: OperatorInput, source: str = _MINIMAL) -> LuaHost:
     """Build a real host on disk with ``op`` injected so tests own supply/click."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         path = Path(td) / "schedule.tslua"
         path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(path), operator_input=op)
@@ -224,7 +224,7 @@ def test_undeclared_input_through_lua_raises_invalid_step_input(app):
         '      :setAction(function() ATE.input(9) end),\n'
         '  })\n'
     )
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         path = Path(td) / "schedule.tslua"
         path.write_text(source, encoding="utf-8", newline="\n")
         host = LuaHost(str(path), operator_input=op)
@@ -262,7 +262,7 @@ return ScheduleParams("Read back schedule", "one step that inspects what ATE.inp
 def _run_read_back(app, type_name: str, extra: str, value):
     """Run one step that reads its input into a local and reports Lua's view of it."""
     op = OperatorInput()
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         path = Path(td) / "read_back.tslua"
         path.write_text(

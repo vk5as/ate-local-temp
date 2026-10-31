@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import errno
 import socket
-import tempfile
 import time
 from collections import deque
 from pathlib import Path
@@ -32,6 +31,7 @@ from ._fixtures import UdpLoopbackPeer
 from .test_device_onerror import _dead_port
 from .test_receive_buffer import _run_with_peer_limited
 from .test_tcp_read_write import _step_message
+from tests._fixtures import scratch_directory
 
 
 def _params(peer: UdpLoopbackPeer, local_port: int = 0) -> dict:
@@ -373,7 +373,7 @@ def test_seam_overflow_drops_whole_oldest_datagrams_and_logs_one_warning() -> No
     peer = UdpLoopbackPeer(datagrams=[b"aaaa", b"bbbb", b"cccc", b"dddddd"])
     peer.start()
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             path = Path(td) / "schedule.tslua"
             path.write_text(
                 """return ScheduleParams("x") :setSchedule({
@@ -619,7 +619,7 @@ def test_seam_a_write_refused_by_a_peer_that_has_gone_costs_only_that_write() ->
     peer = UdpLoopbackPeer()
     peer.start()
     try:
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             path = Path(td) / "schedule.tslua"
             path.write_text(
                 """return ScheduleParams("x") :setSchedule({

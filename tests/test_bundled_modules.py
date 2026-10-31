@@ -10,7 +10,6 @@ import hashlib
 import importlib.resources
 import json
 import os
-import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -31,6 +30,7 @@ from ._fixtures import (
     WRITES_PDF,
     write_ate_env,
 )
+from tests._fixtures import scratch_directory
 
 
 def _bundled_bytes(name: str) -> bytes:
@@ -63,7 +63,7 @@ def _write_release(tmp_path: Path, main_src: str, extra: dict[str, str] | None =
 def _run(app: QCoreApplication, defs_dir: Path, definition):
     """Run ``main.tslua`` and return ``(run row, run_file rows)``."""
     captured = {}
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         engine = RunEngine(
             store, str(defs_dir / "main.tslua"),
@@ -86,7 +86,7 @@ BUNDLED_SCHEDULE = (
 
 def test_bundled_module_runs_and_is_recorded_as_a_run_file_row(app: QCoreApplication) -> None:
     """``require("ate.devices")`` runs, and the run records its checksum under the module name."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td), BUNDLED_SCHEDULE)
         row, files, _ = _run(app, defs_dir, definition)
 
@@ -112,7 +112,7 @@ def test_unknown_bundled_module_fails_naming_the_module(app: QCoreApplication) -
         '    :setAction(function() require("ate.nope") end),\n'
         "})\n"
     )
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td), src)
         row, _, logs = _run(app, defs_dir, definition)
 
@@ -129,7 +129,7 @@ def test_malformed_ate_names_are_rejected(app: QCoreApplication) -> None:
             f'    :setAction(function() require("{bad}") end),\n'
             "})\n"
         )
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_directory() as td:
             defs_dir, definition = _write_release(Path(td), src)
             row, _, logs = _run(app, defs_dir, definition)
 
@@ -147,7 +147,7 @@ def test_a_definition_module_with_an_ordinary_name_still_resolves(app: QCoreAppl
         '    :setAction(function() ATE.report(Result.PASS, "helper is " .. h.value) end),\n'
         "})\n"
     )
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td), src, {"helper.lua": helper})
         row, files, _ = _run(app, defs_dir, definition)
 
@@ -167,7 +167,7 @@ def test_requiring_a_bundled_module_twice_records_one_row(app: QCoreApplication)
         '    :setAction(function() require("ate.devices"); ATE.report(Result.PASS, "second") end),\n'
         "})\n"
     )
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         defs_dir, definition = _write_release(Path(td), src)
         row, files, _ = _run(app, defs_dir, definition)
 
@@ -249,9 +249,13 @@ def test_an_ate_name_cannot_walk_out_of_the_bundled_directory(app: QCoreApplicat
     """A planted .lua outside ``ate/lua`` reached by a ``..`` path is never loaded: only ``ate.<word>``
     is a bundled name, whatever exists on disk."""
     lua_dir = Path(str(importlib.resources.files("ate") / "lua"))
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         (Path(td) / "escape.lua").write_text('ESCAPED = true\nreturn true\n', encoding="utf-8", newline="\n")
-        bad = "ate." + os.path.relpath(Path(td) / "escape", lua_dir)
+        try:
+            walk = os.path.relpath(Path(td) / "escape", lua_dir)
+        except ValueError:  # another drive on Windows: no relative path reaches it, so name it whole
+            walk = str(Path(td) / "escape")
+        bad = "ate." + walk.replace(os.sep, "/")  # a backslash would be an escape in the Lua string
         src = (
             'return ScheduleParams("Escape", "requires a file outside ate/lua") :setSchedule({\n'
             '  StepParams("escape"):setStepNo("1.")\n'

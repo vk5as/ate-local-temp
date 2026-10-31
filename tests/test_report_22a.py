@@ -7,7 +7,6 @@ checks the PDF; a unit test pins the margin constants into the rendered CSS so t
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,7 @@ from ate.report.pdf import run_pdf_helper
 from ate.storage.store import RunStore
 
 from ._fixtures import DOC_FIELDS, _drive
+from tests._fixtures import scratch_directory
 
 
 def _cfg(**overrides) -> Config:
@@ -38,7 +38,7 @@ else:
 @pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
 def test_pdf_a4_from_generated_report(app) -> None:
     """A generated PASS report renders to a non-trivial A4 PDF through the helper process."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
@@ -64,7 +64,7 @@ def test_pdf_a4_from_generated_report(app) -> None:
 @pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
 def test_pdf_letter_from_generated_report(app) -> None:
     """The same report renders to Letter with the matching margins."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(DOC_FIELDS, encoding="utf-8", newline="\n")
@@ -90,7 +90,7 @@ def test_pdf_letter_from_generated_report(app) -> None:
 @pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
 def test_run_pdf_helper_raises_on_missing_html(app) -> None:
     """A missing HTML file makes the helper exit non-zero, so run_pdf_helper raises."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         pdf_path = Path(td) / "missing.pdf"
         with pytest.raises(Exception):
             run_pdf_helper(Path("/no/such/report.html"), pdf_path, "A4")
@@ -112,7 +112,7 @@ def _record(app, source: str = DOC_FIELDS) -> tuple[RunStore, str]:
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")

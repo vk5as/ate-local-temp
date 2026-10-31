@@ -57,6 +57,27 @@ class _TransportClosed(Exception):
     the failure the device reports (packet 17b)."""
 
 
+#: The most bytes handed to one ``send``. Winsock accepts a send of any size whenever its buffer has
+#: any room, so one huge send to a peer that has stopped reading "succeeds" at once, on Windows only,
+#: and the write's timeout means nothing. Small sends make the buffer fill on every platform.
+SEND_CHUNK = 65536
+
+
+def transport_error_text(exc: OSError) -> str:
+    """What a broken connection is called, in the same words on every platform.
+
+    The OS text differs ("[Errno 104] Connection reset by peer", "[WinError 10054] An existing
+    connection was forcibly closed by the remote host") and it reaches the Operator through the
+    Device warning and ``err``."""
+    if isinstance(exc, ConnectionResetError):
+        return "connection reset by peer"
+    if isinstance(exc, ConnectionAbortedError):
+        return "connection aborted"
+    if isinstance(exc, BrokenPipeError):
+        return "broken pipe"
+    return str(exc)
+
+
 class _SendTimeout(Exception):
     """The transport could not accept the bytes before the call's deadline. This fails only the
     call: the connection itself is intact."""
@@ -287,7 +308,7 @@ class _StreamDevice:
             if remaining <= 0:
                 return False, sent, "timeout"
             try:
-                sent += self._send(payload[sent:], remaining)
+                sent += self._send(payload[sent:sent + SEND_CHUNK], remaining)
             except _SendTimeout:
                 return False, sent, "timeout"
             except _TransportClosed as exc:

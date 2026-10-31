@@ -21,6 +21,7 @@ from .stream import (
     _SendTimeout,
     _StreamDevice,
     _TransportClosed,
+    transport_error_text,
 )
 
 
@@ -54,7 +55,7 @@ class _TcpDevice(_StreamDevice):
         try:
             chunk = self.sock.recv(READ_CHUNK)
         except OSError as exc:
-            raise _TransportClosed(str(exc)) from exc
+            raise _TransportClosed(transport_error_text(exc)) from exc
         if not chunk:  # the peer closed: an orderly EOF
             raise _TransportClosed("connection closed by peer")
         return chunk
@@ -69,7 +70,7 @@ class _TcpDevice(_StreamDevice):
         try:
             return self.sock.send(chunk)
         except OSError as exc:
-            raise _TransportClosed(str(exc)) from exc
+            raise _TransportClosed(transport_error_text(exc)) from exc
 
     def _close_transport(self) -> None:
         """Close the socket."""

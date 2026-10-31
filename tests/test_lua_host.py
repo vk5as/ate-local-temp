@@ -6,7 +6,6 @@ register_builtins=False / unpack_returned_tuples=True; the file-loading entry po
 reach Python; and every loaded chunk carries name ``@<path>`` in text mode. Verified
 against a real lupa runtime — no mocks."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from lupa import LuaError
 from ate.engine.lua_host import HostError, LuaHost
 
 from ._fixtures import PASSING
+from tests._fixtures import scratch_directory
 
 
 def _make_host(source: str) -> LuaHost:
@@ -22,7 +22,7 @@ def _make_host(source: str) -> LuaHost:
 
     The file is named ``schedule.tslua`` so the chunk name surfaces as ``@schedule.tslua``;
     construction runs synchronously (no Qt event loop needed)."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(schedule_path))
@@ -61,7 +61,7 @@ def test_python_is_nil():
 def test_chunks_load_with_path_name_and_text_mode():
     """Criterion 01c — a loaded chunk carries name ``@<path>`` in text mode. A body-level error
     surfaces the schedule's own filename (schedule.tslua:N:) rather than an anonymous string."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         schedule_path = Path(td) / "schedule.tslua"
         # Valid schedule whose body errors on line 2; if it loaded anonymously the traceback
         # would be "<eof> expected near 'error'" with no filename.

@@ -31,11 +31,12 @@ from .stream import (
     _SendTimeout,
     _StreamDevice,
     _TransportClosed,
+    transport_error_text,
 )
 
 
 class _Refused(Exception):
-    """The peer is not listening: Linux answers a connected UDP socket with an ICMP port-unreachable.
+    """The peer is not listening: an ICMP port-unreachable came back to the connected UDP socket.
 
     Raised separately from :class:`_TransportClosed` because there is no connection to lose - the
     peer may start listening later - so it fails one call, never the device (packet 18b)."""
@@ -51,6 +52,11 @@ class _Oversize(Exception):
 #: The most bytes a single UDP datagram can carry: the 65,536-byte UDP length minus its 8-byte header.
 #: Checked before sending so an oversize write says what is wrong instead of tripping EMSGSIZE.
 MAX_DATAGRAM_BYTES = 65507
+
+#: What a write says when the peer is not listening. Linux raises ConnectionRefusedError from either
+#: call and Windows ConnectionResetError (WSAECONNRESET) from the next ``recv`` only, so the reader
+#: usually gets it first. One wording, reported by the next write on both.
+REFUSED_TEXT = "connection refused: the peer is not listening"
 
 
 #: Per-call ``read`` overrides for UDP. No ``readTerm``: a datagram is the message, so a terminator
@@ -84,6 +90,7 @@ class _UdpDevice(_StreamDevice):
         self.sock = sock
         self._datagrams: collections.deque[bytes] = collections.deque()
         self._queued = 0  # bytes in _datagrams, the number the cap counts
+        self._refused = False  # the reader saw a refusal that no write has reported yet
 
     def describe(self) -> str:
         """A one-line description of this device for log lines (the peer it is connected to)."""
@@ -93,10 +100,10 @@ class _UdpDevice(_StreamDevice):
         """Pull one datagram, or None if nothing arrived within the poll time.
 
         UDP has no end of stream, so there is no EOF to report: an empty return is an empty
-        datagram, which is a message, not "nothing". On Linux a connected UDP socket whose peer is
-        not listening raises ConnectionRefusedError after an ICMP port-unreachable - the peer might
-        start listening later, so that is treated as "nothing this poll" rather than a device
-        failure (packet 18b)."""
+        datagram, which is a message, not "nothing". A connected UDP socket whose peer is not
+        listening raises after an ICMP port-unreachable (see :data:`REFUSED_TEXT`) - the peer might
+        start listening later, so that is "nothing this poll" rather than a device failure (packet
+        18b), and the next write is the call that reports it."""
         try:
             ready, _, _ = select.select([self.sock], [], [], POLL_SECONDS)
         except (OSError, ValueError) as exc:  # closed under us by close() (fd -1)
@@ -105,10 +112,12 @@ class _UdpDevice(_StreamDevice):
             return None
         try:
             return self.sock.recv(READ_CHUNK)  # one recv is exactly one datagram
-        except ConnectionRefusedError:
+        except (ConnectionRefusedError, ConnectionResetError):
+            with self._lock:
+                self._refused = True
             return None  # peer not listening yet: keep polling
         except OSError as exc:
-            raise _TransportClosed(str(exc)) from exc
+            raise _TransportClosed(transport_error_text(exc)) from exc
 
     def _reader_loop(self) -> None:
         """The shared drain loop, except that an empty datagram is data.
@@ -208,12 +217,12 @@ class _UdpDevice(_StreamDevice):
             raise _SendTimeout("write timeout")
         try:
             return self.sock.send(datagram)
-        except ConnectionRefusedError as exc:
-            raise _Refused(str(exc)) from exc
+        except (ConnectionRefusedError, ConnectionResetError) as exc:
+            raise _Refused(REFUSED_TEXT) from exc
         except OSError as exc:
             if exc.errno == errno.EMSGSIZE:  # too big for a datagram: the call, not the device
                 raise _Oversize(str(exc)) from exc
-            raise _TransportClosed(str(exc)) from exc
+            raise _TransportClosed(transport_error_text(exc)) from exc
 
     def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
         """Send ``data`` as one datagram and return ``(ok, count, err_or_None)``.
@@ -226,8 +235,11 @@ class _UdpDevice(_StreamDevice):
         """
         with self._lock:
             failed = self._failed
+            refused, self._refused = self._refused, False
         if failed is not None:
             return False, 0, failed
+        if refused:
+            return False, 0, REFUSED_TEXT  # as a pending socket error would: nothing goes out
         payload = self._to_bytes(params["data"])
         if len(payload) > MAX_DATAGRAM_BYTES:
             return False, 0, (

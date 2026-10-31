@@ -6,7 +6,6 @@ input types, ENUM's RADIOBUT/CHECKBOX/PUSHBUT widget and enum array, INTEGER/FLO
 Bad declarations are load errors (surfaced as HostError when a schedule loads). Verified against
 real Lua tables — no mocks."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from ate.engine.lua_host import HostError, LuaHost
 from ate.engine.step_inputs import InvalidStepInput, StepInput, validate_inputs
 
 from ._fixtures import PASSING
+from tests._fixtures import scratch_directory
 
 
 # --- valid declarations ------------------------------------------------------
@@ -176,7 +176,7 @@ def test_field_on_wrong_type_raises():
 
 def _host_with_source(source: str) -> LuaHost:
     """Build a host for one schedule on disk (named schedule.tslua so errors carry its name)."""
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         path = Path(td) / "schedule.tslua"
         path.write_text(source, encoding="utf-8", newline="\n")
         return LuaHost(str(path))

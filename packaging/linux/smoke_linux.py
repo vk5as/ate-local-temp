@@ -111,7 +111,7 @@ class SubprocessRunner(Runner):
 
     def run(self, argv: list[str]) -> CommandResult:
         print("$ " + " ".join(str(part) for part in argv))
-        proc = subprocess.run([str(part) for part in argv], capture_output=True, text=True, env=self.env, timeout=1800)
+        proc = subprocess.run([str(part) for part in argv], capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env, timeout=1800)
         return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
 

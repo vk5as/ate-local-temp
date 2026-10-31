@@ -29,6 +29,7 @@ from ._fixtures import (
     wait_for_disconnect,
 )
 from .test_tcp_read_write import _run_with_peer, _step, _step_message
+from tests._fixtures import scratch_directory
 
 
 def _open(peer: LoopbackPeer, read_term: str = "", write_term: str = "", limit: int | None = None):
@@ -483,7 +484,7 @@ def _run_with_peer_limited(app, source: str, port: int, limit: int | None = None
     def _capture(run_uuid: str) -> None:
         captured["run_uuid"] = run_uuid
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(

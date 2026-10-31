@@ -8,7 +8,6 @@ then ABORT, ...). Every attempt row, log line and input value must carry its own
 Verified against a real SQLite file with real .tslua schedules — no mocks."""
 
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
 from ._fixtures import LoopbackPeer, wait_for_disconnect
+from tests._fixtures import scratch_directory
 
 
 def _drive_with_choices(
@@ -65,7 +65,7 @@ def _drive_with_choices(
             value = values_by_index[key] if values_by_index is not None else float(key)
         op.supply_input(key, value)
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -135,7 +135,7 @@ def _drive_poll_retry(
         time.sleep(0.05)
         engine.operator_input.click_poll(node_seq, attempt_no, index - 1, texts[attempt_no])
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
@@ -170,7 +170,7 @@ def _drive_retry_then_abort(app: QCoreApplication, source: str) -> tuple[RunStor
         prompts.append((node_seq, attempt_no))
         engine.choose("RETRY")
 
-    with tempfile.TemporaryDirectory() as td:
+    with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         schedule_path = Path(td) / "schedule.tslua"
         schedule_path.write_text(source, encoding="utf-8", newline="\n")
