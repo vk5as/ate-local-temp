@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
-from PyQt6.QtCore import QObject, QCoreApplication, Qt
-from PyQt6.QtWidgets import QMessageBox
+from PySide6.QtCore import QObject, QCoreApplication, Qt
+from PySide6.QtWidgets import QMessageBox
 
 from ate.app import _pdf_sandbox_box, _pdf_sandbox_dialog, launch
 from ate.cli import main

@@ -22,7 +22,7 @@ from collections import deque
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.devices.udp import UdpDriver
 from ate.engine.lua_host import LuaHost

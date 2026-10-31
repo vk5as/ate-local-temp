@@ -17,7 +17,7 @@ Today there is nothing that does all of this together. The team needs:
 
 ## Solution
 
-ATE is a Python + PyQt6 desktop application that runs Lua 5.5 Test Schedules (through the stock `lupa` wheels) on a background worker thread while the GUI stays responsive.
+ATE is a Python + PySide6 desktop application that runs Lua 5.5 Test Schedules (through the stock `lupa` wheels) on a background worker thread while the GUI stays responsive.
 
 - An admin installs ATE and Media Releases on a Station. `ate setup` prepares the Station: data directories, permissions, a machine-wide config and the local SQLite database.
 - At launch ATE scans the configured directories for Test Definitions (`.atedef` files), validates them, resolves their dependencies, checks every checksum and lists every visible Test Schedule in one flat list, with broken ones shown with their errors.

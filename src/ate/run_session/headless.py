@@ -22,7 +22,7 @@ import enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from ..catalog import definition_mismatches, include_map, module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
 from .._version import __version__  # packet 06d: the version written to test_run.ate_version
@@ -62,19 +62,19 @@ def _map_run_status(status: RunStatus) -> SessionState:
 class HeadlessRunSession(QObject):
     """Drives a one-step Test Schedule headlessly and records it through the store."""
 
-    state_changed = pyqtSignal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
-    input_asked = pyqtSignal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
+    state_changed = Signal(SessionState)  # IDLE -> SELECTING -> STARTED -> FINISHED
+    input_asked = Signal(int, int, int)  # (node_seq, attempt_no, index): a step is asking for its n-th input
     # (node_seq, attempt_no, index, value): an asked input has been answered, through this session.
-    input_answered = pyqtSignal(int, int, int, object)
-    step_finished = pyqtSignal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
-    failure_prompt = pyqtSignal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
+    input_answered = Signal(int, int, int, object)
+    step_finished = Signal(int)  # node_seq: that step's Attempts are done, so its POLL widgets close
+    failure_prompt = Signal(int, int)  # (node_seq, attempt_no): a Stop-on-Fail failure is pending an operator choice
     # (node_seq, attempt_no, choice): that pause is over. Sent when it is answered, so no layout shows
     # an answered prompt, and again when the worker moves on, which keeps it behind a failure_prompt
     # still queued when the answer was given (packet 25b).
-    prompt_answered = pyqtSignal(int, int, str)
-    action_started = pyqtSignal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
-    step_started = pyqtSignal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
-    report_written = pyqtSignal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
+    prompt_answered = Signal(int, int, str)
+    action_started = Signal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
+    step_started = Signal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
+    report_written = Signal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
     def __init__(
         self,

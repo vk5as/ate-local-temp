@@ -20,7 +20,7 @@ import socket
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.devices.tcp import TcpDriver, _TcpDevice
 from ate.devices.registry import DeviceRegistry

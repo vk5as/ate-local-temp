@@ -6,8 +6,9 @@ that the plain CLI does not:
 
 * QtWebEngine spawns its helper process outside the Python process. Qt looks for it beside
   its own libraries, which the bundle's layout changes, so point it at the copy the hooks
-  collected. Where that copy is differs by platform: PyQt6 wheels keep it in ``Qt6/libexec``
-  on Linux and ``Qt6/bin`` on Windows (``QtWebEngineProcess.exe`` there).
+  collected. Where that copy is differs by platform: PySide6 puts it in ``PySide6/Qt/libexec``
+  on Linux and in ``PySide6`` itself on Windows (``QtWebEngineProcess.exe`` there), which is
+  the layout PyInstaller's PySide6 hook collects into.
 * Headless runs (``QT_QPA_PLATFORM=offscreen``, the PDF helper) have no GPU to show a page
   on; Chromium is told not to look for one. The GUI is unaffected.
 * Chromium will not build a renderer sandbox under root or an administrator, but this entry
@@ -64,9 +65,9 @@ def _webengine_process(base: str, name: str) -> str | None:
     somewhere else, so a bundle that has the helper is never refused for a wrong guess.
     """
     for rel in (
-        ("PyQt6", "Qt6", "bin", name),  # PyQt6 wheels on Windows
-        ("PyQt6", "Qt6", "libexec", name),  # PyQt6 wheels on Linux
-        ("PyQt6", "Qt", "libexec", name),  # PyQt6 before the Qt6 layout change
+        ("PySide6", "Qt", "libexec", name),  # PySide6 wheel on Linux: Qt sits under PySide6/Qt
+        ("PySide6", name),  # PySide6 wheel on Windows: the helper sits in PySide6/ itself
+        ("PySide6", "Qt", "bin", name),  # a Qt layout that keeps executables in bin
         (name,),  # collected in the bundle root
     ):
         path = os.path.join(base, *rel)

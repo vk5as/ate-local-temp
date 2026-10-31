@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtWidgets import QApplication, QWIDGETSIZE_MAX, QWidget
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ate.app import launch
 from ate.run_session.headless import SessionState
@@ -35,6 +35,9 @@ WINDOW_SIZE = (1280, 800)
 TALL_WINDOW = (1920, 1200)
 STEP_LIST_FLOOR = 150  # the code's own step-list minimum (packet 30b)
 FIELDS = {"operator": "Ada Lovelace", "project": "PSU-200 Production", "uut_type": "PowerSupply", "serial": "PS-1"}
+# PySide6 does not expose QWIDGETSIZE_MAX as a name, so the ceiling Qt gives a widget nobody
+# capped is written out here: Qt's own define is (1 << 24) - 1.
+QWIDGETSIZE_MAX = (1 << 24) - 1
 
 
 @pytest.fixture

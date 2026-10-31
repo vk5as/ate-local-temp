@@ -66,7 +66,7 @@ harness = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(harness)
 
 try:  # pragma: no cover - depends on the environment's installs
-    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 
     WEBENGINE_AVAILABLE = True
 except Exception:
@@ -166,10 +166,10 @@ def test_the_linux_build_job_builds_all_three_artifacts_in_order():
 
 
 def test_the_build_job_installs_the_libraries_pyinstaller_needs_to_import_qt():
-    """The build machine has to be able to import PyQt6, or the bundle ships a renderer that cannot start.
+    """The build machine has to be able to import PySide6, or the bundle ships a renderer that cannot start.
 
     PyInstaller's Qt hooks collect `QtWebEngineProcess`, its `.pak` resources and the Qt platform
-    plugins only when PyQt6 imports in the build environment. In a bare Debian container the import
+    plugins only when PySide6 imports in the build environment. In a bare Debian container the import
     fails on libGL/libglib, the hooks are skipped without a word, and every Test Report the Station
     writes is a 1.7 KB PDF with nothing in it. A debian:stable container caught this (see
     packaging/linux/docker_smoke.py), so the libraries the artifacts need at runtime are installed
@@ -305,25 +305,28 @@ def _stub_ate() -> str:
 def _fake_bundle(root: Path) -> Path:
     """A bundle shaped like `dist/ate`: the executable, an `_internal` directory, and the parts
     `packaging/build_pyinstaller.py --verify` requires, so packaging has something to accept."""
+    from tests._fixtures import stub_licence_notices
+
     bundle = root / "dist" / "ate"
     internal = bundle / "_internal"
-    (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "lib").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "plugins" / "platforms").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "libexec").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "resources").mkdir(parents=True)
     (internal / "ate" / "lua").mkdir(parents=True)
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
     exe.write_text(_stub_ate(), encoding="utf-8", newline="\n")
     exe.chmod(0o755)
     (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
     (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8", newline="\n")
+    stub_licence_notices(internal)
     return bundle
 
 
@@ -732,7 +735,7 @@ def test_wheel_happy_path(tmp_path: Path) -> None:
     assert station.wheel_bin.is_file() and station.config.is_file()
     installed = next(c for c in runner.calls if c[:2] == ["apt-get", "install"])
     assert {"python3", "python3-venv", "pipx"} <= set(installed[2:]), installed
-    assert set(packaging.WHEEL_SYSTEM_LIBS) <= set(installed[2:]), "PyQt6 from PyPI needs its own system libraries"
+    assert set(packaging.WHEEL_SYSTEM_LIBS) <= set(installed[2:]), "PySide6 from PyPI needs its own system libraries"
 
 
 def test_a_missing_artifact_fails_loudly(tmp_path: Path) -> None:
@@ -975,7 +978,7 @@ def test_pdf_has_text_tells_a_blank_page_from_a_rendered_report() -> None:
     assert not pdf_has_text(NOT_A_PDF), "not a PDF at all"
 
 
-@pytest.mark.skipif(not WEBENGINE_AVAILABLE, reason="PyQt6-WebEngine not installed")
+@pytest.mark.skipif(not WEBENGINE_AVAILABLE, reason="PySide6-WebEngine not installed")
 def test_pdf_has_text_accepts_a_real_webengine_report(tmp_path: Path) -> None:
     """The real thing QtWebEngine prints passes the check, so it never fails a good build."""
     html = tmp_path / "report.html"
@@ -1045,7 +1048,7 @@ def test_wheel_libs_are_read_from_the_packaging_script():
 
 
 def test_the_wheel_needs_libraries_the_deb_does_not() -> None:
-    """PyPI's PyQt6 is linked against more than the bundle's own Qt, so the two lists differ."""
+    """PyPI's PySide6 is linked against more than the bundle's own Qt, so the two lists differ."""
     only_wheel = set(packaging.WHEEL_SYSTEM_LIBS) - set(packaging.DEPENDS)
     assert only_wheel, "the wheel uses the container's Python, not the bundle"
     assert {"libglib2.0-0t64", "libdbus-1-3", "libxkbcommon0"} <= set(packaging.WHEEL_SYSTEM_LIBS)

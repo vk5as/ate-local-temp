@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.devices import DeviceRegistry, Driver, TcpDriver, validate_params
 from ate.engine.lua_host import HostError, LuaHost

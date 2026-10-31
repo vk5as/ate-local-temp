@@ -26,16 +26,16 @@ def _cfg(**overrides) -> Config:
     return Config(path=Path("/tmp/ate-report-test"), **overrides)
 
 
-# QtWebEngine (PyQt6-WebEngine) is an optional dependency; skip the PDF tests if it cannot import.
+# QtWebEngine (PySide6-WebEngine) is an optional dependency; skip the PDF tests if it cannot import.
 try:  # pragma: no cover - depends on the environment's installs
-    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 except Exception:
     QWebEngineAvailable = False
 else:
     QWebEngineAvailable = True
 
 
-@pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
+@pytest.mark.skipif(not QWebEngineAvailable, reason="PySide6-WebEngine not installed")
 def test_pdf_a4_from_generated_report(app) -> None:
     """A generated PASS report renders to a non-trivial A4 PDF through the helper process."""
     with scratch_directory() as td:
@@ -61,7 +61,7 @@ def test_pdf_a4_from_generated_report(app) -> None:
         assert len(data) > 1024  # non-trivial
 
 
-@pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
+@pytest.mark.skipif(not QWebEngineAvailable, reason="PySide6-WebEngine not installed")
 def test_pdf_letter_from_generated_report(app) -> None:
     """The same report renders to Letter with the matching margins."""
     with scratch_directory() as td:
@@ -87,7 +87,7 @@ def test_pdf_letter_from_generated_report(app) -> None:
         assert len(data) > 1024
 
 
-@pytest.mark.skipif(not QWebEngineAvailable, reason="PyQt6-WebEngine not installed")
+@pytest.mark.skipif(not QWebEngineAvailable, reason="PySide6-WebEngine not installed")
 def test_run_pdf_helper_raises_on_missing_html(app) -> None:
     """A missing HTML file makes the helper exit non-zero, so run_pdf_helper raises."""
     with scratch_directory() as td:

@@ -162,7 +162,7 @@ def report_qt_fatal(previous=None):
     every message for a report that an aborted run never prints: without this a dying CI job says
     nothing at all. The stream is a duplicate of the real stderr so that pytest's capture cannot
     swallow it (see open_fatal_stream). Anything but a fatal message goes to ``previous``, the handler this one replaced."""
-    from PyQt6.QtCore import QtMsgType
+    from PySide6.QtCore import QtMsgType
 
     open_fatal_stream()
 
@@ -1236,3 +1236,16 @@ def recording_pdf_helper(record: list, script: str = WRITES_PDF):
         return sys.executable, ["-c", script, str(pdf_path)], env
 
     return command
+
+
+#: The licence files a bundle has to carry (packet 32a): the two texts Qt and PySide6 can be used
+#: under, the notice naming them, and the generated inventory of runtime dependencies.
+LICENCE_NOTICES = ("LGPL-3.0.txt", "GPL-3.0.txt", "NOTICE-Qt-PySide6.txt", "THIRD_PARTY_NOTICES.txt")
+
+
+def stub_licence_notices(internal: Path) -> None:
+    """Write the licence notices into a stub bundle, so `verify_bundle` has something to accept."""
+    licences = internal / "licences"
+    licences.mkdir(parents=True, exist_ok=True)
+    for name in LICENCE_NOTICES:
+        (licences / name).write_text("stub notice", encoding="utf-8", newline="\n")

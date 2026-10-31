@@ -294,7 +294,7 @@ text in it, which `ate.report.pdf.pdf_has_text` catches; and run the same bundle
 `xvfb-run` without the six X libraries and Qt aborts with "Could not load the Qt platform plugin xcb"
 (headless renders never notice, a Station with a screen always does). `packaging/build_pyinstaller.py`
 checks the bundle it built — a Qt platform plugin, `QtWebEngineProcess`, `icudtl.dat` and the `.pak`
-resources — before it says the build succeeded, because a bundle whose PyQt6 hooks imported nothing
+resources — before it says the build succeeded, because a bundle whose PySide6 hooks imported nothing
 looks like a build and is not one.
 
 | Depends | Why |
@@ -421,7 +421,7 @@ metadata, so `ate --version` has to print it):
   `packaging/linux/build_linux.py` (read from the script, never copied into the smoke script), then
   `tar -xzf` and `./install.sh`;
 - **wheel** — `python3`, `python3-venv`, `pipx` and `WHEEL_SYSTEM_LIBS` from the same script: Debian
-  stable's Python is 3.13, and the wheel pulls PyQt6 and QtWebEngine from PyPI, so it needs the
+  stable's Python is 3.13, and the wheel pulls PySide6 and its QtWebEngine from PyPI, so it needs the
   libraries PyPI's Qt is linked against rather than the bundle's own. `pipx install ./ate-*.whl`,
   then `ate setup`, because a wheel has no postinst:
 

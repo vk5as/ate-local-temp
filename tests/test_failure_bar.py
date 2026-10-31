@@ -14,7 +14,7 @@ is left unwired.
 import sqlite3
 import time
 
-from PyQt6.QtGui import QColor
+from PySide6.QtGui import QColor
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import FailurePromptBar, StagedRunScreen

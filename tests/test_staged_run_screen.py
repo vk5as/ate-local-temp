@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,

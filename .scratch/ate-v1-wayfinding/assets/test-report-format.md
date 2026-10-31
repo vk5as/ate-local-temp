@@ -20,7 +20,7 @@ ATE's definition of the Test Report, settled in "Test Report content and format"
 ## Format
 
 - **HTML** is the source: one self-contained file from a bundled Jinja2 template, with inline CSS and no external assets. A logo is embedded as a data URI.
-- **PDF** is rendered from that HTML by **QWebEngine** (`QWebEnginePage.printToPdf`, from PyQt6-WebEngine), settled by "Render a sample Test Report to PDF":
+- **PDF** is rendered from that HTML by **QWebEngine** (`QWebEnginePage.printToPdf`, from PySide6's QtWebEngine), settled by "Render a sample Test Report to PDF":
   - It runs in a **separate ATE helper process** that loads the saved HTML file and writes the PDF, so the Run and History screens never stall. (In the GUI process, Windows stalled 0.35–0.42 s per render, and 8 s on a cold start.)
   - It loads the **saved file**, never `setHtml`: past about 1.5 MB of report, `setHtml` silently produces a blank page.
   - The page header and footer are CSS `@page` margin boxes, using `counter(page)` and `counter(pages)`. The `QPageLayout` margins passed to `printToPdf` must equal the CSS `@page` margins; Chromium takes them from Qt.

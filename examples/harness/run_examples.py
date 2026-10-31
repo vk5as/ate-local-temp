@@ -40,7 +40,7 @@ for _path in (_SRC, _ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from PyQt6.QtCore import QCoreApplication  # noqa: E402
+from PySide6.QtCore import QCoreApplication  # noqa: E402
 
 from ate.catalog import (  # noqa: E402
     include_map,

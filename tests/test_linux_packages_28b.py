@@ -166,25 +166,28 @@ def _fake_bundle(root: Path, script: str = STUB_ATE) -> Path:
     """A bundle shaped like ``dist/ate``: the executable, an ``_internal`` directory, and the parts
     `packaging/build_pyinstaller.py`'s `verify_bundle` insists on, so packaging has something to
     accept."""
+    from ._fixtures import stub_licence_notices
+
     bundle = root / "dist" / "ate"
     internal = bundle / "_internal"
-    (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "lib").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "plugins" / "platforms").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "libexec").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "resources").mkdir(parents=True)
     (internal / "ate" / "lua").mkdir(parents=True)
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     exe = bundle / "ate"
     exe.write_text(script, encoding="utf-8", newline="\n")
     exe.chmod(0o755)
     (internal / "base_library.zip").write_text("not really a zip", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "lib" / "libQt6Core.so.6").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
+    (internal / "PySide6" / "Qt" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
     (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("<html>", encoding="utf-8", newline="\n")
+    stub_licence_notices(internal)
     (internal / "ate" / "version.txt").write_text("1.2.3", encoding="utf-8", newline="\n")
     return bundle
 
@@ -213,7 +216,7 @@ def _package(bundle: Path, out: Path, *, tmpdir: Path | None = None) -> tuple[Pa
 def test_packaging_refuses_a_bundle_whose_hooks_collected_nothing(tmp_path: Path) -> None:
     """A bundle with an executable but no Qt in it is not ATE, and packaging must say so (30d review).
 
-    PyInstaller writes an executable even when its PyQt6 hooks imported nothing, so `dist/ate/ate`
+    PyInstaller writes an executable even when its PySide6 hooks imported nothing, so `dist/ate/ate`
     exists, `--version` prints, and the `.deb` ships a program that aborts at the first Test Report.
     Take the platform plugin, the WebEngine helper and its resources out of a bundle and packaging
     stops, with the missing part named and no artifacts written.
@@ -222,9 +225,9 @@ def test_packaging_refuses_a_bundle_whose_hooks_collected_nothing(tmp_path: Path
     internal = bundle / "_internal"
     out = tmp_path / "out"
     out.mkdir(parents=True)
-    shutil.rmtree(internal / "PyQt6" / "Qt6" / "plugins" / "platforms")
-    (internal / "PyQt6" / "Qt6" / "libexec" / "QtWebEngineProcess").unlink()
-    shutil.rmtree(internal / "PyQt6" / "Qt6" / "resources")
+    shutil.rmtree(internal / "PySide6" / "Qt" / "plugins" / "platforms")
+    (internal / "PySide6" / "Qt" / "libexec" / "QtWebEngineProcess").unlink()
+    shutil.rmtree(internal / "PySide6" / "Qt" / "resources")
 
     proc = subprocess.run(
         [sys.executable, str(BUILD_LINUX), "--dist", str(bundle.parent), "--out", str(out)],
@@ -247,10 +250,10 @@ def test_the_build_script_checks_a_bundle_it_is_only_asked_to_verify(tmp_path: P
     assert good.returncode == 0, good.stdout + good.stderr
     assert "qt platform plugins" in good.stdout, good.stdout
 
-    shutil.rmtree(bundle / "_internal" / "PyQt6" / "Qt6" / "plugins" / "platforms")
+    shutil.rmtree(bundle / "_internal" / "PySide6" / "Qt" / "plugins" / "platforms")
     bad = subprocess.run([sys.executable, str(BUILD_PYINSTALLER), "--verify", str(exe)], capture_output=True, text=True, timeout=300)
     assert bad.returncode != 0, "a bundle with no Qt platform plugin verified clean"
-    assert "PyQt6 could not be imported" in bad.stdout + bad.stderr, bad.stdout + bad.stderr
+    assert "PySide6 could not be imported" in bad.stdout + bad.stderr, bad.stdout + bad.stderr
 
 
 def _control_text(deb: Path) -> str:
@@ -358,7 +361,29 @@ def test_the_tarball_carries_the_bundle_and_install_sh(tmp_path: Path) -> None:
     assert "install.sh" in members, sorted(members)
     assert "ate/ate" in members and "ate/_internal/base_library.zip" in members, sorted(members)
     assert "dist" not in {m.split("/")[0] for m in members}, "the tarball carries dist/ itself"
-    assert any(m.startswith("ate/_internal/PyQt6/") for m in members), "the nested _internal tree was flattened"
+    assert any(m.startswith("ate/_internal/PySide6/") for m in members), "the nested _internal tree was flattened"
+
+
+def test_every_artifact_carries_the_licence_notices(tmp_path: Path) -> None:
+    """Qt and PySide6 are LGPL, so the `.deb` and the tarball ship the texts and the notice (32a).
+
+    LGPL compliance is not a legal question here but a packaging one: the licence text, a notice
+    naming the Qt and PySide6 versions and where their source is, and the statement that Qt can be
+    replaced have to be in the artifact a Station receives. `verify_bundle` refuses a bundle without
+    them, and this checks the two artifacts built from a bundle that has them still have them."""
+    from ._fixtures import LICENCE_NOTICES
+
+    bundle = _fake_bundle(tmp_path)
+    tarball, deb = _package(bundle, tmp_path / "out")
+
+    with tarfile.open(tarball) as tar:
+        members = {m.name for m in tar}
+    listing = subprocess.run(
+        ["dpkg-deb", "-c", str(deb)], capture_output=True, text=True, encoding="utf-8", timeout=120
+    ).stdout
+    for notice in LICENCE_NOTICES:
+        assert f"ate/_internal/licences/{notice}" in members, f"the tarball ships no {notice}"
+        assert notice in listing, f"the .deb ships no {notice}"
 
 
 def test_the_tarball_is_root_owned_and_install_sh_is_executable(tmp_path: Path) -> None:
@@ -483,7 +508,7 @@ def test_an_upgrade_replaces_the_bundle_instead_of_merging_into_it(tmp_path: Pat
 
     stale = prefix / "_internal" / "from_the_previous_version.py"
     stale.write_text("left behind by the old cp -a merge", encoding="utf-8", newline="\n")
-    nested = prefix / "_internal" / "PyQt6" / "Qt6" / "lib" / "libQt6Old.so.6"
+    nested = prefix / "_internal" / "PySide6" / "Qt" / "lib" / "libQt6Old.so.6"
     nested.parent.mkdir(parents=True, exist_ok=True)
     nested.write_text("old library", encoding="utf-8", newline="\n")
 

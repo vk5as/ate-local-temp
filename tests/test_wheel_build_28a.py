@@ -36,12 +36,12 @@ DOCS = REPO / "docs" / "building-from-source.md"
 # no .git or tests/ is needed.
 BUILD_INPUTS = ("pyproject.toml", "README.md", "src")
 
-# Runtime dependencies and the lowest version each one is known to work with. Only the two Qt
-# packages carry an upper bound: they must be the same Qt, and PyQt6-WebEngine has no release
-# past 6.11 (see tests/test_ci_run_is_bounded.py and the CI step that checks the pairing).
+# Runtime dependencies and the lowest version each one is known to work with. Only the Qt
+# package carries an upper bound: it is the one that decides which Qt is in the process, and
+# the suite is proven on Qt 6.11 (see tests/test_ci_run_is_bounded.py and the CI step that
+# checks the Qt and QtWebEngine agree).
 EXPECTED_DEPS = {
-    "pyqt6": "6.11",
-    "pyqt6-webengine": "6.11",
+    "pyside6-addons": "6.11",
     "lupa": "2.8",
     "pyvisa": "1.16",  # PyPI's newest is 1.16.2; 1.22 was never released
     "pyvisa-py": "0.7",
@@ -223,28 +223,28 @@ def test_wheel_declares_python_and_classifiers(wheel: zipfile.ZipFile) -> None:
         assert f"Programming Language :: Python :: {minor}" in meta
 
 
-def test_the_qt_pair_is_banded_to_one_qt(wheel: zipfile.ZipFile) -> None:
-    """`PyQt6` and `PyQt6-WebEngine` are capped in the same band, and both floors match the cap.
+def test_the_qt_band_is_one_qt_release(wheel: zipfile.ZipFile) -> None:
+    """`PySide6-Addons` is capped to a single Qt release, and its floor is the proven one.
 
-    PyQt6 6.12 installs Qt 6.12 while PyQt6-WebEngine stops at 6.11 and brings in
-    PyQt6-WebEngine-Qt6 6.11.2: two Qt builds in one process. Linux tolerates it; Windows aborts
-    with 0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND) the moment QtWebEngine is imported, which is
-    why the first Windows CI run could not render a Test Report at all. An uncapped floor lets
-    pip put those two together again."""
+    PySide6-Addons pins PySide6-Essentials and shiboken6 to the exact same version, so Qt and
+    QtWebEngine cannot drift apart. The pair this project shipped before did: PyQt6 6.12 installs
+    Qt 6.12 while PyQt6-WebEngine stops at 6.11 and brings in PyQt6-WebEngine-Qt6 6.11.2 — two Qt
+    builds in one process. Linux tolerates it; Windows aborts with 0xc0000139
+    (STATUS_ENTRYPOINT_NOT_FOUND) the moment QtWebEngine is imported, which is why the first
+    Windows CI run could not render a Test Report at all. An uncapped floor lets pip pick a Qt
+    this suite has never run against."""
     specs = _runtime_dependencies(wheel)
-    bands: dict[str, tuple[int, int]] = {}
-    for name in ("pyqt6", "pyqt6-webengine"):
-        spec = specs[name]
-        floor = re.search(r">=(\d+)\.(\d+)", spec)
-        cap = re.search(r"<(\d+)\.(\d+)", spec)
-        assert floor and cap, f"{name} is not bounded both ways: {spec!r}"
-        band = (int(floor.group(1)), int(floor.group(2)))
-        # one release only: >=6.11,<6.12. A wider span lets pip put a newer core next to it.
-        assert (int(cap.group(1)), int(cap.group(2))) == (band[0], band[1] + 1), (
-            f"{name} is not held to one Qt release ({spec!r})"
-        )
-        bands[name] = band
-    assert bands["pyqt6"] == bands["pyqt6-webengine"], f"the Qt pair is banded differently: {bands}"
+    name = "pyside6-addons"
+    spec = specs[name]
+    floor = re.search(r">=(\d+)\.(\d+)", spec)
+    cap = re.search(r"<(\d+)\.(\d+)", spec)
+    assert floor and cap, f"{name} is not bounded both ways: {spec!r}"
+    band = (int(floor.group(1)), int(floor.group(2)))
+    # one release only: >=6.11,<6.12. A wider span lets pip put a newer Qt under the app.
+    assert (int(cap.group(1)), int(cap.group(2))) == (band[0], band[1] + 1), (
+        f"{name} is not held to one Qt release ({spec!r})"
+    )
+    assert band == (6, 11), f"{name} is not banded to the Qt the suite is proven on: {spec!r}"
 
 
 def test_wheel_exposes_the_ate_entry_point(wheel: zipfile.ZipFile) -> None:
@@ -256,8 +256,8 @@ def test_wheel_exposes_the_ate_entry_point(wheel: zipfile.ZipFile) -> None:
 def _runtime_dependencies(wheel: zipfile.ZipFile) -> dict[str, str]:
     """Each runtime dependency's requirement string, exactly as the wheel writes it.
 
-    setuptools orders the bounds it is given, so `PyQt6>=6.11,<6.12` comes out as
-    `PyQt6<6.12,>=6.11`: compare the bounds, never a literal "name>=floor" substring."""
+    setuptools orders the bounds it is given, so `PySide6>=6.11,<6.12` comes out as
+    `PySide6<6.12,>=6.11`: compare the bounds, never a literal "name>=floor" substring."""
     out: dict[str, str] = {}
     for line in _dist_info(wheel, "METADATA").splitlines():
         if not line.startswith("Requires-Dist: "):
@@ -334,7 +334,7 @@ def _install_wheel(venv: Path, wheel_path: Path, env: dict[str, str]) -> None:
 
     Dependencies are not fetched: only SQLAlchemy (plus typing_extensions, which it
     imports) are installed — that is the whole import chain of `ate --version`. Pulling
-    PyQt6 would cost minutes.
+    PySide6 would cost minutes.
     """
     result = subprocess.run(
         [_venv_exe(venv, "python"), "-m", "pip", "install", "--no-deps", str(wheel_path), "SQLAlchemy>=2.0", "typing_extensions"],

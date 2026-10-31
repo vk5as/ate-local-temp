@@ -17,7 +17,7 @@ Launch sequence (each step reuses the module that already does it):
    menu, and the Run view's debug window inside the Run screen.
 
 Both dialogs are injectable (`prompt`, `alert`) so tests never block on a real
-:class:`~PyQt6.QtWidgets.QMessageBox`, and `exec_=False` returns the window instead of entering
+:class:`~PySide6.QtWidgets.QMessageBox`, and `exec_=False` returns the window instead of entering
 the event loop.
 """
 
@@ -29,9 +29,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QActionGroup
-from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QActionGroup
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QMessageBox
 
 from ._version import __version__
 from .config import Config, ConfigError, MissingConfigError, config_hint, config_path, read_config

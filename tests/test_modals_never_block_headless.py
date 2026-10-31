@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QMessageBox
 
 from ate.dialogs import dismiss_if_headless
 from ate.ui.run_widgets import MismatchConfirmation
@@ -114,7 +114,7 @@ def test_headless_modals_return_in_a_fresh_process() -> None:
     guard is removed the subprocess sits in `exec()` until this test's own bound kills it, which is
     the CI hang these tests exist to prevent."""
     code = (
-        "from PyQt6.QtWidgets import QApplication\n"
+        "from PySide6.QtWidgets import QApplication\n"
         "app = QApplication([])\n"
         "from ate.app import _missing_config_dialog, _alert_dialog, _close_confirm_dialog, _pdf_sandbox_dialog\n"
         "print(_missing_config_dialog('/nonexistent/ate-config.json'))\n"
@@ -135,7 +135,7 @@ def test_headless_modals_return_in_a_fresh_process() -> None:
 #: prints the dialog's answer, whether the run finished, and what the recorded run_file rows say.
 MISMATCH_RUN_CODE = (
     "import sys, time\n"
-    "from PyQt6.QtWidgets import QApplication\n"
+    "from PySide6.QtWidgets import QApplication\n"
     "app = QApplication([])\n"
     "from ate.run_session.headless import HeadlessRunSession, SessionState\n"
     "from ate.ui.staged_run_screen import StagedRunScreen\n"

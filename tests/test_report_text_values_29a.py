@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 

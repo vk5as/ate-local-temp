@@ -99,7 +99,7 @@ def build_artifacts(scratch: Path) -> Path:
     # it is in libpython3.<minor>, and the minor is whatever Debian stable happens to have.
     libpython = _exec(build, "python3 -c 'import sys; print(f\"libpython3.{sys.version_info[1]}\")'").stdout.strip()
     # PyInstaller's Qt hooks only collect QtWebEngine's helper binary, its .pak resources and the Qt
-    # platform plugins if PyQt6 can actually be imported in the build environment. In a bare Debian
+    # platform plugins if PySide6 can actually be imported in the build environment. In a bare Debian
     # container that import fails on libGL/libglib, the hooks are skipped silently, and the bundle
     # ships a renderer that cannot start: the first `_pdf` call dies with "Could not find the Qt
     # platform plugin offscreen". The libraries the artifacts need at runtime are the same ones the

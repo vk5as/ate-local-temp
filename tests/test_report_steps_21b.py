@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from jinja2 import Environment, PackageLoader
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.config import Config
 from ate.report.html import _report_context, render_report

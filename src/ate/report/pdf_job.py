@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer
+from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 
 from .pdf import pdf_helper_command
 

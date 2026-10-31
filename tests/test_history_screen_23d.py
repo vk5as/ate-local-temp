@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel, QWidget
 
 from ate.engine.run_engine import RunEngine
 from ate.history.session import HistorySession

@@ -20,7 +20,7 @@ import tempfile
 
 import pytest
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.report.log_export import build_export_rows, export_log

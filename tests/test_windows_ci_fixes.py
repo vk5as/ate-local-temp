@@ -17,7 +17,7 @@ import sys
 from pathlib import Path, PureWindowsPath
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate import catalog
 from ate.devices.stream import SEND_CHUNK, _StreamDevice, _TransportClosed, transport_error_text
@@ -185,7 +185,7 @@ def test_no_test_deletes_a_directory_its_store_may_still_hold():
 _ENGINE_CHILD_PREAMBLE = f"""
 import sys, time
 from pathlib import Path
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
@@ -300,8 +300,8 @@ def test_a_qt_fatal_message_reaches_the_log_with_every_stack(tmp_path):
     """Qt ends a Windows process with __fastfail and pytest-qt keeps its messages: say why first."""
     source = """
 import time
-from PyQt6 import sip
-from PyQt6.QtCore import QCoreApplication, QThread, qInstallMessageHandler
+import shiboken6
+from PySide6.QtCore import QCoreApplication, QThread, qInstallMessageHandler
 from tests._fixtures import report_qt_fatal
 
 app = QCoreApplication([])
@@ -312,7 +312,7 @@ class Sleeper(QThread):
 thread = Sleeper()
 thread.start()
 time.sleep(0.2)
-sip.delete(thread)  # destroyed while it runs
+shiboken6.delete(thread)  # destroyed while it runs
 """
     result = _child(tmp_path, source)
     assert result.returncode != 0, "the scenario no longer aborts, so this proves nothing"
@@ -325,8 +325,8 @@ def test_a_qt_fatal_inside_a_real_pytest_run_is_not_swallowed(tmp_path):
     test_file = tmp_path / "test_dies.py"
     test_file.write_text(
         "import time\n"
-        "from PyQt6 import sip\n"
-        "from PyQt6.QtCore import QThread\n"
+        "import shiboken6\n"
+        "from PySide6.QtCore import QThread\n"
         "class Sleeper(QThread):\n"
         "    def run(self):\n"
         "        time.sleep(30)\n"
@@ -334,7 +334,7 @@ def test_a_qt_fatal_inside_a_real_pytest_run_is_not_swallowed(tmp_path):
         "    thread = Sleeper()\n"
         "    thread.start()\n"
         "    time.sleep(0.2)\n"
-        "    sip.delete(thread)\n",
+        "    shiboken6.delete(thread)\n",
         encoding="utf-8",
         newline="\n",
     )

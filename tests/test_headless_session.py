@@ -16,7 +16,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QObject, QProcess, Qt
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
 from ate.storage.store import RunStore
@@ -27,7 +27,7 @@ from ._fixtures import ENABLE_DISABLED, FAILING, LOGGING, PASSING, fake_pdf_help
 # The real end-to-end PDF test needs QtWebEngineCore; if it can't import here the helper process
 # can never build its page, so skip that one test rather than fail the whole module.
 try:
-    from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
 
     PYQT_WEBENGINE_IMPORT_ERROR = None
 except Exception as _exc:  # noqa: BLE001 - any import failure means no real PDF rendering here

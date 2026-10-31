@@ -1,7 +1,7 @@
 """Packet 30a seam tests: bare ``ate`` opens the application.
 
 Every launch here uses ``exec_=False`` and injected dialogs, so nothing blocks on a real
-:class:`~PyQt6.QtWidgets.QMessageBox`; config and data live in the test's ``tmp_path``. The screens
+:class:`~PySide6.QtWidgets.QMessageBox`; config and data live in the test's ``tmp_path``. The screens
 are the real :class:`StagedRunScreen` and :class:`HistoryScreen` bound to a real
 :class:`HeadlessRunSession` and store, exactly as the screen tests build them.
 """
@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMainWindow, QMessageBox
 
 from ate._version import __version__
 from ate.app import _alert_dialog, _close_confirm_dialog, _missing_config_dialog, launch
@@ -304,7 +304,7 @@ def test_launch_keeps_its_qapplication_alive_without_pytest_qt(tmp_path):
     RunStore(env["db"])
     root = Path(__file__).resolve().parent.parent
     script = (
-        "from PyQt6.QtWidgets import QApplication\n"
+        "from PySide6.QtWidgets import QApplication\n"
         "from ate.app import launch\n"
         f"out = launch(['--config', {str(env['config'])!r}], exec_=False)\n"
         "assert out.code == 0, out.code\n"
@@ -494,7 +494,7 @@ def _stub_dialogs(monkeypatch, boxes, choose):
     """Make QMessageBox.exec return at once, recording each box, with clickedButton answering ``choose``.
 
     This runs the real `_missing_config_dialog`/`_alert_dialog` code without blocking on a modal box."""
-    from PyQt6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QPushButton
 
     def fake_exec(self, *args):
         boxes.append(self)
@@ -507,7 +507,7 @@ def _stub_dialogs(monkeypatch, boxes, choose):
 
 def _button(box, text):
     """The box's button with this exact text — how a test 'clicks' a stubbed dialog."""
-    from PyQt6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QPushButton
 
     return next(b for b in box.findChildren(QPushButton) if b.text() == text)
 

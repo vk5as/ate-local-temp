@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 import serial
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.devices.serial import SerialDriver
 from ate.engine.lua_host import LuaHost

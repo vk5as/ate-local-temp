@@ -15,9 +15,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from ate.run_session.headless import HeadlessRunSession
 from ate.ui.staged_run_screen import StagedRunScreen

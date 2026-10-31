@@ -15,8 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -52,7 +52,7 @@ class ExportLogDialog(QDialog):
     ``QFileDialog.getSaveFileName``."""
 
     #: A Save As result was accepted: (path, format, filters-as-exporter-keyword-args).
-    save_chosen = pyqtSignal(str, str, dict)
+    save_chosen = Signal(str, str, dict)
 
     def __init__(
         self,

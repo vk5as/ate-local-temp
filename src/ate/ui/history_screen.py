@@ -16,9 +16,9 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QStandardItem, QStandardItemModel
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -70,7 +70,7 @@ class HistoryScreen(QWidget):
     """
 
     # Prefill dict for a new run of this UUT (see :meth:`HistorySession.new_run_prefill`).
-    new_run_requested = pyqtSignal(dict)
+    new_run_requested = Signal(dict)
 
     def __init__(
         self,

@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from ate.catalog import find_definitions, include_map, module_map
 from ate.engine.lua_host import LuaHost

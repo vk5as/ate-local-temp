@@ -1,7 +1,7 @@
 # ATE — Automated Test Execution
 
 ATE runs Lua 5.5 *Test Schedules* against hardware UUTs, records each run in a
-local SQLite database, and renders an HTML/PDF report. It is a PyQt6 desktop app.
+local SQLite database, and renders an HTML/PDF report. It is a PySide6 desktop app.
 
 ## Scope
 

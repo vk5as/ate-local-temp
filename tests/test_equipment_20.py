@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.catalog import list_schedule_rows
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState

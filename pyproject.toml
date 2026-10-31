@@ -20,15 +20,19 @@ classifiers = [
 # tests/test_wheel_build_28a.py compares each floor with the version installed in the
 # venv running the suite, so a floor that was never released (pyvisa>=1.22) fails.
 #
-# The two Qt packages carry an upper bound because they have to be the *same* Qt:
-# PyQt6 6.12 installs Qt 6.12, while PyQt6-WebEngine tops out at 6.11 and brings in
-# PyQt6-WebEngine-Qt6 6.11.2. Two Qt builds in one process work on Linux and kill the
-# Windows runner with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) when WebEngine is
-# imported. Keeping both in one band is what makes the PDF report render on Windows.
+# The Qt band carries an upper bound so the app stays on Qt 6.11, the version every
+# test and release run so far used. ATE ships PySide6 (LGPL-3.0, with GPL-2.0 and
+# GPL-3.0 also offered by the wheel metadata) instead of PyQt6, whose wheels are GPL
+# or commercial and did not match the MIT licence this project declares.
+# PySide6 is split in two: PySide6-Addons is the wheel that carries QtWebEngine, and
+# it pins PySide6-Essentials and shiboken6 to the *exact* same version, so Qt and
+# QtWebEngine can never drift apart. The old pair did: PyQt6 6.12 installs Qt 6.12
+# while PyQt6-WebEngine topped out at 6.11 and brought in PyQt6-WebEngine-Qt6 6.11.2,
+# and two Qt builds in one process kill the Windows runner with
+# STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) when WebEngine is imported.
 # See the "Check Qt and QtWebEngine are the same Qt" step in .github/workflows/ci.yml.
 dependencies = [
-    "PyQt6>=6.11,<6.12",
-    "PyQt6-WebEngine>=6.11,<6.12",
+    "PySide6-Addons>=6.11,<6.12",
     "lupa>=2.8",
     "SQLAlchemy>=2.0",
     "Jinja2>=3.1",
@@ -71,6 +75,9 @@ where = ["src"]
 # suite runs it too and CI catches an example schedule that stops working.
 testpaths = ["tests", "examples"]
 addopts = "-ra"
+# pytest-qt picks a binding by probing. This project ships one, so pin it: a stray
+# PyQt6 in the venv cannot quietly take over.
+qt_api = "pyside6"
 markers = [
     "slow: seconds of work or a network; deselect with -m 'not slow'",
     "build: builds the frozen bundle with PyInstaller; skipped unless ATE_BUILD_TESTS=1",

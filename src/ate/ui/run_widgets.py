@@ -19,9 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFontMetrics
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, QObject, Qt, QSize, Signal
+from PySide6.QtGui import QBrush, QColor, QFontMetrics
+from PySide6.QtWidgets import (
     QCheckBox,
     QGridLayout,
     QHBoxLayout,
@@ -616,7 +616,7 @@ class SchedulePicker(QWidget):
     ``inline_mismatches`` draws the ⚠ note inside the row (the three-pane picker, spec line 48);
     the staged picker keeps the note under the list instead, where ``mismatch_label`` shows it."""
 
-    selection_changed = pyqtSignal(str)  # the exact schedule name, or "" when nothing runnable is current
+    selection_changed = Signal(str)  # the exact schedule name, or "" when nothing runnable is current
 
     #: Set while MainWindow is copying the Operator's setup across a layout switch: re-rendering
     #: this picker as part of that is not the Operator choosing a schedule, so the picker paints
@@ -853,7 +853,7 @@ class FailurePromptBar(QWidget):
     step's message growing across the bar, then the three buttons in order. ``style`` picks the
     mockup's full-width bar (variant C) or the box hugging the failed step (variant B)."""
 
-    choice_made = pyqtSignal(str)
+    choice_made = Signal(str)
 
     def __init__(self, style: str = "") -> None:
         super().__init__()

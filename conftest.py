@@ -8,7 +8,7 @@ install regardless of this path tweak.
 
 It also provides one offscreen application for the whole session, so the QThread
 run engine and headless session (ticket 02) and the widget Run screen (ticket 03) can be
-driven without a display. This Qt 6.11 / PyQt6 build segfaults at interpreter shutdown when a
+driven without a display. This Qt 6.11 / PySide6 build segfaults at interpreter shutdown when a
 live ``QCoreApplication`` and a live ``QApplication`` are both present; sharing one ``QApplication``
 (for which ``QCoreApplication`` is also true, so queued cross-thread signals still deliver) means
 that never happens — only a lone application is ever finalized.
@@ -36,13 +36,13 @@ if os.name == "nt" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
     os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"))
 
 # Ticket 02 drives QThread workers headless (QT_QPA_PLATFORM=offscreen). One shared application
-# for the session avoids creating a second QApplication mid-session. This PyQt6 build's
+# for the session avoids creating a second QApplication mid-session. This PySide6 build's
 # ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
 # argument list and rely on that env var instead.
 import pytest  # noqa: E402
 
-from PyQt6.QtCore import QObject, QThread, qInstallMessageHandler  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
+from PySide6.QtCore import QObject, QThread, qInstallMessageHandler  # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from ate.engine.run_engine import stop_live_engines  # noqa: E402
 from ate.log import AppLog  # noqa: E402
@@ -212,7 +212,7 @@ def qapp() -> QApplication:
 
     Autouse so tests that do not declare it still run with one application present (ticket 02's
     signal delivery needs an application to pump queued cross-thread events). The ``offscreen``
-    platform is supplied by the ``QT_QPA_PLATFORM=offscreen`` env var; this PyQt6 build's
+    platform is supplied by the ``QT_QPA_PLATFORM=offscreen`` env var; this PySide6 build's
     ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
     argument list and rely on that env var.
 

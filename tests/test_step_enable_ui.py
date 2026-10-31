@@ -7,7 +7,7 @@ locked while a run is in progress and stay locked until it ends.
 
 import time
 
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen

@@ -8,7 +8,7 @@ pass_fail. Verified against a real SQLite file; no mocks."""
 import sqlite3
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.engine.lua_host import LuaHost
 from ate.engine.run_engine import RunEngine

@@ -6,7 +6,7 @@ filter inputs, header sort and the action buttons — offscreen. No run logic he
 into an existing interface (session methods), and "Open report" opens through an injected ``open_file`` so
 tests never touch the platform.
 
-Selection: on this Qt 6.11 / PyQt6 build ``QTableView.setCurrentIndex(idx)`` followed by
+Selection: on this Qt 6.11 / PySide6 build ``QTableView.setCurrentIndex(idx)`` followed by
 ``qapp.processEvents()`` reliably registers a row selection offscreen (verified against the real widget),
 so the action handlers that read ``selectedRunUuid()`` are exercised through genuine selections rather
 than a hand-filled map. Columns are addressed by their fixed index in :data:`HISTORY_COLUMNS` — column 0

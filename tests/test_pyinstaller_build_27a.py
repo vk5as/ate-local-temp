@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._fixtures import executable_stub
+from tests._fixtures import executable_stub, stub_licence_notices
 
 REPO = Path(__file__).resolve().parent.parent
 SPEC = REPO / "packaging" / "pyinstaller" / "ate.spec"
@@ -38,8 +38,8 @@ BUILD_SCRIPT = REPO / "packaging" / "build_pyinstaller.py"
 
 # What a frozen bundle must carry, whatever platform or CPython builds it.
 REQUIRED_HIDDEN = {
-    "PyQt6.QtWebEngineCore",
-    "PyQt6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
     "lupa.lua55",
     "pyvisa_py",
     "pyvisa_py.tcpip",
@@ -88,7 +88,7 @@ def test_the_spec_bundles_qtwebengine_and_names_the_helper() -> None:
     ``QtWebEngineProcess`` lives.
     """
     text = SPEC.read_text(encoding="utf-8")
-    assert "PyQt6.QtWebEngineCore" in text and "PyQt6.QtWebEngineWidgets" in text
+    assert "PySide6.QtWebEngineCore" in text and "PySide6.QtWebEngineWidgets" in text
     entry = ENTRY.read_text(encoding="utf-8")
     assert "QtWebEngineProcess" in entry and "QTWEBENGINEPROCESS_PATH" in entry
 
@@ -170,7 +170,7 @@ def test_the_ticked_box_claims_only_what_was_built_here() -> None:
 def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> None:
     """A bundle with the WebEngine helper and no platform plugin has no Qt at all.
 
-    PyInstaller's Qt hooks only collect the plugins when PyQt6 can be imported in the build
+    PyInstaller's Qt hooks only collect the plugins when PySide6 can be imported in the build
     environment; in a container without libGL/libglib the import fails, the hooks are skipped, and
     the bundle ships `QtWebEngineProcess` and its .pak files while `_pdf` dies with "Could not
     find the Qt platform plugin". Checking the helper alone is not enough: the smoke check has to
@@ -194,22 +194,51 @@ def test_the_frozen_smoke_insists_on_a_qt_platform_plugin(tmp_path: Path) -> Non
     (internal / "ate" / "lua" / "devices.lua").write_text("-- lua", encoding="utf-8", newline="\n")
     (internal / "ate" / "report" / "templates").mkdir(parents=True)
     (internal / "ate" / "report" / "templates" / "report.html.j2").write_text("{{ report }}", encoding="utf-8", newline="\n")
-    (internal / "PyQt6" / "Qt6" / "libexec").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "libexec" / ("QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")).write_bytes(b"ELF")
-    (internal / "PyQt6" / "Qt6" / "resources").mkdir(parents=True)
-    (internal / "PyQt6" / "Qt6" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
-    (internal / "PyQt6" / "Qt6" / "resources" / "icudtl.dat").write_bytes(b"icu")
+    stub_licence_notices(internal)
+    (internal / "PySide6" / "Qt" / "libexec").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "libexec" / ("QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess")).write_bytes(b"ELF")
+    (internal / "PySide6" / "Qt" / "resources").mkdir(parents=True)
+    (internal / "PySide6" / "Qt" / "resources" / "qtwebengine_resources.pak").write_bytes(b"pak")
+    (internal / "PySide6" / "Qt" / "resources" / "icudtl.dat").write_bytes(b"icu")
 
     build = _load_module(BUILD_SCRIPT, "build_pyinstaller")
     with pytest.raises(SystemExit) as caught:
         build._run_smoke(exe, "1.2.3")
     assert "platform plugin" in str(caught.value), f"the smoke check only looked at the helper: {caught.value}"
 
-    plugin = internal / "PyQt6" / "Qt6" / "plugins" / "platforms"
+    plugin = internal / "PySide6" / "Qt" / "plugins" / "platforms"
     plugin.mkdir(parents=True)
     (plugin / "libqoffscreen.so").write_bytes(b"ELF")
     lines = build._run_smoke(exe, "1.2.3")
     assert any("platform plugin" in line for line in lines), lines
+
+    # Qt and PySide6 are LGPL, so the bundle also carries the licence texts and the notice (32a).
+    # A bundle missing one is refused the same way a bundle missing a platform plugin is.
+    (internal / "licences" / "LGPL-3.0.txt").unlink()
+    with pytest.raises(SystemExit) as no_licence:
+        build._run_smoke(exe, "1.2.3")
+    assert "licence" in str(no_licence.value), no_licence.value
+
+
+def test_the_notice_generator_lists_every_runtime_dependency(tmp_path: Path) -> None:
+    """THIRD_PARTY_NOTICES.txt is read off the installed wheels, and the copyleft ones are named.
+
+    The point of generating it is that nothing is guessed: a dependency whose wheel states no
+    licence is reported as unstated rather than assumed MIT, and the LGPL Qt binding is called out
+    as copyleft so the notice that travels with the bundle says so."""
+    notices = _load_module(REPO / "packaging" / "licence" / "notices.py", "licence_notices")
+    text = notices.third_party_notices()
+    for name in ("pyside6-addons", "lupa", "sqlalchemy", "jinja2", "pyserial", "pyvisa", "pyvisa-py"):
+        assert name in text.lower(), f"{name} is not in the notices: {text}"
+    assert "LGPL" in text, "the Qt binding's licence is not reported"
+    assert "Lua" in text, "the Lua lupa embeds is not mentioned"
+
+    qt_notice = notices.qt_notice()
+    assert "LGPL" in qt_notice and "source" in qt_notice.lower(), qt_notice
+    assert "replaced" in qt_notice.lower() or "replace" in qt_notice.lower(), "the notice never says Qt can be replaced"
+    for text_file in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        full = (REPO / "packaging" / "licence" / text_file).read_text(encoding="utf-8")
+        assert "GNU" in full and len(full) > 3000, f"{text_file} is not the licence text"
 
 
 def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
@@ -233,7 +262,7 @@ def test_the_size_log_counts_a_link_once(tmp_path: Path) -> None:
 
 
 def test_the_frozen_helper_search_covers_both_platform_layouts(tmp_path: Path) -> None:
-    """PyQt6 keeps QtWebEngineProcess in Qt6/libexec on Linux and Qt6/bin on Windows.
+    """PySide6 puts QtWebEngineProcess in ``PySide6/Qt/libexec`` on Linux and in ``PySide6`` on Windows.
 
     The entry point points Qt at the bundled helper, so it has to find it in the layout the hooks
     collect into on the platform the bundle is built for — and in any other layout a Qt build
@@ -242,9 +271,9 @@ def test_the_frozen_helper_search_covers_both_platform_layouts(tmp_path: Path) -
     entry = _load_module(ENTRY, "ate_entry")
     for index, rel in enumerate(
         (
-            ("PyQt6", "Qt6", "bin", "QtWebEngineProcess.exe"),  # PyQt6 wheel, Windows
-            ("PyQt6", "Qt6", "libexec", "QtWebEngineProcess"),  # PyQt6 wheel, Linux
-            ("PyQt6", "Qt", "libexec", "QtWebEngineProcess"),  # PyQt6 before the Qt6 layout
+            ("PySide6", "QtWebEngineProcess.exe"),  # PySide6 hook, Windows: Qt sits in PySide6/
+            ("PySide6", "Qt", "libexec", "QtWebEngineProcess"),  # PySide6 hook, Linux
+            ("PySide6", "Qt", "bin", "QtWebEngineProcess.exe"),  # a Qt build that keeps it in bin
         )
     ):
         base = tmp_path / f"bundle{index}"
@@ -309,9 +338,9 @@ def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
     spec = _executed_spec()
     excluded = set(spec["excludes"])
     expected = {
-        "PyQt6.QtQml", "PyQt6.QtQuick", "PyQt6.QtQuickWidgets", "PyQt6.QtQuick3D",
-        "PyQt6.Qt3DCore", "PyQt6.Qt3DRender", "PyQt6.QtMultimedia", "PyQt6.QtMultimediaWidgets",
-        "PyQt6.QtBluetooth",
+        "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQuick3D",
+        "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+        "PySide6.QtBluetooth",
     }
     missing = sorted(expected - excluded)
     assert not missing, f"the spec stopped excluding {missing}"
@@ -319,10 +348,10 @@ def test_the_spec_excludes_qt_bindings_ate_never_imports() -> None:
     used = set()
     for source in (REPO / "src" / "ate").rglob("*.py"):
         for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("PyQt6."):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("PySide6."):
                 used.add(node.module)
             elif isinstance(node, ast.Import):
-                used.update(alias.name for alias in node.names if alias.name.startswith("PyQt6."))
+                used.update(alias.name for alias in node.names if alias.name.startswith("PySide6."))
     clash = sorted(used & excluded)
     assert not clash, f"ATE imports {clash}, which the spec excludes"
 

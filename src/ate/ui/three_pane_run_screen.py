@@ -18,9 +18,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
@@ -80,7 +80,7 @@ class StepTable(QWidget):
     """
 
     #: A Stop-on-Fail prompt answered from one of the inline bars: CONTINUE, RETRY or ABORT.
-    prompt_choice = pyqtSignal(str)
+    prompt_choice = Signal(str)
 
     def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["ThreePaneRunScreen"] = None) -> None:
         super().__init__()

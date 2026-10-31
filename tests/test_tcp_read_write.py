@@ -15,7 +15,7 @@ import socket
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from ate.devices import TcpDriver
 from ate.engine.run_engine import RunEngine
