@@ -13,7 +13,7 @@
 - [x] A Device opened in a Pre-test Action is closed the same way when a later step ends the run unexpectedly.
 - [x] One Device's close raising does not stop the next Device closing.
 - [x] The next run on the same session, reopening the same port, passes and sees `nil` for the global and the `string` field.
-- [x] On Linux only (skip elsewhere), use a real pseudo-terminal: no file descriptor still points at the port after the run, and `serial.Serial(port, exclusive=True)` opens it.
+- [x] On Linux only (skip elsewhere), use a real pseudo-terminal: no file descriptor still points at the port after the run. (The exclusive open first listed here was dropped at review: it succeeds on Linux even while the port is held, so it could not fail.)
 - [x] Each test is shown to fail with `_close_open_devices` disabled, or with a Lua runtime reused between runs.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes.

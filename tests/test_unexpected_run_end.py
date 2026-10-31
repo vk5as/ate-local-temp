@@ -12,7 +12,6 @@ import sys
 import time
 
 import pytest
-import serial
 from PyQt6.QtWidgets import QApplication
 
 from ate.devices.serial import SerialDriver
@@ -343,11 +342,14 @@ def test_one_device_whose_close_raises_does_not_stop_the_next_device_closing(tmp
         assert attempts["n"] == 1, "the failing close was not the one the teardown hit"
         assert still_open == [], "the registry still held a Device when the run finished"
         assert wait_for_disconnect(following, 3.0, 1), "the next Device never closed"
-        assert not stubborn.closed, "the Device whose close raised was closed after all"
+        assert not stubborn.closed, "the failing close was meant to leave this peer connected"
     finally:
-        opened["device"].close()
-        stubborn.stop()
-        following.stop()
+        try:
+            if "device" in opened:
+                opened["device"].close()
+        finally:
+            stubborn.stop()
+            following.stop()
 
 
 def test_the_next_run_on_the_same_session_reopens_the_port_with_clean_lua_state(tmp_path, monkeypatch):
@@ -380,7 +382,8 @@ def test_the_next_run_on_the_same_session_reopens_the_port_with_clean_lua_state(
 @pytest.mark.skipif(sys.platform != "linux", reason="the pseudo-terminal check needs a Linux pty")
 def test_a_crash_on_a_pseudo_terminal_leaves_no_descriptor_on_the_port(tmp_path, monkeypatch):
     """With the teardown disabled the run keeps two descriptors on the port (the probe saw this);
-    with it in place the port is free, so the next opener can take it exclusively."""
+    with it in place none is left. An exclusive open proves nothing here: on Linux it succeeds even
+    while another descriptor holds the port, because ATE does not take that lock itself."""
     import os
     import pty
     import tty
@@ -407,7 +410,5 @@ def test_a_crash_on_a_pseudo_terminal_leaves_no_descriptor_on_the_port(tmp_path,
         still_open, closed = _registry_at_finished(session, engine)
         assert still_open == [] and len(closed) == 2, closed
         assert fds_on_port() == [], f"descriptors still point at {port}: {fds_on_port()}"
-        fresh = serial.Serial(port, exclusive=True)  # exclusive: proves nothing else holds the port
-        fresh.close()
     finally:
         os.close(master)
