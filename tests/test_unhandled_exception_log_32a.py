@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 
+import pytest
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal
 from PySide6.QtWidgets import QLabel, QMessageBox
 from pytestqt.exceptions import capture_exceptions
@@ -20,7 +21,7 @@ from pytestqt.exceptions import capture_exceptions
 import ate.report.pdf_job
 from ate.app import launch
 from ate.exception_log import UnhandledExceptionLog
-from ate.log import AppLog
+from ate.log import AppLog, LogError
 from ate.run_session.headless import SessionState
 from ate.storage.store import RunStore
 
@@ -70,18 +71,48 @@ def test_uninstall_puts_the_previous_hook_back_and_leaves_a_later_hook_alone(qap
             sys.excepthook = before
 
 
-def test_a_closed_log_never_stops_the_exception_reaching_the_previous_hook(qapp, tmp_path) -> None:
-    """The hook runs while Qt is unwinding: it must not raise, whatever state the log is in."""
-    log = AppLog(tmp_path, name="closed")
-    log.close()
+def _fail_with_log_error(*_args) -> None:
+    raise LogError("cannot write application log: disk full")
+
+
+@pytest.mark.parametrize("break_log", [AppLog.close, lambda log: setattr(log, "log", _fail_with_log_error)], ids=["closed", "log-error"])
+def test_a_failed_log_write_still_tells_the_operator_and_reaches_the_previous_hook(qapp, tmp_path, break_log) -> None:
+    """The hook runs while Qt is unwinding, so it must not raise, and a log it cannot write is no
+    reason to say nothing: the notice still goes out, naming no path, because none holds the details."""
+    log = AppLog(tmp_path, name="broken")
+    break_log(log)
+    shown: list[str] = []
     sender = _Sender()
     sender.fired.connect(_raise_in_slot)
     with capture_exceptions() as caught:
         reporter = UnhandledExceptionLog(log)
+        reporter.reported.connect(shown.append)
         reporter.install()
         sender.fired.emit()
         reporter.uninstall()
+    log.close()
     assert [exc_type for exc_type, _value, _tb in caught] == [ValueError]
+    assert shown == [""], "the Operator must hear of it, and not be sent to a log that lacks it"
+
+
+def test_the_window_shows_a_failed_log_write_without_claiming_a_path(qapp, tmp_path, monkeypatch) -> None:
+    """Through `launch` and the queued connection: the line shows, and names no log file."""
+    monkeypatch.setattr(ate.report.pdf_job, "pdf_helper_command", fake_pdf_helper(WRITES_PDF))
+    env = write_ate_env(tmp_path)
+    RunStore(env["db"]).close()
+    sender = _Sender()
+    sender.fired.connect(_raise_in_slot)
+    with capture_exceptions():
+        window = launch(["--config", str(env["config"])], exec_=False, prompt=lambda _path: True, alert=lambda _text: None).window
+        log_path = window.app_log.path
+        window.app_log.close()
+        sender.fired.emit()
+        qapp.processEvents()
+        label = window.findChild(QLabel, "internal_error_label")
+        text = label.text() if label is not None else ""
+        window.close()
+    assert "Internal error" in text and "could not be written" in text, text
+    assert str(log_path) not in text and log_path.name not in text and "Details:" not in text, text
 
 
 def test_an_exception_on_a_worker_is_logged_there_and_shown_on_the_main_thread(qapp, tmp_path) -> None:

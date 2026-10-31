@@ -231,15 +231,10 @@ print("FINISHED" if done else "no finish", len(_live_engines))
     assert "FINISHED 0" in result.stdout, "the ended worker was not let go: " + result.stdout
 
 
-def test_an_exception_leaving_the_worker_does_not_abort_the_process(tmp_path):
-    """A worker whose ``QThread.run`` raises does not get to end silently. Here a schedule no host can load.
-
-    PyQt6 aborted the process on an exception escaping ``QThread.run``; PySide6 prints
-    "Error calling Python override of QThread::run()" and lets the thread end, which is worse for the
-    screen: it would wait for a FINISHED that never arrives. The guard in ``RunEngine.run`` is what
-    makes both bindings report the run as INTERRUPTED and still announce FINISHED, and this child
-    proves it: exit 0, and the run ended."""
-    source = _ENGINE_CHILD_PREAMBLE + """
+def _load_failure_child(tmp_path, plant: str = ""):
+    """A child whose schedule no host can load, pumping its queue once the worker has ended, so a slot
+    or timer that raises late runs and is seen. ``plant`` goes in just before that pump."""
+    source = _ENGINE_CHILD_PREAMBLE + f"""
 schedule.write_text('this is not lua', encoding="utf-8", newline="\\n")
 done = []
 engine = RunEngine(store, str(schedule), uut_type="U", uut_serial="S", operator="O")
@@ -249,16 +244,55 @@ deadline = time.time() + 20
 while not done and time.time() < deadline:
     app.processEvents()
 engine.wait()
+{plant}
+end = time.time() + 0.2
+while time.time() < end:
+    app.processEvents()
+    time.sleep(0.01)
 print("FINISHED" if done else "no finish")
 """
-    result = _child(tmp_path, source)
-    assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
-    # The guard reports the load failure on stderr with its traceback, on purpose. Nothing else may raise.
-    before, guard, after = result.stderr.partition("The Test Run ended on an unexpected error:")
-    assert guard, f"the guard never reported the failure:\n{result.stderr[-1500:]}"
+    return _child(tmp_path, source)
+
+
+def _assert_only_the_guard_raised(stderr: str) -> None:
+    """The guard reports the load failure on stderr with its traceback, on purpose: that one, right
+    after its message, is the only one in the whole of stderr. It is a chain (the Lua error, then the
+    HostError raised from it), so a further traceback belongs to it only if Python's chaining line
+    joins them. Anything else came from somewhere else, wherever it landed."""
+    before, guard, after = stderr.partition("The Test Run ended on an unexpected error:\n")
+    assert guard, f"the guard never reported the failure:\n{stderr[-1500:]}"
     assert_no_swallowed_exception(before)
     assert "Error calling Python override" not in after, after[-1500:]
+    first, *chain = after.split("Traceback (most recent call last):")
+    assert first == "" and chain, f"the guard's message has no traceback:\n{after[:500]}"
+    for block in chain[:-1]:
+        assert block.rstrip().endswith(
+            ("The above exception was the direct cause of the following exception:",
+             "During handling of the above exception, another exception occurred:")
+        ), f"a slot raised in the child, after the guard:\n{stderr[-2000:]}"
+
+
+def test_an_exception_leaving_the_worker_does_not_abort_the_process(tmp_path):
+    """A worker whose ``QThread.run`` raises does not get to end silently. Here a schedule no host can load.
+
+    PyQt6 aborted the process on an exception escaping ``QThread.run``; PySide6 prints
+    "Error calling Python override of QThread::run()" and lets the thread end, which is worse for the
+    screen: it would wait for a FINISHED that never arrives. The guard in ``RunEngine.run`` is what
+    makes both bindings report the run as INTERRUPTED and still announce FINISHED, and this child
+    proves it: exit 0, and the run ended."""
+    result = _load_failure_child(tmp_path)
+    assert result.returncode == 0, f"exit {result.returncode}\n{result.stderr[-1500:]}"
+    _assert_only_the_guard_raised(result.stderr)
     assert "FINISHED" in result.stdout, result.stdout
+
+
+def test_a_traceback_after_the_guards_message_is_still_caught(tmp_path):
+    """The check above must fail on a late slot exception: PySide6 prints it and exits 0, after the guard."""
+    plant = "from PySide6.QtCore import QTimer\nQTimer.singleShot(0, lambda: 1 / 0)"
+    result = _load_failure_child(tmp_path, plant)
+    assert result.returncode == 0 and "ZeroDivisionError" in result.stderr, result.stderr[-1500:]
+    with pytest.raises(AssertionError, match="a slot raised in the child"):
+        _assert_only_the_guard_raised(result.stderr)
 
 
 def test_exiting_with_a_run_in_progress_stops_the_worker_first(tmp_path):

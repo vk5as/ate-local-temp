@@ -36,11 +36,22 @@ _PERMISSIVE = re.compile(
     r"(?:the\s+)?"
     r"(?:mit|0bsd|bsd(?:-\d-clause(?:-clear)?)?|apache(?:-2\.0|\s+2\.0|\s+software)?|isc|psf(?:-2\.0)?"
     r"|python-2\.0|python\s+software\s+foundation)"
-    r"(?:\s+licen[cs]e)?(?:\s+\([\w. -]+\))?",
+    r"(?:\s+licen[cs]e)?(?:\s+\(iscl\))?",
     re.IGNORECASE,
 )
-_LGPL = re.compile(r"(?:gnu\s+)?(?:lgpl[-\w.+]*|lesser\s+general\s+public\s+licen[cs]e.*)", re.IGNORECASE)
-_GPL = re.compile(r"(?:gnu\s+)?(?:a?gpl[-\w.+]*|(?:affero\s+)?general\s+public\s+licen[cs]e.*)", re.IGNORECASE)
+#: An SPDX id's version ("-3.0-only", "-2.1+", "v3") and a classifier's ("v3 or later (LGPLv3+)").
+_SPDX_VERSION = r"(?:-?v?\d+(?:\.\d+)?(?:-only|-or-later|\+)?)?"
+_CLASSIFIER_VERSION = r"(?:\s+v\d+(?:\s+or\s+later)?)?(?:\s+\({0}" + _SPDX_VERSION + r"\))?"
+_LGPL = re.compile(
+    r"(?:gnu\s+)?(?:lgpl" + _SPDX_VERSION + r"|(?:library\s+or\s+)?lesser\s+general\s+public\s+licen[cs]e"
+    + _CLASSIFIER_VERSION.format("lgpl") + ")",
+    re.IGNORECASE,
+)
+_GPL = re.compile(
+    r"(?:gnu\s+)?(?:a?gpl" + _SPDX_VERSION + r"|(?:affero\s+)?general\s+public\s+licen[cs]e"
+    + _CLASSIFIER_VERSION.format("a?gpl") + ")",
+    re.IGNORECASE,
+)
 
 PERMISSIVE_NOTE = "permissive"
 LGPL_NOTE = "copyleft (LGPL): keeps its own licence, which ATE's does not replace"
@@ -51,9 +62,10 @@ LUA_NOTE = (
     "https://www.lua.org/license.html, the link lupa's own licence file gives."
 )
 
-#: Where Qt's source is. The wheels name PySide6's repository but not Qt's. This is the same host's
-#: top-level Qt repository, with a tag for each release (checked with ``git ls-remote``, 2026-11-01).
-QT_REPOSITORY = "https://code.qt.io/cgit/qt/qt5.git/"
+#: Where Qt's source is, as a URL ``git clone`` takes. The wheels name PySide6's repository but not
+#: Qt's. This is the same host's top-level Qt repository, with a tag for each release: ``git ls-remote``
+#: on this URL found ``v6.11.3`` on 2026-11-01, and the host's ``/cgit/`` web page for it is not a remote.
+QT_REPOSITORY = "https://code.qt.io/qt/qt5.git"
 
 
 def _version(name: str) -> str:
@@ -119,6 +131,9 @@ def _kind(term: str) -> str:
 
 def _classify_one(declaration: str) -> str:
     """"permissive", "lgpl", "gpl" or "unknown" for one declaration, reading OR and AND as SPDX does."""
+    # A classifier's own "or" ("v3 or later") is part of one name, not a choice between two.
+    if (whole := _kind(declaration)) != "unknown":
+        return whole
     parts = re.split(r"\s+(or|and)\s+", declaration, flags=re.IGNORECASE)
     kinds, operators = [_kind(term) for term in parts[0::2]], {op.lower() for op in parts[1::2]}
     if "unknown" in kinds or len(operators) > 1:

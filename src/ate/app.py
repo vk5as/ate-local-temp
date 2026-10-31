@@ -295,6 +295,7 @@ class MainWindow(QMainWindow):
 
     def show_internal_error(self, log_path: str) -> None:
         """Say that a slot raised, without stopping anything: never a dialog, the worker may be mid-run.
+        ``log_path`` is where the details went, or "" if writing them failed.
 
         The status bar only exists from the first error on, so a healthy window keeps the mockup's
         layout. Stays up until ATE closes, because the screen may be wrong from here on."""
@@ -306,7 +307,8 @@ class MainWindow(QMainWindow):
                 label.setStyleSheet("color: #b00020; font-weight: bold;")
                 label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self.statusBar().addWidget(label, 1)
-            label.setText(f"Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: {log_path}")
+            details = f"Details: {log_path}" if log_path else "The details could not be written to the application log."
+            label.setText(f"Internal error: this window may have stopped updating. A Test Run in progress keeps recording. {details}")
         except Exception:  # noqa: BLE001 - raising here would come straight back to this method
             pass
 

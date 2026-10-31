@@ -460,6 +460,12 @@ def _notices_module():
         "MIT AND Proprietary",
         "MPL-2.0",
         "",
+        "Lesser General Public License v3 proprietary",
+        "GNU General Public License except for commercial use",
+        "Affero General Public License with extra terms",
+        "LGPL-proprietary",
+        "GPL-with-a-private-exception",
+        "MIT License (but not for you)",
     ],
 )
 def test_the_classifier_reports_what_it_cannot_name(stated: str) -> None:
@@ -489,7 +495,17 @@ def test_the_classifier_names_permissive_licences(stated: str) -> None:
 def test_the_classifier_separates_lgpl_from_gpl_and_keeps_disagreements_open() -> None:
     notices = _notices_module()
     assert notices._classify(["LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"]).startswith("copyleft (LGPL)")
-    assert notices._classify(["GNU Lesser General Public License v3 (LGPLv3)"]).startswith("copyleft (LGPL)")
+    for classifier in (
+        "GNU Lesser General Public License v3 (LGPLv3)",
+        "GNU Lesser General Public License v3 or later (LGPLv3+)",
+        "GNU Lesser General Public License v2 or later (LGPLv2+)",
+        "GNU Library or Lesser General Public License (LGPL)",
+        "LGPL-2.1-or-later",
+        "LGPLv3+",
+    ):
+        assert notices._classify([classifier]).startswith("copyleft (LGPL)"), classifier
+    assert notices._classify(["GNU General Public License v3 or later (GPLv3+)"]).startswith("GPL with no LGPL")
+    assert notices._classify(["GNU Affero General Public License v3"]).startswith("GPL with no LGPL")
     # GPL with no LGPL or permissive option is a question for the user, not a footnote.
     assert "check upstream" in notices._classify(["GPL-3.0-only"])
     assert "check upstream" in notices._classify(["AGPL-3.0-or-later"])
