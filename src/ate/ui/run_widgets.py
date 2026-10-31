@@ -156,6 +156,13 @@ _HEADER_BG = "#eef1f5"
 #: A broken picker row, straight from the mockup: `.b-sched .it.broken` background and `.err` text.
 _BROKEN_BG = "#fff5f5"
 _BROKEN_ERR = "#b71c1c"
+
+#: The marker on a row that cannot run. `×` (U+00D7), not `⛔` (U+26D4): the "no entry" sign is not
+#: in DejaVu Sans, the only font a headless Linux runner has, so Qt drew its missing-glyph box and
+#: every broken row in the picker was an empty rectangle instead of a warning. U+00D7 is Latin-1,
+#: so every font Qt can find draws it. ``tests/test_broken_rows_05b.py`` renders the marker and
+#: compares its ink with the box Qt draws for a character no font has.
+BROKEN_MARKER = "×"
 _MUTED_STYLE = "color: #777; font-size: 12px;"
 
 #: `.b-sched .it.broken { cursor: not-allowed }` (mockup line 97): the pointer says "can't pick this".
@@ -292,7 +299,7 @@ def _broken_row_widget(name: str, release: str, error: str) -> QWidget:
     widget.setCursor(_FORBIDDEN_CURSOR)
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(_ROW_MARGIN_X, _ROW_MARGIN_Y, _ROW_MARGIN_X, _ROW_MARGIN_Y)
-    title = QLabel(f"⛔ {name}")
+    title = QLabel(f"{BROKEN_MARKER} {name}")
     subtitle = QLabel(release)
     subtitle.setStyleSheet(_MUTED_STYLE)
     err = QLabel(error)
@@ -772,7 +779,7 @@ class SchedulePicker(QWidget):
         name = row.file or "(Test Definition broken)"
         release = row.release or row.media_number
         error = _short_error(row.error, self._release_dirs.get(row.media_number))
-        item = QListWidgetItem(f"⛔ {name}\n{release}\n{error}")
+        item = QListWidgetItem(f"{BROKEN_MARKER} {name}\n{release}\n{error}")
         item.setBackground(QColor(_BROKEN_BG))
         # Not selectable and not enabled: a click can't pick it, and Qt won't even make it current.
         # UserRole is deliberately left empty so no path can pass a broken row to the session.
@@ -1339,7 +1346,7 @@ class RunScreenMixin:
             # The schedule picked before this Start broke in the meantime (packet 05b review): name
             # the reason on the pane the Operator is looking at rather than raising out of the
             # button handler, and take Start away so it cannot be clicked again.
-            self.error_label.setText(f"⛔ {exc}")
+            self.error_label.setText(f"{BROKEN_MARKER} {exc}")
             self.start_button.setEnabled(False)
 
     def _on_action_started(self, phase: str, done: int, total: int) -> None:

@@ -8,6 +8,7 @@ the headless session and CLI can be exercised end-to-end against real files — 
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 import threading
@@ -1022,6 +1023,16 @@ def add_failing_poll_schedule(tmp_path: Path) -> str:
     )
     _append_file(defs, "failing_poll.tslua", source)
     return "Failing poll schedule"
+
+
+def chmod_can_deny_access() -> bool:
+    """Whether `chmod 0o555` really keeps this process out of a directory.
+
+    Root ignores the mode bits and Windows has no euid and treats the POSIX bits as advisory, so a
+    test that expects a refused write only proves anything on POSIX as an ordinary user — and a
+    GitHub runner that happens to be privileged must not fail one."""
+    geteuid = getattr(os, "geteuid", None)
+    return os.name == "posix" and geteuid is not None and geteuid() != 0
 
 
 def fake_pdf_helper(script: str):

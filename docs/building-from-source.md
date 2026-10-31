@@ -506,7 +506,7 @@ because a PyInstaller build takes minutes:
 ATE_BUILD_TESTS=1 pytest -m build -q
 ```
 
-### Testing seams: three environment variables
+### Testing seams: four environment variables
 
 Tests that run `ate` in a real subprocess need to aim the platform paths somewhere writable
 and to close Qt dialogs that would otherwise block offscreen. These are test seams, not
@@ -518,6 +518,12 @@ environment expansion.
 | `ATE_DEFAULT_CONFIG` | Replaces the platform default **config file** path (`/etc/ate/config.json`, `%PROGRAMDATA%\ATE\config.json`), so a test can prove "no config at the default location" without touching `/etc` | `ate.config._platform_default` only |
 | `ATE_DATA_DIR` | Replaces the platform **data directory** (`/var/lib/ate`, `%PROGRAMDATA%\ATE`) that `<data>` resolves to | `ate.config._platform_data_dir` only |
 | `ATE_AUTO_DISMISS_DIALOG` | Closes every launch dialog by itself, so a refusal exits instead of blocking in `exec()`. It closes with `accept()`, which clicks no button: the missing-config prompt therefore answers **Abort** and the "abort the run and quit?" confirmation answers **keep running**. `""`, `"0"`, `"false"`, `"no"` and `"off"` mean unset | `ate.app._dismiss_if_headless` |
+| `ATE_ELEVATED` | Says whether ATE believes it is running as root or Administrator, which decides whether the Test Report PDF needs the Chromium sandbox (packet 30d). `1`, `true`, `yes` mean elevated; anything else means not. `conftest.py` sets it to `0` for the whole test session, and it is inherited by every spawned `ate _pdf` helper, which a monkeypatch cannot reach | `ate.report.pdf._elevation`, `ate.cli._is_root`, `packaging/pyinstaller/ate_entry.py` |
+
+A dialog is also dismissed automatically when the platform has no window server at all
+(`QT_QPA_PLATFORM=offscreen` or `minimal`): nothing could be drawn, so nothing can be
+answered. That is the case every container and every CI runner is in, and it is what stopped
+the first CI run from hanging for six hours on a `QMessageBox.exec()` nobody could click.
 
 `conftest.py` also points `<data>` at pytest's `basetemp` for the whole session, so no test
 ever writes under `/var/lib`.

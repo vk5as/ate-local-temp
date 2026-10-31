@@ -37,7 +37,14 @@ def _elevated() -> bool:
     """Root on Linux, an administrator on Windows.
 
     Written out here rather than imported from ``ate.report.pdf`` because this module runs
-    before ATE is imported, and a frozen bundle must set these knobs before QtWebEngine starts."""
+    before ATE is imported, and a frozen bundle must set these knobs before QtWebEngine starts.
+    ``ATE_ELEVATED`` (the same seam as :data:`ate.report.pdf.ELEVATION_ENV`) answers first, so a
+    test or a CI job can tell the bundle what privilege it is pretending to have."""
+    forced = os.environ.get("ATE_ELEVATED", "").strip().lower()
+    if forced in ("0", "false", "no", "off"):
+        return False
+    if forced in ("1", "true", "yes", "on"):
+        return True
     if os.name == "nt":
         try:
             import ctypes

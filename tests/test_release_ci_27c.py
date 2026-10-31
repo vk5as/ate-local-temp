@@ -943,7 +943,7 @@ def test_the_helper_env_disables_the_sandbox_only_when_told_to(monkeypatch):
     packet 30d rule, and it is what makes a helper run directly as root refuse."""
     from ate.report import pdf
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "1")
 
     env = pdf._child_env(True)
     assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
@@ -963,7 +963,7 @@ def test_the_helper_command_carries_the_decision_as_an_argument(monkeypatch):
     """The child is told in its own argv, not by an environment it has to interpret (packet 30d)."""
     from ate.report import pdf
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "1")
     _program, args, env = pdf.pdf_helper_command("a.html", "a.pdf", "A4", True)
     assert pdf.UNSANDBOXED_FLAG in args, args
     assert env["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
@@ -977,7 +977,7 @@ def test_an_ordinary_user_keeps_the_sandbox_even_with_the_flag(monkeypatch):
     """Turning the sandbox off is a real loss of isolation: only a privileged process needs it."""
     from ate.report import pdf
 
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "0")
     for allow in (False, True):
         env = pdf._child_env(allow)
         assert "QTWEBENGINE_DISABLE_SANDBOX" not in env, f"the flag disabled the sandbox for an ordinary user (allow={allow})"
@@ -992,6 +992,7 @@ def test_a_windows_administrator_gets_the_knobs_only_when_chosen(monkeypatch):
 
     from ate.report import pdf
 
+    monkeypatch.delenv(pdf.ELEVATION_ENV, raising=False)  # this test is about the Windows probe
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(
         ctypes, "windll", types.SimpleNamespace(shell32=types.SimpleNamespace(IsUserAnAdmin=lambda: True)), raising=False
@@ -1015,7 +1016,7 @@ def test_the_frozen_entry_point_never_disables_the_sandbox_by_itself(monkeypatch
     monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
     monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv("ATE_ELEVATED", "1")  # the entry point's own privilege seam
     entry._prepare_webengine_env(["_selftest", "--run"])
     assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, "a root ATE turned the sandbox off on its own"
     assert "--no-sandbox" not in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
@@ -1026,7 +1027,7 @@ def test_the_frozen_entry_point_never_disables_the_sandbox_by_itself(monkeypatch
     assert "--no-sandbox" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
 
     # The same argument handed to an ordinary user changes nothing.
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("ATE_ELEVATED", "0")
     monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
     monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
     entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--unsandboxed"])

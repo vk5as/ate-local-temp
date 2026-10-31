@@ -34,6 +34,7 @@ import ate.app as ate_app
 from ate.app import launch
 from ate.config import ConfigError, MissingConfigError, config_hint, config_path, read_config
 from ate.storage import SCHEMA_VERSION, RunStore
+from ._fixtures import chmod_can_deny_access
 
 _SRC = str(Path(__file__).resolve().parent.parent / "src")
 
@@ -253,6 +254,8 @@ def test_launch_refuses_when_the_data_directory_is_not_writable(tmp_path: Path) 
     The defect (30c review): the "Create default config and launch" defaults resolve to
     ``/var/lib/ate``, and :class:`ate.log.AppLog` raised ``PermissionError`` from its ``mkdir``,
     which :func:`ate.app.launch` never caught."""
+    if not chmod_can_deny_access():
+        pytest.skip("chmod 0o555 denies nothing to root or on Windows")
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     data = tmp_path / "station-data"
@@ -308,6 +311,8 @@ def test_a_default_config_that_cannot_be_written_refuses_in_process(tmp_path: Pa
 
 def test_launch_refuses_an_unwritable_log_directory_in_process(tmp_path: Path) -> None:
     """The same refusal through the injected ``alert`` seam: message, exit 1, no window."""
+    if not chmod_can_deny_access():
+        pytest.skip("chmod 0o555 denies nothing to root or on Windows")
     read_only = tmp_path / "station-data"
     read_only.mkdir()
     read_only.chmod(0o555)
@@ -336,6 +341,8 @@ def test_creating_the_defaults_then_an_unwritable_data_dir_refuses(tmp_path: Pat
     """The 30c defect exactly: "Create default config and launch" writes the ``<data>`` defaults,
     the log directory under the platform data dir is not writable, and the launch refused with a
     traceback instead of a dialog. Now it is a refusal naming the path."""
+    if not chmod_can_deny_access():
+        pytest.skip("chmod 0o555 denies nothing to root or on Windows")
     monkeypatch.setattr("ate.config._platform_data_dir", lambda: tmp_path / "station-data")
     data = tmp_path / "station-data"
     data.mkdir()
@@ -436,12 +443,30 @@ def test_rooted_setup_creates_the_definitions_directory(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("value,dismissed", [("1", True), ("true", True), ("yes", True), ("", False), ("0", False), ("false", False), ("no", False), ("off", False)])
 def test_auto_dismiss_seam_treats_falsy_values_as_unset(qapp, monkeypatch, value: str, dismissed: bool) -> None:
-    """``ATE_AUTO_DISMISS_DIALOG=""``/``"0"``/``"false"`` means unset, so the real dialog stays."""
+    """``ATE_AUTO_DISMISS_DIALOG=""``/``"0"``/``"false"`` means unset, so the real dialog stays.
+
+    The test pretends there is a display: with none (``offscreen``, which CI and every container
+    use) the box dismisses itself whatever the variable says, which is the next test."""
     scheduled: list[int] = []
+    monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
     monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
     monkeypatch.setenv("ATE_AUTO_DISMISS_DIALOG", value)
     ate_app._dismiss_if_headless(ate_app.QMessageBox())
     assert bool(scheduled) is dismissed
+
+
+def test_a_box_with_no_display_to_show_on_closes_itself(qapp, monkeypatch) -> None:
+    """A modal on an offscreen platform has no Operator, so it must not wait for one.
+
+    GitHub's Windows runners are administrators, so packet 30d's question is asked there, and
+    `exec()` on a box nothing is drawn on never returns: the first CI run sat in "Run tests"
+    until the job was killed."""
+    monkeypatch.delenv("ATE_AUTO_DISMISS_DIALOG", raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    scheduled: list[int] = []
+    monkeypatch.setattr(ate_app.QTimer, "singleShot", lambda delay, slot: scheduled.append(delay))
+    ate_app._dismiss_if_headless(ate_app.QMessageBox())
+    assert scheduled, "a headless ATE left a dialog open waiting for a click that can never come"
 
 
 # --- launch refusals in real subprocesses -------------------------------------------------------

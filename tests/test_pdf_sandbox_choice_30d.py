@@ -7,7 +7,9 @@ asked and never loses the sandbox; a privileged user is asked by a dialog whose 
 or presets the answer with `--allow-unsandboxed-pdf`; and with no way to ask (headless,
 `_selftest --run`, a dismissed dialog) the answer is No and no PDF is written.
 
-Elevation is simulated by monkeypatching `os.geteuid` — nothing here ever runs as root on the host.
+Elevation is simulated with the ``ATE_ELEVATED`` environment variable (:data:`ate.report.pdf.ELEVATION_ENV`)
+— nothing here ever runs as root on the host, and a runner that really is privileged (a GitHub
+Windows runner is an administrator) cannot change which branch a test takes.
 """
 
 from __future__ import annotations
@@ -39,11 +41,11 @@ ATE_ENTRY = Path(__file__).resolve().parents[1] / "packaging" / "pyinstaller" / 
 
 def _as_root(monkeypatch) -> None:
     """Pretend this process is root, without ever being root."""
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "1")
 
 
 def _as_ordinary_user(monkeypatch) -> None:
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "0")
 
 
 @pytest.fixture(autouse=True)
@@ -540,7 +542,7 @@ def test_the_frozen_entry_point_scrubs_an_inherited_off_setting_before_qt_starts
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     for elevated in (True, False):
         _inherit_sandbox_off(monkeypatch)
-        monkeypatch.setattr(os, "geteuid", lambda: 0 if elevated else 1000)
+        monkeypatch.setenv(pdf.ELEVATION_ENV, "1" if elevated else "0")
         entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf"])
         assert "QTWEBENGINE_DISABLE_SANDBOX" not in os.environ, f"root={elevated}"
         assert "--no-sandbox" not in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""), f"root={elevated}"
@@ -549,7 +551,7 @@ def test_the_frozen_entry_point_scrubs_an_inherited_off_setting_before_qt_starts
 
     monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
     monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "1")
     monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", INHERITED_FLAGS)
     entry._prepare_webengine_env(["_pdf", "a.html", "a.pdf", "--unsandboxed"])
     assert os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1", "the parent's Yes was not honoured"
@@ -723,6 +725,7 @@ def test_the_dialog_warns_and_asks_in_two_sentences():
 
 def test_an_unreadable_admin_check_leaves_the_sandbox_on_and_says_so(monkeypatch):
     """IsUserAnAdmin can fail; a failed render must not blame the sandbox for a guess."""
+    monkeypatch.delenv(pdf.ELEVATION_ENV, raising=False)  # conftest pins it; this test needs the real probe
     monkeypatch.setattr(os, "name", "nt")
     assert pdf._elevation() is None, "the Windows check should report that it could not tell"
     assert pdf._is_elevated() is False, "unknown elevation must not disable the sandbox"
@@ -731,7 +734,7 @@ def test_an_unreadable_admin_check_leaves_the_sandbox_on_and_says_so(monkeypatch
     assert "IsUserAnAdmin" in hint
     # On Linux the check cannot fail, so the hint stays the sandbox one.
     monkeypatch.setattr(os, "name", "posix")
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv(pdf.ELEVATION_ENV, "1")
     assert "elevated is unknown" not in pdf._render_failure_hint(True)
     assert "sandbox" in pdf._render_failure_hint(True)
     assert pdf._render_failure_hint(False) == "", "an ordinary user's failure is not an elevation story"

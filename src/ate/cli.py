@@ -24,9 +24,19 @@ def _is_root() -> bool:
 
     Packagers run ``ate setup`` elevated, so the default applies real permissions; an unprivileged
     run warns and skips them rather than failing. Use ``--no-permissions`` for test runs regardless.
+
+    ``ATE_ELEVATED`` answers before the operating system is asked — the same seam packet 30d's PDF
+    decision uses — so a test run never depends on whether the runner happens to be root (conftest
+    pins it to 0) and a packager can tell an unprivileged CI job what it is pretending to be.
     """
     import os
     import sys
+
+    from .report.pdf import _elevation_override
+
+    override = _elevation_override()
+    if override is not None:
+        return override
 
     # Windows has no euid: an elevated process is one UAC says is an administrator. Both spellings
     # of "Windows" are checked so tests can steer the branch without changing os.name (which

@@ -28,6 +28,10 @@ jobs:
   windows-installer:
     name: Windows installer (build and smoke)
     runs-on: windows-latest
+    # A PyInstaller bundle with QtWebEngine, an Inno Setup install, a silent install and an
+    # uninstall: minutes, but bounded. Nothing in this job may wait indefinitely, and the
+    # smoke step runs the installer's own dialogs.
+    timeout-minutes: 45
     env:
       # Qt needs a platform with no display, exactly as in ci.yml: the bundle's _pdf helper and
       # the smoke script's `ate` calls both start QtWebEngine.
@@ -103,6 +107,8 @@ jobs:
   linux-build:
     name: Linux artifacts (build)
     runs-on: ubuntu-24.04
+    # The frozen bundle is the long part; dpkg-deb and the wheel are minutes.
+    timeout-minutes: 45
     env:
       # The bundle's `_pdf` helper and `ate _selftest --run` both start QtWebEngine, and a runner
       # has no display (the same as in ci.yml).
@@ -179,6 +185,8 @@ jobs:
     name: Linux smoke (${{ matrix.kind }})
     needs: linux-build
     runs-on: ubuntu-24.04
+    # apt-get, one container pull and one smoke run per artifact: minutes, but bounded.
+    timeout-minutes: 30
     container:
       image: debian:stable
     strategy:

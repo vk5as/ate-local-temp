@@ -22,6 +22,7 @@ from PyQt6.QtGui import QColor, QFontMetrics, QMouseEvent
 from PyQt6.QtWidgets import QLabel, QWidget
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.run_widgets import BROKEN_MARKER
 from ate.ui.staged_run_screen import StagedRunScreen, _broken_row_size_hint, _ROW_MARGIN_X, _wrapped_height
 
 #: The mockup's broken-row colours, spelled out here so the assertions name the design directly.
@@ -142,6 +143,26 @@ def _pixels(widget) -> set[tuple[int, int, int]]:
             for y in range(image.height()) for x in range(image.width())}
 
 
+#: A Unicode non-character, written with chr() because Python's \U escape takes only four hex
+#: digits. No font anywhere contains it, so Qt draws the box it draws for any glyph it cannot find.
+#: A marker whose ink is this box is a marker the Operator never sees.
+_NO_GLYPH = chr(0xF0000)
+
+
+def _glyph_ink(qapp, text: str) -> frozenset[tuple[int, int]]:
+    """The pixels a QLabel draws for `text`, in the font the runner actually has."""
+    label = QLabel(text)
+    label.show()
+    qapp.processEvents()
+    image = label.grab().toImage()
+    return frozenset(
+        (x, y)
+        for y in range(image.height())
+        for x in range(image.width())
+        if image.pixelColor(x, y).lightness() < 200
+    )
+
+
 # -- the rows themselves -------------------------------------------------------
 
 
@@ -161,13 +182,13 @@ def test_broken_definitions_and_schedules_are_listed_with_their_errors(qapp, tmp
                            ("MR-10611 · Legacy Fixtures 0.9.0", "listed file is missing: fixture_io.lua")):
         row = next(t for t in broken if release in t)
         assert error in row, row
-        assert row.splitlines()[0] == "⛔ (Test Definition broken)", row
+        assert row.splitlines()[0] == f"{BROKEN_MARKER} (Test Definition broken)", row
 
     # The schedule that raised while loading is its own row, named by the file that failed.
     raising = [t for t in texts if "broken.tslua" in t]
     assert len(raising) == 1, raising
     assert "MR-10422 · PSU-200 Tests 2.3.0" in raising[0]
-    assert raising[0].splitlines()[0] == "⛔ broken.tslua", raising[0]
+    assert raising[0].splitlines()[0] == f"{BROKEN_MARKER} broken.tslua", raising[0]
 
 
 def test_broken_rows_sit_after_the_usable_ones_in_scan_order(qapp, tmp_path):
@@ -241,7 +262,45 @@ def test_broken_rows_are_styled_like_the_mockup(qapp, tmp_path):
     # A usable row keeps its plain look: no error widget, no broken background.
     for item in _usable_items(screen):
         assert list_widget.itemWidget(item) is None
-        assert not item.text().startswith("⛔")
+        assert not item.text().startswith(BROKEN_MARKER)
+
+
+def test_the_broken_marker_is_a_glyph_the_runner_font_has(qapp):
+    """The warning on a broken row has to be ink, not Qt's "no such glyph" rectangle.
+
+    The mockup draws `⛔`, and `⛔` (U+26D4) is not in DejaVu Sans — the only font the Linux CI
+    runner installs — so on that runner every broken row in the picker was an empty box. Qt's
+    missing-glyph box is drawn for a Unicode non-character too, so the marker's pixels are compared
+    with it: if they are the same, nothing is being said."""
+    missing = _glyph_ink(qapp, _NO_GLYPH)
+    marker = _glyph_ink(qapp, BROKEN_MARKER)
+    assert marker, f"{BROKEN_MARKER!r} drew nothing at all"
+    assert marker != missing, (
+        f"{BROKEN_MARKER!r} is not in this machine's default font: the row shows Qt's "
+        f"missing-glyph box instead of a marker"
+    )
+
+
+def test_no_glyph_ate_paints_is_missing_from_the_font(qapp):
+    """Every character the interface puts on screen must be drawable by the font it is drawn in.
+
+    Found the hard way on a runner with only DejaVu Sans installed: a character the font lacks is
+    silently drawn as an empty rectangle, and the row looks correct to whoever typed it. This reads
+    the string literals of the interface code and renders each non-ASCII character in it."""
+    import ast
+
+    glyphs = set()
+    for path in (Path(__file__).resolve().parents[1] / "src" / "ate").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                glyphs.update(ch for ch in node.value if ord(ch) > 127)
+
+    missing = _glyph_ink(qapp, _NO_GLYPH)
+    undrawable = {ch for ch in glyphs if _glyph_ink(qapp, ch) == missing}
+    assert not undrawable, (
+        f"ATE paints glyphs this machine has no font for: {sorted(undrawable)} "
+        "(they render as Qt's empty box on a runner without an emoji font)"
+    )
 
 
 def test_the_filter_matches_broken_rows_by_name_release_and_error(qapp, tmp_path):
@@ -566,7 +625,7 @@ def test_stage_two_start_reports_a_schedule_that_broke_after_picking(qapp, tmp_p
     screen.steps_options_stage.run_button.click()
     assert screen.engine is None, "no run started"
     error = screen.steps_options_stage.error_label.text()
-    assert error.startswith("⛔"), error
+    assert error.startswith(BROKEN_MARKER), error
     assert "schedule" in error.lower(), error
 
 
