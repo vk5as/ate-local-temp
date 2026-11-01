@@ -810,16 +810,26 @@ def test_every_message_the_manual_quotes_is_one_the_code_prints() -> None:
         assert source in code, f"{path} no longer prints {source!r}, which {quoted!r} came from"""
 
 
-def test_the_config_field_table_names_format_in_the_table_not_just_a_listing() -> None:
-    """The config's `format` key has to be in the table that explains the keys.
+def test_the_field_tables_name_format_rather_than_a_listing_body() -> None:
+    """`format` has to be explained as a field, not merely seen inside a listing.
 
-    ``config_keys()`` counts ``format`` as covered if the name appears anywhere the manual sets
-    code, and every JSON listing has ``"format": 1`` in it, so a manual that never explained the
-    key would still pass. This pins it to the field table."""
+    ``config_keys()`` counts a key as covered when the manual sets it as code anywhere, and every
+    JSON listing body carries ``"format": 1``, so a manual that never explained the key would pass
+    on the bytes of a listing. Requiring it in the table or the field list is simple, so it is
+    required here; the other keys are left to the coverage check, which cannot tell a table row
+    from a listing without more machinery than this file wants."""
     tex = (MANUALS_DIR / "admin/04-the-config-file.tex").read_text(encoding="utf-8")
     md = MANUALS["admin"].markdown.read_text(encoding="utf-8")
     assert re.search(r"\\texttt\{format\}\s*&", tex), "the admin manual's config table has no row for format"
     assert re.search(r"\|\s*`format`\s*\|", md), "the agent manual's config table has no row for format"
+
+    # The same for the `.atedef` key: outside the verbatim or fenced JSON, the manual must say what
+    # `format` is.
+    atedef_tex = (MANUALS_DIR / "test-writer/09-modules-and-test-definitions.tex").read_text(encoding="utf-8")
+    outside = re.sub(r"\\begin\{verbatim\}.*?\\end\{verbatim\}", "", atedef_tex, flags=re.S)
+    assert "\\texttt{format}" in outside, "the test-writer manual explains format only inside a listing"
+    outside_md = re.sub(r"```[^\n]*\n.*?```", "", MANUALS["test-writer"].markdown.read_text(encoding="utf-8"), flags=re.S)
+    assert "`format`" in outside_md, "the agent manual explains format only inside a listing"
 
 
 def test_the_pdf_helper_timeout_is_the_sixty_seconds_the_manual_says() -> None:
