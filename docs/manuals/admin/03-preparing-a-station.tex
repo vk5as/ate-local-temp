@@ -1,0 +1,89 @@
+\chapter{Preparing a Station: \texttt{ate setup}}\label{ch:setup}
+
+One command prepares a Station however ATE was installed. It is idempotent: run it again and it
+creates nothing that already exists and never overwrites a config.
+
+\begin{lstlisting}[language=ATEShell]
+ate setup
+sudo ate setup                          # Linux, so the ownership and group work
+ate setup --root /tmp/station --no-permissions   # a throwaway Station, for checking
+\end{lstlisting}
+
+\section{What it creates}
+
+\texttt{ate setup} makes the data directory with \texttt{reports}, \texttt{logs} and
+\texttt{definitions} inside it, and the config directory. On Windows those two are the same
+directory; on Linux they are \texttt{/var/lib/ate} and \texttt{/etc/ate}. It then writes a default
+\texttt{config.json} --- only if there is no config file there, never over one --- and runs the
+same database migration \texttt{ate db migrate} runs (chapter~\ref{ch:database}).
+
+The default config it writes has every key filled in, a fresh \texttt{station.uuid}, the computer's
+hostname as \texttt{station.name}, and the paths already written out as real paths rather than as
+\texttt{<data>} placeholders, so the Station works wherever setup put it. \texttt{definitions} is
+created because the default config names it as a Test Definition directory, and a Test Definition
+directory that does not exist is a warning on the Run screen at every scan; setup leaves the
+Station quiet until a Media Release is dropped in.
+
+What it prints is the list of directories it created, whether it wrote the config or kept the one
+that was there, and the database path:
+
+\begin{lstlisting}[language=ATEShell]
+ate setup:
+  created: /tmp/station/data
+  created: /tmp/station/data/reports
+  created: /tmp/station/data/logs
+  created: /tmp/station/data/definitions
+  created: /tmp/station/config
+  wrote default config: /tmp/station/config/config.json
+  database: /tmp/station/data/ate.db
+\end{lstlisting}
+
+\texttt{--root DIR} puts the Station under \texttt{DIR} (\texttt{DIR/data} and
+\texttt{DIR/config}); \texttt{--data-dir} and \texttt{--config-dir} override one of them. Those
+three exist for packagers and for tests: an ordinary Station uses the platform defaults.
+
+\section{Permissions, and who can run what}
+
+The privileged part of setup is the ownership and access rights, and it only happens when the
+process is elevated --- \texttt{ate setup} run as root on Linux, or as an administrator on
+Windows. An unprivileged run prints
+
+\begin{lstlisting}[language=ATEShell]
+ate setup: running unprivileged; skipping group/ownership/ACL setup (packagers run this elevated)
+\end{lstlisting}
+
+and carries on. It does not fail: the directories and the database are still created, and
+\texttt{sudo ate setup} finishes the job later. \texttt{--no-permissions} skips that treatment
+without the warning being about privilege.
+
+On Linux, setup creates a system group called \texttt{ate} if it is missing, makes everything under
+the data directory group-owned and group-writable, recursively, and sets the setgid bit on the
+directories so new files --- \texttt{ate.db-wal}, \texttt{ate.db-shm}, a fresh Test Report ---
+inherit the group. \texttt{config.json} and the config directory itself are made root-owned:
+the file 0644, the directory 0755. Adding an Operator's account to the \texttt{ate} group is a
+step you do yourself; setup creates the group but never adds anyone to it.
+
+On Windows, \texttt{icacls} gives the Users group Modify on the data directory with inherit
+flags, so the database, its WAL files and every report and log under it are writable by ordinary
+users, and gives \texttt{config.json} an explicit access list: Administrators and SYSTEM full
+control, Users read only.
+
+The suite proves this with a recording double that captures every call setup makes, rather than
+running \texttt{groupadd}, \texttt{chown} or \texttt{icacls} on the machine the tests run on; the
+real Linux commands are exercised in a \texttt{debian:stable} container, gated behind
+\texttt{ATE\_DOCKER\_TESTS=1}.
+
+\section{Checking it worked}
+
+\begin{lstlisting}[language=ATEShell]
+ate --version
+ate db status
+\end{lstlisting}
+
+\texttt{ate --version} prints the version the build stamped in (a git tag, or \texttt{0.0.0-dev}
+from a checkout). \texttt{ate db status} prints the database's schema version and exits 0; a
+missing or outdated database makes it print the refusal and exit 1. If the Station's config is not
+the platform default, pass it: \texttt{ate db status --config /tmp/station/config/config.json}.
+
+\cando{prepare a Station from nothing, read what setup said, and tell which rights an Operator
+needs in order to run a Test Run.}
