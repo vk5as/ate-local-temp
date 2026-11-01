@@ -10,7 +10,7 @@ database is an archive, not a scratch pad.
 ate db status
 ate db migrate
 ate db migrate --yes
-ate db status --config /tmp/station/config/config.json
+ate --config /tmp/station/config/config.json db status
 ate db migrate /tmp/station/data/ate.db --yes
 \end{lstlisting}
 
@@ -24,8 +24,11 @@ Create or upgrade database at /var/lib/ate/ate.db? [y/N]
 
 Answering anything other than \texttt{y} prints \texttt{aborted} and exits 1. With \texttt{--yes}
 there is no prompt, which is what scripts and \texttt{ate setup} use. Neither command needs a
-config: give it a path, or let it use the configured database from the platform config (or the one
-\texttt{--config} names). A path given after \texttt{db migrate} wins over the configured one.
+config: give it a path, or let it use the configured database from the platform config.
+\texttt{--config} belongs to \texttt{ate}, so it comes \emph{before} \texttt{db}:
+\texttt{ate --config PATH db status}. Written after the subcommand it is read as a database path,
+and the command fails saying \texttt{file is not a database} --- it is not a database. A path given
+after \texttt{db migrate} wins over the configured one.
 
 Migrations are forward only. A database built by a \emph{newer} ATE is refused rather than
 downgraded; a missing, empty or older one is exactly what migrate is for. The version is SQLite's

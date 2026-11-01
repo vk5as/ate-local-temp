@@ -42,7 +42,16 @@ Command & What it does \\
 \end{center}
 
 The hidden commands are deliberately not in \texttt{ate --help}; they are what ATE and the packager
-call, not what an Operator types.
+call, not what an Operator types. An administrator can still run them, and each one prints what it
+found and exits 1 if anything is missing or broken:
+
+\begin{lstlisting}[language=ATEShell]
+ate --help
+ate -V
+ate _selftest                                # what the bundle carries
+ate _selftest --run                          # a built-in one-step Test Schedule, in its own temp directory
+ate _selftest --scan definitions/MR-1043     # the database version and the Test Definitions in a directory
+\end{lstlisting}
 
 \section{Where things are}
 

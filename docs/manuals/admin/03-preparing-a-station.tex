@@ -83,7 +83,8 @@ ate db status
 \texttt{ate --version} prints the version the build stamped in (a git tag, or \texttt{0.0.0-dev}
 from a checkout). \texttt{ate db status} prints the database's schema version and exits 0; a
 missing or outdated database makes it print the refusal and exit 1. If the Station's config is not
-the platform default, pass it: \texttt{ate db status --config /tmp/station/config/config.json}.
+the platform default, name it before the subcommand:
+\texttt{ate --config /tmp/station/config/config.json db status}.
 
 \cando{prepare a Station from nothing, read what setup said, and tell which rights an Operator
 needs in order to run a Test Run.}
