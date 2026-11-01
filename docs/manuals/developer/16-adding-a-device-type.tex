@@ -14,10 +14,10 @@ three edits in \texttt{lua\_\allowbreak{}host.py}.
 
 \section{Step 1: the driver}
 
-A driver is a subclass of :class:`ate.devices.registry.Driver`. It declares the Device Type name,
+A driver is a subclass of \texttt{ate.devices.registry.Driver}. It declares the Device Type name,
 the fields an \texttt{ATE.open} may pass, and the fields \texttt{ATE.read}/\texttt{ATE.write} may
-pass; the registry validates every one of them generically through :func:`validate\_params`, which
-raises a :class:`ValueError` naming the offending field before anything connects.
+pass; the registry validates every one of them generically through \texttt{validate\_params}, which
+raises a \texttt{ValueError} naming the offending field before anything connects.
 
 \lstinputlisting[language=ATEPython, caption={\texttt{docs/manuals/examples/developer/\allowbreak{}echo\allowbreak{}\_\allowbreak{}driver.py}}]{../examples/developer/echo_driver.py}
 
