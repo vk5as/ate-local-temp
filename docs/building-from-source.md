@@ -488,7 +488,7 @@ valid PDF with no glyphs is exactly the failure the release CI is meant to catch
 > installed the `.deb`, `install.sh` has installed the tarball, and `pipx` has installed the wheel.
 > The Windows jobs, `ate.iss` and `smoke_installer.py` have still never run anywhere.
 
-## The manuals (packets 34a and 34b)
+## The manuals (packets 34a, 34b and 34c)
 
 The manuals are LaTeX: one `.tex` per chapter, a shared preamble, and a Markdown copy for agents.
 No TeX toolchain is installed on the build machine, so the build is a Docker call:
@@ -516,16 +516,21 @@ Each manual keeps its facts next to the code they come from:
 | Shared preamble (page geometry, the Lua listing language, the capability box) | `docs/manuals/common/manual.sty` |
 | The test writer's manual | `docs/manuals/test-writer/` |
 | The admin manual (11 chapters; its own shell listing language, `ATEShell`) | `docs/manuals/admin/` |
-| The agent-readable versions | `docs/manuals/llm/test-writer.md`, `docs/manuals/llm/admin.md` |
-| The examples the manuals quote, which are real files that run | `docs/manuals/examples/test-writer/` |
+| The developer manual (19 chapters; `ATEShell` and `ATEPython` listings defined in its own `main.tex`) | `docs/manuals/developer/` |
+| The agent-readable versions | `docs/manuals/llm/test-writer.md`, `docs/manuals/llm/admin.md`, `docs/manuals/llm/developer.md` |
+| The examples the manuals quote, which are real files that run | `docs/manuals/examples/test-writer/`, `docs/manuals/examples/developer/` |
 
 `tests/test_manuals.py` runs every one of those examples headless, fails if a listing in either
 manual is not the exact bytes of the file it quotes, and fails if a function, enum, parameter or
 Device type that the code exposes is missing from the manuals. The admin manual is held to the code
 the same way: its config keys and `ate` commands are derived from `src/ate/config.py` and
 `src/ate/cli.py`, every command it tells an administrator to run is executed in a temporary
-Station, and every error message it quotes is looked up in the file that prints it. Adding a
-manual for another audience (packet 34c) is a new directory under `docs/manuals/`, a new entry in
+Station, and every error message it quotes is looked up in the file that prints it. The developer
+manual is held to the code harder: its module table is compared with `pkgutil.walk_packages` over
+`src/ate`, its signal list with the Qt signals declared on `RunEngine` and `HeadlessRunSession`, its
+table list with `schema.metadata.tables`, its driver list with the registry, and its two worked
+examples (a Device Type, a schema version) are applied to a temporary copy of the source and run.
+Adding a manual for another audience is a new directory under `docs/manuals/`, a new entry in
 that test's `MANUALS` table, and nothing else.
 
 ## Tests
