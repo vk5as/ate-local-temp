@@ -575,6 +575,60 @@ def test_the_pdf_helper_timeout_is_the_sixty_seconds_the_manual_says() -> None:
     assert "timed out after 60 s" in "\n".join(text for _label, text in MANUALS["admin"].texts())
 
 
+#: Numbers the admin manual states that are constants in the code: (module, attribute, value, the
+#: words the manual uses). If the code changes one and the manual does not, this fails.
+NUMBERS_IN_THE_MANUAL: list[tuple[str, str, object, str]] = [
+    ("ate.engine.run_engine", "_ABORT_CLOSE_SECONDS", 3.0, "three seconds"),
+    ("ate.devices.abort", "POLL_SECONDS", 0.05, "50 ms"),
+    ("ate.storage.schema", "SCHEMA_VERSION", 5, "the current one is 5"),
+    ("ate.report.pdf_job", "PDF_TIMEOUT_MS", 60_000, "60 s"),
+]
+
+
+def test_the_numbers_the_manual_gives_are_the_numbers_the_code_has() -> None:
+    """Every figure in the admin manual that is a constant somewhere in the code is checked against it."""
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    for module, attribute, value, as_written in NUMBERS_IN_THE_MANUAL:
+        actual = getattr(importlib.import_module(module), attribute)
+        assert actual == value, f"{module}.{attribute} is now {actual}, the manual says {value}"
+        assert as_written in manual, f"the manual no longer says {as_written!r}"
+    from ate.config import _DEFAULTS
+
+    assert _DEFAULTS["devices.receiveBufferBytes"] == 16_777_216
+    assert "16777216" in manual, "the manual no longer prints the buffer default the code uses"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the pseudo-terminal probe needs a Linux pty")
+def test_ate_takes_no_exclusive_lock_on_a_linux_serial_port() -> None:
+    """Chapter 10 tells an administrator that another program can open the same tty while a Test Run
+    holds it. ATE never asks for the lock, and the probe shows the lock is not implied either: with
+    one descriptor already on the port, an open that asks for exclusive access still succeeds.
+
+    A pseudo-terminal stands in for a real tty; no instrument is touched."""
+    import os
+    import pty
+    import tty
+
+    import serial
+
+    serial_source = (ROOT / "src" / "ate" / "devices" / "serial.py").read_text(encoding="utf-8")
+    assert "exclusive" not in serial_source, "the SERIAL driver now asks for exclusive access"
+
+    master, slave = pty.openpty()
+    tty.setraw(slave)
+    port = os.ttyname(slave)
+    os.close(slave)  # the master still holds the port, as a Device's descriptor would
+    try:
+        second = serial.Serial(port, exclusive=True, timeout=0.2)
+        assert second.is_open, f"the exclusive open on {port} did not succeed"
+        second.close()
+    finally:
+        os.close(master)
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "serial.Serial(exclusive=True)" in manual, "the manual stopped naming the probe"
+
+
 # --- setup's permissions, proven where they can be ---------------------------------------
 
 #: The container script that runs the real `groupadd`/`chgrp`/`chmod` that `ate setup` uses. It
@@ -636,7 +690,7 @@ def test_the_real_linux_permission_commands_work_in_debian_stable(tmp_path: Path
     proc = subprocess.run(
         ["docker", "run", "--rm", "-v", f"{work}:/work", "-w", "/work",
          "-e", "PYTHONDONTWRITEBYTECODE=1", "debian:stable", "sh", "-c",
-         "apt-get update -qq && apt-get install -y -qq python3 >/dev/null && python3 /work/check.py"],
+         "apt-get update -qq && apt-get install -y -qq python3 >/dev/null && python3 -B /work/check.py"],
         capture_output=True, text=True, timeout=900,
     )
     assert proc.returncode == 0, f"the container run failed: {proc.stderr[-1000:]}"

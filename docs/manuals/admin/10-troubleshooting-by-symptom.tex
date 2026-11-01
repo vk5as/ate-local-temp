@@ -154,8 +154,9 @@ guessed.
 
 \textbf{ATE takes no exclusive lock on a serial port on Linux.} Another program can open the same
 \texttt{tty} while a Test Run is using it. The suite tried to prove the opposite with
-\texttt{serial.Serial(exclusive=True)} and found the open succeeded even while the port was held, so
-sharing is the behaviour, and two schedules or two programs on one port are your problem to avoid.
+\texttt{serial.Serial(exclusive=True)} against a pseudo-terminal already held by another descriptor
+and found the open succeeded, so sharing is the behaviour, and two schedules or two programs on one
+port are your problem to avoid.
 
 \textbf{An abort frees the worker, not the instrument.} When the Operator aborts a run, the worker
 stops waiting for a Device call in about 50 ms and moves on; the call itself keeps running on a
