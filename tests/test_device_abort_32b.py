@@ -2,7 +2,12 @@
 
 Each test runs a real schedule through the real run engine with a 600 s timeout on the call, so nothing
 but the abort can end it in time. The peers are real loopback sockets; what stands in for a call only
-the OS or a C library can end (a connect, `viRead`) is a Python wait the abort cannot reach either."""
+the OS or a C library can end (a connect, `viRead`) is a Python wait the abort cannot reach either.
+
+Every wait on an abort goes through `wait_for_aborted_run`, which fails past story 83's 10 s and warns
+past the 0.5 s aim: a 9 s abort shows up in pytest's summary instead of passing. A test that holds a
+call behind the abort on purpose ends past 0.5 s, and its warning says so from the timeline.
+"""
 
 from __future__ import annotations
 
@@ -23,11 +28,18 @@ from ate.devices.visa import VisaDriver
 from ate.engine.run_engine import RunEngine, RunStatus
 from ate.storage.store import RunStore
 
-from ._fixtures import LoopbackPeer, describe_stuck_runs, scratch_directory
+from ._fixtures import (
+    ABORT_MUST_STOP_S,
+    LoopbackPeer,
+    describe_stuck_runs,
+    scratch_directory,
+    wait_for_aborted_run,
+)
 from .test_serial_devices import _StuckPeer
 
-#: Story 83: an abort must stop within this, and should within 0.5 s.
-MUST_STOP_SECONDS = 10.0
+#: Story 83: an abort must stop the run within this. `wait_for_aborted_run` also warns past the
+#: 0.5 s aim, so an abort that crawls does not pass as a passing test (packet 32b).
+MUST_STOP_SECONDS = ABORT_MUST_STOP_S
 
 _OPEN = {
     "TCP": 'ATE.open(DeviceType.TCP, {{host="127.0.0.1", port={port}, timeout=600, readTerm="\\n", writeTerm=""}})',
@@ -69,9 +81,16 @@ class _Run:
         path.write_text(source, encoding="utf-8", newline="\n")
         self.ready, self.finished = threading.Event(), threading.Event()
         self.seen: dict = {}
+        self.timeline: list[tuple[float, str]] = []
         self.engine = RunEngine(self.store, str(path), ate_fns={"ready": self._ready})
         self.engine.run_uuid_reported.connect(lambda run_uuid: self.seen.update(run_uuid=run_uuid))
-        self.engine.state_changed.connect(lambda status: self.finished.set() if status == RunStatus.FINISHED else None)
+        self.engine.state_changed.connect(self._note_state)
+
+    def _note_state(self, status: RunStatus) -> None:
+        """FINISHED sets the event and puts the moment on the timeline `wait_for_aborted_run` prints."""
+        if status == RunStatus.FINISHED:
+            self.finished.set()
+            self.timeline.append((time.monotonic(), "run FINISHED"))
 
     def _ready(self) -> bool:
         self.ready.set()
@@ -86,15 +105,18 @@ class _Run:
         return event.is_set()
 
     def abort_in_flight(self, app) -> float:
-        """Start the run, let the call begin, abort it and return how long the run took to end."""
+        """Start the run, let the call begin, abort it and return how long the run took to end.
+
+        Story 83's limit is enforced by `wait_for_aborted_run`, which also warns past 0.5 s: a 9 s
+        abort is not a passing test."""
         self.engine.start()
         assert self.pump(app, self.ready, 10.0), describe_stuck_runs()
         time.sleep(0.3)  # into the call: ATE.ready() is the line before it
         assert not self.finished.is_set(), "the call ended by itself, so nothing here tests an abort"
         started = time.monotonic()
+        self.timeline.append((started, "abort requested"))
         self.engine.request_abort()
-        assert self.pump(app, self.finished, MUST_STOP_SECONDS + 5.0), describe_stuck_runs()
-        return time.monotonic() - started
+        return wait_for_aborted_run(app, self.finished, started, timeline=self.timeline)
 
     def assert_ended_aborted(self) -> None:
         run_uuid = self.seen["run_uuid"]
@@ -116,7 +138,6 @@ def test_an_abort_ends_a_long_read(qapp, device_type):
             try:
                 took = run.abort_in_flight(qapp)
                 print(f"\n{device_type} read: abort took {took:.3f} s")
-                assert took < MUST_STOP_SECONDS
                 run.assert_ended_aborted()
             finally:
                 run.engine.stop_and_wait()
@@ -145,7 +166,6 @@ def test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading(qapp, device_
             try:
                 took = run.abort_in_flight(qapp)
                 print(f"\n{device_type} write: abort took {took:.3f} s")
-                assert took < MUST_STOP_SECONDS
                 run.assert_ended_aborted()
             finally:
                 run.engine.stop_and_wait()
@@ -172,7 +192,6 @@ def test_an_abort_leaves_behind_a_connect_only_the_os_can_end(qapp, monkeypatch)
         try:
             took = run.abort_in_flight(qapp)
             print(f"\nTCP open: abort took {took:.3f} s")
-            assert took < MUST_STOP_SECONDS
             run.assert_ended_aborted()
             assert not closed.is_set()
             release.set()
@@ -245,7 +264,6 @@ def test_an_abort_leaves_behind_a_visa_read_in_c_and_closes_only_after_it(qapp, 
         try:
             took = run.abort_in_flight(qapp)
             print(f"\nVISA viRead: abort took {took:.3f} s")
-            assert took < MUST_STOP_SECONDS
             run.assert_ended_aborted()
             assert resource.reads == 1
             assert resource.calls == []  # the run has ended, and nothing has touched the session under the read
@@ -270,11 +288,13 @@ def test_a_post_test_action_waits_for_the_call_an_abort_left_behind(qapp, monkey
             run.engine.start()
             assert run.pump(qapp, run.ready, 10.0), describe_stuck_runs()
             time.sleep(0.3)
+            started = time.monotonic()
+            run.timeline.append((started, "abort requested"))
             run.engine.request_abort()
             time.sleep(0.5)
             assert not run.finished.is_set() and resource.calls == []  # the write has not gone across the read
             resource.release.set()
-            assert run.pump(qapp, run.finished, MUST_STOP_SECONDS), describe_stuck_runs()
+            assert wait_for_aborted_run(qapp, run.finished, started, timeline=run.timeline), describe_stuck_runs()
             assert resource.calls[:2] == ["read ended", "write b'OUTP OFF'"]
             run.assert_ended_aborted()
         finally:
@@ -295,12 +315,13 @@ def test_a_read_after_an_abandoned_read_waits_for_it(qapp, monkeypatch):
             assert run.pump(qapp, run.ready, 10.0), describe_stuck_runs()
             time.sleep(0.3)
             started = time.monotonic()
+            run.timeline.append((started, "abort requested"))
             run.engine.request_abort()
             time.sleep(0.5)  # the Post-test Action has begun its read
             assert not run.finished.is_set(), describe_stuck_runs()
             assert resource.events == ["attr", "attr", "attr", "read"], f"the second read touched the session during the first: {resource.events}"
             resource.release.set()
-            assert run.pump(qapp, run.finished, MUST_STOP_SECONDS), describe_stuck_runs()
+            assert wait_for_aborted_run(qapp, run.finished, started, timeline=run.timeline), describe_stuck_runs()
             assert resource.events == [
                 "attr", "attr", "attr", "read", "read ended",
                 "attr", "attr", "read", "read ended", "close",
@@ -321,12 +342,17 @@ def test_a_second_abort_ends_a_post_test_action_waiting_for_a_call_left_behind(q
             run.engine.start()
             assert run.pump(qapp, run.ready, 10.0), describe_stuck_runs()
             time.sleep(0.3)
+            started = time.monotonic()
+            run.timeline.append((started, "abort requested"))
             run.engine.request_abort()
             time.sleep(0.5)  # the Post-test Action has begun, and the flag was cleared for it
+            again = time.monotonic()
+            run.timeline.append((again, "second abort requested"))
             run.engine.request_abort()
-            assert run.pump(qapp, run.finished, MUST_STOP_SECONDS), describe_stuck_runs()
-            actions = run.store.actions(run.seen["run_uuid"]) if hasattr(run.store, "actions") else []
-            assert not actions or actions[-1]["outcome"] == "aborted"
+            assert wait_for_aborted_run(qapp, run.finished, again, timeline=run.timeline), describe_stuck_runs()
+            post = [action for action in run.store.actions(run.seen["run_uuid"]) if action["phase"] == "post"]
+            assert post, "the Post-test Action never began, so there was nothing for the second abort to end"
+            assert post[-1]["outcome"] == "aborted", post[-1]
             assert "write b'OUTP OFF'" not in resource.calls
         finally:
             resource.release.set()
@@ -351,7 +377,6 @@ def test_an_aborted_runs_stuck_close_does_not_hold_the_worker(qapp, monkeypatch)
             try:
                 took = run.abort_in_flight(qapp)
                 print(f"\nTCP close: abort took {took:.3f} s")
-                assert took < MUST_STOP_SECONDS
                 run.assert_ended_aborted()
                 lines = [line["text"] for line in run.store.log_lines(run.seen["run_uuid"])]
                 assert any("still closing" in line for line in lines), lines
