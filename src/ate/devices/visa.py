@@ -68,16 +68,36 @@ def _default_manager() -> Any:
         return pyvisa.ResourceManager("@py")
 
 
+def _session_is_alive(manager: Any) -> bool:
+    """Whether this manager's session can still be used.
+
+    pyvisa-py's session is shared by every ResourceManager in the process, so a manager closed
+    anywhere - ``ate _selftest`'s own, which it closes on purpose - leaves every other manager's
+    handle dead.
+    """
+    try:
+        manager.session
+        return True
+    except errors.InvalidSession:
+        return False
+    except Exception:  # noqa: BLE001 - an injected stand-in has no session to check; use it as is
+        return True
+
+
 def get_resource_manager(factory: Callable[[], Any] | None = None) -> Any:
     """The ResourceManager every VISA open uses: created lazily, then cached for the process.
 
     ``factory`` replaces it outright (the tests' scripted fake); an injected one is not cached, so
     each driver built with it gets its own.
+
+    A cached manager whose session has been closed by someone else is replaced with a fresh one
+    rather than reused: pyvisa-py's session is process-wide, so ``ate _selftest`` running in the
+    same process would otherwise make every later VISA open fail with "Invalid session handle".
     """
     global _manager
     if factory is not None:
         return factory()
-    if _manager is None:
+    if _manager is None or not _session_is_alive(_manager):
         _manager = _default_manager()
     return _manager
 
