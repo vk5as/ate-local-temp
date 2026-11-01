@@ -481,6 +481,12 @@ anything connects, and never accepts a boolean where a number is expected.
 `POLL_SECONDS = 0.05` and checks the run's abort flag between them. A connect or a DNS lookup is the
 OS's to end: an abort leaves it behind and closes the handle it later produces.
 
+An abort frees the worker, not the instrument. The helper thread left behind is joined in slices, and
+all of an aborted run's leftover closes together get `_ABORT_CLOSE_SECONDS = 3.0`
+(`src/ate/engine/run_engine.py`), each with a WARNING naming the Device. A Post-test Action on the same
+Device waits for the call left behind, and a new run opening the same instrument while an abandoned call
+is still running may find it busy. That is the boundary of what an abort can do, not a bug to fix.
+
 `src/ate/devices/tracing.py` wraps every handle in `TracedDevice` when `deviceTrace.enabled` is set, and
 emits one DEBUG line per open, read, write and close through the host's `record_log`, so the engine
 attributes it to the Action that made it. Bytes are escaped and truncated at `deviceTrace.maxBytes`

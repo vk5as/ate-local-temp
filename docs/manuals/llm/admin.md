@@ -270,6 +270,15 @@ device TCP 127.0.0.1:5025 left open at end of run
 device TCP 127.0.0.1:5025 was still closing when the aborted run ended
 ```
 
+An abort frees the worker, not the instrument. The worker stops waiting for a Device call in about
+50 ms; the call itself carries on on a daemon thread and holds its transport until it finishes -
+a connect or DNS lookup, a `viRead` on a non-SOCKET VISA session, a pyserial write, an
+`ATE.close` on a stuck port. All the closes left behind at the end of an aborted run get three
+seconds together (`_ABORT_CLOSE_SECONDS = 3.0`), one WARNING each. A Post-test Action on the same
+Device waits for the call left behind, and a new run opening the same instrument while an abandoned
+call is still running finds it busy. This is the boundary of an abort, not a fault: it is why the
+`was still closing when the aborted run ended` line is not a bug.
+
 ## Upgrades, uninstalling, licences
 
 Order: back up the database and the config; install the new artifact over the old; migrate if the
