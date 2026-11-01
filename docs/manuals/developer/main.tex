@@ -3,7 +3,7 @@
 % Build: python docs/manuals/build.py developer
 % (latexmk -lualatex inside texlive/texlive:latest; see docs/building-from-source.md.)
 %
-% Every fact here is checked against the code. tests/test_manuals.py derives the module list, the
+% Every fact here is checked against the code. tests/test\_manuals.py derives the module list, the
 % Qt signals, the schema tables and the Device drivers from the code and fails if this manual or
 % docs/manuals/llm/developer.md stops naming them; every command in a listing is either run by the
 % suite or listed with the reason it is not; the two worked examples (a Device driver, a schema
@@ -13,7 +13,13 @@
 \documentclass[a4paper,11pt]{report}
 
 \usepackage{manual}  % docs/manuals/common/manual.sty, on TEXINPUTS by the build script
+\usepackage{longtable}  % the module table in chapter 2 is longer than one page
 
+% Long code names are what makes a line here overflow: the build gate fails on any box more than
+% 5pt too wide, so line breaking gets extra room, and every path or dotted name in the text is
+% written with \allowbreak{} where it can be cut.
+\setlength{\emergencystretch}{2em}
+\sloppy
 % The developer manual quotes shell commands as well as Lua, so it needs the shell listing style
 % in addition to the Lua one the shared preamble defines.
 \lstdefinelanguage{ATEShell}{

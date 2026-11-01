@@ -7,8 +7,8 @@ this chapter, because a bug that only shows in one of them is invisible until a 
 
 \section{The bundle}
 
-\texttt{packaging/build_pyinstaller.py} builds the frozen application. It makes a throwaway venv,
-installs into it, runs \texttt{packaging/pyinstaller/ate.spec}, and can smoke-test the result:
+\texttt{packaging/\allowbreak{}build\_\allowbreak{}pyinstaller.py} builds the frozen application. It makes a throwaway venv,
+installs into it, runs \texttt{packaging/\allowbreak{}pyinstaller/\allowbreak{}ate.spec}, and can smoke-test the result:
 
 \begin{lstlisting}[language=ATEShell]
 python packaging/build_pyinstaller.py --smoke
@@ -17,64 +17,66 @@ python packaging/build_pyinstaller.py --verify dist/ate   # check an existing bu
 
 \texttt{verify\_bundle()} is the gate a bundle must pass: it refuses a bundle that does not carry the
 licence files (\texttt{\_internal/licences}, four files generated at build time by
-\texttt{packaging/licence/notices.py --out build/licences}), the report template, the bundled Lua
+\texttt{packaging/\allowbreak{}licence/\allowbreak{}notices.py --out build/\allowbreak{}licences}), the report template, the bundled Lua
 modules, the WebEngine binary and its 57 \texttt{.pak} files. The excludes list in \texttt{ate.spec}
 has its own history: PySide6's \texttt{QtWebEngineWidgets} imports \texttt{PySide6.QtWebChannel} on its
 own, and keeping it excluded produced a bundle that looked fine and then died in
 \texttt{ate \_pdf} with ``could not import module 'PySide6.QtWebChannel'''. It is out of the list, and
-\texttt{test\_the\_spec\_does\_not\_exclude\_what\_webengine\_imports\_itself} runs the WebEngine import and
+\texttt{test\_\allowbreak{}the\_\allowbreak{}spec\_\allowbreak{}does\_\allowbreak{}not\_\allowbreak{}exclude\_\allowbreak{}what\_\allowbreak{}webengine\_\allowbreak{}imports\_\allowbreak{}itself} runs the WebEngine import and
 compares what it pulls in with the excludes list --- so the list cannot drift again without failing.
 
-The real build is gated: \texttt{ATE\_BUILD\_TESTS=1 pytest -m build} runs
-\texttt{tests/test\_pyinstaller\_build\_27a.py}, which takes minutes. It is not run by the default suite,
+The real build is gated: \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} runs
+\texttt{tests/\allowbreak{}test\_\allowbreak{}pyinstaller\_\allowbreak{}build\_\allowbreak27a.py}, which takes minutes. It is not run by the default suite,
 and the manual says so rather than implying it is.
 
 \section{Linux: the \texttt{.deb}, the tarball, the wheel}
 
-\texttt{packaging/linux/build\_linux.py --build --dist dist --out dist} produces the \texttt{.deb} and the
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}build\_\allowbreak{}linux.py --build --dist dist --out dist} produces the \texttt{.deb} and the
 tarball from a built bundle. The \texttt{.deb} declares \texttt{DEPENDS}, the list of system libraries the
 bundle cannot carry itself; \texttt{WHEEL\_SYSTEM\_LIBS} is the list for the wheel, which ships no Qt and
 therefore needs the system to provide the xcb and GL libraries QtWebEngine links against. Six xcb
 libraries (cursor, icccm, keysyms, shape, xkb, xkbcommon-x11) were added to that list after a bare
 \texttt{debian:stable} container aborted with ``Could not load the Qt platform plugin "xcb"''.
 
-\texttt{packaging/linux/install.sh --prefix /opt/ate --bin /usr/bin/ate} is the tarball's installer;
-\texttt{packaging/linux/deb/postinst} and \texttt{postrm} are the \texttt{.deb}'s hooks (the \texttt{.deb}
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}install.sh --prefix /\allowbreak{}opt/\allowbreak{}ate --bin /\allowbreak{}usr/\allowbreak{}bin/\allowbreak{}ate} is the tarball's installer;
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}deb/\allowbreak{}postinst} and \texttt{postrm} are the \texttt{.deb}'s hooks (the \texttt{.deb}
 is idempotent about the \texttt{ate} group; \texttt{apt purge} removes the config file).
 
-The wheel is built the ordinary way:
+The wheel is built with \texttt{build}. \texttt{--no-isolation} uses the interpreter already present
+instead of making a throwaway venv to download setuptools into, which is what a machine with no
+network to PyPI needs:
 
 \begin{lstlisting}[language=ATEShell]
-python -m build --wheel
+python -m build --wheel --no-isolation -o dist
 \end{lstlisting}
 
 Its version comes from the git tag, computed once by \texttt{src/ate/\_version.py} so build time and run
 time agree; untagged builds fall back to \texttt{0.0.0-dev} and a build never fails because git is
 unavailable. Package data matters: a bare-key bug in \texttt{pyproject.toml} meant \texttt{no wheel had
-built since packet 06b}, and \texttt{tests/test\_wheel\_build\_28a.py} now reads the parsed config rather
+built since packet 06b}, and \texttt{tests/\allowbreak{}test\_\allowbreak{}wheel\_\allowbreak{}build\_\allowbreak28a.py} now reads the parsed config rather
 than the source text, so a non-\texttt{.py} file the wheel must ship cannot go missing silently.
 
 \section{Windows}
 
-\texttt{packaging/windows/ate.iss} is the Inno Setup script;
-\texttt{packaging/windows/build\_installer.py} compiles it. On Linux the only thing you can do is see the
+\texttt{packaging/\allowbreak{}windows/\allowbreak{}ate.iss} is the Inno Setup script;
+\texttt{packaging/\allowbreak{}windows/\allowbreak{}build\_\allowbreak{}installer.py} compiles it. On Linux the only thing you can do is see the
 command:
 
 \begin{lstlisting}[language=ATEShell]
 python packaging/windows/build_installer.py --dry-run --dist dist
 \end{lstlisting}
 
-which prints the exact \texttt{iscc} line the CI will run. \texttt{tests/test\_inno\_installer\_27b.py}
+which prints the exact \texttt{iscc} line the CI will run. \texttt{tests/\allowbreak{}test\_\allowbreak{}inno\_\allowbreak{}installer\_\allowbreak27b.py}
 parses \texttt{ate.iss} and asserts against that command, and
-\texttt{tests/test\_release\_ci\_28c.py} checks that the flags the CI passes to the installer
-(\texttt{packaging/windows/smoke\_installer.py}'s \texttt{INSTALL\_FLAGS}) are the ones the manuals tell an
+\texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} checks that the flags the CI passes to the installer
+(\texttt{packaging/\allowbreak{}windows/\allowbreak{}smoke\_\allowbreak{}installer.py}'s \texttt{INSTALL\_FLAGS}) are the ones the manuals tell an
 administrator to use.
 
 \section{The CI that runs all of this}
 
-\texttt{.github/workflows/ci.yml} runs the suite on \texttt{ubuntu-latest} and
+\texttt{.github/\allowbreak{}workflows/\allowbreak{}ci.yml} runs the suite on \texttt{ubuntu-latest} and
 \texttt{windows-latest}, each on CPython 3.13 and 3.14 --- four jobs, \texttt{fail-fast: false}, with
-\texttt{QT\_QPA\_PLATFORM=offscreen} and \texttt{PYTHONFAULTHANDLER=1} set at job level. Two things in it
+\texttt{QT\_\allowbreak{}QPA\_\allowbreak{}PLATFORM=offscreen} and \texttt{PYTHONFAULTHANDLER=1} set at job level. Two things in it
 are load-bearing and were added because of failures, not taste:
 
 \begin{itemize}
@@ -87,18 +89,18 @@ are load-bearing and were added because of failures, not taste:
     WebEngine was imported: pip had put a Qt 6.12 core next to a Qt 6.11 WebEngine.
 \end{itemize}
 
-\texttt{.github/workflows/release.yml} runs on a tag or by hand: \texttt{windows-installer},
+\texttt{.github/\allowbreak{}workflows/\allowbreak{}release.yml} runs on a tag or by hand: \texttt{windows-installer},
 \texttt{linux-build} and \texttt{linux-smoke} (matrix: \texttt{deb}, \texttt{tar}, \texttt{wheel}) --- five
 job runs. The smoke tests install each artifact in a fresh \texttt{debian:stable} container and run
-\texttt{ate --version} and \texttt{ate \_selftest --run}. \texttt{packaging/linux/smoke_linux.py} is the
-script that runs inside them, and \texttt{packaging/linux/docker\_smoke.py} is the driver that a human
+\texttt{ate --version} and \texttt{ate \_selftest --run}. \texttt{packaging/\allowbreak{}linux/\allowbreak{}smoke\_\allowbreak{}linux.py} is the
+script that runs inside them, and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} is the driver that a human
 runs.
 
 \section{What has actually been run here}
 
-The frozen-build gate was run for this manual: \texttt{ATE\_BUILD\_TESTS=1 pytest -m build} gave
+The frozen-build gate was run for this manual: \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} gave
 \texttt{1 passed, 46 deselected in 40.81 s}. The container gate was attempted
-(\texttt{ATE\_DOCKER\_TESTS=1 pytest -m build}, then \texttt{packaging/linux/docker\_smoke.py} by hand)
+(\texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build}, then \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} by hand)
 and did not complete here: the container ran out of scratch space in this environment. Chapter
 \ref{ch:unproven} says that plainly; the suite does not pretend those smokes passed. What has never
 been run on this machine is a Windows build, a Windows install, or an installer: those paths are

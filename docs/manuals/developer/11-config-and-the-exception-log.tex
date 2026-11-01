@@ -15,7 +15,7 @@ before touching it:
     \texttt{<word>} is a config error naming the file and the key, so a typo never becomes a directory
     literally called \texttt{<whatever>}.
   \item Config values get no environment expansion. The platform default path is decided by
-    \texttt{\_platform\_default()}, and \texttt{--config <path>} beats it. Note the trap the file records:
+    \texttt{\_\allowbreak{}platform\_\allowbreak{}default()}, and \texttt{--config <path>} beats it. Note the trap the file records:
     \texttt{sys.platform} is \texttt{win32}, never \texttt{windows}, and \texttt{\_is\_windows} is the only
     platform test used anywhere.
   \item \texttt{ATE\_DEFAULT\_CONFIG} and \texttt{ATE\_DATA\_DIR} are test seams. They are read nowhere
@@ -24,13 +24,13 @@ before touching it:
 \end{itemize}
 
 Adding a key means adding it to \texttt{\_SCHEMA}, to \texttt{\_DEFAULTS}, to the accessor on
-\texttt{Config}, and to both manuals --- \texttt{config\_keys()} in \texttt{tests/test\_manuals.py}
+\texttt{Config}, and to both manuals --- \texttt{config\_keys()} in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}
 derives the set from \texttt{\_SCHEMA} and fails a manual that does not name it.
 
 \section{The application log}
 
 \texttt{src/ate/log.py} opens one \texttt{AppLog} per launch, at
-\texttt{<data>/logs/ate-app-<launch time>.log}, honouring \texttt{log.level}. A session given a config
+\texttt{<data>/\allowbreak{}logs/\allowbreak{}ate-app-<launch time>.log}, honouring \texttt{log.level}. A session given a config
 opens its own if the launch did not hand one in; a log handed in belongs to the launch and the session
 does not close it. A log directory that cannot be opened must not stop the application: the failure leaves
 \texttt{on\_log} as \texttt{None}, and the session falls back to printing.
@@ -68,10 +68,10 @@ Know its limits, because they are narrow and were found by test:
 \end{itemize}
 
 The consequence for whoever writes a test: a child-process test can no longer trust its exit code to see
-a slot exception. \texttt{assert\_no\_swallowed\_exception(stderr)} in \texttt{tests/\_fixtures.py} reads
+a slot exception. \texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception(stderr)} in \texttt{tests/\_fixtures.py} reads
 stderr as well, and it is used by the tests that start a Qt process: the children in
-\texttt{tests/test\_windows\_ci\_fixes.py}, the two in
-\texttt{tests/test\_modals\_never\_block\_headless.py}, the one in
-\texttt{tests/test\_gui\_launch\_30a.py}, and the packet 10a tests.
+\texttt{tests/\allowbreak{}test\_\allowbreak{}windows\_\allowbreak{}ci\_\allowbreak{}fixes.py}, the two in
+\texttt{tests/\allowbreak{}test\_\allowbreak{}modals\_\allowbreak{}never\_\allowbreak{}block\_\allowbreak{}headless.py}, the one in
+\texttt{tests/\allowbreak{}test\_\allowbreak{}gui\_\allowbreak{}launch\_\allowbreak30a.py}, and the packet 10a tests.
 
 \cando{say where an unhandled exception lands, and write a test that cannot pass by swallowing one.}

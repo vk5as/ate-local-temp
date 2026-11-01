@@ -1,9 +1,9 @@
 \chapter{Worked example: adding a schema version}\label{ch:schema-version}
 
-The Test Run record is defined in one file, \texttt{src/ate/storage/schema.py}, and one number:
+The Test Run record is defined in one file, \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}schema.py}, and one number:
 \texttt{SCHEMA\_VERSION}. Everything that reads or writes the record goes through
 \texttt{RunStore}, so a table added here is the only way a table exists. The example below is run by
-\texttt{tests/test\_manuals.py}: it migrates a database with the shipped code, migrates the same
+\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}: it migrates a database with the shipped code, migrates the same
 database with a copy of the code that declares version 6 and one more table, and then shows the
 shipped code refusing that database.
 
@@ -31,7 +31,7 @@ review_note = Table(
 
 Nothing else is required: no hand-written DDL, no migration script. The version lives in
 \texttt{PRAGMA user\_version}, and the tables are created by
-\texttt{metadata.create\_all(engine)} in \texttt{RunStore.\_ensure\_schema}, which reflects each
+\texttt{metadata.create\_\allowbreak{}all(engine)} in \texttt{RunStore.\_\allowbreak{}ensure\_\allowbreak{}schema}, which reflects each
 table through the backend's own catalog and so never raises on a database that already has it.
 
 The types are the ones the record uses everywhere: UUIDs as 36-character \texttt{Text}, times as
@@ -53,7 +53,7 @@ The assertion that matters is that the set of tables only grew --- a migration a
 rewrites or drops.
 
 The third run is the reason the version check exists: the shipped code, pointed at the version 6
-database, exits 1 with \texttt{this ATE is too old for \dots; update ATE}. \texttt{check\_database\_at\_launch}
+database, exits 1 with \texttt{this ATE is too old for \dots; update ATE}. \texttt{check\_\allowbreak{}database\_\allowbreak{}at\_\allowbreak{}launch}
 compares \texttt{PRAGMA user\_version} with \texttt{SCHEMA\_VERSION} and returns
 \texttt{NEEDS\_MIGRATE} when the database is behind, \texttt{TOO\_OLD} when it is ahead, and
 \texttt{OK} only when they match. A run against a database whose tables are missing fails at the
@@ -73,10 +73,10 @@ say so; the version number is only a guard, not a migration.
 
 \section{Where a new field reaches the report}
 
-A table is not a report. The HTML writer in \texttt{src/ate/report/html.py} reads the record through
+A table is not a report. The HTML writer in \texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}html.py} reads the record through
 the store's query methods; a new table that nothing queries is invisible on the printed page. The
 batching rules in chapter~\ref{ch:storage} apply to a new row type as well:
-\texttt{\_rows\_per\_statement} keeps an insert under SQLite's variable limit, and
+\texttt{\_\allowbreak{}rows\_\allowbreak{}per\_\allowbreak{}statement} keeps an insert under SQLite's variable limit, and
 \texttt{\_log\_seq} is what orders a new row against the rest of the run.
 
 \cando{add a table, bump the version, and show what a database at a different version does.}

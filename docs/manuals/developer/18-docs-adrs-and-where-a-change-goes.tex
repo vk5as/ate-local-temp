@@ -4,36 +4,36 @@ There are five kinds of document in this repository and they are not equal. When
 code is the record: a document that says something the code does not do is a bug in the document, and
 the manual chapters in this packet are written from the code, not from the documents.
 
-\begin{center}
-\small
-\begin{tabular}{p{4.4cm} p{8.2cm}}
+\begingroup\small
+\begin{longtable}{p{4.4cm} p{8.2cm}}
 \toprule
 \textbf{Where it is} & \textbf{What it is good for} \\
 \midrule
+\endhead
 \texttt{GLOSSARY.md} & the words. \texttt{Test Run}, \texttt{Test Step}, \texttt{Attempt},
   \texttt{Media Release}, \texttt{Device Type}: every manual and every test uses these, so a new
   term has to be added here before it is used anywhere \\
 \texttt{docs/adr/} & decisions that were argued and settled. ADR-0001 is PySide6 rather than PyQt6
   (the licence question). If you change a binding, a runtime or a packaging choice, an ADR is where
   the reason goes \\
-\texttt{.scratch/ate-v1/spec.md} & the numbered rules (\texttt{As an Operator, \dots}) the packets
+\texttt{.scratch/\allowbreak{}ate-v1/\allowbreak{}spec.md} & the numbered rules (\texttt{As an Operator, \dots}) the packets
   were written from. It is the requirement, not the behaviour --- see chapter~\ref{ch:unproven} for
   where it is ahead of the code \\
-\texttt{.scratch/ate-v1-wayfinding/assets/} & the format specs the code was built against:
+\texttt{.scratch/\allowbreak{}ate-v1-wayfinding/\allowbreak{}assets/\allowbreak} & the format specs the code was built against:
   \texttt{test-run-record.md}, \texttt{app-config-format.md}, \texttt{test-schedule-format.md},
   \texttt{ate-table-reference.md}, \texttt{packaging.md} and the rest. Read them to know what was
   intended; read \texttt{src/} to know what happens \\
-\texttt{.scratch/ate-v1/issues/} & the packets, one file each, with what was built and what is left \\
-\texttt{.scratch/ate-v1/review-notes.md} & the gaps a reviewer found and did not fix. It is where
+\texttt{.scratch/\allowbreak{}ate-v1/\allowbreak{}issues/\allowbreak} & the packets, one file each, with what was built and what is left \\
+\texttt{.scratch/\allowbreak{}ate-v1/\allowbreak{}review-notes.md} & the gaps a reviewer found and did not fix. It is where
   the flake history and the ``not yet verified on real Windows'' notes live --- the honest version of
   the story, and the source of chapter~\ref{ch:pyside} and chapter~\ref{ch:tests} \\
 \texttt{docs/manuals/} & the three manuals and the three Markdown manuals, held to the code by
-  \texttt{tests/test\_manuals.py} \\
+  \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} \\
 \texttt{docs/agents/} & how the agents working on this repo are told to read the domain docs \\
-\texttt{docs/building-from-source.md} & how to build, including how to build these PDFs \\
+\texttt{docs/\allowbreak{}building-from-source.md} & how to build, including how to build these PDFs \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{longtable}
+\endgroup
 
 \section{Where a change has to go, by kind}
 
@@ -54,13 +54,13 @@ the suite checks most of them:
     test-writer manuals (\texttt{device\_types()} and \texttt{device\_drivers()} derive it from the
     classes that exist). Chapter~\ref{ch:device-type} is the worked version.
   \item \textbf{A new module under \texttt{src/ate}} --- the developer manual and
-    \texttt{docs/manuals/llm/developer.md}. \texttt{ate\_modules()} walks the package, so a module
+    \texttt{docs/\allowbreak{}manuals/\allowbreak{}llm/\allowbreak{}developer.md}. \texttt{ate\_modules()} walks the package, so a module
     nobody mentioned is a red suite.
   \item \textbf{A new table in the record} --- \texttt{schema.py}, the version bump, and both
     developer manuals (\texttt{schema\_tables()} reads \texttt{metadata.tables}).
   \item \textbf{A new command a manual tells someone to run} --- it goes into
     \texttt{COMMANDS\_RUN} or \texttt{COMMANDS\_NOT\_RUN} (admin) or \texttt{DEV\_COMMANDS\_RUN} or
-    \texttt{DEV\_COMMANDS\_NOT\_RUN} (developer), with the exit code and the output it must produce,
+    \texttt{DEV\_\allowbreak{}COMMANDS\_\allowbreak{}NOT\_\allowbreak{}RUN} (developer), with the exit code and the output it must produce,
     or a reason it is not run. A command in a listing that nobody runs and nobody explains fails.
   \item \textbf{A change to the staged screens, the abort path or the timing of a run} --- the ADRs
     if the decision changes, \texttt{GLOSSARY.md} if a term changes, and the packet file if a rule is
@@ -78,7 +78,7 @@ decision record and a marketing page.
 
 \section{Reading the review notes as a developer}
 
-\texttt{.scratch/ate-v1/review-notes.md} is the closest thing this repository has to a bug list that
+\texttt{.scratch/\allowbreak{}ate-v1/\allowbreak{}review-notes.md} is the closest thing this repository has to a bug list that
 is known and accepted. Several entries are still open and are worth knowing before touching the
 area they describe: the abort-at-boundary behaviour that 13b and 13c had to fix, \texttt{\_location()}
 deriving a schedule's file and line by text search rather than from the Lua call stack, the

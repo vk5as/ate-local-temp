@@ -1,17 +1,17 @@
 \chapter{PySide6 traps, found the hard way}\label{ch:pyside}
 
-ATE uses PySide6 (ADR-0001, \texttt{docs/adr/0001-pyside6-instead-of-pyqt6.md}: PyQt6's wheels are GPL,
+ATE uses PySide6 (ADR-0001, \texttt{docs/\allowbreak{}adr/\allowbreak0001-pyside6-instead-of-pyqt6.md}: PyQt6's wheels are GPL,
 and shipping a GPL binding under an MIT label is a licence gap). The switch from PyQt6 found real
 behaviour differences. Each is a trap for someone writing code or a test here.
 
 \begin{itemize}
   \item \textbf{An exception in a slot or \texttt{QThread.run} does not end the process.} PyQt6 aborted
     with SIGABRT (exit 134). PySide6 prints the traceback, calls \texttt{sys.excepthook} and carries on.
-    That is why the guard in \texttt{RunEngine.run} and the hook in \texttt{ate.exception_log} exist ---
+    That is why the guard in \texttt{RunEngine.run} and the hook in \texttt{ate.exception\_log} exist ---
     not as style, but because otherwise the run row stays open and the screen waits forever.
   \item \textbf{A child process's exit code is not a signal.} A test that started a Qt process used to
     prove nothing had gone wrong by \texttt{returncode == 0}. It no longer can. Use
-    \texttt{assert\_no\_swallowed\_exception(stderr)}.
+    \texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception(stderr)}.
   \item \textbf{\texttt{Signal(int)} is a C \texttt{int}.} \texttt{emit(2**31)} with a slot connected
     returns normally and the slot receives -2147483648 with a \texttt{RuntimeWarning}; the
     \texttt{OverflowError} is raised only when nothing is connected, and it can surface later as a
@@ -25,7 +25,7 @@ behaviour differences. Each is a trap for someone writing code or a test here.
   \item \textbf{\texttt{QtWebEngineWidgets} imports \texttt{QtWebChannel}.} Excluding it from the bundle is
     the packaging bug that produced a bundle that looked complete and failed at render time.
   \item \textbf{Deleted objects: different message, same handling.} PyQt6 raises
-    \texttt{wrapped C/C++ object of type Thing has been deleted}; PySide6 raises
+    \texttt{wrapped C/\allowbreak{}C++ object of type Thing has been deleted}; PySide6 raises
     \texttt{libshiboken: Internal C++ object (Thing) already deleted.} Every catch here is
     \texttt{except RuntimeError}, so both behave the same. \texttt{sip.isdeleted(x)} became
     \texttt{not shiboken6.isValid(x)}.

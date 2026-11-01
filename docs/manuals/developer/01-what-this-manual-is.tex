@@ -9,14 +9,14 @@ change breaks.
 Two files make this manual, and they say the same things:
 
 \begin{itemize}
-  \item this PDF, built from \texttt{docs/manuals/developer/} by \texttt{python docs/manuals/build.py developer};
-  \item \texttt{docs/manuals/llm/developer.md}, written for an agent rather than converted from this
+  \item this PDF, built from \texttt{docs/\allowbreak{}manuals/\allowbreak{}developer/\allowbreak} by \texttt{python docs/\allowbreak{}manuals/\allowbreak{}build.py developer};
+  \item \texttt{docs/\allowbreak{}manuals/\allowbreak{}llm/\allowbreak{}developer.md}, written for an agent rather than converted from this
     text: it is shorter, it is in the order an agent works, and the checks below apply to it too.
 \end{itemize}
 
 \section{What is checked, and how}
 
-\texttt{tests/test_manuals.py} holds the manuals to the code. It does not read them for style; it
+\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} holds the manuals to the code. It does not read them for style; it
 derives lists of names from the code and fails when a manual stops naming one:
 
 \begin{itemize}
@@ -61,11 +61,12 @@ states rather than glosses over.
 Proven on this machine, by the tests named in the chapters that state them:
 
 \begin{itemize}
-  \item the whole suite on Linux with the offscreen platform, repeated until it was green;
+  \item the whole suite on Linux with the offscreen platform, repeated until it was green: 1586
+    passed, 5 skipped, 336.28 s (chapter~\ref{ch:tests} names the five skips);
   \item the threading behaviour of every signal the engine and the session emit, and the thread each
-    slot runs on (\texttt{tests/test_signal_threads_32a.py});
+    slot runs on (\texttt{tests/\allowbreak{}test\_\allowbreak{}signal\_\allowbreak{}threads\_\allowbreak32a.py});
   \item that an abort ends a Device call on every Device Type, and how long it takes
-    (\texttt{tests/test_device_abort_32b.py});
+    (\texttt{tests/\allowbreak{}test\_\allowbreak{}device\_\allowbreak{}abort\_\allowbreak32b.py});
   \item that a new Device driver and a new schema version work when added the way this manual says.
 \end{itemize}
 
@@ -73,7 +74,7 @@ Not proven, and this manual says so wherever it matters:
 
 \begin{itemize}
   \item \textbf{real hardware.} Every Device test here talks to a loopback peer in
-    \texttt{tests/_fixtures.py} or a pseudo-terminal. A GPIB instrument, a real serial port and a
+    \texttt{tests/\_fixtures.py} or a pseudo-terminal. A GPIB instrument, a real serial port and a
     real VISA stack have never been touched by the suite.
   \item \textbf{real Windows sessions.} Windows behaviour is asserted by the same tests, but only
     GitHub Actions has ever run them on Windows, and only as CI runs.

@@ -7,12 +7,12 @@ cause visible.
 
 \texttt{test\_run.result} is \texttt{PASS} or \texttt{FAIL}. \texttt{end\_reason} is the story:
 
-\begin{center}
-\small
-\begin{tabular}{p{3.2cm} p{9.4cm}}
+\begingroup\small
+\begin{longtable}{p{3.2cm} p{9.4cm}}
 \toprule
 \textbf{End Reason} & \textbf{What happened} \\
 \midrule
+\endhead
 \texttt{COMPLETED} & the schedule ran to its end, abort or not \\
 \texttt{PRETEST\_FAILED} & a Pre-test Action raised; no step ran, and every step is NOTRUN \\
 \texttt{STOPPED\_ON\_FAIL} & the Operator answered \texttt{ABORT} at a Stop-on-Fail prompt \\
@@ -21,8 +21,8 @@ cause visible.
 \texttt{INTERRUPTED} & the worker ended on an exception it could not handle, or the process died with the
   run open and launch closed it \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{longtable}
+\endgroup
 
 A step's \texttt{result} is one of \texttt{PASS}, \texttt{FAIL}, \texttt{ERROR}, \texttt{SKIPPED},
 \texttt{NOTRUN}, \texttt{FORCED\_NOTRUN} or \texttt{NOREPORT}. \texttt{NOREPORT} means the step ran and never
@@ -35,7 +35,7 @@ The \textbf{Run log} is the \texttt{log\_line} table: one row per line, with a l
 (\texttt{DEBUG}/\texttt{INFO}/\texttt{WARNING}/\texttt{ERROR}), a source (\texttt{schedule}, \texttt{ate} or
 \texttt{device}) and an owner --- the Action or the Attempt that produced it. Run log lines come from
 \texttt{ATE.log}, redirected \texttt{print}, Device failures and warnings, and trace lines when tracing is
-on. The \textbf{application log} is the per-launch file at \texttt{<data>/logs/ate-app-<time>.log}, which
+on. The \textbf{application log} is the per-launch file at \texttt{<data>/\allowbreak{}logs/\allowbreak{}ate-app-<time>.log}, which
 is where an unhandled exception's traceback goes. They are different things and answer different questions:
 ``what did this run do'' versus ``what did the application do wrong''.
 
@@ -45,7 +45,7 @@ step whose Attempt raised records the error text as its \texttt{msg}.
 \section{When the failure is the test harness, not the run}
 
 If a test fails with ``a RunEngine worker outlived its test'' or ``N RunEngine worker(s) did not stop'',
-the report section added by \texttt{describe\_stuck\_runs} is the thing to read: the live workers, what each
+the report section added by \texttt{describe\_\allowbreak{}stuck\_\allowbreak{}runs} is the thing to read: the live workers, what each
 session thinks its state is, what the store has recorded, the store's write timings with any write still in
 flight, and every thread's stack. Long or in-flight writes mean the disk. Normal writes with the worker's
 stack elsewhere mean a fault the suite has not found yet. That is the diagnostic packet 32b added because

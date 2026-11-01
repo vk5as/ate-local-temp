@@ -1,6 +1,6 @@
 \chapter{The run session: what a layout binds to}\label{ch:session}
 
-\texttt{HeadlessRunSession} in \texttt{src/ate/run\_session/headless.py} is the object a screen talks
+\texttt{HeadlessRunSession} in \texttt{src/\allowbreak{}ate/\allowbreak{}run\_\allowbreak{}session/\allowbreak{}headless.py} is the object a screen talks
 to, and the object a headless run uses. It is a \texttt{QObject}: that is what lets a widget connect to
 its signals. It imports no widgets, and it writes no SQL. It holds the Operator's decisions, owns one
 engine at a time, and turns the worker's signals into its own.
@@ -43,7 +43,7 @@ The session, not the screen, is the authority:
   \item \texttt{start()} refuses to run with no schedule selected, and refuses a run with an empty
     Project (spec 08/11). A screen that disables the Start button is being helpful; the session is what
     makes it true.
-  \item Before a run starts, \texttt{close\_interrupted\_runs} closes every run row with no
+  \item Before a run starts, \texttt{close\_\allowbreak{}interrupted\_\allowbreak{}runs} closes every run row with no
     \texttt{ended\_at} --- one left open by a crash or a power cut --- recording it
     \texttt{INTERRUPTED}/\texttt{FAIL}, and logs how many. That is spec rule 98, and it is why a run
     never stays open across launches.
@@ -101,8 +101,8 @@ while SessionState.STARTED not in states:      # pump the loop: queued signals n
 \end{lstlisting}
 
 There is no widget and no display, and the queued signals still deliver, because delivery rides the
-event loop of the receiving thread. \texttt{tests/test_manuals.py} runs the manual's own examples this
-way, including an abort, and \texttt{examples/harness/run_examples.py} runs the shipped Media Release
+event loop of the receiving thread. \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} runs the manual's own examples this
+way, including an abort, and \texttt{examples/\allowbreak{}harness/\allowbreak{}run\_\allowbreak{}examples.py} runs the shipped Media Release
 the same way with simulator peers.
 
 \cando{start a Test Run from a script, answer its Step Inputs, abort it, and read the record back from

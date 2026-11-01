@@ -16,12 +16,12 @@ happen''.
   \item \textbf{Real Windows sessions.} The same tests run on \texttt{windows-latest} in CI, and
     the notes record those CI runs being green. Nothing in this manual was executed on Windows by
     us. The \texttt{icacls} permission paths, the Inno installer and the frozen Windows bundle are
-    asserted by reading the scripts and by \texttt{tests/test\_release\_ci\_27c.py}, which checks the
+    asserted by reading the scripts and by \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak27c.py}, which checks the
     workflow's shape, never by an install.
   \item \textbf{The Debian container smokes, on this machine.}
-    \texttt{ATE\_DOCKER\_TESTS=1 pytest -m build} and \texttt{packaging/linux/docker\_smoke.py} were
+    \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} were
     attempted while writing this manual and did not complete: the container ran out of scratch space.
-    \texttt{tests/test\_release\_ci\_28c.py} asserts the gate is written as documented and the smoke
+    \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} asserts the gate is written as documented and the smoke
     scripts' logic; the containers themselves are CI's job. Nothing in this manual claims those
     smokes passed here.
   \item \textbf{A real Chromium PDF.} \texttt{conftest.py} replaces the PDF helper with a stub for
@@ -36,7 +36,7 @@ happen''.
 
 Packet 32b is the clearest example of a fix that outran its diagnosis. One Windows CI run left a
 Test Run stalled for tens of seconds. The packet added the abort-boundary handling, the
-\texttt{describe\_stuck\_runs} report, and the store's write timing, and the tests prove each of
+\texttt{describe\_\allowbreak{}stuck\_\allowbreak{}runs} report, and the store's write timing, and the tests prove each of
 them behaves. The cause --- that the disk was the thing that was slow --- is not established. The
 diagnostic exists so that the next stall can be read: long or in-flight writes point at the disk,
 normal writes with the worker's stack elsewhere point at something nobody has found. A manual that
@@ -76,7 +76,7 @@ left as it is, so that the difference is visible rather than smoothed over:
 Two numbers in this manual are snapshots: the suite's size and the elapsed time. Both were taken on
 one machine on one day, and both move with every packet. The names, the signals, the tables and the
 drivers are not snapshots --- the suite derives them from the code and fails if a manual stops naming
-them. If \texttt{1571} is no longer the number, the tests in \texttt{tests/test\_manuals.py} do not
+them. If \texttt{1571} is no longer the number, the tests in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} do not
 care; if a signal is gone from \texttt{RunEngine} and the manual still lists it, nothing notices, so
 the direction of the risk matters: the checks catch a manual falling behind, not a manual ahead of
 the code.

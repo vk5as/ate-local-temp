@@ -6,15 +6,15 @@ the rest of the application uses. Nothing outside these two files contains a tab
 
 \section{The record, and the version}
 
-The Test Run record is ten tables. \texttt{tests/test_manuals.py} reads them from
+The Test Run record is ten tables. \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} reads them from
 \texttt{schema.metadata.tables}, so this list is the code's list:
 
-\begin{center}
-\small
-\begin{tabular}{p{3.2cm} p{8.4cm}}
+\begingroup\small
+\begin{longtable}{p{3.2cm} p{8.4cm}}
 \toprule
 \textbf{Table} & \textbf{One row is} \\
 \midrule
+\endhead
 \texttt{test\_run} & one Test Run: Operator, Project, UUT, schedule, Media Release, Stop on Fail, start
   and end times, UTC offset, Result, End Reason \\
 \texttt{node} & one step or header in the expanded tree, with its number, enable state, Result and
@@ -30,8 +30,8 @@ The Test Run record is ten tables. \texttt{tests/test_manuals.py} reads them fro
 \texttt{run\_file} & one file the run used, with expected and computed checksums and whether they differed \\
 \texttt{schedule\_instance} & the top-level schedule and every Sub-schedule include, in tree order \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{longtable}
+\endgroup
 
 Types are deliberately portable: UUIDs are 36-character text, times are ISO-8601 UTC text with
 milliseconds (\texttt{\_now\_iso}), booleans are 0/1 (\texttt{\_as\_int}), structured values are JSON
@@ -39,14 +39,14 @@ text. There is no SQLite-only column type anywhere; a Postgres backend is meant 
 change. The version lives in SQLite's \texttt{PRAGMA user\_version}, and \texttt{SCHEMA\_VERSION} is
 currently 5.
 
-At launch, \texttt{check\_database\_at\_launch} inspects the file read-only --- it never creates it ---
+At launch, \texttt{check\_\allowbreak{}database\_\allowbreak{}at\_\allowbreak{}launch} inspects the file read-only --- it never creates it ---
 and compares \texttt{user\_version} with \texttt{SCHEMA\_VERSION}. A missing, empty or older database
 refuses with \texttt{run `ate db migrate` to create or upgrade the database at \dots}; a newer one refuses
 with \texttt{this ATE is too old for the database at \dots; update ATE}. Only an exact match allows
 launch. The application never migrates; \texttt{ate db migrate} does, and the hint carries
 \texttt{--config <path>} when the Station is not reading the platform default (packet 30c).
 
-\texttt{RunStore.\_ensure\_schema} is idempotent: \texttt{metadata.create\_all} reflects each table through
+\texttt{RunStore.\_\allowbreak{}ensure\_\allowbreak{}schema} is idempotent: \texttt{metadata.create\_all} reflects each table through
 the backend's own catalog, so reopening a populated database never fails, and then the two pragmas ---
 WAL and the version --- are set on the store's own stdlib connection. That is the only raw SQL in ATE,
 and it is confined to pragmas.
@@ -59,11 +59,11 @@ reason an abort over 400 unrun steps used to make 404 commits and take longer th
 no stall at all (packet 32b). The answer was batching, not a different transaction model.
 
 SQLite limits the number of variables one statement may carry; the lowest default is 999
-(\texttt{\_SQL\_MAX\_VARIABLES}, the pre-3.32 default, so the code stays safe on old builds too).
-\texttt{\_rows\_per\_statement(table)} computes the batch size from the table's column count ---
-\texttt{999 // len(table.columns)} --- rather than a hard-coded 80 chosen for \texttt{node}'s twelve
+(\texttt{\_\allowbreak{}SQL\_\allowbreak{}MAX\_\allowbreak{}VARIABLES}, the pre-3.32 default, so the code stays safe on old builds too).
+\texttt{\_\allowbreak{}rows\_\allowbreak{}per\_\allowbreak{}statement(table)} computes the batch size from the table's column count ---
+\texttt{999 /\allowbreak/\allowbreak len(table.columns)} --- rather than a hard-coded 80 chosen for \texttt{node}'s twelve
 columns. A batch sized for one table breaks the day another table gains a column, which
-\texttt{test\_a\_row\_batch\_is\_sized\_to\_the\_table\_it\_writes} is there to prevent.
+\texttt{test\_\allowbreak{}a\_\allowbreak{}row\_\allowbreak{}batch\_\allowbreak{}is\_\allowbreak{}sized\_\allowbreak{}to\_\allowbreak{}the\_\allowbreak{}table\_\allowbreak{}it\_\allowbreak{}writes} is there to prevent.
 \texttt{\_row\_chunks} then yields the rows in pieces that fit.
 
 There is a trap here that a new writer will hit. Each chunk is its own commit, so the run's counters must
@@ -71,7 +71,7 @@ advance \emph{inside} the loop, only for chunks that landed. \texttt{insert\_log
 that: before packet 32b a half-written batch left \texttt{\_log\_seq} behind the rows already in the
 table, and the next write failed with \texttt{UNIQUE constraint failed: log\_line.run\_uuid,
 log\_line.seq}. The test is
-\texttt{test\_a\_log\_batch\_failing\_part\_way\_through\_keeps\_the\_log\_counter\_true}.
+\texttt{test\_\allowbreak{}a\_\allowbreak{}log\_\allowbreak{}batch\_\allowbreak{}failing\_\allowbreak{}part\_\allowbreak{}way\_\allowbreak{}through\_\allowbreak{}keeps\_\allowbreak{}the\_\allowbreak{}log\_\allowbreak{}counter\_\allowbreak{}true}.
 
 \section{\texttt{\_log\_seq}: one counter per run, four tables}
 
@@ -85,7 +85,7 @@ Attempt.
 Rules for a new row type that shares this key:
 
 \begin{itemize}
-  \item take \texttt{next\_seq = self.\_log\_seq.get(run\_uuid, 0)} and advance it by the number of rows
+  \item take \texttt{next\_\allowbreak{}seq = self.\_\allowbreak{}log\_\allowbreak{}seq.get(run\_\allowbreak{}uuid, 0)} and advance it by the number of rows
     that actually landed;
   \item never assume a batch is one commit;
   \item stamp ownership (\texttt{action\_seq}, or \texttt{node\_seq} plus \texttt{attempt\_no}) the way the

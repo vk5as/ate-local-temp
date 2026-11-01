@@ -7,7 +7,7 @@ actually runs.
 
 \section{The contract}
 
-\texttt{ate/devices/registry.py} defines \texttt{Driver}, an abstract base class with three class
+\texttt{ate/\allowbreak{}devices/\allowbreak{}registry.py} defines \texttt{Driver}, an abstract base class with three class
 attributes and two methods:
 
 \begin{lstlisting}[language=ATEPython]
@@ -33,7 +33,7 @@ closed and warned about (packet 16a).
 
 The four drivers that ship, and the Device Types they serve, are \texttt{TcpDriver} (TCP),
 \texttt{SerialDriver} (SERIAL), \texttt{UdpDriver} (UDP) and \texttt{VisaDriver} (VISA).
-\texttt{tests/test_manuals.py} derives that list by importing every module in \texttt{ate.devices} and
+\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} derives that list by importing every module in \texttt{ate.devices} and
 collecting the classes that subclass \texttt{Driver}, so a driver added to the code and not named in the
 manual fails the suite.
 
@@ -41,7 +41,7 @@ TCP, SERIAL and UDP share \texttt{devices/stream.py}: a background reader thread
 capped by \texttt{devices.receiveBufferBytes} (default 16777216 bytes), an overflow that drops the oldest
 bytes and reports \texttt{overflow = true} with one WARNING on the next read
 (\texttt{receive buffer overflow - dropped 4096 oldest byte(s)}), and the failure and warning logic. VISA
-has no background reader, so \texttt{accepts\_receive\_buffer\_bytes} is \texttt{False} for it: there is no
+has no background reader, so \texttt{accepts\_\allowbreak{}receive\_\allowbreak{}buffer\_\allowbreak{}bytes} is \texttt{False} for it: there is no
 buffer to cap.
 
 \section{Tracing}
@@ -50,7 +50,7 @@ When \texttt{deviceTrace.enabled} is on, the registry wraps every handle it open
 \texttt{TracedDevice} and logs each open, read, write and close as one \texttt{DEBUG} line with source
 \texttt{device}, through the host's log sink --- so a trace line is owned by the step or Action that made
 the call, exactly like a schedule log line. Payloads are escaped and truncated at
-\texttt{deviceTrace.maxBytes}, default \texttt{DEFAULT\_TRACE\_MAX\_BYTES = 256}. A call the abort left
+\texttt{deviceTrace.maxBytes}, default \texttt{DEFAULT\_\allowbreak{}TRACE\_\allowbreak{}MAX\_\allowbreak{}BYTES = 256}. A call the abort left
 behind gets its own line, \texttt{open <device> aborted (ms)} or \texttt{close <device> aborted (ms)}
 (packet 32b review round: before the fix the trace list was empty).
 
@@ -74,9 +74,9 @@ There are two kinds of Device wait:
 Two details that were found by test and are easy to break again. \texttt{\_Call.\_run} catches
 \texttt{BaseException}, not \texttt{Exception}, because a helper thread killed by \texttt{KeyboardInterrupt}
 or \texttt{SystemExit} would otherwise leave no outcome and the worker would wait forever
-(\texttt{test\_a\_helper\_thread\_dying\_on\_a\_base\_exception\_reaches\_the\_worker}). And a helper thread
+(\texttt{test\_\allowbreak{}a\_\allowbreak{}helper\_\allowbreak{}thread\_\allowbreak{}dying\_\allowbreak{}on\_\allowbreak{}a\_\allowbreak{}base\_\allowbreak{}exception\_\allowbreak{}reaches\_\allowbreak{}the\_\allowbreak{}worker}). And a helper thread
 left behind is joined in slices, so an aborted run's leftover closes are bounded:
-\texttt{\_ABORT\_CLOSE\_SECONDS = 3.0} in \texttt{run\_engine.py} is the total for all closes at the end of
+\texttt{\_\allowbreak{}ABORT\_\allowbreak{}CLOSE\_\allowbreak{}SECONDS = 3.0} in \texttt{run\_engine.py} is the total for all closes at the end of
 an aborted run, each with a WARNING naming the Device.
 
 The consequence for a Station, stated in the admin manual as well: an aborted run can leave a Device

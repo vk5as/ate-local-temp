@@ -1,6 +1,6 @@
 \chapter{The Lua host and the sandbox}\label{ch:lua}
 
-\texttt{src/ate/engine/lua\_host.py} is 1798 lines, and most of them are about one thing: a Test
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py} is 1798 lines, and most of them are about one thing: a Test
 Schedule is untrusted input, and the host has to run it without letting it reach the machine. Read it as
 three parts: the runtime and its lockdown, the \texttt{ATE} table, and the schedule builders that turn a
 Lua file into the tree the engine walks.
@@ -9,7 +9,7 @@ Lua file into the tree the engine walks.
 
 Each load makes a fresh \texttt{lupa} runtime. Nothing is shared between schedules in a run, so a
 schedule cannot read another schedule's globals, and a Test Run's state does not leak from one step to
-another through the interpreter. The runtime is created with \texttt{register\_builtins=False}, so
+another through the interpreter. The runtime is created with \texttt{register\_\allowbreak{}builtins=False}, so
 Python's builtins are not present at all, and then \texttt{\_lockdown} shadows the file-loading entry
 points:
 
@@ -31,12 +31,12 @@ points:
 \end{itemize}
 
 The lockdown runs \emph{before} anything else is registered, so a schedule cannot escape at load time
-either. \texttt{tests/test\_lua\_isolation.py} and \texttt{test\_lua\_lockdown\_calls.py} are the tests
+either. \texttt{tests/\allowbreak{}test\_\allowbreak{}lua\_\allowbreak{}isolation.py} and \texttt{test\_\allowbreak{}lua\_\allowbreak{}lockdown\_\allowbreak{}calls.py} are the tests
 that prove this, and the example \texttt{forbidden.tslua} in
-\texttt{docs/manuals/examples/test-writer/} is a schedule that opens a Device while the file is loading,
+\texttt{docs/\allowbreak{}manuals/\allowbreak{}examples/\allowbreak{}test-writer/\allowbreak} is a schedule that opens a Device while the file is loading,
 which the host refuses.
 
-The abort hook is installed before the schedule runs: \texttt{debug.sethook(check\_abort, "", 1000)}, and
+The abort hook is installed before the schedule runs: \texttt{debug.sethook(check\_\allowbreak{}abort, "", 1000)}, and
 \texttt{pcall}/\texttt{xpcall} are wrapped to re-raise \texttt{aborted} so a schedule's own error handling
 cannot swallow an abort (packet 13c). \texttt{print} is redirected to \texttt{ATE.log(INFO, \dots)}, so
 schedule output is always logged.
@@ -51,14 +51,14 @@ schedule output is always logged.
     in the message;
   \item \texttt{ATE.run} is a read-only Lua table built from \texttt{\_RUN\_FIELDS}:
     \texttt{UUT\_serial}, \texttt{Operator}, \texttt{Station}, \texttt{Project},
-    \texttt{Test\_Schedule\_Name}, \texttt{Media\_Release\_Media\_Number}, \texttt{name}, \texttt{version}.
+    \texttt{Test\_Schedule\_Name}, \texttt{Media\_\allowbreak{}Release\_\allowbreak{}Media\_\allowbreak{}Number}, \texttt{name}, \texttt{version}.
     Writing to it raises \texttt{ATE.run: read-only}. It is rebuilt by \texttt{publish\_run} through
     \texttt{rawset}, which is how the engine fills it without tripping the guard.
 \end{itemize}
 
 The enums a schedule can use are \texttt{Result}, \texttt{Log}, \texttt{DeviceType}, \texttt{Parity} and
 \texttt{FlowControl}, declared by \texttt{\_declare\_enums} as read-only tables, and
-\texttt{tests/test_manuals.py} derives them from \texttt{\_ENUMS} so a manual cannot list fewer than the
+\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} derives them from \texttt{\_ENUMS} so a manual cannot list fewer than the
 code has.
 
 Context matters: \texttt{\_context} is one of \texttt{"load"}, \texttt{"pretest"}, \texttt{"posttest"} or
@@ -75,8 +75,8 @@ A new function has to do four things or it is not really available:
     \texttt{equipment} lists) rather than writing to the store directly --- the engine owns the rows and
     attributes them to the step or Action running;
   \item check the context if it is only legal in one phase;
-  \item add it to both manuals. \texttt{ate\_table\_functions()} in
-    \texttt{tests/test\_manuals.py} reads the table off the object, so a function the code has and the
+  \item add it to both manuals. \texttt{ate\_\allowbreak{}table\_\allowbreak{}functions()} in
+    \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} reads the table off the object, so a function the code has and the
     manual does not name fails the suite.
 \end{enumerate}
 
