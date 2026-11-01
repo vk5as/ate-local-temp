@@ -16,7 +16,7 @@ import pytest
 from ate.engine.run_engine import RunEngine, RunStatus, _live_engines
 from ate.report.html import render_report
 from ate.run_session.headless import HeadlessRunSession
-from ate.storage import store as store_module
+from ate.storage import schema, store as store_module
 from ate.storage.store import RunStore
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
@@ -238,7 +238,27 @@ def test_a_big_batch_of_log_lines_is_one_commit_a_batch_and_keeps_its_order():
         recorded = store.log_lines(run_uuid)
         assert [line["text"] for line in recorded] == [f"line {i}" for i in range(400)] + ["after"]
         assert [line["seq"] for line in recorded] == list(range(401))
-        assert len(writes) == 400 // store_module._ROWS_PER_STATEMENT + 1
+        per = store_module._rows_per_statement(store_module.log_line)
+        assert len(writes) == (400 + per - 1) // per + 1  # one per chunk of the batch, one for the last line
+        assert max(len(stmt.compile().params) for stmt in writes) <= _SQLITE_MINIMUM_VARIABLE_LIMIT
+
+
+def test_a_row_batch_is_sized_to_the_table_it_writes():
+    """The chunk size comes from the column count, not from a number tuned to `node`'s twelve columns.
+
+    80 rows of 13 columns are 1040 variables: past SQLite's lowest limit of 999. A table that gains a
+    column would have been written in statements SQLite refuses."""
+    wide = schema.Table(
+        "wide", schema.metadata, *[schema.Column(f"c{i}", schema.Integer) for i in range(13)]
+    )
+    assert store_module._rows_per_statement(wide) == _SQLITE_MINIMUM_VARIABLE_LIMIT // 13, "the bound is per column, not fixed"
+    with scratch_directory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        run_uuid = store.insert_test_run({"operator": "o", "project": "p"})["run_uuid"]
+        writes = _dml_statements(store)
+        store.insert_nodes(run_uuid, [{"node_seq": i, "kind": "step", "result": "NOTRUN"} for i in range(400)])
+        per = store_module._rows_per_statement(store_module.node)
+        assert len(writes) == (400 + per - 1) // per, f"{len(writes)} statements for 400 rows at {per} a statement"
         assert max(len(stmt.compile().params) for stmt in writes) <= _SQLITE_MINIMUM_VARIABLE_LIMIT
 
 
@@ -250,7 +270,7 @@ def test_a_log_batch_failing_part_way_through_keeps_the_log_counter_true(monkeyp
     with scratch_directory() as td:
         store = RunStore(Path(td) / "ate.db")
         run_uuid = store.insert_test_run({"operator": "o", "project": "p"})["run_uuid"]
-        chunk = store_module._ROWS_PER_STATEMENT
+        chunk = store_module._rows_per_statement(store_module.log_line)
         lines = [{"level": "INFO", "source": "ate", "text": f"line {i}"} for i in range(chunk * 3)]
         real_run, chunks = store._run, 0
 

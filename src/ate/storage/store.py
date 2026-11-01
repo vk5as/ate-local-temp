@@ -182,15 +182,24 @@ def _norm_date(value) -> str:
     return str(value)
 
 
-#: Rows one multi-row INSERT carries. At twelve columns or fewer a row, that stays under the 999
-#: variables a statement that is SQLite's lowest default limit.
-_ROWS_PER_STATEMENT = 80
+#: SQLite's lowest default for the variables one statement may carry (before 3.32); newer builds
+#: accept far more, so the batch is sized against this and stays safe on both.
+_SQL_MAX_VARIABLES = 999
 
 
-def _row_chunks(rows: list[Any]):
-    """``rows`` in pieces of at most :data:`_ROWS_PER_STATEMENT`, so each is one statement."""
-    for start in range(0, len(rows), _ROWS_PER_STATEMENT):
-        yield rows[start : start + _ROWS_PER_STATEMENT]
+def _rows_per_statement(table: Any) -> int:
+    """How many rows one multi-row INSERT of ``table`` may carry.
+
+    The limit is on variables, not rows, so it depends on how many columns the table has: a batch
+    sized for `node`'s twelve (80) would break the day a table gained a thirteenth column (packet 32b)."""
+    return max(1, _SQL_MAX_VARIABLES // len(table.columns))
+
+
+def _row_chunks(table: Any, rows: list[Any]):
+    """``rows`` in pieces small enough for one statement each, per :func:`_rows_per_statement`."""
+    per = _rows_per_statement(table)
+    for start in range(0, len(rows), per):
+        yield rows[start : start + per]
 
 
 class RunStore:
@@ -364,8 +373,8 @@ class RunStore:
         self._insert_rows(node, [self._node_values(run_uuid, row["node_seq"], row) for row in rows])
 
     def _insert_rows(self, table: Any, rows: list[dict[str, Any]]) -> None:
-        """Insert ``rows`` in as few commits as SQLite allows, at most :data:`_ROWS_PER_STATEMENT` each."""
-        for chunk in _row_chunks(rows):
+        """Insert ``rows`` in as few commits as SQLite allows, each statement inside its variable limit."""
+        for chunk in _row_chunks(table, rows):
             self._run(table.insert().values(chunk))
 
     @staticmethod
@@ -725,7 +734,7 @@ class RunStore:
         # actually landed, inside the loop: a later chunk that fails would otherwise leave the
         # counter behind rows already in the table, and the next batch would collide on (run_uuid, seq).
         landed = next_seq
-        for chunk in _row_chunks(rows):
+        for chunk in _row_chunks(log_line, rows):
             self._run(log_line.insert().values(chunk))
             landed += len(chunk)
             self._log_seq[run_uuid] = landed

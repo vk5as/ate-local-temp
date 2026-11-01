@@ -829,17 +829,20 @@ class StagedRunScreen(RunScreenMixin, QWidget):
     def _request_abort(self) -> None:
         """The Abort button ends the current run — answering a pending prompt or stopping between steps.
 
-        With a Stop-on-Fail prompt up the worker is blocked waiting for a choice, so the
-        step-boundary flag ``request_abort`` would set is never observed and the run hangs: answer
-        the pending prompt with ABORT instead (the bar's own Abort path). Otherwise the worker is
-        free to stop at its next step boundary (records ERROR / NOTRUN / ABORTED); ``request_abort``
-        raises if there is no run in progress (the button is disabled whenever one is not)."""
+        With a Stop-on-Fail prompt up the button answers it instead of setting the step-boundary flag.
+        It is not preventing a hang: since packet 32b the worker gives way at the pause on that flag
+        too, and that run ends ABORTED with no choice recorded. Answering is what the Operator means
+        when Abort is clicked while the prompt is up, so the choice is kept and the run ends
+        STOPPED_ON_FAIL (packet 12b). Otherwise the worker is free to stop at its next step boundary
+        (records ERROR / NOTRUN / ABORTED); ``request_abort`` raises if there is no run in progress
+        (the button is disabled whenever one is not)."""
         if not self.is_active():
             return  # the layout that is not showing cannot abort the run (packet 25b)
         if self.session.pause_pending():
-            # The worker is blocked on a prompt: answer it with ABORT (packet 25b). The decision comes
-            # from the session, not from this layout's bar — the pause may have been answered in the
-            # other layout, and then this bar would be stale.
+            # A prompt is up: answer it with ABORT (packet 25b), which is the Operator's choice rather
+            # than a flag the worker would find at its next boundary. The decision comes from the
+            # session, not from this layout's bar — the pause may have been answered in the other
+            # layout, and then this bar would be stale.
             self._on_prompt_choice("ABORT")
             return
         self.session.request_abort()

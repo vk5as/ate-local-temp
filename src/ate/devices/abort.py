@@ -141,6 +141,10 @@ class AbortableCalls:
             return False
 
         def close_when_free() -> None:
+            # Deliberately unbounded: the call this waits for ends on its own timeout (see the packet's
+            # table of what an abort cannot interrupt), and joining a bounded slice would mean either
+            # waiting again or closing across a call still using the transport. The thread is a daemon,
+            # so it cannot keep the process alive: the close is late, never lost, never wrong.
             thread.join()
             try:
                 close()
