@@ -131,6 +131,11 @@ class DeviceTracer:
         detail = "" if err is None else f" failed: {err}"
         self._line(f"close {label}{detail} ({elapsed:.1f} ms)")
 
+    def aborted(self, operation: str, label: str, elapsed: float) -> None:
+        """`open <device> aborted (50.1 ms)` — the worker gave up on the call (packet 32b), which is
+        still running: not a failure of the Device, so it is not called one."""
+        self._line(f"{operation} {label} aborted ({elapsed:.1f} ms)")
+
 
 def _write_payload(params: Mapping[str, Any], device: Any) -> bytes:
     """The exact bytes a write sends: the data plus the terminator the driver appends.

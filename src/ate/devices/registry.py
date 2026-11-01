@@ -140,7 +140,8 @@ class DeviceRegistry:
         Packet 17c: with tracing on the open is timed and logged at DEBUG — a refused connect too,
         before the OSError goes on to the caller's ``onError`` — and the handle comes back wrapped in
         a :class:`TracedDevice` so its reads and writes are traced too. Off, this is the plain open:
-        one `if` and no wrapper."""
+        one `if` and no wrapper. Packet 32b: an open the abort left behind is traced as `aborted`
+        before :class:`DeviceAborted` carries on."""
         if name not in self._drivers:
             raise ValueError(f"unknown DeviceType '{name}'")
         driver_cls = self._drivers[name]
@@ -169,6 +170,9 @@ class DeviceRegistry:
         started = time.perf_counter()
         try:
             handle = connect()
+        except DeviceAborted:  # 32b: an open the abort left behind is traced, though it is still running
+            tracer.aborted("open", label, elapsed_ms(started))
+            raise
         except OSError as exc:
             tracer.open(label, False, str(exc), elapsed_ms(started))
             raise
@@ -199,6 +203,8 @@ class DeviceRegistry:
             # close while output drains, and an abort does not wait for that (packet 32b).
             run_abortable(device.close, self._abort_flag if abortable else None)
         except DeviceAborted:
+            if self._tracer is not None:  # 32b: a close the abort left behind is traced like any other
+                self._tracer.aborted("close", label, elapsed_ms(started))
             self._closed[key] = device
             raise
         except OSError as exc:  # 17c: a close that failed is still traced, then the error carries on

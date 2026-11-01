@@ -16,7 +16,8 @@ import pytest
 from pyvisa import constants
 
 from ate.devices import visa
-from ate.devices.abort import _Call, run_abortable
+from ate.devices.abort import DeviceAborted, _Call, run_abortable
+from ate.devices.registry import DeviceRegistry
 from ate.devices.tcp import TcpDriver, _TcpDevice
 from ate.devices.visa import VisaDriver
 from ate.engine.run_engine import RunEngine, RunStatus
@@ -406,6 +407,13 @@ class _NeverAborts:
     aborted = False
 
 
+class _Flag:
+    """A switchable stand-in for the run's abort flag."""
+
+    def __init__(self) -> None:
+        self.aborted = False
+
+
 class _NotAnException(BaseException):
     """What a helper thread can die on that `except Exception` misses."""
 
@@ -448,3 +456,43 @@ def test_a_helper_thread_that_records_no_outcome_is_not_waited_on(monkeypatch):
     returned, caught = _run_off_thread(lambda: run_abortable(lambda: 1, _NeverAborts()))
     assert returned, "run_abortable kept joining a thread that had already ended"
     assert len(caught) == 1 and "without an outcome" in str(caught[0]), caught
+
+
+def test_an_open_or_close_left_behind_by_an_abort_leaves_a_trace_line(monkeypatch):
+    """17c traces a Device operation that failed, and `except OSError` misses DeviceAborted.
+
+    A call the worker gave up on is still running, so the trace says `aborted` rather than calling it
+    a failure: without it the debug window has no line at all for an open or close the abort left behind."""
+    lines: list[str] = []
+    flag = _Flag()
+    registry = DeviceRegistry(
+        trace_enabled=True,
+        emit=lambda _level, text, source="device": lines.append(text),
+        abort_flag=flag,
+    )
+    registry.register("TCP", TcpDriver)
+
+    class _SlowHandle:
+        def close(self) -> None:
+            time.sleep(1.0)
+
+    def open_that_stalls_when_aborted(_driver, _params, _limit=None):
+        if flag.aborted:
+            time.sleep(1.0)  # only the OS or its own timeout can end this, as a connect would
+        return _SlowHandle()
+
+    monkeypatch.setattr(TcpDriver, "open", open_that_stalls_when_aborted)
+
+    flag.aborted = True
+    with pytest.raises(DeviceAborted):
+        registry.open_device("TCP", {"host": "127.0.0.1", "port": 1})
+    opens = [text for text in lines if text.startswith("open TCP 127.0.0.1:1")]
+    assert len(opens) == 1 and "aborted" in opens[0], lines
+
+    flag.aborted = False
+    handle = registry.open_device("TCP", {"host": "127.0.0.1", "port": 1})
+    flag.aborted = True
+    with pytest.raises(DeviceAborted):
+        registry.close_device(handle)
+    closes = [text for text in lines if text.startswith("close ")]
+    assert len(closes) == 1 and "aborted" in closes[0], lines
