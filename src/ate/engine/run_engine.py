@@ -796,7 +796,12 @@ class RunEngine(QThread):
 
         ``bounded`` is an aborted run's end: the flag is clear by now, and a close the OS holds (a
         serial port draining its output, say) must not hold the worker past story 83's limit, so all
-        the closes together get :data:`_ABORT_CLOSE_SECONDS` and any still going are left to finish."""
+        the closes together get :data:`_ABORT_CLOSE_SECONDS`.
+
+        Which means the promise "every Device is closed before FINISHED" holds only for an
+        unexpected end, where this runs unbounded. For an aborted run a close that outlives
+        :data:`_ABORT_CLOSE_SECONDS` is left on its daemon thread and finishes after FINISHED; that
+        Device is named by its one WARNING, and it does close."""
         registry = getattr(host, "_devices", None)
         if registry is None:
             return
@@ -815,8 +820,11 @@ class RunEngine(QThread):
                 closer = threading.Thread(target=close, args=(device,), daemon=True, name="ate-device-close")
                 closer.start()
                 closer.join(max(0.0, deadline - time.monotonic()))
-                if closer.is_alive() and hasattr(device, "describe"):
-                    warnings.append(f"device {device.describe()} was still closing when the aborted run ended")
+                if closer.is_alive():
+                    if hasattr(device, "describe"):
+                        # One line for this Device: it is closing, not simply left open.
+                        warnings.append(f"device {device.describe()} was still closing when the aborted run ended")
+                    continue
             else:
                 close(device)
             if hasattr(device, "describe"):
@@ -844,7 +852,9 @@ class RunEngine(QThread):
         ATE stopped before the run could end, which is what INTERRUPTED records; the Post-test
         Actions do not run, as they would not after a crash. The exception may have come from the
         store itself, so each step is attempted on its own, and FINISHED is always announced: the
-        screen must not wait on a worker that has gone."""
+        screen must not wait on a worker that has gone. Every Device the run left open is closed
+        before that announcement, since this end is not bounded (packet 31c); an aborted run bounds
+        its closes instead, so there one can still be closing after FINISHED."""
         def attempt(step: Callable[[], Any]) -> None:
             try:
                 step()

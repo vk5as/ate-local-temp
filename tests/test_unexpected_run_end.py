@@ -5,17 +5,20 @@ next launch's recovery closed it.
 
 Packet 31c adds the other half of that bargain: the run may end with its Post-test Actions skipped,
 but every Device the run left open is closed before FINISHED is announced, and the next run starts
-with a clean Lua environment.
+with a clean Lua environment. An aborted run is the exception: its closes are bounded (packet 32b),
+so one the OS holds is still running when FINISHED is announced, named by a WARNING, and finishes
+afterwards.
 """
 
 import sys
+import threading
 import time
 
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from ate.devices.serial import SerialDriver
-from ate.engine.run_engine import RunEngine
+from ate.devices.serial import SerialDriver, _SerialDevice
+from ate.engine.run_engine import _ABORT_CLOSE_SECONDS, RunEngine
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 
@@ -124,7 +127,9 @@ def test_a_run_failing_before_it_announces_its_key_still_gets_its_report(tmp_pat
 # A run that dies on a worker exception skips its Post-test Actions. That is accepted, provided
 # the teardown in :meth:`RunEngine._end_unexpectedly` closes every Device the run left open before
 # FINISHED is emitted, and the next run gets a fresh Lua runtime: a leaked socket or a leaked
-# global is a leak the following run inherits.
+# global is a leak the following run inherits. Nothing in this section is bounded, so nothing is
+# still closing at FINISHED; an aborted run bounds the same teardown (packet 32b) and can leave a
+# close running, which it names with a WARNING.
 
 
 def _always_raises(what: str):
@@ -184,6 +189,23 @@ def _device_from_the_pretest(port: str) -> str:
     StepParams("the later step"):setStepNo("1.")
       :setAction(function() ATE.report(Result.PASS, "the step after the Pre-test Action") end),
   }})"""
+
+
+def _device_left_open_under_abort(port: str) -> str:
+    """A step that opens one Device and reads it long enough for an abort to land mid-run.
+
+    The peer sends nothing, so the read runs to its 5 s timeout unless the abort ends it first."""
+    params = (
+        f'{{port="{port}", baud=9600, dataBits=8, stopBits=1, parity=Parity.NONE, '
+        'flowControl=FlowControl.NONE, timeout=5, readTerm="", writeTerm=""}'
+    )
+    return f"""return ScheduleParams("One open Device aborted"):setSchedule({{
+  StepParams("open and read"):setStepNo("1."):setAction(function()
+    _G.device_one = ATE.open(DeviceType.SERIAL, {params})
+    ATE.read(_G.device_one)
+    ATE.report(Result.PASS, "read")
+  end),
+}})"""
 
 
 def _session_on(tmp_path, schedule_name: str, source: str, extra: dict[str, str] | None = None) -> HeadlessRunSession:
@@ -350,6 +372,45 @@ def test_one_device_whose_close_raises_does_not_stop_the_next_device_closing(tmp
         finally:
             stubborn.stop()
             following.stop()
+
+
+def test_an_aborted_run_names_a_device_still_closing_once_and_closes_it_afterwards(tmp_path, monkeypatch):
+    """An aborted run bounds its closes, so one can outlive FINISHED — and still happen.
+
+    A close the OS holds is left on its daemon thread when :data:`_ABORT_CLOSE_SECONDS` runs out: the
+    run ends without waiting for it, names it in one WARNING, and the transport closes when the hold
+    ends. An unexpected end, unbounded, never leaves a Device closing at FINISHED (packet 31c)."""
+    peer = LoopbackPeer()
+    peer.start()
+    release = threading.Event()
+    real_close = _SerialDevice._close_transport
+
+    def held_close(device) -> None:
+        release.wait(_ABORT_CLOSE_SECONDS + 2.0)
+        real_close(device)
+
+    monkeypatch.setattr(_SerialDevice, "_close_transport", held_close)
+    try:
+        session = _session_on(tmp_path, "One open Device aborted", _device_left_open_under_abort(
+            f"socket://127.0.0.1:{peer.port}"))
+        session.start()
+        _pump(lambda: session.state == SessionState.STARTED, "the run never started")
+        time.sleep(0.3)  # inside the step's read
+        session.request_abort()
+        _finished(session)
+
+        lines = [line["text"] for line in session.store.log_lines(session.run_uuid) if line["level"] == "WARNING"]
+        closing = [text for text in lines if "still closing" in text]
+        assert len(closing) == 1, f"a Device left closing logged more than one WARNING: {lines}"
+        assert f"SERIAL socket://127.0.0.1:{peer.port}" in closing[0], closing[0]
+        assert not [text for text in lines if "left open" in text], f"the still-closing Device was also called left open: {lines}"
+        assert session.store.get_test_run(session.run_uuid)["end_reason"] == "ABORTED"
+
+        release.set()
+        assert wait_for_disconnect(peer, 5.0, 1), "the close an aborted run left behind never happened"
+    finally:
+        release.set()
+        peer.stop()
 
 
 def test_the_next_run_on_the_same_session_reopens_the_port_with_clean_lua_state(tmp_path, monkeypatch):
