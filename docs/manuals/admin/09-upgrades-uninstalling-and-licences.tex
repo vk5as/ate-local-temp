@@ -10,12 +10,17 @@ is:
     touches them, but a migration that turns out to be the wrong one has no built-in undo.
   \item \textbf{Install the new artifact over the old one.} The Windows installer, \texttt{install.sh}
     and the \texttt{.deb} postinst each run \texttt{ate setup} as their last step, and that runs the
-    migration, so an install through those three leaves the database current. A wheel installed with
-    \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema until you
-    migrate it, and ATE refuses to start against a database older than itself.
-  \item \textbf{Migrate, when the artifact did not.} \texttt{ate db migrate} is idempotent: run it on
-    an already-current database and it succeeds, prints the version, and changes nothing.
-  \item \textbf{Check with \texttt{ate db status}.} On this build it prints \texttt{5} and exits 0 ---
+    migration, so an install through those three leaves the database current. The database it
+    migrates is \texttt{\textless data\textgreater/ate.db}, which is what the default config points
+    at; a config with a custom \texttt{database.path} is not migrated, so a custom database still
+    needs \texttt{ate db migrate} after the install. Step 4 below is what catches it. A wheel
+    installed with \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema
+    until you migrate it, and ATE refuses to start against a database older than itself.
+  \item \textbf{Migrate, when the artifact did not, or when \texttt{database.path} points elsewhere.}
+    \texttt{ate db migrate} is idempotent: run it on an already-current database and it succeeds,
+    prints the version, and changes nothing.
+  \item \textbf{Check with \texttt{ate db status}.} It reads the configured path, so it also catches a
+    custom database the installer never touched. On this build it prints \texttt{5} and exits 0 ---
     \texttt{5} is the schema version, not the ATE version, so do not compare the two. A missing or
     older database exits 1 with the refusal to run, which is the migration not having happened.
   \item \textbf{Check the Media Releases.} A Media Release whose files no longer match its recorded

@@ -284,7 +284,10 @@ call is still running finds it busy. This is the boundary of an abort, not a fau
 Order: back up the database and the config; install the new artifact over the old; migrate if the
 artifact did not; check; then `ate definition update` on any Media Release whose files changed. The
 Windows installer, `install.sh` and the `.deb` postinst run `ate setup` at the end, and that runs the
-migration, so those three leave the database current. A `pip`/`pipx` wheel install runs nothing, so
+migration, so those three leave the database current — the one at `<data>/ate.db`, which is what the
+default config uses. A config with a custom `database.path` is not migrated by `ate setup`, so that
+database still needs `ate db migrate` after an install; `ate db status` reads the configured path and
+catches it. A `pip`/`pipx` wheel install runs nothing, so
 its database stays at the old schema and ATE refuses to start against it until you migrate.
 
 `ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
