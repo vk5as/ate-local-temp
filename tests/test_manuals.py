@@ -85,14 +85,16 @@ MANUAL_EXAMPLES: dict[str, Path] = {"test-writer": EXAMPLES_DIR}
 def ate_table_functions() -> set[str]:
     """Every function the ``ATE`` table exposes to a Test Schedule.
 
-    ``register`` is the engine's seam for adding a function, not something a schedule calls,
-    so it is excluded. ``run`` is a table rather than a function and is named explicitly,
-    because it is reached through ``__getattr__`` and not the registry.
+    ``register`` and ``publish_run`` are the engine's own seams - they build the table rather
+    than being calls a schedule makes - so they are excluded. ``run`` is a table rather than a
+    function and is named explicitly, because it is reached through ``__getattr__`` and not the
+    registry.
     """
+    seams = {"register", "publish_run"}
     table = _AteTable()
     names = {name for name in table._extra}
     for name, member in inspect.getmembers(table, callable):
-        if not name.startswith("_") and name != "register":
+        if not name.startswith("_") and name not in seams:
             names.add(name)
     names.add("run")
     return names
