@@ -1,0 +1,88 @@
+\chapter{Reference}\label{ch:reference}
+
+\section{The \texttt{ATE} table}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.6cm}>{\raggedright\arraybackslash}p{9.4cm}@{}}
+\toprule
+Call & Returns / does \\
+\midrule
+\texttt{ATE.open(deviceType, params [, onError])} & opens a Device, returns an opaque handle \\
+\texttt{ATE.read(dev [, params] [, onError])} & \texttt{\{data, count, partial\}}, or
+  \texttt{err} on failure \\
+\texttt{ATE.write(dev, params [, onError])} & \texttt{\{ok, count\}}; \texttt{count} includes
+  the terminator \\
+\texttt{ATE.close(dev [, params] [, onError])} & \texttt{\{ok = true\}} \\
+\texttt{ATE.flush(dev)} & \texttt{\{ok = true, count = n\}} bytes discarded \\
+\texttt{ATE.sleep(seconds)} & pauses the step; an abort wakes it at once \\
+\texttt{ATE.input(n)} & the current step's $n$-th Step Input \\
+\texttt{ATE.report(passFail, msg, actual, expected)} & records the step's result; returns
+  \texttt{true} \\
+\texttt{ATE.log(level, \dots)} & writes a line to the Test Run's log \\
+\texttt{ATE.addEquipment(name, serial, connection, calDue, notes)} & declares Equipment for the
+  Test Report \\
+\texttt{ATE.run} & read-only table describing the current Test Run \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The enums}
+
+The enum tables are globals, so a schedule reads them directly:
+
+\begingroup\footnotesize
+\begin{verbatim}
+Result:      PASS, FAIL, ERROR, SKIPPED, NOTRUN, FORCED_NOTRUN, NOREPORT
+Log:         DEBUG, INFO, WARNING, ERROR
+DeviceType:  TCP, SERIAL, UDP, VISA
+Parity:      NONE, EVEN, ODD, MARK, SPACE
+FlowControl: NONE, RTSCTS, XONXOFF, DSRDTR
+\end{verbatim}
+\endgroup
+
+\section{\texttt{ScheduleParams} and \texttt{StepParams}}
+
+The setters are what a schedule calls; each one returns the object, so they chain:
+
+\begingroup\footnotesize
+\begin{verbatim}
+ScheduleParams(name, description): setDocTitle, setDocId, setDocRev, setPreTestAction,
+  setPostTestAction, setStopOnFail, setSchedule
+StepParams(name): setStepNo, setEnable, setInputs, setAction, setInclude, setPrefix
+\end{verbatim}
+\endgroup
+
+The builders in \texttt{ate.devices} have their own setters: \texttt{setHost},
+\texttt{setPort}, \texttt{setLocalPort}, \texttt{setResource}, \texttt{setBaud},
+\texttt{setDataBits}, \texttt{setStopBits}, \texttt{setParity}, \texttt{setFlowControl},
+\texttt{setTimeout}, \texttt{setReadTerm}, \texttt{setWriteTerm}, \texttt{setSize} and
+\texttt{Write(data)}.
+
+\section{What the Test Report shows, and where it goes}
+
+ATE writes the report when the run ends, without asking:
+
+\begingroup\footnotesize
+\begin{verbatim}
+<UUT Type>/<UUT Type>_<serial>_<yyyymmdd-HHMMSS>_<PASS|FAIL>.html
+\end{verbatim}
+\endgroup
+
+under \texttt{reports.directory}, and the same name with \texttt{.pdf} when the PDF is
+rendered: an elevated Station is asked before it writes one, and the answer defaults to Skip.
+The sections are Cover,
+Steps, Equipment, Configuration and Run log. The Run log in the report carries INFO, WARNING
+and ERROR lines only; DEBUG lines and Device trace stay in the database.
+
+\section{Reading a run back}
+
+From the History screen, or from the database. Every Test Run has a UUIDv7 assigned at run
+start, and its rows are the run itself, its Media Releases, its files, its schedule instances,
+its nodes, its Actions, its Attempts, its Operator inputs, its Equipment and its log lines. The
+End Reason tells you how the run finished: \texttt{COMPLETED}, \texttt{PRETEST\_FAILED},
+\texttt{STOPPED\_ON\_FAIL}, \texttt{ABORTED}, or \texttt{INTERRUPTED} when ATE itself stopped
+before the run could.
+
+\cando{look up any part of a finished Test Run, and name the enum value or record field you are
+reading.}

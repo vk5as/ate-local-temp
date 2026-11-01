@@ -62,8 +62,12 @@ class Driver(ABC):
         """Validate ``params`` and connect; return an opaque device handle."""
 
     def close(self, device: Any) -> None:
-        """Release a previously opened device. The default is a no-op for drivers that need no
-        teardown (packet 16a's TCP driver overrides this to close its socket)."""
+        """Release a previously opened device.
+
+        Nothing calls this method: the registry tears down the handle, not the driver —
+        ``DeviceRegistry.close_device`` calls the handle's own ``close()``. No shipped driver
+        overrides it; ``VisaDriver.close`` is the one that does and is never reached. A driver that
+        needs teardown puts it on the handle ``open`` returns."""
 
 
 def validate_params(

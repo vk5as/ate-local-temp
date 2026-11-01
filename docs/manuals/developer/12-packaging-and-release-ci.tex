@@ -1,0 +1,116 @@
+\chapter{Packaging, release CI, and how a bundle is proven}\label{ch:packaging}
+
+Four artifacts ship: a Windows installer, a Linux \texttt{.deb}, a tarball of the frozen bundle, and a
+wheel. The first three come from a PyInstaller bundle; the wheel does not contain Qt at all --- it
+declares the dependency and pip fetches it. Understanding which artifact carries what is the point of
+this chapter, because a bug that only shows in one of them is invisible until a Station installs it.
+
+\section{The bundle}
+
+\texttt{packaging/\allowbreak{}build\_\allowbreak{}pyinstaller.py} builds the frozen application. It makes a throwaway venv,
+installs into it, runs \texttt{packaging/\allowbreak{}pyinstaller/\allowbreak{}ate.spec}, and can smoke-test the result:
+
+\begin{lstlisting}[language=ATEShell]
+python packaging/build_pyinstaller.py --smoke
+python packaging/build_pyinstaller.py --verify dist/ate   # check an existing bundle: no build, no run
+\end{lstlisting}
+
+\texttt{verify\_bundle()} is the gate a bundle must pass: it refuses a bundle that does not carry the
+licence files (\texttt{\_internal/licences}, four files generated at build time by
+\texttt{packaging/\allowbreak{}licence/\allowbreak{}notices.py --out build/\allowbreak{}licences}), the report template, the bundled Lua
+modules, the WebEngine binary and its \texttt{.pak} and \texttt{icudtl.dat} resources --- the gate
+checks that some are there, not how many. The excludes list in \texttt{ate.spec}
+has its own history: PySide6's \texttt{QtWebEngineWidgets} imports \texttt{PySide6.QtWebChannel} on its
+own, and keeping it excluded produced a bundle that looked fine and then died in
+\texttt{ate \_pdf} with ``could not import module 'PySide6.QtWebChannel'''. It is out of the list, and
+\texttt{test\_\allowbreak{}the\_\allowbreak{}spec\_\allowbreak{}does\_\allowbreak{}not\_\allowbreak{}exclude\_\allowbreak{}what\_\allowbreak{}webengine\_\allowbreak{}imports\_\allowbreak{}itself} runs the WebEngine import and
+compares what it pulls in with the excludes list --- so the list cannot drift again without failing.
+
+The real build is gated: \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} runs
+\texttt{tests/\allowbreak{}test\_\allowbreak{}pyinstaller\_\allowbreak{}build\_\allowbreak27a.py}, which takes minutes. It is not run by the default suite,
+and the manual says so rather than implying it is.
+
+\section{Linux: the \texttt{.deb}, the tarball, the wheel}
+
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}build\_\allowbreak{}linux.py --build --dist dist --out dist} produces the \texttt{.deb} and the
+tarball from a built bundle. The \texttt{.deb} declares \texttt{DEPENDS}, the list of system libraries the
+bundle cannot carry itself; \texttt{WHEEL\_SYSTEM\_LIBS} is the list for the wheel, which ships no Qt and
+therefore needs the system to provide the xcb and GL libraries QtWebEngine links against. Six xcb
+libraries (cursor, icccm, keysyms, shape, xkb, xkbcommon-x11) were added to that list after a bare
+\texttt{debian:stable} container aborted with ``Could not load the Qt platform plugin "xcb"''.
+
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}install.sh --prefix /\allowbreak{}opt/\allowbreak{}ate --bin /\allowbreak{}usr/\allowbreak{}bin/\allowbreak{}ate} is the tarball's installer;
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}deb/\allowbreak{}postinst} and \texttt{postrm} are the \texttt{.deb}'s hooks (the \texttt{.deb}
+is idempotent about the \texttt{ate} group; \texttt{apt purge} removes the config file).
+
+The wheel is built with \texttt{build}. \texttt{--no-isolation} uses the interpreter already present
+instead of making a throwaway venv to download setuptools into, which is what a machine with no
+network to PyPI needs:
+
+\begin{lstlisting}[language=ATEShell]
+python -m build --wheel --no-isolation -o dist
+\end{lstlisting}
+
+Its version comes from the git tag, computed once by \texttt{src/ate/\_version.py} so build time and run
+time agree; untagged builds fall back to \texttt{0.0.0-dev} and a build never fails because git is
+unavailable. Package data matters: a bare-key bug in \texttt{pyproject.toml} meant \texttt{no wheel had
+built since packet 06b}, and \texttt{tests/\allowbreak{}test\_\allowbreak{}wheel\_\allowbreak{}build\_\allowbreak28a.py} now reads the parsed config rather
+than the source text, so a non-\texttt{.py} file the wheel must ship cannot go missing silently.
+
+\section{Windows}
+
+\texttt{packaging/\allowbreak{}windows/\allowbreak{}ate.iss} is the Inno Setup script;
+\texttt{packaging/\allowbreak{}windows/\allowbreak{}build\_\allowbreak{}installer.py} compiles it. On Linux the only thing you can do is see the
+command:
+
+\begin{lstlisting}[language=ATEShell]
+python packaging/windows/build_installer.py --dry-run --dist dist
+\end{lstlisting}
+
+which prints the exact \texttt{iscc} line the CI will run. \texttt{tests/\allowbreak{}test\_\allowbreak{}inno\_\allowbreak{}installer\_\allowbreak27b.py}
+parses \texttt{ate.iss} and asserts against that command, and
+\texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} checks that the flags the CI passes to the installer
+(\texttt{packaging/\allowbreak{}windows/\allowbreak{}smoke\_\allowbreak{}installer.py}'s \texttt{INSTALL\_FLAGS}) are the ones the manuals tell an
+administrator to use.
+
+\section{The CI that runs all of this}
+
+\texttt{.github/\allowbreak{}workflows/\allowbreak{}ci.yml} runs the suite as a single job with a
+$2 \times 2$ matrix --- \texttt{ubuntu-latest} and \texttt{windows-latest}, each on CPython 3.13 and
+3.14 --- so four job runs, \texttt{fail-fast: false}, with
+\texttt{QT\_\allowbreak{}QPA\_\allowbreak{}PLATFORM=offscreen} and \texttt{PYTHONFAULTHANDLER=1} set at job level. Two things in it
+are load-bearing and were added because of failures, not taste:
+
+\begin{itemize}
+  \item \texttt{timeout-minutes} is 30 on Linux and 40 on Windows. The first real run of this workflow
+    hung on \texttt{windows-latest} for an hour on a modal dialog waiting for an Operator who was not
+    there. A bounded job that reports a timeout plus a \texttt{faulthandler} stack is a job you can read.
+  \item A step checks that \texttt{PySide6-Addons}, \texttt{PySide6-Essentials} and \texttt{shiboken6} are
+    the same version and that the Qt the runtime reports matches them. Two Qt builds in one process is how
+    the first Windows run died with \texttt{0xc0000139} (STATUS\_ENTRYPOINT\_NOT\_FOUND) the moment
+    WebEngine was imported: pip had put a Qt 6.12 core next to a Qt 6.11 WebEngine.
+\end{itemize}
+
+\texttt{.github/\allowbreak{}workflows/\allowbreak{}release.yml} runs on a tag or by hand: \texttt{windows-installer},
+\texttt{linux-build} and \texttt{linux-smoke} (matrix: \texttt{deb}, \texttt{tar}, \texttt{wheel}) --- three
+job definitions, five job runs. The smoke tests install each artifact in a fresh \texttt{debian:stable}
+container and run
+\texttt{ate --version} and \texttt{ate \_selftest --run}. \texttt{packaging/\allowbreak{}linux/\allowbreak{}smoke\_\allowbreak{}linux.py} is the
+script that runs inside them, and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} is the driver that a human
+runs.
+
+\section{What has actually been run here}
+
+Both gates were run for this manual, on the machine that wrote it, with \texttt{TMPDIR} pointed at a
+directory on disk rather than \texttt{/tmp}. \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} takes a few minutes
+because it builds a frozen bundle; \texttt{ATE\_\allowbreak{}DOCKER\allowbreak{}TESTS=1 pytest -m build} takes several, because it builds the tarball
+and the \texttt{.deb} and installs each in a fresh \texttt{debian:stable} container. Both pass. The first
+attempt at the container gate in this environment died with \texttt{OSError: [Errno 28] No space left on
+device} on a small \texttt{/tmp}, which is why the manual says where a gate ran and not merely that it
+can. The timings quoted in chapter~\ref{ch:intro} are three separate runs of three
+separate commands on one machine, not a comparison. What has never been run on
+this machine is a Windows build, a Windows install, or an installer: the release runner did compile
+\texttt{ate.iss} and install, run, upgrade and uninstall the installer at \texttt{v0.1.0-rc2} (run
+41198438867), so those paths are proven somewhere --- just not here.
+
+\cando{say which artifact carries which library, and name the test that proves a bundle is complete.}

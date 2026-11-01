@@ -1,0 +1,88 @@
+\chapter{The database: status, migration, backup}\label{ch:database}
+
+Every Test Run is a record in one SQLite database, at \texttt{database.path}. ATE writes it as the
+run happens and never edits or deletes a run afterwards: v1 has no delete and no purge, so the
+database is an archive, not a scratch pad.
+
+\section{The two commands}
+
+\begin{lstlisting}[language=ATEShell]
+ate db status
+ate db migrate
+ate db migrate --yes
+ate --config /tmp/station/config/config.json db status
+ate db migrate /tmp/station/data/ate.db --yes
+\end{lstlisting}
+
+\texttt{ate db status} opens the database read-only and prints its schema version, exiting 0. A
+missing, empty or older database exits 1 and prints the refusal. \texttt{ate db migrate} creates or
+upgrades it. Without \texttt{--yes} (or \texttt{-y}) it asks first:
+
+\begin{lstlisting}[language=ATEShell]
+Create or upgrade database at /var/lib/ate/ate.db? [y/N]
+\end{lstlisting}
+
+Answering anything other than \texttt{y} prints \texttt{aborted} and exits 1. With \texttt{--yes}
+there is no prompt, which is what scripts and \texttt{ate setup} use. Neither command needs a
+config: give it a path, or let it use the configured database from the platform config.
+\texttt{--config} belongs to \texttt{ate}, so it comes \emph{before} \texttt{db}:
+\texttt{ate --config PATH db status}. Written after the subcommand it is read as a database path,
+and the command fails saying \texttt{file is not a database} --- it is not a database. A path given
+after \texttt{db migrate} wins over the configured one.
+
+Migrations are forward only. A database built by a \emph{newer} ATE is refused rather than
+downgraded; a missing, empty or older one is exactly what migrate is for. The version is SQLite's
+\texttt{PRAGMA user\_version}, and the current one is 5.
+
+\section{What the app itself does at launch}
+
+The application never migrates. It checks the version and stops if it is wrong:
+
+\begin{lstlisting}[language=ATEShell]
+run `ate db migrate` to create or upgrade the database at /var/lib/ate/ate.db
+this ATE is too old for the database at /var/lib/ate/ate.db; update ATE
+\end{lstlisting}
+
+The first line names the database, and when the Station is reading a config that is not the
+platform default the hint carries \texttt{--config <path>} so you migrate the right one.
+
+At launch ATE also closes any run that has no end time --- a run left open by a crash or a power
+cut --- recording it as \texttt{INTERRUPTED} with result \texttt{FAIL}, and logs one line saying
+how many it closed: \texttt{interrupted run(s) at launch}. That is a record of what was lost, not a
+bug to fix.
+
+\section{Backups}
+
+Nothing in ATE backs anything up. The design note the record format was written from
+(\texttt{.scratch/\allowbreak{}ate-v1-wayfinding/\allowbreak{}assets/\allowbreak{}test-run-record.md}) says
+\texttt{ate db migrate} makes a timestamped copy first; it does not, and that is the code's behaviour,
+so \textbf{you} make the copy before you migrate. Migrate is not destructive --- it only adds tables and sets the version ---
+but an upgrade you did not back up is an upgrade you cannot roll back.
+
+Back up three things:
+
+\begin{itemize}
+  \item \textbf{The database.} \texttt{ate.db} and its companions \texttt{ate.db-wal} and
+    \texttt{ate.db-shm}. ATE opens every connection in WAL mode, so a database that is in use has a
+    \texttt{-wal} file holding recent writes; copying \texttt{ate.db} alone while a Test Run is
+    writing can lose those writes. Copy all three, or stop ATE first.
+  \item \textbf{The config.} \texttt{config.json}. It is small, it is not backed up by anything, and
+    \texttt{apt purge} deletes it on Linux.
+  \item \textbf{The reports.} Test Reports are generated from the database, so a report can always be
+    regenerated --- but only from a database that still exists. Treat the \texttt{reports} directory
+    as the deliverables and the database as the archive; keep both.
+\end{itemize}
+
+The data directory is small enough to copy whole: \texttt{ate.db}, \texttt{reports}, \texttt{logs}
+and \texttt{definitions}. Keeping \texttt{logs} is optional and is the only part of the data that
+records ATE's own activity rather than a Test Run.
+
+Restoring is the same copy, in the other direction. Stop ATE, put \texttt{ate.db}, \texttt{ate.db-wal}
+and \texttt{ate.db-shm} back where \texttt{database.path} points, and start again: the schema check at
+launch accepts a database whose version matches this ATE, and the runs it holds appear on the History
+screen as they did before. There is no partial restore and no undo of a single run: a run is a row in
+\texttt{test\_run} with its steps in \texttt{node}, and the only way back to an earlier state is the
+copy you made before the change.
+
+\cando{check a database's version, migrate it safely, and say what has to be copied before a
+migration and why a lone \texttt{ate.db} copy is not always enough.}

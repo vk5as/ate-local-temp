@@ -13,11 +13,11 @@ second time over the first (upgrade) and then uninstalls — asserting at every 
 has exactly the entry it should have, that the other entries are untouched, and that the value is
 still `REG_EXPAND_SZ`.
 
-**NEVER RUN.** No machine that has ever written or read this file has had Windows, Inno Setup, or
-a `%PROGRAMDATA%\ATE` to install into, and no tag of this repository has been cut, so the release
-workflow has never started. `tests/test_release_ci_27c.py` runs the assertions below against a
-fake registry and a fake installer on Linux: it proves the script notices a broken install, not
-that an install works. The first real install, upgrade and uninstall is this script's first run.
+**Run only on a release runner.** It needs Windows, Inno Setup and a clean `%PROGRAMDATA%\ATE`; it
+does nothing useful anywhere else. Its first real run was tag `v0.1.0-rc2` (release run 41198438867):
+install, PATH, database, Test Run, upgrade, uninstall, all on a fresh runner.
+`tests/test_release_ci_27c.py` runs the assertions below against a fake registry and a fake installer
+on Linux: it proves the script notices a broken install, not that an install works.
 
 Code signing is not touched here: the CI passes `ATE_SIGN_CERT`/`ATE_SIGN_PASSWORD` to the build
 only when the repository has them, and an empty value means an unsigned artifact. Nothing in this

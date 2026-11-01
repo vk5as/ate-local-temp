@@ -1,0 +1,115 @@
+\chapter{The shape of the code}\label{ch:shape}
+
+ATE is one process, one \texttt{QApplication}, and one worker thread per Test Run. The source under
+\texttt{src/ate/} is small enough to read in an afternoon, and the structure is the thing that makes it
+safe to change: a change in one layer cannot reach another layer except through a signal or a store
+call.
+
+\section{Four layers, one direction}
+
+The dependency arrows go one way:
+
+\begin{itemize}
+  \item \texttt{ate.ui} knows \texttt{ate.run\_session}. A layout connects to the session's signals and
+    calls its methods. It never reaches into the engine.
+  \item \texttt{ate.run\_session} knows \texttt{ate.engine}. The session owns a \texttt{RunEngine},
+    forwards its signals, and writes nothing to the database itself.
+  \item \texttt{ate.engine} knows \texttt{ate.storage} and \texttt{ate.devices}. The worker writes rows
+    and opens Devices. It knows nothing about screens.
+  \item \texttt{ate.storage} is the only place SQL is written. \texttt{ate.catalog}, the configuration
+    reader and the report writer are reached from above, not from the engine.
+\end{itemize}
+
+Nothing points the other way. \texttt{ate/\_\_init\_\_.py} deliberately imports neither the engine nor the
+UI, so \texttt{import ate} stays cheap and widget-free: it exposes only \texttt{\_\_version\_\_} and
+\texttt{version}.
+
+\section{Every module}
+
+This table is the coverage list: \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} walks the package with
+\texttt{pkgutil.walk\_\allowbreak{}packages} and fails if a module in it is not named here or in
+\texttt{docs/\allowbreak{}manuals/\allowbreak{}llm/\allowbreak{}developer.md}.
+
+\begingroup\small
+\begin{longtable}{p{5.6cm} p{9.4cm}}
+\toprule
+\textbf{File} & \textbf{What it holds} \\
+\midrule
+\endhead
+\texttt{src/\allowbreak{}ate/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the package's version only; imports no engine, no widgets \\
+\texttt{src/ate/\_version.py} & the version from the git tag, computed once so build time and run time agree \\
+\texttt{src/\allowbreak{}ate/\allowbreak\_\allowbreak\_\allowbreak{}main\_\allowbreak\_\allowbreak.py} & \texttt{python -m ate}, the entry the PDF helper subprocess uses \\
+\texttt{src/ate/cli.py} & the \texttt{ate} command: parsing, subcommands, \texttt{ate setup}, \texttt{ate db}, the hidden \texttt{ate \_pdf} and \texttt{ate \_selftest} \\
+\texttt{src/ate/app.py} & the application shell: reads config once, opens the chosen layout, installs the exception hook \\
+\texttt{src/ate/config.py} & the config file: read, validate, fill defaults, resolve \texttt{<data>} \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}permissions.py} & the group, ownership and ACL treatment \texttt{ate setup} applies on Linux \\
+\texttt{src/ate/setup.py} & prepare a Station: directories, default config, database, permissions \\
+\texttt{src/ate/log.py} & the per-launch application log, \texttt{AppLog} \\
+\texttt{src/ate/errors.py} & \texttt{ATEError} and its subclasses; the one base every ATE failure has \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}exception\_\allowbreak{}log.py} & \texttt{UnhandledExceptionLog}: what a raising slot writes to the log \\
+\texttt{src/ate/catalog.py} & \texttt{.atedef} reading and validation, Media Release chains, schedule and module maps \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the engine package; the rule is that it imports no widgets \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}run\_\allowbreak{}engine.py} & the \texttt{QThread} worker: steps the schedule, records the run, ends it \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py} & the Lua runtime, the sandbox, the \texttt{ATE} table, the schedule builders \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}operator\_\allowbreak{}input.py} & \texttt{OperatorInput}: how \texttt{ATE.input(n)} waits for an answer \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}step\_\allowbreak{}inputs.py} & parsing and validating a Step Input declaration \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}lua/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the modules bundled with ATE, reachable as \texttt{require("ate.devices")} \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}lua/\allowbreak{}devices.lua} & the Lua module a Test Schedule can \texttt{require} \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}run\_\allowbreak{}session/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the run session package; also widget-free \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}run\_\allowbreak{}session/\allowbreak{}headless.py} & \texttt{HeadlessRunSession}: the object a layout binds to, and what a headless run uses \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the storage package: the only place ATE talks SQL \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}schema.py} & every table in the Test Run record, as SQLAlchemy Core tables \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}store.py} & \texttt{RunStore}: writes, queries, batching, the schema check \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak\_\allowbreak{}uuid.py} & UUIDv7 run keys, without \texttt{uuid.uuid7} \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the Device drivers package \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}registry.py} & \texttt{Driver}, \texttt{validate\_params}, \texttt{DeviceRegistry} \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}stream.py} & the background reader shared by the buffered Device Types \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}tcp.py} & the TCP driver \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}udp.py} & the UDP driver \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}serial.py} & the SERIAL driver, through pyserial \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}visa.py} & the VISA driver, through pyvisa \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}abort.py} & how a Device call gives way to an abort \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}tracing.py} & one \texttt{DEBUG} line per Device operation, when tracing is on \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the report package \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}html.py} & the self-contained HTML Test Report \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}pdf.py} & HTML to PDF in a separate process, and the sandbox decision \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}pdf\_\allowbreak{}job.py} & the \texttt{QProcess} that runs the helper, owned by a session \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}log\_\allowbreak{}export.py} & the Run log as CSV, JSON Lines or text \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}history/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the history package \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}history/\allowbreak{}session.py} & \texttt{HistorySession}: queries over past Test Runs, no widgets \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the widgets package; the only place QtWidgets is imported \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}run\_\allowbreak{}widgets.py} & the widgets both Run screens share \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}staged\_\allowbreak{}run\_\allowbreak{}screen.py} & the \texttt{staged} layout \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}three\_\allowbreak{}pane\_\allowbreak{}run\_\allowbreak{}screen.py} & the \texttt{threePane} layout \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}history\_\allowbreak{}screen.py} & the History screen \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}export\_\allowbreak{}log\_\allowbreak{}dialog.py} & the Run log export dialog \\
+\texttt{src/ate/dialogs.py} & \texttt{dismiss\_\allowbreak{}if\_\allowbreak{}headless}: every modal that must answer itself \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+Outside \texttt{src/} there is \texttt{packaging/} (PyInstaller, Inno Setup, the \texttt{.deb}, the wheel
+and the licence inventory, chapter~\ref{ch:packaging}), \texttt{examples/} (a Media Release and the
+harness that runs it, used by the test suite), and \texttt{docs/} (the ADRs, this manual and the agent
+manuals).
+
+\section{What a Test Run is made of, in the code}
+
+Four objects move one Test Run through the application, and knowing which one you are in is half of
+debugging it:
+
+\begin{itemize}
+  \item the \textbf{run session} (\texttt{HeadlessRunSession}) holds the Operator's choices: which
+    schedule, which Operator, whether Stop on Fail is on. It is a \texttt{QObject}, so widgets can bind
+    to it.
+  \item the \textbf{run engine} (\texttt{RunEngine}, a \texttt{QThread}) is the worker that walks the
+    expanded step tree and writes the record.
+  \item the \textbf{Lua host} (\texttt{LuaHost}) is the interpreter the schedule runs in, with the
+    sandbox and the \texttt{ATE} table.
+  \item the \textbf{store} (\texttt{RunStore}) is the only thing that touches the database.
+\end{itemize}
+
+A layout is a fifth object, above the session: \texttt{StagedRunScreen} or \texttt{ThreePaneRunScreen},
+chosen by \texttt{ui.layout} and switched in \texttt{App.set\_layout}.
+
+\cando{say which object owns a piece of state, and which layer a new line of code belongs in.}

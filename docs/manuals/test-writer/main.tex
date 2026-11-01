@@ -1,0 +1,33 @@
+% Writing Test Schedules for ATE - the test writer's manual (packet 34a).
+%
+% Build: python docs/manuals/build.py test-writer
+% (latexmk -lualatex inside texlive/texlive:latest; see docs/building-from-source.md.)
+
+\documentclass[a4paper,11pt]{report}
+
+\usepackage{manual}  % docs/manuals/common/manual.sty, on TEXINPUTS by the build script
+
+\title{%
+  \textbf{Writing Test Schedules for ATE}\\[6pt]
+  \large The test writer's manual\\[10pt]
+  \normalsize ATE v1.0 \quad\textbullet\quad examples in \texttt{docs/manuals/examples/test-writer/}}
+\author{ATE}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\input{01-what-a-schedule-is}
+\input{02-a-schedule-that-runs}
+\input{03-steps-numbers-and-results}
+\input{04-step-inputs}
+\input{05-actions-and-equipment}
+\input{06-sub-schedules}
+\input{07-devices}
+\input{08-device-errors-and-retries}
+\input{09-modules-and-test-definitions}
+\input{10-the-sandbox}
+\input{11-reference}
+
+\end{document}

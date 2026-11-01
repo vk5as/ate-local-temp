@@ -1,0 +1,110 @@
+\chapter{Reference: commands, files, exit codes}\label{ch:reference}
+
+\section{Every \texttt{ate} command}
+
+\begingroup\footnotesize
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{9.6cm}@{}}
+\toprule
+Command & What it does \\
+\midrule
+\endhead
+\texttt{ate} & Opens the application. With an unusable config or database, refuses and exits 1. \\
+\texttt{ate --config PATH} & Read that config instead of the platform default. Works with every
+  subcommand. \\
+\texttt{ate -V}, \texttt{ate --version} & Print the version and exit 0. \\
+\texttt{ate --help} & Print usage at any level and exit 0. \\
+\texttt{ate --allow-unsandboxed-pdf} & When ATE is root or an administrator, render Test Report PDFs
+  without Chromium's sandbox instead of asking (or skipping them). Has no effect for an ordinary
+  user, and says so. \\
+\texttt{ate db status [PATH]} & Print the database's schema version. Read-only: it never creates a
+  database. Exits 1 with the refusal if it is missing or outdated. \\
+\texttt{ate db migrate [PATH] [--yes|-y]} & Create or upgrade the database, after confirmation unless
+  \texttt{--yes}. Refuses a database built by a newer ATE. \\
+\texttt{ate setup} & Create the Station's directories, write a default config if none exists, and
+  migrate the database. \\
+\texttt{--root DIR} & Prepare DIR as the Station root: DIR/data and DIR/config. \\
+\texttt{--data-dir DIR} & Use DIR for the data directory instead of the root's \texttt{data/}. \\
+\texttt{--config-dir DIR} & Use DIR for the config directory instead of the root's \texttt{config/}. \\
+\texttt{--no-permissions} & Skip the group, ownership and ACL treatment explicitly (packagers and
+  test runs). \\
+\texttt{ate definition update <file.atedef>} & Recompute every listed file's SHA-256 in place,
+  filling in missing ones. Rewrites only if something changed. \\
+\texttt{ate \_pdf <html> <pdf> --paper A4|Letter [--unsandboxed]} & Hidden helper ATE starts as a
+  child process to render one Test Report. Not for humans to run. \\
+\texttt{ate \_selftest} & Hidden: the frozen bundle inventories what it carries and exits 1 if
+  anything is missing. \\
+\texttt{ate \_selftest --run} & Hidden: runs a built-in one-step Test Schedule head end to end in a
+  temporary directory, and checks both reports were written. A privileged run needs
+  \texttt{--allow-unsandboxed-pdf} to produce the PDF. \\
+\texttt{ate \_selftest --scan DIR} & Hidden: release CI's headless launch. Reads the config
+  \texttt{ate setup} wrote, refuses a database at the wrong schema version, and reports the schedules
+  in a Test Definition directory and the broken ones. Writes nothing. \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+The hidden commands are deliberately not in \texttt{ate --help}; they are what ATE and the packager
+call, not what an Operator types. An administrator can still run them, and each one prints what it
+found and exits 1 if anything is missing or broken. \texttt{\_selftest} inventories the bundle,
+\texttt{\_selftest --run} runs a built-in one-step Test Schedule in its own temporary directory,
+\texttt{\_selftest --scan DIR} checks the database version and reports the Test Definitions in a
+directory, and \texttt{\_pdf} is the child process the report writer starts:
+
+\begin{lstlisting}[language=ATEShell]
+ate --help
+ate -V
+ate _selftest
+ate _selftest --run
+ate _selftest --scan definitions/MR-1043
+ate _pdf report.html report.pdf --paper A4
+\end{lstlisting}
+
+\section{Where things are}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.0cm}>{\raggedright\arraybackslash}p{5.4cm}>{\raggedright\arraybackslash}p{6.0cm}@{}}
+\toprule
+Thing & Windows & Linux \\
+\midrule
+Config & \texttt{\%PROGRAMDATA\%\textbackslash ATE}\allowbreak\texttt{\textbackslash config.json} & \texttt{/etc/ate/config.json} \\
+Data directory (\texttt{<data>}) & \texttt{\%PROGRAMDATA\%\textbackslash ATE} & \texttt{/var/lib/ate} \\
+Database & \texttt{<data>/ate.db} & \texttt{/var/lib/ate/ate.db} \\
+Test Reports & \texttt{<data>/reports/}\allowbreak\texttt{<UUT Type>} & \texttt{/var/lib/ate/reports/}\allowbreak\texttt{<UUT Type>} \\
+Application log & \texttt{<data>/logs} & \texttt{/var/lib/ate/logs} \\
+Media Releases & \texttt{<data>/definitions} & \texttt{/var/lib/ate/definitions} \\
+Program & \texttt{C:\textbackslash Program Files\textbackslash ATE} & \texttt{/opt/ate}, linked as \texttt{/usr/bin/ate} \\
+Licence notices & \texttt{<program}\textbackslash\texttt{\_internal}\allowbreak\texttt{\textbackslash licences} & \texttt{<program/\_internal/}\allowbreak\texttt{licences} \\
+Run log & in the database, table \texttt{log\_line} & the same \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The log and report paths are what the config says; the defaults above are what \texttt{ate setup}
+writes, and it writes them already resolved to absolute paths. A path left relative in the config is
+resolved against the config file's directory, so only a hand-written config with relative paths keeps
+its data next to the config.
+
+\section{What this manual cannot tell you}
+
+Be honest about these, because a Station's problem is often in one of them:
+
+\begin{itemize}
+  \item \textbf{What the interface looks like, and what a click does.} ATE has never been run with a
+    display that a human watched. Layout, fonts, dialog appearance and the exact wording of prompts
+    other than the ones quoted here are unverified, and the appearance work is still in progress.
+  \item \textbf{What Windows makes of an unsigned installer.} There is no signing certificate, so the
+    artifacts are unsigned. The installer installed, upgraded and uninstalled on a CI runner with
+    \texttt{/VERYSILENT}, which suppresses dialogs; what a person sees when they double-click it is
+    not known here.
+  \item \textbf{Real instruments.} Every Device test in the suite runs against a loopback peer, a
+    \texttt{socket://} URL standing in for a serial port, or pyvisa-py's own backends. Nothing has
+    been connected to GPIB, USBTMC or RS-232 hardware, and NI-VISA is not shipped. Timing,
+    terminator behaviour and error handling on a real instrument are untested.
+  \item \textbf{Why the one Windows stall happened.} The fix is tested; the cause is a hypothesis
+    about the runner's disk.
+  \item \textbf{Whether the wheel carries the licence notices.} The bundle, the tarball and the
+    \texttt{.deb} demonstrably do. The wheel is not checked for them.
+\end{itemize}
+
+\cando{look up any command, any file, and any claim this manual does not actually support.}

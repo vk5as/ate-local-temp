@@ -1,0 +1,12 @@
+-- first.tslua: the smallest Test Schedule that runs.
+--
+-- A Test Schedule is a Lua file that RETURNS a schedule object. Nothing in the file
+-- runs by itself: ATE reads the steps and executes them. Save it next to a Test
+-- Definition that lists it (see manual.atedef in this directory).
+return ScheduleParams("Manual: first schedule", "one Test Step that reports PASS")
+  :setSchedule({
+    StepParams("Say hello"):setStepNo("1.")
+      :setAction(function()
+        ATE.report(Result.PASS, "the schedule ran")
+      end),
+  })

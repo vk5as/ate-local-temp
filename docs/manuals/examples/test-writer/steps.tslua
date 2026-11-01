@@ -1,0 +1,40 @@
+-- steps.tslua: Step Numbers, Step Names, enabled defaults, and reporting.
+--
+-- Demonstrates:
+--   * every ordinary step needs setStepNo and setAction;
+--   * setEnable(false) starts a step disabled, and a step disabled at run start
+--     records Result.NOTRUN without ever executing;
+--   * a step that never calls ATE.report records Result.NOREPORT and logs a WARNING;
+--   * several ATE.report calls in one Attempt: every one is logged, the last one counts;
+--   * Actual and Expected are stored as text, and ATE does no comparing: the schedule
+--     decides whether the value passes.
+return ScheduleParams("Manual: steps", "step numbers, names and the enabled default")
+  :setDocTitle("Manual examples - Steps")
+  :setDocId("MR-MANUAL-STEPS")
+  :setDocRev("1.0")
+  :setSchedule({
+    StepParams("First check"):setStepNo("1.")
+      :setAction(function()
+        ATE.report(Result.PASS, "rail is within tolerance", 5.0, 5.0)
+      end),
+
+    -- Two reports in one Attempt: the log shows both, the step's result is the second.
+    StepParams("Report twice"):setStepNo("2.")
+      :setAction(function()
+        ATE.report(Result.FAIL, "first reading looked low", 4.9, 5.0)
+        ATE.report(Result.PASS, "second reading is fine", 5.0, 5.0)
+      end),
+
+    -- Disabled from the start: the Operator can turn it on before the run.
+    StepParams("Optional check"):setStepNo("3.")
+      :setEnable(false)
+      :setAction(function()
+        ATE.report(Result.PASS, "only runs when the Operator enables it")
+      end),
+
+    -- A step that does work but never reports: ATE records NOREPORT and warns.
+    StepParams("Forgot to report"):setStepNo("4.")
+      :setAction(function()
+        ATE.log(Log.INFO, "measured something, but did not report it")
+      end),
+  })

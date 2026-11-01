@@ -1,0 +1,174 @@
+\chapter{The run engine: one worker, eight signals}\label{ch:engine}
+
+\texttt{RunEngine} is a \texttt{QThread} subclass in
+\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}run\_\allowbreak{}engine.py}. Its \texttt{run()} method is the worker: it inserts the
+\texttt{test\_run} row, walks the expanded step tree, and closes the run. Everything the screen knows
+about the run arrives through the eight signals the class declares.
+
+\section{The worker's lifetime, and why it owns itself}
+
+A \texttt{QThread} destroyed while its thread is still running makes Qt abort the process
+(\texttt{QThread: Destroyed while thread is still running}: SIGABRT on Linux, 0xC0000409 on Windows,
+with nothing printed). The danger is real because the session drops its engine when it is finished,
+and that drop is queued while the worker is still returning from \texttt{run()}. Whichever side lets go
+last then destroys a running thread.
+
+So a started engine keeps itself alive. \texttt{RunEngine.start} adds the engine to
+\texttt{\_live\_engines} and connects \texttt{finished} to \texttt{\_\allowbreak{}forget\_\allowbreak{}ended\_\allowbreak{}worker}, which
+waits for the thread and then removes it from the set. \texttt{stop\_\allowbreak{}live\_\allowbreak{}engines(timeout\_\allowbreak{}ms=5000)}
+aborts every worker still in that set and waits for it, and it is registered with \texttt{atexit}, so a
+worker running when the interpreter exits is not destroyed running. If it returns a non-empty list, the
+process is about to be killed by Qt, and the test suite turns that into an error message that explains
+itself (chapter~\ref{ch:failed-run}).
+
+Two rules follow, and both are easy to break by accident:
+
+\begin{itemize}
+  \item Do not \texttt{parent} a \texttt{RunEngine} to a widget in the hope that Qt will clean it up.
+    A parented engine is still in \texttt{\_live\_engines}, and the widget can be deleted underneath a
+    live worker.
+  \item Do not call \texttt{engine.wait()} on the main thread without first calling
+    \texttt{request\_abort()}. \texttt{stop\_and\_wait} does both: it sets the abort flag, then waits
+    \texttt{timeout\_ms}. \texttt{wait()} releases the GIL while it waits, so the worker keeps working.
+\end{itemize}
+
+\section{What the worker does, in order}
+
+\texttt{run()} is a guard. It calls \texttt{\_execute()} inside \texttt{try/except}, and an exception
+that escapes is turned into \texttt{\_\allowbreak{}end\_\allowbreak{}unexpectedly(trace)}: the run is recorded as
+\texttt{INTERRUPTED}/\texttt{FAIL}, the message is printed to stderr, the application log gets it
+through the \texttt{on\_error} callable, every open Device is closed, and \texttt{FINISHED} is emitted
+anyway. Each of those steps is attempted separately, because the exception may have come from the store
+itself. Post-test Actions do not run after an unexpected end, as they would not after a crash.
+
+This guard matters more since packet 32a: under PyQt6 an exception leaving \texttt{QThread.run} aborted
+the process; under PySide6 it prints \texttt{Error calling Python override of QThread::run()} and the
+thread simply ends. Without the guard, the run row would stay open and the screen would wait for a
+\texttt{FINISHED} that never arrives. \texttt{tests/\allowbreak{}test\_\allowbreak{}unexpected\_\allowbreak{}run\_\allowbreak{}end.py} proves the run is
+recorded \texttt{INTERRUPTED} and \texttt{FINISHED} is still announced.
+
+\texttt{\_execute()} then does the work in this order:
+
+\begin{enumerate}
+  \item build a \texttt{LuaHost} for the schedule, which loads and validates it, expands
+    Sub-schedules, and registers the Device drivers;
+  \item insert the \texttt{test\_run} row and emit \texttt{run\_uuid\_reported};
+  \item run every Pre-test Action, in Pre-test order, recording an \texttt{action} row for each; a
+    Pre-test Action that raises ends the run \texttt{PRETEST\_FAILED} and records every step NOTRUN;
+  \item walk the step list: header rows record their place in the tree and never run; disabled steps
+    record NOTRUN with no Attempt; the abort flag is checked at every step boundary;
+  \item for each enabled step, run its action closure once per Attempt, recording one \texttt{attempt}
+    row each. A step's result is its last Attempt's; a step whose action raised records an
+    \texttt{ERROR} Attempt; a step with no report records \texttt{NOREPORT};
+  \item pause on a Stop-on-Fail failure until the Operator answers (section below);
+  \item run the Post-test Actions, which run even after an abort (spec story 84), each ending on a second
+    abort;
+  \item record the Media Release chain and every file the run used, close open Devices, and write the
+    run's result and End Reason.
+\end{enumerate}
+
+\section{The eight signals}
+
+Every one of these is emitted on the worker and delivered to the main thread, where the receiver's own
+event loop runs the slot. \texttt{tests/\allowbreak{}test\_\allowbreak{}signal\_\allowbreak{}threads\_\allowbreak32a.py} drives a real run with a
+Stop-on-Fail pause, a POLL and a blocking input, and records the thread each slot ran on: they all ran
+on the main thread. The same test connects one signal with \texttt{DirectConnection} as a control, and
+sees the worker's thread --- and planting \texttt{DirectConnection} in the main test makes it fail. A
+new signal has to be added to that test.
+
+\begingroup\small
+\begin{longtable}{p{3.3cm} p{3.6cm} p{5.2cm}}
+\toprule
+\textbf{Signal} & \textbf{Arguments} & \textbf{When it is emitted} \\
+\midrule
+\endhead
+\texttt{run\_uuid\_reported} & the run key & as soon as the \texttt{test\_run} row exists; also emitted
+  by an unexpected end, so the report can still find the row \\
+\texttt{state\_changed} & \texttt{RunStatus} & \texttt{IDLE} $\to$ \texttt{RUNNING} $\to$ \texttt{FINISHED} \\
+\texttt{input\_asked} & node seq, Attempt no, input index & a blocking \texttt{ATE.input(n)} has started
+  waiting; announced from \texttt{\_on\_asked} while the worker sits in \texttt{get\_raw} \\
+\texttt{step\_finished} & node seq & this step's Attempts are done, so its POLL inputs close \\
+\texttt{failure\_prompt} & node seq, Attempt no & a Stop-on-Fail failure is waiting for a choice \\
+\texttt{prompt\_answered} & node seq, Attempt no, choice & the pause is over: emitted when answered, and
+  again when the worker moves on \\
+\texttt{action\_started} & \texttt{"pre"}/\texttt{"post"}, completed, total & a Pre- or Post-test Action
+  is about to run, so the status bar can say \texttt{Pre-test n/total} \\
+\texttt{step\_started} & node seq & an Attempt is about to run, again on each Retry \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+\texttt{prompt\_answered} is emitted twice on purpose (packet 25b review): the screen clears its prompt
+as soon as the answer is given, and a \texttt{failure\_prompt} still queued behind it must not leave an
+answered prompt painted.
+
+Two types of argument deserve a warning. \texttt{Signal(int)} in PySide6 is a C \texttt{int}:
+\texttt{emit(2**31)} with a slot connected returns normally and the slot receives -2147483648, with a
+\texttt{RuntimeWarning}; \texttt{Signal(str)} turns a non-string into \texttt{''}. A slot cannot see a
+bad value, so the check is on the sending side, and
+\texttt{tests/\allowbreak{}test\_\allowbreak{}signal\_\allowbreak{}threads\_\allowbreak32a.py} pins every value the engine sends. Everything the engine
+emits is bounded by the schedule (node sequence, Attempt number, input index) or is a string that is
+always a string (\texttt{"pre"}/\texttt{"post"}, \texttt{CONTINUE}/\texttt{RETRY}/\texttt{ABORT}, a
+path). Anything that could exceed \texttt{2**31 - 1} must be declared \texttt{Signal(object)}.
+
+\section{Blocking, and how a block lets go}
+
+Three things block the worker, and each has to give way to an abort:
+
+\begin{itemize}
+  \item \textbf{A Stop-on-Fail pause.} \texttt{\_\allowbreak{}pause\_\allowbreak{}for\_\allowbreak{}operator} blocks with no timeout until the
+    Operator answers. Packet 32b found the bug that this is about: a run-level abort that arrived before
+    the pause was entered used to be lost, because the pause never read the flag. It now ends on the
+    abort. A real answer given at the same moment is not overwritten, and \texttt{choose} returns
+    \texttt{None} once the flag is set, so the order of the two decides rather than the worker's 50 ms
+    poll.
+  \item \textbf{\texttt{ATE.input(n)}.} A blocking input waits in \texttt{OperatorInput.get\_\allowbreak{}raw}, which
+    takes the abort flag and gives up. The ask is announced with \texttt{input\_asked} first, so a layout
+    can put a widget under the step and the Operator can answer while the worker sits.
+  \item \textbf{\texttt{ATE.sleep(seconds)}.} The wait is sliced, so the abort lands within about 50 ms.
+\end{itemize}
+
+A busy loop is interrupted by the Lua count hook, which calls \texttt{aborted()} every 1000
+instructions and raises \texttt{aborted} once the flag is set; \texttt{pcall} and \texttt{xpcall} are
+wrapped to re-raise it so an abort cannot be caught. A Device call is interrupted by
+\texttt{ate/devices/abort.py} (chapter~\ref{ch:devices}).
+
+Three things cannot be interrupted at all, and the manual says so rather than promising otherwise: a
+SQLite commit already in progress, one Lua C call such as a pattern match on a huge string, and
+\texttt{set\_visa\_attribute} or \texttt{resource.timeout} on the worker.
+
+\section{What may run on the worker}
+
+Allowed, because the abort flag is checked inside it and it never touches a widget:
+
+\begin{itemize}
+  \item a Test Step or Action closure, synchronously. \texttt{run\_engine.py}'s docstring assumes
+    this: the sandbox does not remove coroutines, but spec story 83 records a busy loop in one as an
+    exception to the abort bound, so \texttt{ATE.report} is attributed to a step by snapshotting the
+    host's report log before the closure runs and diffing it afterwards;
+  \item store writes. Each is its own commit (the Engine is autocommit), which is what makes the record
+    append-only and crash-safe, and also why a run with many rows costs many commits --- see
+    chapter~\ref{ch:storage};
+  \item Device reads, writes, opens and closes, through the registry, which hands every call to
+    \texttt{run\_abortable};
+  \item the drains: \texttt{\_\allowbreak{}flush\_\allowbreak{}device\_\allowbreak{}warnings}, \texttt{\_flush\_equipment} and
+    \texttt{\_record\_files} run on the worker and write what the host collected.
+\end{itemize}
+
+Not allowed:
+
+\begin{itemize}
+  \item touching a widget or importing \texttt{QtWidgets};
+  \item a wait that does not check the abort flag. Every loop a worker enters must have an exit the
+    abort can reach;
+  \item emitting from the main thread into the engine as if it were the worker. The main thread calls
+    \texttt{choose()} and \texttt{request\_abort()}; it does not step the schedule.
+\end{itemize}
+
+One detail that trips people reading log stamps: \texttt{record\_log} takes \texttt{time.monotonic()}
+when the line is recorded, and the drain only maps that to wall-clock. The \texttt{at} column promises
+when the worker logged the line, not when the worker got there on time. Packet 31e's stamp test was
+comparing it with a deadline and was measuring the wrong thing.
+
+\cando{trace a run from \texttt{start()} to \texttt{FINISHED}, name each signal and what blocks the
+worker, and say what an abort can and cannot interrupt.}

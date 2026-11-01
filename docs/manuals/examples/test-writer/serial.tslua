@@ -1,0 +1,36 @@
+-- serial.tslua: a SERIAL Device through pyserial.
+--
+-- The port here is pyserial's socket:// URL, which opens a TCP connection to the
+-- simulator peer; a real station names a COM or tty port instead.
+--
+-- Demonstrates:
+--   * open has no defaults, so every field is named;
+--   * the Parity and FlowControl enums;
+--   * the same connection read with the Device's own terminator.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_SCPI_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025
+
+return ScheduleParams("Manual: SERIAL", "open a serial port and read a reply")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("Open the port"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.SERIAL, {
+          port = "socket://" .. host .. ":" .. port,
+          baud = 115200,
+          dataBits = 8,
+          stopBits = 1,
+          parity = Parity.NONE,
+          flowControl = FlowControl.NONE,
+          timeout = 2.0,
+          readTerm = "\n",
+          writeTerm = "\n",
+        })
+        ATE.write(dev, devices.Write("*IDN?"))
+        local reply = ATE.read(dev)
+        ATE.report(reply.count > 0 and Result.PASS or Result.FAIL, "serial reply: " .. (reply.data or "nothing"))
+        ATE.close(dev)
+      end),
+  })

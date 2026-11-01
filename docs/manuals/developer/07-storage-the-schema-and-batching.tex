@@ -1,0 +1,109 @@
+\chapter{Storage: the schema, batching, and the log counter}\label{ch:storage}
+
+\texttt{src/ate/storage/} is the only place ATE writes SQL. Two files: \texttt{schema.py} declares every
+table as a SQLAlchemy Core table, and \texttt{store.py} implements \texttt{RunStore}, the only interface
+the rest of the application uses. Nothing outside these two files contains a table name or a query.
+
+\section{The record, and the version}
+
+The Test Run record is ten tables. \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} reads them from
+\texttt{schema.metadata.tables}, so this list is the code's list:
+
+\begingroup\small
+\begin{longtable}{p{3.2cm} p{8.4cm}}
+\toprule
+\textbf{Table} & \textbf{One row is} \\
+\midrule
+\endhead
+\texttt{test\_run} & one Test Run: Operator, Project, UUT, schedule, Media Release, Stop on Fail, start
+  and end times, UTC offset, Result, End Reason \\
+\texttt{node} & one step or header in the expanded tree, with its number, enable state, Result and
+  Attempt count \\
+\texttt{attempt} & one execution of one step, with its times, Result, message, actual, expected, and the
+  Stop-on-Fail choice made at it \\
+\texttt{action} & one Pre-test or Post-test Action call, with phase, order, times and outcome
+  (\texttt{ok}, \texttt{error}, \texttt{aborted}, \texttt{skipped}) \\
+\texttt{log\_line} & one line of the Run log, owned by an Action or an Attempt, or run-level \\
+\texttt{input\_value} & one Step Input answer \\
+\texttt{equipment} & one \texttt{ATE.addEquipment} declaration, in declaration order \\
+\texttt{media\_release} & one Media Release in the resolved chain; the release owning the run is seq 0 \\
+\texttt{run\_file} & one file the run used, with expected and computed checksums and whether they differed \\
+\texttt{schedule\_instance} & the top-level schedule and every Sub-schedule include, in tree order \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+Types are deliberately portable: UUIDs are 36-character text, times are ISO-8601 UTC text with
+milliseconds (\texttt{\_now\_iso}), booleans are 0/1 (\texttt{\_as\_int}), structured values are JSON
+text. There is no SQLite-only column type anywhere; a Postgres backend is meant to be a connection
+change. The version lives in SQLite's \texttt{PRAGMA user\_version}, and \texttt{SCHEMA\_VERSION} is
+currently 5.
+
+At launch, \texttt{check\_\allowbreak{}database\_\allowbreak{}at\_\allowbreak{}launch} inspects the file read-only --- it never creates it ---
+and compares \texttt{user\_version} with \texttt{SCHEMA\_VERSION}. A missing, empty or older database
+refuses with \texttt{run `ate db migrate` to create or upgrade the database at \dots}; a newer one refuses
+with \texttt{this ATE is too old for the database at \dots; update ATE}. Only an exact match allows
+launch. The application never migrates; \texttt{ate db migrate} does, and the hint carries
+\texttt{--config <path>} when the Station is not reading the platform default (packet 30c).
+
+\texttt{RunStore.\_\allowbreak{}ensure\_\allowbreak{}schema} is idempotent: \texttt{metadata.create\_all} reflects each table through
+the backend's own catalog, so reopening a populated database never fails, and then the two pragmas ---
+WAL and the version --- are set on the store's own stdlib connection. That is the only raw SQL in ATE,
+and it is confined to pragmas.
+
+\section{One commit per row, and why that is a design decision}
+
+The Core Engine is autocommit: each write commits immediately. That is what makes the record
+append-only and crash-safe --- an open run simply has no \texttt{ended\_at} yet --- and it is also the
+reason an abort over 400 unrun steps used to make 404 commits and take longer than spec story 83's 10 s with
+no stall at all (packet 32b). The answer was batching, not a different transaction model.
+
+SQLite limits the number of variables one statement may carry; the lowest default is 999
+(\texttt{\_\allowbreak{}SQL\_\allowbreak{}MAX\_\allowbreak{}VARIABLES}, the pre-3.32 default, so the code stays safe on old builds too).
+\texttt{\_\allowbreak{}rows\_\allowbreak{}per\_\allowbreak{}statement(table)} computes the batch size from the table's column count ---
+\texttt{999 /\allowbreak/\allowbreak len(table.columns)} --- rather than a hard-coded 80 chosen for \texttt{node}'s twelve
+columns. A batch sized for one table breaks the day another table gains a column, which
+\texttt{test\_\allowbreak{}a\_\allowbreak{}row\_\allowbreak{}batch\_\allowbreak{}is\_\allowbreak{}sized\_\allowbreak{}to\_\allowbreak{}the\_\allowbreak{}table\_\allowbreak{}it\_\allowbreak{}writes} is there to prevent.
+\texttt{\_row\_chunks} then yields the rows in pieces that fit.
+
+There is a trap here that a new writer will hit. Each chunk is its own commit, so the run's counters must
+advance \emph{inside} the loop, only for chunks that landed. \texttt{insert\_log\_lines} does exactly
+that: before packet 32b a half-written batch left \texttt{\_log\_seq} behind the rows already in the
+table, and the next write failed with \texttt{UNIQUE constraint failed: log\_line.run\_uuid,
+log\_line.seq}. The test is
+\texttt{test\_\allowbreak{}a\_\allowbreak{}log\_\allowbreak{}batch\_\allowbreak{}failing\_\allowbreak{}part\_\allowbreak{}way\_\allowbreak{}through\_\allowbreak{}keeps\_\allowbreak{}the\_\allowbreak{}log\_\allowbreak{}counter\_\allowbreak{}true}.
+
+\section{\texttt{\_log\_seq}: one counter per run, four tables}
+
+\texttt{log\_line}, \texttt{action}, \texttt{input\_value} and \texttt{equipment} all have
+\texttt{(run\_uuid, seq)} as their primary key, and they share one per-run counter held in
+\texttt{RunStore.\_log\_seq}. That is what makes a log line, an Action and an Equipment declaration
+uniquely keyed without a global sequence, and it is why the ordering of the drain calls matters: the
+engine diffs the host's collected lines around each step, and a batch can hold several lines from one
+Attempt.
+
+Rules for a new row type that shares this key:
+
+\begin{itemize}
+  \item take \texttt{next\_\allowbreak{}seq = self.\_\allowbreak{}log\_\allowbreak{}seq.get(run\_\allowbreak{}uuid, 0)} and advance it by the number of rows
+    that actually landed;
+  \item never assume a batch is one commit;
+  \item stamp ownership (\texttt{action\_seq}, or \texttt{node\_seq} plus \texttt{attempt\_no}) the way the
+    log lines do, so the report can group a row under the step or Action that produced it.
+\end{itemize}
+
+\section{Reading, and the \texttt{\_run} subtlety}
+
+Every read goes through \texttt{RunStore.\_run}, which executes a Core statement and
+\texttt{fetchall()}s the rows \emph{inside} the connection context. Packet 25a review found why:
+returning the open \texttt{Result} left a read statement alive after the context closed; the GUI thread
+fetched it later, the connection pool handed the same sqlite3 connection --- cursor still open --- to the
+run worker, and a worker INSERT colliding with the unfinalised read aborted a long run with ``database is
+locked''. Do not return a result object from \texttt{\_run}. Materialise it.
+
+\texttt{query\_runs} is the History screen's query: filters on the eight \texttt{HISTORY\_COLUMNS},
+sorting on exactly those keys, and \texttt{run\_uuid} ordered last so paging never repeats or skips a row
+when several runs share a sort value. Dates are normalised to ISO-8601 UTC by \texttt{\_norm\_date} so
+lexical comparison is correct.
+
+\cando{add a table to the record the way the code does it, and explain why a batch is not one commit.}

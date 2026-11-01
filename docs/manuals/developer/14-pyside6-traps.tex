@@ -1,0 +1,50 @@
+\chapter{PySide6 traps, found the hard way}\label{ch:pyside}
+
+ATE uses PySide6 (ADR-0001, \texttt{docs/\allowbreak{}adr/\allowbreak0001-pyside6-instead-of-pyqt6.md}: PyQt6's wheels are GPL,
+and shipping a GPL binding under an MIT label is a licence gap). The switch from PyQt6 found real
+behaviour differences. Each is a trap for someone writing code or a test here.
+
+\begin{itemize}
+  \item \textbf{An exception in a slot or \texttt{QThread.run} does not end the process.} PyQt6 aborted
+    with SIGABRT (exit 134). PySide6 prints the traceback, calls \texttt{sys.excepthook} and carries on.
+    That is why the guard in \texttt{RunEngine.run} and the hook in \texttt{ate.exception\_log} exist ---
+    not as style, but because otherwise the run row stays open and the screen waits forever.
+  \item \textbf{A child process's exit code is not a signal.} A test that started a Qt process used to
+    prove nothing had gone wrong by \texttt{returncode == 0}. It no longer can. Use
+    \texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception(stderr)}.
+  \item \textbf{\texttt{Signal(int)} is a C \texttt{int}.} \texttt{emit(2**31)} with a slot connected
+    returns normally and the slot receives -2147483648 with a \texttt{RuntimeWarning}; the
+    \texttt{OverflowError} is raised only when nothing is connected, and it can surface later as a
+    \texttt{SystemError} in a slot's next C call. \texttt{Signal(str)} turns \texttt{5} and \texttt{None}
+    into \texttt{''}. A slot cannot see a bad value, so validate on the sending side. Declare
+    \texttt{Signal(object)} for anything that can exceed \texttt{2**31 - 1}.
+  \item \textbf{Two Qt builds in one process.} PySide6-Addons pins PySide6-Essentials and shiboken6 to the
+    exact same version, and CI checks that the Qt the runtime reports matches the bindings. If it does not,
+    WebEngine loads a second Qt and Windows dies with \texttt{0xc0000139} the moment WebEngine is
+    imported. On Linux it tolerates it --- until it does not.
+  \item \textbf{\texttt{QtWebEngineWidgets} imports \texttt{QtWebChannel}.} Excluding it from the bundle is
+    the packaging bug that produced a bundle that looked complete and failed at render time.
+  \item \textbf{Deleted objects: different message, same handling.} PyQt6 raises
+    \texttt{wrapped C/\allowbreak{}C++ object of type Thing has been deleted}; PySide6 raises
+    \texttt{libshiboken: Internal C++ object (Thing) already deleted.} Every catch here is
+    \texttt{except RuntimeError}, so both behave the same. \texttt{sip.isdeleted(x)} became
+    \texttt{not shiboken6.isValid(x)}.
+  \item \textbf{A second \texttt{QCoreApplication} raises.} Creating one while a \texttt{QApplication}
+    exists raises \texttt{RuntimeError} in PySide6 and was tolerated by PyQt6. This is why the suite keeps
+    exactly one application --- and why \texttt{conftest.py} destroys the widget tree before quitting: an
+    orphaned \texttt{QWidget} finalised at interpreter shutdown segfaults in this Qt 6.11 build either way.
+  \item \textbf{Small API differences that only show in tests.} \texttt{findChildren} takes one type, not a
+    tuple. \texttt{QWidget.cursor()} does not compare equal to a \texttt{Qt.CursorShape} enum: read
+    \texttt{.shape()}. \texttt{QWIDGETSIZE\_MAX} is not exported, so the tests use the literal
+    \texttt{(1 << 24) - 1}.
+  \item \textbf{Offscreen on Windows has no fonts.} Qt's offscreen platform on Windows looks for fonts in
+    Qt's own (empty) library directory instead of asking Windows, so every character draws as the
+    missing-glyph box and every width is wrong. \texttt{conftest.py} sets \texttt{QT\_QPA\_FONTDIR} to
+    Windows' font directory before any Qt import, and every subprocess a test starts inherits it. A real
+    operator's \texttt{windows} platform has no such problem; a test on a Windows runner does.
+\end{itemize}
+
+None of these were run ``on both bindings'': only PySide6 was tested here. The ADR records the
+comparison as a reviewer's probe where a claim rests on one.
+
+\cando{name a difference between PySide6 and PyQt6 that changes how a test must be written.}

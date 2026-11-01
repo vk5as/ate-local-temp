@@ -1,0 +1,37 @@
+-- results.tslua: every value the Result enum can record.
+--
+-- Stop on Fail is turned off here so the run reaches every step. A Test Run is FAIL if
+-- any step records FAIL or ERROR; the other Result values do not fail the run by
+-- themselves. A step that reports nothing at all records NOREPORT, which ATE also logs
+-- as a WARNING.
+return ScheduleParams("Manual: every Result", "one step for each Result value")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("A pass"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "within limits", 5.0, 5.0) end),
+
+    StepParams("A fail"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.FAIL, "rail low", 4.1, 5.0) end),
+
+    -- Reporting ERROR is a legitimate way to say "this step could not be completed";
+    -- an uncaught Lua error in a step records ERROR too.
+    StepParams("An error"):setStepNo("3.")
+      :setAction(function() ATE.report(Result.ERROR, "the probe was not connected") end),
+
+    -- SKIPPED is the schedule's own decision: the step ran, chose not to test anything.
+    StepParams("Skipped on purpose"):setStepNo("4.")
+      :setAction(function() ATE.report(Result.SKIPPED, "no test for this variant") end),
+
+    -- NOTRUN can also be reported by the schedule; ATE records it for a step that never
+    -- ran because the run stopped or was aborted.
+    StepParams("Not run"):setStepNo("5.")
+      :setAction(function() ATE.report(Result.NOTRUN, "skipped by the schedule") end),
+
+    -- FORCED_NOTRUN: the schedule decided the step does not apply to this UUT.
+    StepParams("Not fitted"):setStepNo("6.")
+      :setAction(function() ATE.report(Result.FORCED_NOTRUN, "this board has no second rail") end),
+
+    -- NOREPORT: this step runs and reports nothing, so ATE records NOREPORT and warns.
+    StepParams("Reports nothing"):setStepNo("7.")
+      :setAction(function() ATE.log(Log.INFO, "looked, but reported nothing") end),
+  })

@@ -1,0 +1,18 @@
+-- left_open.tslua: a Device the schedule never closes.
+--
+-- A Test Run closes every Device still open when it ends, and logs one WARNING naming
+-- each one. That is why a Device opened in a Pre-test Action does not have to be closed
+-- by hand - it is worth closing anyway, so the log stays clean.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_SCPI_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025
+
+return ScheduleParams("Manual: a Device left open", "ATE closes what the schedule forgets")
+  :setSchedule({
+    StepParams("Open and forget"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, devices.Tcp(host, port):setTimeout(1.0))
+        ATE.report(Result.PASS, "opened a Device and left it open")
+      end),
+  })

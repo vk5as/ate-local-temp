@@ -1,0 +1,99 @@
+{
+  "format": 1,
+  "mediaNumber": "MR-MANUAL-TW",
+  "name": "Test writer manual examples",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "first.tslua",
+      "sha256": "a260d2b923819ff6f71804370d4afce9ac77269ec9d9cf9c4b0dae35b85e48c8"
+    },
+    {
+      "path": "steps.tslua",
+      "sha256": "2203cddc55bf0daf0e557d3ecf1b847e77bf8fa873385cea775e32f240c5af97"
+    },
+    {
+      "path": "inputs.tslua",
+      "sha256": "6a746ebad482542f81d5b846b65a57adb467942e5289d9fc7e76b9bdaabd22fc"
+    },
+    {
+      "path": "actions.tslua",
+      "sha256": "a15e9a9fa060f0e829cc2e047d2c0313a1a2203c7c33356e792f699d1b02c526"
+    },
+    {
+      "path": "retry.tslua",
+      "sha256": "5375d9870ad11af1553eeaa1d5fd27ce586c2a5cce78af6b4a493a029fee58c9"
+    },
+    {
+      "path": "results.tslua",
+      "sha256": "49f80374f637c13e34281140912335fcb583fa87865674def089b18188130ce7"
+    },
+    {
+      "path": "main.tslua",
+      "sha256": "fc768ae110764fb3a7a9a4a29fdd93df3beafc09b8fff6ea7fa71efa825964d4"
+    },
+    {
+      "path": "channel.tslua",
+      "hidden": true,
+      "sha256": "1cecd8b3566e4783c86375ebcdac6b69eaae52f1ea74e32c495babf7009b6e63"
+    },
+    {
+      "path": "led.tslua",
+      "hidden": true,
+      "sha256": "3477e6a5a1578108bd76687e13e211ca1c48b5bac3343160a4e86319f87f46f8"
+    },
+    {
+      "path": "modules.tslua",
+      "sha256": "f34234441c454b9e0559e778fb86c6f10086f2edd4248207953ce67f22fae386"
+    },
+    {
+      "path": "lib/rails.lua",
+      "sha256": "392e385ab81dfb814a7ddec0cb1c0799c97d714b3d97c2cfb3306e6ba6cde029"
+    },
+    {
+      "path": "modules/limits.lua",
+      "module": "board_limits",
+      "sha256": "ea8a21a8a7bef16b0abaa9efcc07c8f08416b4a07b712ac35b9ffdbf8c31fd99"
+    },
+    {
+      "path": "tcp.tslua",
+      "sha256": "8439beda05cc96f5c6bd69629951fc2318a7526eb085fb2bb322fc711c2cb8c7"
+    },
+    {
+      "path": "udp.tslua",
+      "sha256": "324ce6659ab74bcea159fbe20d063925e5b5a88992b2ad1755e4d68625f461b4"
+    },
+    {
+      "path": "serial.tslua",
+      "sha256": "dd717a441db74b490b84b999f82a54b7e0d2b3b3185906ae83150562c7dcb768"
+    },
+    {
+      "path": "visa.tslua",
+      "sha256": "5c9d69646277814d6d0e134380ba32e6402ce4d9d3f4006dbe4f622bb107afb8"
+    },
+    {
+      "path": "errors.tslua",
+      "sha256": "66151279fc9e62462e80a75e273785fac0bb1c8f2a7bf0aeec62f312a1fb0fe2"
+    },
+    {
+      "path": "left_open.tslua",
+      "sha256": "a53f424fe15813bafdcdf74f0c7eb4e69b37bbbb5fa27d833b58eb7d1923b279"
+    },
+    {
+      "path": "logging.tslua",
+      "sha256": "ee6b7ee6f1a3b1ed15522544d93645c694dfd29d27d53188416c8e956170dd02"
+    },
+    {
+      "path": "abort.tslua",
+      "sha256": "b164d0057d61fa7d5f4092a2b47154dc4ca16dfd685640ef09338f4b862eb308"
+    },
+    {
+      "path": "sandbox.tslua",
+      "sha256": "e40b7d8eafd167b5d52f844957962b505f53009d791a38bb2729413462aaee99"
+    },
+    {
+      "path": "forbidden.tslua",
+      "sha256": "eae7b5e968792a6abdcf883ccde1e956fdf4f7a6c14e2d8aab8ff02c1fc8dd97"
+    }
+  ]
+}

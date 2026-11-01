@@ -177,6 +177,31 @@ def test_open_every_field_then_write_and_read_through_pyvisa(app: QCoreApplicati
     assert peer.received[peer.connections[-1]] == b"*IDN?\n", "the peer got the command with its terminator"
 
 
+def test_a_session_closed_by_another_manager_is_not_reused(app: QCoreApplication) -> None:
+    """pyvisa-py's session is shared by every ResourceManager in the process, so closing one kills
+    the cached one.
+
+    `ate _selftest` opens a manager of its own and closes it. Run in the same process as a Test
+    Run, that would leave every later VISA open failing with "Invalid session handle", so the
+    cached manager is checked before it is used and rebuilt when its session is gone."""
+    peer = LoopbackPeer(payload=b"AFTER\n", after_first_byte=True)
+    peer.start()
+    try:
+        cached = get_resource_manager()
+        throwaway = pyvisa.ResourceManager("@py")
+        throwaway.close()
+        with pytest.raises(errors.InvalidSession):
+            cached.session  # the shared session is dead
+
+        store, ru = _run_with_peer(app, _visa_step("""
+        ATE.write(dev, {data = "*IDN?"})
+        local r = ATE.read(dev)
+        ATE.report(Result.PASS, r.data)"""), peer.port)
+        assert _step_message(store, ru) == "AFTER", "the open went through a manager built again"
+    finally:
+        peer.stop()
+
+
 def test_a_size_read_takes_that_many_bytes_and_the_rest_survives(app: QCoreApplication) -> None:
     """``size`` caps a read; what arrived past it is not lost, the next read finds it."""
     peer = LoopbackPeer(payload=b"SEAM1\n", after_first_byte=True)

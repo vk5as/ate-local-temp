@@ -1,0 +1,24 @@
+-- actions.tslua: Pre-test and Post-test Actions, and Equipment.
+--
+-- Demonstrates:
+--   * a Pre-test Action runs before the first step; a Post-test Action runs after the
+--     last one. Both are called with the run's current result as their first argument:
+--     a Pre-test Action always sees "PASS", the Post-test one sees the final PASS or FAIL.
+--   * ATE.addEquipment is legal in an Action, a step, or both; the report's Equipment
+--     section comes from it. Declaring the same name and serial twice adds no second row.
+--   * ATE.report and ATE.input are NOT legal in an Action: only Test Steps have a result
+--     and an Operator prompt.
+return ScheduleParams("Manual: Actions", "Pre-test and Post-test Actions")
+  :setPreTestAction(function(passFail)
+    ATE.log(Log.INFO, "pre-test action, run stands at " .. passFail)
+    ATE.addEquipment("Bench power supply", "PSU-123", "GPIB::1", "2026-12-01", "0-60 V")
+  end)
+  :setPostTestAction(function(passFail)
+    ATE.log(Log.INFO, "post-test action, run result was " .. passFail)
+  end)
+  :setSchedule({
+    StepParams("Measure the rail"):setStepNo("1.")
+      :setAction(function()
+        ATE.report(Result.PASS, "rail at 5.0 V", 5.0, 5.0)
+      end),
+  })

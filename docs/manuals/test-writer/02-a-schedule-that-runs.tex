@@ -1,0 +1,79 @@
+\chapter{A schedule that runs}\label{ch:a-schedule-that-runs}
+
+The shortest Test Schedule that does something is eight lines. Every example in this manual
+is a real file in \texttt{docs/manuals/examples/test-writer/}, and every one of them runs
+headless in the test suite (\texttt{tests/test\_manuals.py}). Read this one, then run it.
+
+\noindent\textbf{\texttt{first.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/first.tslua}
+
+Three things are happening here.
+
+\begin{itemize}
+  \item \texttt{ScheduleParams(name, description)} builds the schedule. The name is required;
+    it is what the Operator sees on the Run screen.
+  \item The \texttt{setSchedule} call gives the schedule its Test Steps, in the order they
+    run, and one \texttt{StepParams(name)} is one step.
+  \item \texttt{:setAction(function() \dots end)} is the step's logic. ATE calls it; inside it
+    the schedule calls the \texttt{ATE} table.
+\end{itemize}
+
+The setters all return the object they were given, so they chain. Order does not matter: the
+setters only stash values, and ATE checks the whole schedule when the file finishes loading.
+
+\section{Running it}
+
+Point a Station at the examples directory, then run it from the GUI or headless. Headless, from
+a source checkout, there is one script beside this manual that runs any Test Schedule any
+Media Release contains:
+
+\begin{lstlisting}[language=ATEShell]
+QT_QPA_PLATFORM=offscreen python docs/manuals/examples/test-writer/run_your_schedule.py \
+  --release docs/manuals/examples/test-writer --schedule "Manual: first schedule"
+\end{lstlisting}
+
+\noindent\textbf{\texttt{run\_your\_schedule.py}}\par
+\lstinputlisting[language=ATEPython, caption={\texttt{docs/manuals/examples/test-writer/run\_your\_schedule.py}}]{../examples/test-writer/run_your_schedule.py}
+
+A Step Input has to be answered or the run never ends, so each one is given with
+\texttt{--input}, keyed by the \textbf{Step Name}: \texttt{--input "Operator input=1.5"}. A
+Stop-on-Fail pause is answered with \texttt{--choice CONTINUE}, \texttt{RETRY} or
+\texttt{ABORT}, in order. A POLL input is clicked with \texttt{--poll "Step name=BUTTON"}, which
+clicks that step's first POLL input; a step with more than one POLL input names the one it means,
+\texttt{--poll "Step name=2=STOP"}.
+The script prints the run row, every step's Result, the Actions, the Equipment count, the
+WARNING and ERROR log lines, and the Test Report paths. An answer the step's own declaration
+rejects is not recorded: the script exits 1 naming the value and the rule it broke.
+
+The shipped example release can also be run whole:
+
+\begin{lstlisting}[language=ATEShell]
+QT_QPA_PLATFORM=offscreen python examples/harness/run_examples.py
+\end{lstlisting}
+
+That harness runs the shipped example release with its simulator peers; the manual's own
+examples are run by \texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML
+Test Report under \texttt{reports.directory}, and a PDF as well unless the Station is running
+elevated and the Operator declines the sandbox question.
+
+An installed ATE has no headless runner. \texttt{ate \_selftest --run} runs a built-in one-step
+schedule to prove a bundle can run a Test Run, and \texttt{ate \_selftest --scan DIR} loads
+every schedule in a directory and reports the broken ones --- a load check, not a run. To run
+your own schedule from a command line you need a source checkout.
+
+Two traps this script makes visible. An unanswered Step Input does not fail the schedule: the
+worker blocks, and the harness raises \texttt{TimeoutError: schedule never finished}, leaving
+the run row open with no \texttt{ended\_at} for the next launch to close as
+\texttt{INTERRUPTED}/\texttt{FAIL}. And a POLL is answered by a click, not by a value:
+\texttt{--poll}, never \texttt{--input}.
+
+\section{What the run record shows}
+
+A Test Run is one execution of one schedule against one UUT at one moment. ATE records the run
+itself, every step, every Attempt of every step, every Operator input, every Action, every
+Equipment declaration and every log line. The Test Report is generated from those rows, so
+anything the schedule does that is worth knowing has to reach one of them: a
+\texttt{ATE.report} call, an \texttt{ATE.log} line, or an \texttt{ATE.addEquipment} call.
+
+\cando{write, load and run a Test Schedule of your own, and say which rows of the Test Run
+record each part of it produced.}

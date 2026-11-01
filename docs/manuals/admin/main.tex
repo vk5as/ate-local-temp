@@ -1,0 +1,37 @@
+% Running an ATE Station - the system administrator's manual (packet 34b).
+%
+% Build: python docs/manuals/build.py admin
+% (latexmk -lualatex inside texlive/texlive:latest; see docs/building-from-source.md.)
+%
+% Every fact here is checked against the code, and every command in a code block is run by
+% tests/test_manuals.py in a temporary directory. Where the wayfinding assets and the code
+% disagree, the code is followed and the disagreement is listed in the last chapter.
+
+\documentclass[a4paper,11pt]{report}
+
+\usepackage{manual}  % docs/manuals/common/manual.sty, on TEXINPUTS by the build script
+
+\title{%
+  \textbf{Running an ATE Station}\\[6pt]
+  \large The system administrator's manual\\[10pt]
+  \normalsize ATE v1.0 \quad\textbullet\quad every command here is run by the test suite}
+\author{ATE}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\input{01-the-station-and-what-is-proven}
+\input{02-installing}
+\input{03-preparing-a-station}
+\input{04-the-config-file}
+\input{05-the-database}
+\input{06-media-releases}
+\input{07-running-a-test-run}
+\input{08-logs-and-where-they-are}
+\input{09-upgrades-uninstalling-and-licences}
+\input{10-troubleshooting-by-symptom}
+\input{11-reference}
+
+\end{document}

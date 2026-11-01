@@ -1,0 +1,40 @@
+-- udp.tslua: a UDP Device, where one datagram is one message.
+--
+-- Demonstrates:
+--   * UDP has no terminators, so readTerm and writeTerm are not fields this Device Type
+--     knows; passing one is a schedule bug that raises naming the field;
+--   * a datagram longer than the size asked for is truncated and returned with partial =
+--     true, which the log calls a truncation rather than a timeout;
+--   * the receive buffer is a queue of whole datagrams, so a reply that arrives before the
+--     schedule reads it is not lost.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_UDP_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_UDP_PORT")) or 5026
+
+return ScheduleParams("Manual: UDP", "send and read datagrams")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("Echo one datagram"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.UDP, devices.Udp(host, port):setTimeout(2.0))
+        ATE.write(dev, devices.Write("PING"))
+        local reply = ATE.read(dev)
+        ATE.report(reply.data == "ECHO:PING" and Result.PASS or Result.FAIL,
+                   "the peer echoed " .. (reply.data or "nothing"),
+                   reply.count, 9)
+        ATE.close(dev)
+      end),
+
+    -- Ask for 10 bytes of a 40-byte datagram: ATE returns the first 10 and says partial.
+    StepParams("Truncate a datagram"):setStepNo("2.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.UDP, devices.Udp(host, port):setTimeout(2.0))
+        ATE.write(dev, devices.Write("a datagram longer than the size asked for"))
+        local r = ATE.read(dev, devices.Read():setSize(10))
+        ATE.report((r.count == 10 and r.partial) and Result.PASS or Result.FAIL,
+                   "read " .. r.count .. " of a longer datagram",
+                   r.count, 10)
+        ATE.close(dev)
+      end),
+  })

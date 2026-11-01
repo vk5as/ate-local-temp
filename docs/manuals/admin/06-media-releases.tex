@@ -1,0 +1,111 @@
+\chapter{Media Releases, checksums and \texttt{storeMismatchedFiles}}\label{ch:media-releases}
+
+A Test Schedule cannot run unless a Media Release ships it. As the administrator you do not
+install Media Releases through ATE --- they have their own installers --- you put them where the
+config says ATE looks, and keep their checksums honest.
+
+\section{Where they go}
+
+ATE searches every directory in \texttt{testDefinitions.directories}, recursively, for
+\texttt{.atedef} files. Each Test Definition names a Media Release and lists every Lua file
+belonging to it. A directory in that list that does not exist is a warning at each scan, not a
+failure:
+
+\begin{lstlisting}[language=ATEShell]
+WARNING: Test Definition directory does not exist: /var/lib/ate/definitions
+\end{lstlisting}
+
+A Media Release is a directory next to its \texttt{.atedef}:
+
+\begin{lstlisting}[language=ATEShell]
+definitions/
+  MR-1043/
+    release.atedef
+    main.tslua
+    lib/scpi.lua
+\end{lstlisting}
+
+\section{What a Test Definition says}
+
+\texttt{format} must be 1. \texttt{mediaNumber}, \texttt{name} and \texttt{version} are required and
+must be non-empty; \texttt{version} must be valid semver 2.0.0. \texttt{files} is a list of
+\texttt{path} and \texttt{sha256} pairs, each path ending \texttt{.tslua} (a Test Schedule) or
+\texttt{.lua} (a module); \texttt{hidden} is only valid on a schedule, \texttt{module} only on a
+module. \texttt{depends} lists other Media Releases by name and a semver range, resolved
+transitively, with cycle and ambiguity detection.
+
+A structural defect makes that one definition broken and lists it with its error while the rest of
+the scan carries on. The messages are literal, and they are the ones you will see:
+
+\begin{lstlisting}[language=ATEShell]
+unknown .atedef format: 2
+required 'mediaNumber' is missing or empty
+'1.2' is not valid semver 2.0.0
+listed file is missing: lib/scpi.lua
+duplicate path 'lib/scpi.lua' listed more than once
+unknown file extension '.py' for lib/helper.py
+depends[0] needs 'name' and 'version'
+\end{lstlisting}
+
+A schedule that raises while it is being loaded is reported as broken with its error, and the rest
+of its Media Release stays usable.
+
+\section{Checksums, and \texttt{ate definition update}}
+
+Every listed file's SHA-256 is compared with the bytes on disk. A mismatch does not break the
+definition; it warns. At scan time the warning goes to stdout; when a Test Run uses the file, one
+WARNING line is recorded with the run:
+
+\begin{lstlisting}[language=ATEShell]
+checksum mismatch for lib/scpi.lua (expected 3f2a..., got 9b1c...)
+\end{lstlisting}
+
+To rewrite the recorded checksums so they match what is actually there --- after a release was
+edited, or when a Media Release was shipped without checksums --- run:
+
+\begin{lstlisting}[language=ATEShell]
+ate definition update definitions/MR-1043/release.atedef
+\end{lstlisting}
+
+It reads the \texttt{.atedef}, computes the SHA-256 of every listed file it can read, and writes
+them back in place, filling in any that were absent. The file is only rewritten if at least one
+checksum changed; a definition that is already correct is left byte-for-byte as it was. A listed
+file that cannot be read keeps its existing \texttt{sha256} and prints a warning rather than
+failing the command.
+
+\section{\texttt{database.storeMismatchedFiles}}
+
+This decides what happens to the \emph{bytes} of a mismatched file, not whether the run proceeds:
+the run proceeds either way.
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}p{12.2cm}@{}}
+\toprule
+Value & What happens \\
+\midrule
+\texttt{always} & The raw bytes of every mismatched file are stored with the Test Run. No
+  checkbox, no question. \\
+\texttt{never} & They are not stored. No checkbox, no question. \\
+\texttt{ask} & The Run screen shows a confirmation listing each file as \texttt{expected \dots,
+  found \dots} with a "Store mismatched files with this Test Run" checkbox, ticked by default. The
+  Operator's answer decides for this run. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Headless --- CI, a container, any run with \texttt{QT\_QPA\_PLATFORM=offscreen} --- there is nobody
+to click, and the dialog answers itself from the setting: the run starts, and the bytes are stored
+only if the setting says \texttt{always}. A run started programmatically with \texttt{ask} and
+mismatches pending and no choice given does not guess; it says
+\texttt{database.storeMismatchedFiles is 'ask' and this schedule has checksum mismatches: start()
+needs store\_mismatched=True or False}.
+
+The stored bytes go into the database, in the \texttt{run\_file} table's \texttt{content} column,
+alongside the expected and computed checksums and a mismatch flag. Every Media Release in the
+resolved dependency chain of a run is recorded too, with the SHA-256 of its \texttt{.atedef}. That
+is why \texttt{always} is a storage decision as much as a debugging one: each mismatched file adds
+its whole text to the archive, permanently.
+
+\cando{deploy a Media Release, read a broken Test Definition's error, and decide what
+\texttt{storeMismatchedFiles} should say on a Station that runs unattended.}

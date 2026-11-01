@@ -6,8 +6,11 @@ name: Release
 # push to a branch must not start this job. The per-push test matrix is .github/workflows/ci.yml.
 #
 # First run: tag v0.1.0-rc1 (2026-10-31). The Linux build and the tarball's smoke passed; the .deb and
-# wheel smokes and the Windows job failed, and the Windows job stopped at the Inno Setup step, so
-# `packaging/windows/ate.iss` and `packaging/windows/smoke_installer.py` have still never executed.
+# wheel smokes and the Windows job failed, and the Windows job stopped at the Inno Setup step. That is
+# fixed: at v0.1.0-rc2 (run 41198438867) all five job runs are green, `packaging/windows/ate.iss` is
+# compiled by `packaging/windows/build_installer.py`, and `packaging/windows/smoke_installer.py`
+# installs the installer silently, checks PATH and the database, runs a Test Run, upgrades and
+# uninstalls.
 # `packaging/linux/docker_smoke.py` runs the Linux side in `debian:stable` containers without Actions.
 # `tests/test_release_ci_27c.py` and `tests/test_release_ci_28c.py` check the workflow's shape and the
 # smoke scripts' logic, never an installed program.

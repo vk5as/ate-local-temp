@@ -259,6 +259,9 @@ def run_schedule(
     poll_by_seq = {_seq(name): (index, text) for name, (index, text) in (polls or {}).items()}
 
     refused: list[str] = []
+    #: A scripted answer the step's own declaration rejects. The step stays waiting for a value
+    #: nobody has, so the run would block until the pump timed out if the refusal were not caught.
+    unanswerable: list[str] = []
     bad_tried: set[int] = set()
     poll_pending: list[tuple[int, int, int, str, float]] = []  # (node_seq, attempt_no, index, text, announced_at)
     poll_clicked: list[tuple[int, int, str]] = []
@@ -271,13 +274,22 @@ def run_schedule(
         if node_seq in poll_by_seq and poll_by_seq[node_seq][0] == index:
             poll_pending.append((node_seq, attempt_no, index, poll_by_seq[node_seq][1], time.monotonic()))
             return
+        if node_seq not in values:
+            # Nothing scripted for this input. A POLL announces itself here as well and is answered
+            # by the click below; a blocking input nobody answers ends in the TimeoutError.
+            return
         if node_seq in bad and node_seq not in bad_tried:
             bad_tried.add(node_seq)
             try:
                 session.supply_input(node_seq, attempt_no, index, bad[node_seq])
             except ValueError as exc:
                 refused.append(f"input {index}: {bad[node_seq]!r} refused: {exc}")
-        session.supply_input(node_seq, attempt_no, index, values[node_seq])
+        try:
+            session.supply_input(node_seq, attempt_no, index, values[node_seq])
+        except ValueError as exc:
+            # The refusal comes out of this slot, in the worker thread. Uncaught it is a traceback
+            # and a run that blocks until the pump times out, so record it and let the loop end.
+            unanswerable.append(f"input {index}: {values[node_seq]!r} refused: {exc}")
 
     if values:
         session.input_asked.connect(_supply)
@@ -310,8 +322,12 @@ def run_schedule(
             poll_clicked.append((node_seq, index, text))
         poll_pending[:] = [p for p in poll_pending if p not in due]
 
-    if not _pump(app, lambda: SessionState.FINISHED in states, on_tick=_click_polls):
+    if not _pump(app, lambda: SessionState.FINISHED in states or unanswerable, on_tick=_click_polls):
         raise TimeoutError(f"schedule '{schedule}' never finished")
+    if unanswerable:
+        # The step is still waiting, so the run cannot finish; say which answer was rejected
+        # rather than reporting a run that merely ran out of time.
+        raise ValueError("; ".join(unanswerable))
     if not _pump(app, lambda: reports, timeout=10.0):
         raise TimeoutError(f"schedule '{schedule}' finished without writing its report")
 

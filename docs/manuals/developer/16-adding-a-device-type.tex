@@ -1,0 +1,152 @@
+\chapter{Worked example: adding a Device Type}\label{ch:device-type}
+
+This chapter is not a description of a Device Type. It is a change made to this codebase, and every
+line in it was executed: \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} copies \texttt{src/} into a temporary
+directory, puts the driver below at \texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}echo.py}, makes the three edits
+to \texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py} shown here character for character, and runs
+\texttt{docs/\allowbreak{}manuals/\allowbreak{}examples/\allowbreak{}developer/\allowbreak{}echo.tslua} headless against that copy. If the
+manual and the code ever part company, that test fails.
+
+A Device Type has three parts, and all three have to exist: the driver that opens it, the registry
+line that makes the name mean that driver, and the enum member that lets a schedule write the name
+down. The driver is a new file; the other two, plus the import that makes the driver visible, are
+three edits in \texttt{lua\_\allowbreak{}host.py}.
+
+\section{Step 1: the driver}
+
+A driver is a subclass of \texttt{ate.devices.registry.Driver}. It declares the Device Type name,
+the fields an \texttt{ATE.open} may pass, and the fields \texttt{ATE.read}/\texttt{ATE.write} may
+pass; the registry validates every one of them generically through \texttt{validate\_params}, which
+raises a \texttt{ValueError} naming the offending field before anything connects.
+
+\lstinputlisting[language=ATEPython, caption={\texttt{docs/manuals/examples/developer/\allowbreak{}echo\allowbreak{}\_\allowbreak{}driver.py}}]{../examples/developer/echo_driver.py}
+
+Three things in that file are not decoration:
+
+\begin{itemize}
+  \item \texttt{fields} is the whole of the open-time contract. An undeclared key is refused with
+    \texttt{unknown field 'x' for ECHO device}, so a schedule typo never reaches a driver.
+  \item \texttt{read\_fields} and \texttt{write\_fields} are \texttt{READ\_FIELDS} and
+    \texttt{WRITE\_FIELDS} from \texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}stream.py}. Every Device Type takes the same
+    read and write fields; a Device with a different contract would declare its own dict, and the
+    ATE wrappers validate against the driver carried on the handle.
+  \item \texttt{partial\_\allowbreak{}read\_\allowbreak{}is\_\allowbreak{}truncation = True} on the handle is what makes a cut-short read
+    say \texttt{datagram truncated to N byte(s)} instead of \texttt{timed out after N byte(s)}. The
+    engine asks the Device which it is (packet 32b review): there is no stream and no deadline here,
+    so claiming a timeout would be a lie.
+\end{itemize}
+
+\section{Step 2: register the driver}
+
+The registry is built once per run, in \texttt{LuaHost.\_\_init\_\_}
+(\texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py}). Add one line beside the others:
+
+\begin{lstlisting}[language=ATEPython]
+        self._devices.register("TCP", TcpDriver)
+        self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
+        self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
+        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader
+        self._devices.register("ECHO", EchoDriver)  # the developer manual's worked example
+\end{lstlisting}
+
+and the import above it, in the same style the other drivers use
+(\texttt{serial}, \texttt{udp} and \texttt{visa} are imported from their own modules, not from the
+package's \texttt{\_\_init\_\_}):
+
+\begin{lstlisting}[language=ATEPython]
+from ..devices.echo import EchoDriver  # the developer manual's worked example
+\end{lstlisting}
+
+Without this line the enum member is a name with nothing behind it: \texttt{ATE.open(DeviceType.ECHO,
+\{label = "x"\})} reaches the registry, which raises \texttt{unknown DeviceType 'ECHO'}. That test is
+run too --- see the last section of this chapter.
+
+\section{Step 3: the enum member}
+
+The flat enum tables a schedule can see live in \texttt{\_ENUMS} in the same file. The Device Type
+table is flat: each name maps to its own label.
+
+\begin{lstlisting}[language=ATEPython]
+    "DeviceType": {
+        "ECHO": "ECHO",  # the developer manual's worked example
+        "SERIAL": "SERIAL",
+        "TCP": "TCP",
+        "UDP": "UDP",
+        "VISA": "VISA",
+    },
+\end{lstlisting}
+
+Each entry maps the Lua table name to a member; \texttt{\_device\_type\_name()} (also in
+\texttt{lua\_\allowbreak host.py}) turns a member back into the string the registry looks up. A member
+resolves to its label, a one-field table \texttt{\{TCP = "TCP"\}} resolves to its single key, a bare
+string is accepted as the name, and anything else --- including \texttt{nil}, which is what an enum
+table with no such member gives a schedule --- raises \texttt{deviceType must be a DeviceType enum
+member}.
+
+\section{Step 4: run it}
+
+The schedule below is the one the test runs. It writes a terminator, leaves a Device open at the end
+of the run, cuts a read with \texttt{size} and answers one Step Input from the command line --- four
+things a driver and the session have to get right, and each of them shows up in the record.
+
+\lstinputlisting[language=ATELua, caption={\texttt{docs/manuals/examples/developer/echo.tslua}}]{../examples/developer/echo.tslua}
+
+To run it yourself against a copy of the source with the driver in place, put the runner from
+chapter~\ref{ch:session} in \texttt{runner.py} and start it with the copy of \texttt{src} on
+\texttt{PYTHONPATH}:
+
+\begin{lstlisting}[language=ATEShell]
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
+\end{lstlisting}
+
+\section{What the run proves}
+
+The test asserts the run ends \texttt{PASS} / \texttt{COMPLETED} with all four steps
+\texttt{PASS}, the Step Input recorded as \texttt{42}, and then reads the traces the engine
+recorded:
+
+\begingroup\small
+\begin{longtable}{p{5.4cm} p{7.6cm}}
+\toprule
+\textbf{Line in the Run log} & \textbf{What it proves} \\
+\midrule
+\endhead
+\texttt{open ECHO ok (0.3 ms)} & the registry wrapped the new driver like any other and traced it.
+  The open line names the Device as \texttt{device\_\allowbreak label} derives it from the open
+  params (type plus address); an \texttt{ECHO} has no address, so it is just \texttt{ECHO}. The calls
+  after it carry the handle's own \texttt{describe()} \\
+\texttt{write ECHO manual-example 6 bytes "hello\textbackslash n" (0.0 ms)} & the terminator is part
+  of the counted payload \\
+\texttt{read ECHO sized 4 bytes "ABCD" partial (0.0 ms)} & \texttt{size} cut the read short, and the
+  handle reported it as partial \\
+\texttt{ATE.read: datagram truncated to 4 byte(s)} & the Device said it was a truncation, not a
+  timeout \\
+\texttt{device ECHO left-open left open at end of run} (WARNING) & the run-end teardown closed a
+  Device the schedule never closed \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+Two more assertions are the negative cases, and they are two different failures. A Device Type the
+registry has never registered raises \texttt{unknown DeviceType 'ECHOX'} from
+\texttt{DeviceRegistry.open\_\allowbreak device}. A schedule that names an enum member that does not
+exist gets \texttt{nil}: \texttt{ATE.open(DeviceType.ECHO, \{...\})} raises \texttt{deviceType must be
+a DeviceType enum member, got NoneType}, the step records an ERROR Attempt, and the run fails. A
+Device Type is real only when the driver, the register line and the enum member are all there.
+
+\section{What else a new Device Type touches}
+
+\begin{itemize}
+  \item A test file named after the packet that added it
+    (\texttt{tests/\allowbreak{}test\_\allowbreak{}device\_\allowbreak{}abort\_\allowbreak32b.py} is the style), with the
+    \texttt{LoopbackPeer}/\texttt{UdpLoopbackPeer} fixtures in \texttt{tests/\_fixtures.py} if the
+    Device needs a peer.
+  \item The Device Type list in both test-writer manuals:
+    \texttt{missing\_\allowbreak{}from(MANUALS["test-writer"].texts(), device\_\allowbreak{}types())} is derived from the
+    drivers that exist, so a driver nobody documented is a failing suite, not an omission somebody
+    might notice later.
+  \item \texttt{docs/\allowbreak{}manuals/\allowbreak{}llm/\allowbreak{}test-writer.md}: a schedule writer reading only that file needs to
+    know the Device exists and what its fields accept.
+\end{itemize}
+
+\cando{add a Device Type with a driver, a register line and an enum member, and show it in the record.}

@@ -1,0 +1,93 @@
+\chapter{The config file}\label{ch:config}
+
+ATE reads one machine-wide config file at launch: \texttt{\%PROGRAMDATA\%\textbackslash
+ATE\textbackslash config.json} on Windows, \texttt{/etc/ate/config.json} on Linux, or whatever
+\texttt{--config PATH} names. It is read \emph{once}. Changing it does nothing until ATE is
+restarted; rescanning Test Definitions does not re-read it, and there is no per-user override.
+
+\section{Every key}
+
+Keys are camelCase and grouped in sections. A key that is missing is filled with its default; a key
+that is present is checked for type.
+
+\begingroup\footnotesize
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{8.0cm}@{}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\endhead
+\texttt{format} & required & Must be exactly \texttt{1}. A missing or other \texttt{format} stops
+  startup. \\
+\texttt{defaultProject} & \texttt{""} & Prefills the Project field on the Run screen. A Test Run
+  cannot start with an empty Project. \\
+\texttt{station.name} & hostname & The Station's descriptive name, recorded on every Test Run. May
+  be renamed. \\
+\texttt{station.uuid} & generated & The Station's stable identity. If it is missing or empty, ATE
+  generates one and writes it back into the file, keeping the other keys and their order. Never copy
+  one Station's UUID to another: ATE does not detect a cloned one. \\
+\texttt{testDefinitions.}\allowbreak\texttt{directories} & \texttt{<data>/}\allowbreak\texttt{definitions} & Directories searched
+  recursively for \texttt{.atedef} files. One that does not exist is a warning, not a failure. \\
+\texttt{database.type} & \texttt{sqlite} & v1 accepts only \texttt{sqlite}; anything else stops
+  startup. \\
+\texttt{database.path} & \texttt{<data>/ate.db} & The SQLite file. Created and upgraded by
+  \texttt{ate db migrate} (chapter~\ref{ch:database}). \\
+\texttt{database.}\allowbreak\texttt{storeMismatchedFiles} & \texttt{ask} & \texttt{ask}, \texttt{always} or
+  \texttt{never}: whether the raw bytes of a Lua file whose checksum no longer matches are stored
+  with the Test Run (chapter~\ref{ch:media-releases}). \\
+\texttt{reports.directory} & \texttt{<data>/reports} & Where Test Reports are written. \\
+\texttt{reports.organisation} & \texttt{""} & Text in every Test Report page header. \\
+\texttt{reports.logo} & \texttt{null} & The validator accepts only \texttt{null} today: a path is
+  refused with \texttt{must be a null}, even though the report renderer can embed one. Setting a
+  logo is not currently possible through the config. \\
+\texttt{reports.paperSize} & \texttt{A4} & \texttt{A4} or \texttt{Letter}. The config does not check
+  the value; the PDF helper refuses anything else when a report is rendered. \\
+\texttt{log.directory} & \texttt{<data>/logs} & Where the application log is written
+  (chapter~\ref{ch:logs}). \\
+\texttt{log.level} & \texttt{info} & Floor for the application log: \texttt{debug}, \texttt{info},
+  \texttt{warning} or \texttt{error}. Anything else is treated as \texttt{info}. \\
+\texttt{devices.}\allowbreak\texttt{receiveBufferBytes} & 16777216 & Per-Device receive buffer cap, in bytes. Must be
+  positive; overflow drops the oldest bytes. \\
+\texttt{deviceTrace.enabled} & \texttt{false} & One \texttt{DEBUG} log line per Device operation, in
+  the Run log. \\
+\texttt{deviceTrace.maxBytes} & 256 & Traced bytes are shortened past this. \\
+\texttt{ui.theme} & \texttt{system} & Accepted and stored; nothing in the shipped code reads it. \\
+\texttt{ui.layout} & \texttt{staged} & The Run screen layout: \texttt{staged} or
+  \texttt{threePane}. Anything else is refused as a typo. \\
+\texttt{ui.allowLayoutSwitch} & \texttt{true} & Whether the layout can be changed for the session. \\
+\texttt{ui.allowHistoryDuringRun} & \texttt{true} & Whether History can be browsed while a Test Run
+  is in progress. \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+\section{Paths in the config}
+
+A path is absolute or relative; a relative one is resolved against the config file's own directory.
+\texttt{<data>} stands for the platform data directory --- \texttt{\%PROGRAMDATA\%\textbackslash
+ATE} on Windows, \texttt{/var/lib/ate} on Linux --- and it is the only placeholder that exists. Any
+other angle-bracketed token is a config error naming the file and the key, so a typo never becomes
+a directory literally called \texttt{<whatever>}. There is no environment-variable expansion and no
+\texttt{\textasciitilde} expansion in config \emph{values}; forward slashes work on Windows because
+paths are never translated. Only the platform's own default locations expand \texttt{\%PROGRAMDATA\%}.
+
+\section{What makes ATE refuse to start}
+
+An unknown top-level key, a section that is not an object, a value of the wrong type, a bad
+\texttt{format}, a \texttt{database.type} that is not \texttt{sqlite}, a
+\texttt{storeMismatchedFiles} outside \texttt{ask}/\texttt{always}/\texttt{never}, a
+\texttt{ui.layout} that is neither shipped layout, and a \texttt{receiveBufferBytes} of zero or
+less all stop startup with a message naming the file and the key. A file that is not valid JSON,
+or is not an object at all, is refused the same way.
+
+When the config file is missing, ATE shows the path it expected and asks: create a default config
+and launch, or abort. If it cannot write the file --- an Operator without admin rights, say ---
+startup is refused with the path. If a config exists but has no \texttt{station.uuid} and the write
+back fails, ATE prints the generated UUID for an admin to add by hand and stops.
+
+Two environment variables move the platform defaults, \texttt{ATE\_}\allowbreak\texttt{DEFAULT\_CONFIG}
+and \texttt{ATE\_}\allowbreak\texttt{DATA\_DIR}. They exist so the test suite can exercise
+"no config at the platform location" without writing to \texttt{/etc/ate}; nothing else in ATE
+reads them. Do not use them on a Station.
+
+\cando{write a config file for a Station by hand, and explain exactly what ATE will and will not
+accept in it.}

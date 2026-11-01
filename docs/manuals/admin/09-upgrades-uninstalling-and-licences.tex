@@ -1,0 +1,97 @@
+\chapter{Upgrading, uninstalling, and the licences you ship}\label{ch:upgrades}
+
+\section{Upgrade order}
+
+Upgrades install in place and keep the config and all the data. The order that has to be followed
+is:
+
+\begin{enumerate}
+  \item \textbf{Back up the database and the config} (chapter~\ref{ch:database}). An upgrade never
+    touches them, but a migration that turns out to be the wrong one has no built-in undo.
+  \item \textbf{Install the new artifact over the old one.} The Windows installer, \texttt{install.sh}
+    and the \texttt{.deb} postinst each run \texttt{ate setup} as their last step, and that runs the
+    migration, so an install through those three leaves the database current. The database it
+    migrates is \texttt{\textless data\textgreater/ate.db}, which is what the default config points
+    at; a config with a custom \texttt{database.path} is not migrated, so a custom database still
+    needs \texttt{ate db migrate} after the install. Step 4 below is what catches it. A wheel
+    installed with \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema
+    until you migrate it, and ATE refuses to start against a database older than itself.
+  \item \textbf{Migrate, when the artifact did not, or when \texttt{database.path} points elsewhere.}
+    \texttt{ate db migrate} is idempotent: run it on an already-current database and it succeeds,
+    prints the version, and changes nothing.
+  \item \textbf{Check with \texttt{ate db status}.} It reads the configured path, so it also catches a
+    custom database the installer never touched. On this build it prints \texttt{5} and exits 0 ---
+    \texttt{5} is the schema version, not the ATE version, so do not compare the two. A missing or
+    older database exits 1 with the refusal to run, which is the migration not having happened.
+  \item \textbf{Check the Media Releases.} A Media Release whose files no longer match its recorded
+    checksums warns rather than failing; after updating a release, run \texttt{ate definition update}
+    on its \texttt{.atedef} (chapter~\ref{ch:media-releases}).
+\end{enumerate}
+
+Each artifact clears its own program files before writing the new ones, so nothing stale survives an
+upgrade: the Windows installer deletes \texttt{\_internal} first; \texttt{install.sh} removes the
+bundle's \texttt{ate} and \texttt{\_internal} before copying; dpkg removes everything the package
+installed. Config and data live outside the install directory on every platform, so none of this
+touches them.
+
+Going backwards is not supported by the database. A schema version is only ever increased, and an
+older ATE started against a database built by a newer one refuses with \texttt{this ATE is too old
+for the database at \dots; update ATE}. If you must roll back an ATE version, roll the database back
+with the backup you took.
+
+The version ATE reports is the git tag the bundle was built from, in semver form, stamped in at
+build time; prerelease tags are written the PEP 440 way (\texttt{v0.1.0-rc1} reports
+\texttt{0.1.0rc1}, and the \texttt{.deb} names that \texttt{0.1.0\textasciitilde rc1}). That version
+is recorded on every Test Run and printed in the Test Report footer, so a record says which ATE
+produced it.
+
+\section{Uninstalling}
+
+Uninstall removes the program, and only the program.
+
+\begin{itemize}
+  \item Windows: the uninstaller deletes the install directory and takes its own entry back out of
+    the machine PATH. It leaves any PATH entry it did not add, and writes the value back as
+    \texttt{REG\_EXPAND\_SZ} so entries like \texttt{\%USERPROFILE\%} keep expanding.
+  \item \texttt{apt remove}: config and data stay. \texttt{apt purge}: removes
+    \texttt{/etc/ate/config.json} and the config directory if it is then empty, and never touches
+    \texttt{/var/lib/ate}.
+  \item \texttt{./install.sh --uninstall --prefix /opt/ate}: removes the bundle and its link. It
+    refuses to remove a prefix that has no ATE executable in it, so it cannot wipe a directory an
+    operator pointed it at by mistake.
+  \item The wheel: \texttt{pipx uninstall ate}. Whatever \texttt{ate setup} created is not part of
+    the wheel and stays behind.
+\end{itemize}
+
+Test Runs are records. No uninstall path deletes the database, its WAL files, the reports or the
+logs, and if you want them gone you remove them yourself, having checked whether anyone needs the
+records.
+
+\section{Third-party licences, and where they land}
+
+ATE's interface and its Test Report renderer are Qt, used through PySide6, both LGPL. Whoever
+receives a Station needs to be able to read that licence, see which Qt is in the bundle, find its
+source, and know that Qt can be replaced. Four files carry that, generated from the wheels actually
+installed in the build rather than written by hand:
+
+\begin{lstlisting}[language=ATEShell]
+python packaging/licence/notices.py --out build/licences
+\end{lstlisting}
+
+\texttt{NOTICE-Qt-PySide6.txt} (what Qt, PySide6 and shiboken6 versions are in the bundle, their
+licence as the wheels declare it, where the source is, and the statement that the shared libraries
+are copied unmodified and can be replaced by another build of the same Qt version);
+\texttt{THIRD\_PARTY\_NOTICES.txt} (every runtime dependency, its version and the licence its wheel
+names, walking every requirement of every requirement); \texttt{LGPL-3.0.txt} and
+\texttt{GPL-3.0.txt}, the full texts. A licence a wheel does not name, or that the script cannot
+name, is reported as such rather than guessed --- the file ends with a list of the ones to check
+upstream, and the Lua that lupa embeds is named with its own licence link.
+
+In the bundle they sit under \texttt{\_internal/licences/}, and \texttt{verify\_bundle} refuses to
+release a bundle that is missing any of the four. The tarball and the \texttt{.deb} ship that
+directory, and the suite checks both artifacts still carry it. The wheel is not checked for them by
+the suite: it is a Python package whose dependencies come from PyPI, and nothing here proves that
+the notices travel with it. Say so if compliance depends on it.
+
+\cando{upgrade a Station in the right order, uninstall it without taking a record with it, and say
+where the licence texts a Station receives are to be found.}

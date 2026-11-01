@@ -1,0 +1,33 @@
+-- logging.tslua: logging inside a Test Run, and reading the run's own context.
+--
+-- Demonstrates:
+--   * ATE.log(level, ...) with the Log enum; every argument is turned to text and the
+--     parts are joined with spaces;
+--   * print is redirected to ATE.log(Log.INFO, ...), so a stray print is still recorded;
+--   * the main screen shows INFO and above; the debug window shows every level;
+--   * ATE.run is a read-only table of the current Test Run. Writing to it is an error.
+--   * DEBUG device tracing is off unless the application config turns it on with
+--     deviceTrace.enabled; every line a schedule writes is stored with the Test Run.
+return ScheduleParams("Manual: logging", "log levels, print and ATE.run")
+  :setSchedule({
+    StepParams("One line at each level"):setStepNo("1.")
+      :setAction(function()
+        ATE.log(Log.DEBUG, "a detail only the debug window shows")
+        ATE.log(Log.INFO, "the rail settled", 5.0, "V")
+        ATE.log(Log.WARNING, "the probe is loose")
+        ATE.log(Log.ERROR, "the supply did not come up")
+        print("print lands at INFO")
+        ATE.report(Result.PASS, "logged at every level")
+      end),
+
+    StepParams("Who is running"):setStepNo("2.")
+      :setAction(function()
+        ATE.log(Log.INFO, "station " .. ATE.run.Station
+                             .. ", project " .. ATE.run.Project
+                             .. ", UUT " .. ATE.run.UUT_serial
+                             .. ", operator " .. ATE.run.Operator
+                             .. ", schedule " .. ATE.run.Test_Schedule_Name
+                             .. ", release " .. ATE.run.Media_Release_Media_Number)
+        ATE.report(Result.PASS, "read the run context", ATE.run.Operator, "Ada Lovelace")
+      end),
+  })

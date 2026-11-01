@@ -1,0 +1,77 @@
+\chapter{Config, and the exception nothing caught}\label{ch:config}
+
+\section{How the config is read}
+
+\texttt{src/ate/config.py} is the whole of ATE's configuration. Four things a developer has to know
+before touching it:
+
+\begin{itemize}
+  \item \texttt{\_SCHEMA} is the list of accepted keys, grouped by section, each with a type;
+    \texttt{\_DEFAULTS} is the default for every one of them. A key the file does not have takes its
+    default; a key that is not in the schema is refused with \texttt{unknown config key '<key>' in
+    <file>}. \texttt{format} is required and must be 1.
+  \item \texttt{<data>} is the only placeholder. It expands to the platform data directory
+    (\texttt{/var/lib/ate} on Linux, \texttt{\%PROGRAMDATA\%\textbackslash ATE} on Windows). Any other
+    \texttt{<word>} is a config error naming the file and the key, so a typo never becomes a directory
+    literally called \texttt{<whatever>}.
+  \item Config values get no environment expansion. The platform default path is decided by
+    \texttt{\_\allowbreak{}platform\_\allowbreak{}default()}, and \texttt{--config <path>} beats it. Note the trap the file records:
+    \texttt{sys.platform} is \texttt{win32}, never \texttt{windows}, and \texttt{\_is\_windows} is the only
+    platform test used anywhere.
+  \item \texttt{ATE\_DEFAULT\_CONFIG} and \texttt{ATE\_DATA\_DIR} are test seams. They are read nowhere
+    else in ATE: they exist so a test can exercise ``there is no config at the default location'' in a
+    real subprocess without writing to \texttt{/etc/ate} (packet 30c). Do not use them in production code.
+\end{itemize}
+
+Adding a key means adding it to \texttt{\_SCHEMA}, to \texttt{\_DEFAULTS}, to the accessor on
+\texttt{Config}, and to both manuals --- \texttt{config\_keys()} in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}
+derives the set from \texttt{\_SCHEMA} and fails a manual that does not name it.
+
+\section{The application log}
+
+\texttt{src/ate/log.py} opens one \texttt{AppLog} per launch, at
+\texttt{<data>/\allowbreak{}logs/\allowbreak{}ate-app-<launch time>.log}, honouring \texttt{log.level}. A session given a config
+opens its own if the launch did not hand one in; a log handed in belongs to the launch and the session
+does not close it. A log directory that cannot be opened must not stop the application: the failure leaves
+\texttt{on\_log} as \texttt{None}, and the session falls back to printing.
+
+\section{\texttt{UnhandledExceptionLog}, and what it does not see}\label{sec:exception}
+
+PySide6 does not end the process when a slot, or a \texttt{QThread.run} override, raises. It hands the
+exception to \texttt{sys.excepthook} and carries on --- so a worker keeps recording while a screen quietly
+stops updating. \texttt{launch()} installs \texttt{UnhandledExceptionLog} on \texttt{sys.excepthook}: it
+writes the traceback to the per-launch application log at ERROR, passes the exception to the previous hook
+(so stderr and pytest-qt's capture still see it), and emits \texttt{reported} with the log path so the
+window can show one line in its status bar:
+
+\begin{lstlisting}[language=ATEShell]
+Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: <log path>
+\end{lstlisting}
+
+There is no dialog, because a modal box would sit in front of a run and nobody has to answer it for the
+run to continue, and no abort, because the worker's record is still good. If the log write itself fails,
+the Operator still gets the line, with no path claimed.
+
+Know its limits, because they are narrow and were found by test:
+
+\begin{itemize}
+  \item it sees a raising slot (direct or queued), a timer callback, and an exception leaving a
+    \texttt{QThread.run} override;
+  \item it does not see a \texttt{threading.Thread} exception --- those go to \texttt{threading.excepthook},
+    and the Device readers, the only such threads, catch their own;
+  \item the Test Run path does not use it: \texttt{RunEngine.run}'s guard catches a worker's exception
+    first and reports it through the run's own log and Test Report;
+  \item \texttt{qInstallMessageHandler} was not used, because it sees Qt's messages, not Python
+    exceptions;
+  \item it covers the GUI launch only. \texttt{ate \_selftest} and other headless paths have no
+    application log and still print.
+\end{itemize}
+
+The consequence for whoever writes a test: a child-process test can no longer trust its exit code to see
+a slot exception. \texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception(stderr)} in \texttt{tests/\_fixtures.py} reads
+stderr as well, and it is used by the tests that start a Qt process: the children in
+\texttt{tests/\allowbreak{}test\_\allowbreak{}windows\_\allowbreak{}ci\_\allowbreak{}fixes.py}, the two in
+\texttt{tests/\allowbreak{}test\_\allowbreak{}modals\_\allowbreak{}never\_\allowbreak{}block\_\allowbreak{}headless.py}, the one in
+\texttt{tests/\allowbreak{}test\_\allowbreak{}gui\_\allowbreak{}launch\_\allowbreak30a.py}, and the packet 10a tests.
+
+\cando{say where an unhandled exception lands, and write a test that cannot pass by swallowing one.}

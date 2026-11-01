@@ -1,0 +1,89 @@
+\chapter{What this manual cannot state, and where the documents are wrong}\label{ch:unproven}
+
+A manual that does not say what it has not tested is a manual a developer trusts in the wrong place.
+This chapter is the list of things this manual asserts only as ``the code says'', not as ``we saw it
+happen''.
+
+\section{Never run here}
+
+\begin{itemize}
+  \item \textbf{Real hardware.} Every Device test in the suite talks to something in the same
+    process: the \texttt{LoopbackPeer} and \texttt{UdpLoopbackPeer} in \texttt{tests/\_fixtures.py},
+    a socket on an ephemeral port, a pseudo-terminal for \texttt{SERIAL}, and pyvisa-py behind a
+    \texttt{TCPIP0::127.0.0.1::\dots::SOCKET} resource for \texttt{VISA}. No GPIB instrument, no real
+    serial adapter, no NI-VISA stack has ever been opened by this suite. The driver contract is
+    proven; the driver against an instrument is not.
+  \item \textbf{A Windows session a human watched.} The same tests run on \texttt{windows-latest} in
+    CI, and the release workflow installed the Windows installer there: at \texttt{v0.1.0-rc2} (run
+    41198438867) \texttt{packaging/\allowbreak{}windows/\allowbreak{}ate.iss} was compiled and the installer
+    silently installed, run, upgraded and uninstalled on that runner. None of it happened on this
+    machine, and nobody watched a window open. The \texttt{icacls} permission paths, the Inno installer
+    and the frozen Windows bundle are asserted here by reading the scripts and by
+    \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak27c.py}, which checks the
+    workflow's shape rather than an installed program.
+  \item \textbf{The Debian container smokes, on \texttt{/tmp}.}
+    \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py}
+    ran here and passed --- the container smoke takes several minutes, and \texttt{docker smoke: all kinds
+    ran in debian:stable} printed by hand --- but only after \texttt{TMPDIR} was pointed at a directory on
+    disk. The first attempt, using the machine's \texttt{/tmp}, failed with \texttt{[Errno 28] No space left
+    on device}. \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak{}28c.py} also asserts the gate is written as documented and
+    the smoke scripts' logic. Nothing outside \texttt{debian:stable} has been smoked: no Fedora, no
+    Ubuntu release, no container on a machine with SELinux enforced.
+  \item \textbf{A real Chromium PDF.} \texttt{conftest.py} replaces the PDF helper with a stub for
+    every test except the four that must prove a PDF has text. The sandbox decision, the flags and
+    the failure messages are tested; the rendered page is not, except in those four.
+  \item \textbf{Both Qt bindings.} The PySide6/PyQt6 differences in chapter~\ref{ch:pyside} come
+    from the 32a switch and its notes. They were not measured side by side on this machine; where a
+    claim rests on one binding only, ADR-0001 says so.
+\end{itemize}
+
+\section{The 32b stall: fixed, not explained}
+
+Packet 32b is the clearest example of a fix that outran its diagnosis. One Windows CI run left a
+Test Run stalled for tens of seconds. The packet added the abort-boundary handling, the
+\texttt{describe\_\allowbreak{}stuck\_\allowbreak{}runs} report, and the store's write timing, and the tests prove each of
+them behaves. The cause --- that the disk was the thing that was slow --- is not established. The
+diagnostic exists so that the next stall can be read: long or in-flight writes point at the disk,
+normal writes with the worker's stack elsewhere point at something nobody has found. A manual that
+stated the cause as fact would be the same kind of error as a test that widens a timeout to make a
+failure disappear.
+
+\section{Where the documents and the code disagree}
+
+These were found while writing the manuals. In every case the code was followed and the document was
+left as it is, so that the difference is visible rather than smoothed over:
+
+\begin{itemize}
+  \item \textbf{Spec rule 20 says \texttt{ate db migrate} upgrades ``after a timestamped backup''.}
+    It makes no backup. \texttt{cli.\_cmd\_db} calls \texttt{RunStore}, which creates the missing
+    tables and sets \texttt{PRAGMA user\_version}, and prints
+    \texttt{created or upgraded database at \dots}. The admin manual tells an administrator to back
+    up first, and says so in the same breath as the command.
+  \item \textbf{Spec rule 08 says \texttt{log\_line} rows are written ``about once a second''.}
+    They are inserted per step, not on a timer. The review notes recorded this in packet 08 and it
+    has never been corrected in the spec.
+  \item \textbf{The release workflow has three jobs, not five.} The 32a notes and the review notes
+    both say ``all 5 jobs''; \texttt{release.yml} defines \texttt{windows-installer},
+    \texttt{linux-build} and \texttt{linux-smoke}, and \texttt{linux-smoke} runs a matrix of
+    \texttt{deb}, \texttt{tar} and \texttt{wheel} --- five job runs from three job definitions. The
+    count is right; the word is not.
+  \item \textbf{\texttt{\_location()} finds a step's file and line by searching the schedule text}
+    for \texttt{:setAction(}, not from the Lua call stack. For a multi-line Action, a helper module
+    or a Sub-schedule the reported location can be wrong. The manual describes what is reported, not
+    what the notes imply it should be.
+  \item \textbf{The prototype layout in \texttt{run-screen-prototype.html} is not the screen.} The
+  staged Run screen is a vertical stack; the review notes say so, and the developer manual describes
+  the widgets the code creates.
+\end{itemize}
+
+\section{What changes the moment you read this}
+
+Two numbers in this manual are snapshots: the suite's size and the elapsed time. Both were taken on
+one machine on one day, and both move with every packet. The names, the signals, the tables and the
+drivers are not snapshots --- the suite derives them from the code and fails if a manual stops naming
+them. If \texttt{1586} is no longer the number, the tests in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} do not
+care; if a signal is gone from \texttt{RunEngine} and the manual still lists it, nothing notices, so
+the direction of the risk matters: the checks catch a manual falling behind, not a manual ahead of
+the code.
+
+\cando{say what a claim in this manual rests on, and what would falsify it.}

@@ -1,0 +1,27 @@
+-- main.tslua: the top-level schedule that includes Sub-schedules.
+--
+-- Demonstrates:
+--   * :setInclude(file, keyvals) makes a step a header row, not a Test Step: the steps of
+--     the included schedule are pulled in beneath it.
+--   * The same file can be included more than once; each include is its own instance with
+--     its own keyvals.
+--   * :setPrefix is prepended to the included steps' Step Numbers, as written, with no
+--     separator, and prefixes stack as the includes nest.
+--   * :setEnable on a header forces the default of every step beneath it.
+return ScheduleParams("Manual: sub-schedules", "includes, keyvals, prefixes and nesting")
+  :setDocTitle("Manual examples - Sub-schedules")
+  :setDocId("MR-MANUAL-SUBS")
+  :setDocRev("1.0")
+  :setSchedule({
+    StepParams("Rail present"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "the rail is fitted") end),
+
+    -- 2.1. and 2.2. come from channel.tslua, included once for channel 1.
+    StepParams("Channel 1"):setStepNo("2.")
+      :setInclude("channel.tslua", { channel = 1, label = "left rail" }):setPrefix("2."),
+
+    -- A disabled header: every step beneath it records NOTRUN, and its Actions are skipped.
+    StepParams("Channel 2, not fitted"):setStepNo("3.")
+      :setEnable(false)
+      :setInclude("channel.tslua", { channel = 2, label = "right rail" }):setPrefix("3."),
+  })
