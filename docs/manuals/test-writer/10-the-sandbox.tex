@@ -11,7 +11,8 @@ files a Test Run ran, so a report can name them and their checksums. A schedule 
 Lua, or one written in a hurry, is trusted; a schedule that reaches for code outside its Media
 Release is not, because the Test Definition cannot describe it.
 
-\example{../examples/test-writer/sandbox.tslua}{sandbox.tslua}
+\noindent\textbf{\texttt{sandbox.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/sandbox.tslua}
 
 \section{Where each call is legal}
 
@@ -20,13 +21,16 @@ The top level of a \texttt{.tslua} file runs before a Test Run exists. Only the 
 \texttt{ATE.open}, \texttt{ATE.report}, \texttt{ATE.input}, \texttt{ATE.addEquipment} --- raises
 a load error that names the function:
 
+\begingroup\footnotesize
 \begin{verbatim}
 forbidden.tslua:7: ATE.open: only legal after the schedule has loaded
 \end{verbatim}
+\endgroup
 
 That is why the Device is opened in a Pre-test Action and not at the top of the file.
 
-\example{../examples/test-writer/forbidden.tslua}{forbidden.tslua}
+\noindent\textbf{\texttt{forbidden.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/forbidden.tslua}
 
 In a Pre-test or Post-test Action everything is legal except \texttt{ATE.input} and
 \texttt{ATE.report}, which belong to steps. In a step action, everything is legal.

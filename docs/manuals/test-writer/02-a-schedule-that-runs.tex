@@ -4,15 +4,16 @@ The shortest Test Schedule that does something is eight lines. Every example in 
 is a real file in \texttt{docs/manuals/examples/test-writer/}, and every one of them runs
 headless in the test suite (\texttt{tests/test\_manuals.py}). Read this one, then run it.
 
-\example{../examples/test-writer/first.tslua}{first.tslua}
+\noindent\textbf{\texttt{first.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/first.tslua}
 
 Three things are happening here.
 
 \begin{itemize}
   \item \texttt{ScheduleParams(name, description)} builds the schedule. The name is required;
     it is what the Operator sees on the Run screen.
-  \item \texttt{:setSchedule(\{\dots\})} gives the schedule its Test Steps, in the order they
-    run. Each \texttt{StepParams(name)} is one step.
+  \item The \texttt{setSchedule} call gives the schedule its Test Steps, in the order they
+    run, and one \texttt{StepParams(name)} is one step.
   \item \texttt{:setAction(function() \dots end)} is the step's logic. ATE calls it; inside it
     the schedule calls the \texttt{ATE} table.
 \end{itemize}
@@ -25,9 +26,11 @@ setters only stash values, and ATE checks the whole schedule when the file finis
 Point a Station at the examples directory, then run it from the GUI or headless. Headless, from
 a source checkout:
 
+\begingroup\footnotesize
 \begin{verbatim}
 QT_QPA_PLATFORM=offscreen python examples/harness/run_examples.py
 \end{verbatim}
+\endgroup
 
 That harness runs the shipped example release; the manual's own examples are run by
 \texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML and a PDF report under

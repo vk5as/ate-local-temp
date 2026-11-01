@@ -8,6 +8,7 @@ extension \texttt{.atedef}.
 
 These are the files the manual's examples live in:
 
+\begingroup\footnotesize
 \begin{verbatim}
 {
   "format": 1,
@@ -22,6 +23,7 @@ These are the files the manual's examples live in:
   ]
 }
 \end{verbatim}
+\endgroup
 
 This is an abbreviation of the real \texttt{manual.atedef} beside the examples: only the fields
 that matter for reading it are shown, and the checksums are truncated.
@@ -66,11 +68,14 @@ A module runs once per Test Run and its return value is cached.
 The \texttt{ate.} prefix is reserved: \texttt{require("ate.devices")} is always the Device
 params builder bundled with ATE, and a Test Definition may not list files under \texttt{ate.}.
 
-\example{../examples/test-writer/modules.tslua}{modules.tslua}
+\noindent\textbf{\texttt{modules.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/modules.tslua}
 
-\example{../examples/test-writer/lib/rails.lua}{lib/rails.lua}
+\noindent\textbf{\texttt{rails.lua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/lib/rails.lua}
 
-\example{../examples/test-writer/modules/limits.lua}{modules/limits.lua}
+\noindent\textbf{\texttt{limits.lua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/modules/limits.lua}
 
 \cando{put a schedule and its helper modules in a Media Release, name the modules the way
 \texttt{require} will find them, and check the checksums.}

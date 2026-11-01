@@ -19,7 +19,8 @@ Post-test Actions: not steps, so they have no Step Number, no result and no inpu
 Both Actions are called with the run's standing result as their first argument. For a Pre-test
 Action that is always \texttt{"PASS"}; nothing has had a chance to fail yet.
 
-\example{../examples/test-writer/actions.tslua}{actions.tslua}
+\noindent\textbf{\texttt{actions.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/actions.tslua}
 
 \section{Equipment}
 
@@ -37,12 +38,19 @@ to text and joined with spaces. \texttt{level} is one of \texttt{Log.DEBUG},
 above; every level is stored. \texttt{print} is redirected to \texttt{ATE.log(Log.INFO, \dots)},
 so a stray print is still recorded.
 
-\texttt{ATE.run} is a read-only table describing the run in progress: \texttt{UUT\_serial},
-\texttt{Operator}, \texttt{Station}, \texttt{Project}, \texttt{Test\_Schedule\_Name},
-\texttt{Media\_Release\_Media\_Number}, \texttt{name} and \texttt{version}. Writing to it is an
-error.
+\texttt{ATE.run} is a read-only table describing the run in progress. Its fields are:
 
-\example{../examples/test-writer/logging.tslua}{logging.tslua}
+\begingroup\footnotesize
+\begin{verbatim}
+UUT_serial, Operator, Station, Project, Test_Schedule_Name,
+Media_Release_Media_Number, name, version
+\end{verbatim}
+\endgroup
+
+Writing to any of them is an error.
+
+\noindent\textbf{\texttt{logging.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/logging.tslua}
 
 \cando{open a Device and declare the bench in a Pre-test Action, log what happened, and close
 things up in a Post-test Action that runs whatever the run did.}

@@ -25,7 +25,8 @@ These are the setters, and what each one does:
     steps' Step Numbers.
 \end{itemize}
 
-\example{../examples/test-writer/steps.tslua}{steps.tslua}
+\noindent\textbf{\texttt{steps.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/steps.tslua}
 
 \section{Results}
 
@@ -37,7 +38,8 @@ schedule decides whether a reading passes and says so with the first argument.
 These are the seven values a step can record:
 
 \begin{center}
-\begin{tabular}{@{}lll@{}}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{8.6cm}>{\raggedright\arraybackslash}p{2.2cm}@{}}
 \toprule
 \texttt{Result} & Means & Fails the run \\
 \midrule
@@ -55,7 +57,8 @@ NOREPORT & the step ran but never reported & no \\
 A Test Run is \texttt{FAIL} if any step is \texttt{FAIL} or \texttt{ERROR}. \texttt{NOREPORT}
 does not fail the run on its own; it is a warning the Operator has to read.
 
-\example{../examples/test-writer/results.tslua}{results.tslua}
+\noindent\textbf{\texttt{results.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/results.tslua}
 
 Run that schedule and the record shows each of the seven values, with the WARNING that
 \texttt{NOREPORT} carries and the run's overall result \texttt{FAIL} because of step 2.

@@ -32,7 +32,8 @@ A read that times out \emph{after} some bytes arrived is not a Device failure: i
 \texttt{partial = true} and logs a WARNING. ATE never reconnects on its own; to recover, close
 the Device and open it again with the same params, which gives a new handle.
 
-\example{../examples/test-writer/errors.tslua}{errors.tslua}
+\noindent\textbf{\texttt{errors.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/errors.tslua}
 
 \section{Stop on Fail and Retry}
 
@@ -45,7 +46,8 @@ blocking inputs cleared. Every Attempt is recorded; the step's result is its las
 schedule has no way to read its own Attempt number, so keep the count yourself in a local the
 action closes over.
 
-\example{../examples/test-writer/retry.tslua}{retry.tslua}
+\noindent\textbf{\texttt{retry.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/retry.tslua}
 
 \section{Abort}
 
@@ -61,7 +63,8 @@ promises within ten.
 Post-test Actions still run afterwards, each with the run's result. A second abort ends only the
 Action it lands in. Every Device still open is closed.
 
-\example{../examples/test-writer/abort.tslua}{abort.tslua}
+\noindent\textbf{\texttt{abort.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/abort.tslua}
 
 \cando{handle a Device failure without letting it end a run, and explain what Stop on Fail,
 Retry and Abort each do to the record.}

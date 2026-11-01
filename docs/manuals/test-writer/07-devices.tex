@@ -5,7 +5,8 @@ a datagram peer, a VISA instrument. Four Device Types exist in v1. Each one take
 details from the schedule, and the schedule names them --- ATE has no Device discovery.
 
 \begin{center}
-\begin{tabular}{@{}lp{8.5cm}@{}}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{11.2cm}@{}}
 \toprule
 Device Type & What it is \\
 \midrule
@@ -30,7 +31,8 @@ error. The builders in \texttt{ate.devices} fill in the sensible ones, which is 
 every schedule uses them:
 
 \begin{center}
-\begin{tabular}{@{}lll@{}}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{1.6cm}>{\raggedright\arraybackslash}p{6.8cm}>{\raggedright\arraybackslash}p{6.2cm}@{}}
 \toprule
 Device Type & \texttt{open} fields & Builder defaults \\
 \midrule
@@ -55,9 +57,9 @@ datagram is already a whole message. \texttt{parity} takes one of \texttt{Parity
 \texttt{flowControl} takes \texttt{FlowControl.NONE}, \texttt{FlowControl.RTSCTS},
 \texttt{FlowControl.XONXOFF} or \texttt{FlowControl.DSRDTR}.
 
-A builder's setters chain and set a field on the table, so
-\texttt{devices.Tcp(host, port):setTimeout(2.0)} is just a params table. There is no
-\texttt{:build()} step.
+Each setter sets one field and returns the table, so a params table can be built in one
+expression, with no \texttt{:build()} step at the end: \texttt{devices.Tcp(host, port)} then
+\texttt{:setTimeout(2.0)} and so on.
 
 \section{Reading, writing, flushing and closing}
 
@@ -81,26 +83,31 @@ it discarded --- useful just before sending a command. VISA has no background re
 buffer, so \texttt{flush} discards nothing: polling an SCPI instrument with empty reads makes it
 log \emph{Query UNTERMINATED} ($-420$) and ties up the bus.
 
-\example{../examples/test-writer/tcp.tslua}{tcp.tslua}
+\noindent\textbf{\texttt{tcp.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/tcp.tslua}
 
 \section{Every Device Type, one at a time}
 
 UDP is the one with no terminators. Its only partial read is a \texttt{size} that cuts a
 datagram short, and the log says so rather than claiming a timeout.
 
-\example{../examples/test-writer/udp.tslua}{udp.tslua}
+\noindent\textbf{\texttt{udp.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/udp.tslua}
 
 A serial port is named by its COM or tty name; pyserial also accepts a URL such as
 \texttt{socket://127.0.0.1:5025}, which is how these examples exercise a serial Device without
 hardware.
 
-\example{../examples/test-writer/serial.tslua}{serial.tslua}
+\noindent\textbf{\texttt{serial.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/serial.tslua}
 
-VISA addresses an instrument by resource string, for example
-\texttt{GPIB0::5::INSTR} or \texttt{TCPIP0::127.0.0.1::5025::SOCKET}. ATE uses whatever pyvisa
-backend it finds; it does not ship NI-VISA.
+VISA addresses an instrument by a resource string. GPIB instruments are
+\texttt{GPIB0::5::INSTR}, VXI-11 instruments are
+\texttt{TCPIP0::127.0.0.1::5025::SOCKET}. ATE uses whatever pyvisa backend it finds; it does
+not ship NI-VISA.
 
-\example{../examples/test-writer/visa.tslua}{visa.tslua}
+\noindent\textbf{\texttt{visa.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/visa.tslua}
 
 \section{Lifetime}
 
@@ -111,7 +118,8 @@ success. Using a closed Device is a failure, and goes through \texttt{onError}.
 ATE closes every Device still open when the run ends, and logs a WARNING naming each one. It is
 worth closing what you open, if only to keep the log clean.
 
-\example{../examples/test-writer/left_open.tslua}{left_open.tslua}
+\noindent\textbf{\texttt{left\_open.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/left_open.tslua}
 
 \cando{open a Device of any of the four Types, read and write it with per-call overrides, and
 close it --- and explain what a buffered, overflowing or truncated read means.}

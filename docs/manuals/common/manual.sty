@@ -14,6 +14,7 @@
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{booktabs}
+\usepackage{array}  % for the raggedright p-columns every reference table uses
 \usepackage{enumitem}
 \usepackage{hyperref}
 \usepackage{amsmath}  % for the small amounts of maths in the timing tables
@@ -66,7 +67,7 @@
 % Every chapter says what the reader can do by its end; this is the one line that says it.
 \newcommand{\cando}[1]{%
   \par\medskip
-  \noindent\colorbox{codebg}{\parbox{\linewidth}{%
+  \noindent\colorbox{codebg}{\parbox{\dimexpr\linewidth-2\fboxsep}{%
     \textbf{By the end of this chapter you can}\ #1}}\par\smallskip
 }
 

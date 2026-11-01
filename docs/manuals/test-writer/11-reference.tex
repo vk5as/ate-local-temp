@@ -3,7 +3,8 @@
 \section{The \texttt{ATE} table}
 
 \begin{center}
-\begin{tabular}{@{}lp{7.5cm}@{}}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.6cm}>{\raggedright\arraybackslash}p{9.4cm}@{}}
 \toprule
 Call & Returns / does \\
 \midrule
@@ -28,25 +29,29 @@ Call & Returns / does \\
 
 \section{The enums}
 
-\begin{itemize}
-  \item \texttt{Result}: \texttt{PASS}, \texttt{FAIL}, \texttt{ERROR}, \texttt{SKIPPED},
-    \texttt{NOTRUN}, \texttt{FORCED\_NOTRUN}, \texttt{NOREPORT}.
-  \item \texttt{Log}: \texttt{DEBUG}, \texttt{INFO}, \texttt{WARNING}, \texttt{ERROR}.
-  \item \texttt{DeviceType}: \texttt{TCP}, \texttt{SERIAL}, \texttt{UDP}, \texttt{VISA}.
-  \item \texttt{Parity}: \texttt{NONE}, \texttt{EVEN}, \texttt{ODD}, \texttt{MARK},
-    \texttt{SPACE}.
-  \item \texttt{FlowControl}: \texttt{NONE}, \texttt{RTSCTS}, \texttt{XONXOFF},
-    \texttt{DSRDTR}.
-\end{itemize}
+The enum tables are globals, so a schedule reads them directly:
+
+\begingroup\footnotesize
+\begin{verbatim}
+Result:      PASS, FAIL, ERROR, SKIPPED, NOTRUN, FORCED_NOTRUN, NOREPORT
+Log:         DEBUG, INFO, WARNING, ERROR
+DeviceType:  TCP, SERIAL, UDP, VISA
+Parity:      NONE, EVEN, ODD, MARK, SPACE
+FlowControl: NONE, RTSCTS, XONXOFF, DSRDTR
+\end{verbatim}
+\endgroup
 
 \section{\texttt{ScheduleParams} and \texttt{StepParams}}
 
-\texttt{ScheduleParams(name, description)}: \texttt{setDocTitle}, \texttt{setDocId},
-\texttt{setDocRev}, \texttt{setPreTestAction}, \texttt{setPostTestAction},
-\texttt{setStopOnFail}, \texttt{setSchedule}.
+The setters are what a schedule calls; each one returns the object, so they chain:
 
-\texttt{StepParams(name)}: \texttt{setStepNo}, \texttt{setEnable}, \texttt{setInputs},
-\texttt{setAction}, \texttt{setInclude}, \texttt{setPrefix}.
+\begingroup\footnotesize
+\begin{verbatim}
+ScheduleParams(name, description): setDocTitle, setDocId, setDocRev, setPreTestAction,
+  setPostTestAction, setStopOnFail, setSchedule
+StepParams(name): setStepNo, setEnable, setInputs, setAction, setInclude, setPrefix
+\end{verbatim}
+\endgroup
 
 The builders in \texttt{ate.devices} have their own setters: \texttt{setHost},
 \texttt{setPort}, \texttt{setLocalPort}, \texttt{setResource}, \texttt{setBaud},
@@ -58,9 +63,11 @@ The builders in \texttt{ate.devices} have their own setters: \texttt{setHost},
 
 ATE writes the report when the run ends, without asking:
 
+\begingroup\footnotesize
 \begin{verbatim}
 <UUT Type>/<UUT Type>_<serial>_<yyyymmdd-HHMMSS>_<PASS|FAIL>.html
 \end{verbatim}
+\endgroup
 
 under \texttt{reports.directory}, and the same with \texttt{.pdf}. The sections are Cover,
 Steps, Equipment, Configuration and Run log. The Run log in the report carries INFO, WARNING
