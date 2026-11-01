@@ -56,7 +56,10 @@ class DbLaunchResult:
         """A human-readable refusal message for non-OK statuses; empty when OK.
 
         It names the database path, and the migrate hint carries ``--config <path>`` when the
-        Station is reading a config that is not the platform default (packet 30c review)."""
+        Station is reading a config that is not the platform default (packet 30c review). A
+        database that is behind but has nothing left to create gets its own sentence: telling it
+        to run ``ate db migrate`` would send the Operator into a loop, because migrate refuses
+        it too (packet 35 review)."""
         if self.status == DbLaunchStatus.NEEDS_MIGRATE:
             hint = "ate db migrate"
             if self.config_file is not None:
@@ -70,6 +73,8 @@ class DbLaunchResult:
             return f"the file at {self.path} is not a SQLite database"
         if self.status == DbLaunchStatus.NOT_READABLE:
             return f"cannot open the database at {self.path}: {self.reason}"
+        if self.status == DbLaunchStatus.NO_MIGRATION:
+            return _no_migration_message(self.path, self.user_version or 0)
         return ""
 
 
@@ -77,10 +82,26 @@ class DbLaunchStatus(enum.Enum):
     """Why a database refuses launch (or why it allows it)."""
 
     OK = "OK"  # schema version matches; safe to open
-    NEEDS_MIGRATE = "NEEDS_MIGRATE"  # missing, empty, or older than this ATE
+    NEEDS_MIGRATE = "NEEDS_MIGRATE"  # missing, empty, or behind with tables to create
     TOO_OLD = "TOO_OLD"  # built by a newer ATE
     NOT_A_DATABASE = "NOT_A_DATABASE"  # a file is there, but it is not a SQLite database
     NOT_READABLE = "NOT_READABLE"  # it is a database, but this process cannot open it (packet 35)
+    NO_MIGRATION = "NO_MIGRATION"  # older version, every table present: nothing to migrate (packet 35)
+
+
+def _no_migration_message(path: Optional[Path], stored: int) -> str:
+    """One line for a database this ATE cannot honestly stamp: older version, every table.
+
+    A version bump with no migration behind it is not a migration, and ``ate db migrate`` has
+    nothing to do: the tables are all there. Saying "run `ate db migrate`" would send the
+    Operator in a circle, because migrate refuses the same database for the same reason
+    (packet 35 review)."""
+    where = f"the database at {path}" if path else "this database"
+    return (
+        f"{where} stores schema version {stored} and already holds every table this ATE declares: "
+        f"this ATE has no migration from version {stored} to {SCHEMA_VERSION}, "
+        f"so it is not stamped as {SCHEMA_VERSION}"
+    )
 
 
 def _inspect_db(path: str | Path) -> tuple[bool, Optional[int], Optional[str]]:
@@ -118,7 +139,11 @@ def check_database_at_launch(path: str | Path, config_file: str | Path | None = 
     empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), a
     newer one refuses with TOO_OLD ("this ATE is too old"), a file that is not a
     database at all refuses with NOT_A_DATABASE, and a database this process cannot
-    open refuses with NOT_READABLE. Only an exact match returns OK.
+    open refuses with NOT_READABLE. One database is in neither of those boxes: it stores
+    an older version but already has every table this build declares, so there is nothing
+    to migrate — it refuses with NO_MIGRATION and says so in one line (packet 35). Only an
+    exact match returns OK. Deciding all of this reads the file read-only: no copy is taken
+    and nothing is written.
 
     ``config_file`` is the config this launch read, already filtered by
     :func:`ate.config.config_hint` to ``None`` when it is the platform default: it lets the
@@ -137,6 +162,11 @@ def check_database_at_launch(path: str | Path, config_file: str | Path | None = 
         )
         return DbLaunchResult(status, None, database, hint, reason)
     if not has_tables or user_version < SCHEMA_VERSION:
+        if has_tables and user_version < SCHEMA_VERSION and not missing_tables(path):
+            # Behind in version, complete in tables: nothing this build would create, so there
+            # is no migration to run and no stamp to earn (packet 35). Read-only: deciding this
+            # touches the file and takes no copy.
+            return DbLaunchResult(DbLaunchStatus.NO_MIGRATION, user_version, database, hint)
         return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version, database, hint)
     if user_version > SCHEMA_VERSION:
         return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version, database, hint)
@@ -302,6 +332,11 @@ class RunStore:
         to be current, and the version check at launch would then pass on a database nobody
         migrated (packet 35). Such a database is refused, naming the version it stores."""
         missing = missing_tables(self.path)
+        stored = current_version(self.path)
+        if not missing and stored < SCHEMA_VERSION:
+            # The backstop for a store opened without the launch check: refuse before writing
+            # a byte, so a database nobody migrated stays exactly as it was.
+            raise SchemaVersionError(_no_migration_message(Path(self.path), stored))
         _create_schema(str(self.path))
         # Set the pragmas on our own stdlib connection. Both persist in the database
         # file header, so they survive reopen and WAL mode stays enabled for every
@@ -309,13 +344,6 @@ class RunStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         if missing:
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        elif current_version(self.path) < SCHEMA_VERSION:
-            stored = current_version(self.path)
-            raise SchemaVersionError(
-                f"the database at {self.path} stores schema version {stored} but is missing nothing "
-                f"to migrate: no step from version {stored} to {SCHEMA_VERSION} ran, so it is not "
-                f"stamped as version {SCHEMA_VERSION}"
-            )
 
     # -- test_run -----------------------------------------------------------
 

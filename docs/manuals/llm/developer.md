@@ -978,22 +978,31 @@ version 6 database, the shipped code exits 1 with `this ATE is too old for ...; 
 
 `src/ate/storage/backup.py` is where the copy comes from, and `migrate_database` is the routine both
 `ate db migrate` and `ate setup` call, so an installer upgrade and a hand-run upgrade take the same
-copy. No copy is made for a database that does not exist, one with no tables, or one that needs no
-migration; SQLite's `Connection.backup` writes `<db>.backup-<YYYYMMDD-HHMMSS>` beside the file and never
-over an existing name. If the copy cannot be written the migration is refused: the command names the
-path and the reason, exits 1, and changes nothing.
+copy. A copy is taken exactly when this build has a table to create: none for a file that does not
+exist, none for one that holds no tables at all, one whenever `missing_tables(path)` is non-empty --
+including a database already stamped at this version that is missing a table. SQLite's
+`Connection.backup` writes `<db>.backup-<YYYYMMDD-HHMMSS>` beside the file and never over an existing
+name; the copy is written as `<name>.partial`, checked (`integrity_check`, the same tables, the same
+version) and only then renamed. Every step of it is bounded by `BACKUP_LOCK_TIMEOUT_S = 10.0`: a
+database held by another process is refused inside ten seconds rather than waited out. If the copy
+cannot be written the migration is refused: the command names the path and the reason, exits 1, and
+changes nothing.
 
 Spec rule 20's timestamped backup is no longer the Administrator's job (see
 `.scratch/ate-v1-wayfinding/assets/test-run-record.md`).
 
 And `create_all` does not alter a table that already exists, so adding a column is not a version bump ---
 it needs an explicit migration, written and tested as one. Packet 35 removed the silent version of that
-mistake: `RunStore._ensure_schema` stamps `PRAGMA user_version` only when a table was created, so a
-database storing an older version that already has every table is refused by name, e.g. `the database at
-... stores schema version 5 but is missing nothing to migrate: no step from version 5 to 6 ran, so it is
-not stamped as version 6`. There is no `ALTER` or `add_column` anywhere in `src/ate`, and every insert
-names its columns by hand (`insert_test_run` builds its row field by field), so an upgrade never fills a
-new column.
+mistake where nothing is created at all: `RunStore._ensure_schema` stamps `PRAGMA user_version` only
+when a table was created, so a database storing an older version that already has every table gets its
+own launch status, `NO_MIGRATION`, and `db status`, `db migrate` and the launch dialog refuse it with
+one line, e.g. `the database at ... stores schema version 5 and already holds every table this ATE
+declares: this ATE has no migration from version 5 to 6, so it is not stamped as version 6`. There is
+no `ALTER` or `add_column` anywhere in `src/ate`, and every insert names its columns by hand
+(`insert_test_run` builds its row field by field), so an upgrade never fills a new column. What the
+guard cannot see is a bump that adds a column *next to* a new table: the new table makes
+`missing_tables` non-empty, so the stamp is raised and the column is never added. A real migration
+registry -- steps from N to N+1, run in order, each tested -- is needed before the next schema version.
 
 A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
 table nothing queries is invisible on the page. Batching applies to a new row type as well

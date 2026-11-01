@@ -58,10 +58,15 @@ SQL in ATE, and it is confined to pragmas.
 
 \texttt{src/ate/storage/backup.py} is the one routine \texttt{ate db migrate} and \texttt{ate setup}
 both call, so an upgrade through an installer and an upgrade by hand take the same copy.
-\texttt{backup\_for\_migration} decides honestly whether a copy is needed: none for a database that does
-not exist, none for one with no tables, none for one that needs no migration; otherwise SQLite's
-\texttt{Connection.backup} writes \texttt{<db>.backup-<YYYYMMDD-HHMMSS>} beside the file, never over an
-existing name. The backup API is used rather than \texttt{cp} because it folds \texttt{-wal} into the
+\texttt{backup\_for\_migration} decides honestly whether a copy is needed, and the rule is the one the
+admin manual states: no copy for a file that does not exist and none for one that holds no tables at
+all, a copy whenever \texttt{missing\_tables(path)} is non-empty --- including a database already
+stamped at this build's version that is missing a table, because that migration changes real data.
+The copy is written to \texttt{<name>.partial}, checked with \texttt{integrity\_check}, the table set and
+the version against the source, and only then renamed to \texttt{<db>.backup-<YYYYMMDD-HHMMSS>} beside
+the file, never over an existing name. Every step of it runs inside \texttt{BACKUP\_LOCK\_TIMEOUT\_S},
+so a database locked by another process is refused in one line rather than hanging the installer. The
+backup API is used rather than \texttt{cp} because it folds \texttt{-wal} into the
 copy: a database with a Test Run in flight is copied whole. \texttt{migrate\_database} then refuses if
 the copy cannot be written, and reports the copy's path when a migration fails after it.
 

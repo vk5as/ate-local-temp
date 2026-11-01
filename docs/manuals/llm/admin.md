@@ -167,20 +167,30 @@ purge.
 - A missing, empty or older database exits 1 with: `run \`ate db migrate\` to create or upgrade the database at <path>`.
 - A database built by a newer ATE exits 1 with: `this ATE is too old for the database at <path>; update ATE`. There is no downgrade.
 - A file that is not a database exits 1 with `the file at <path> is not a SQLite database`; a database this process cannot open exits 1 with `cannot open the database at <path>: <reason>`. Neither prints a traceback.
-- A database storing an older version that already has every table this build declares is refused, not stamped: `the database at <path> stores schema version 4 but is missing nothing to migrate: no step from version 4 to 5 ran, so it is not stamped as version 5`.
+- A database storing an older version that already has every table this build declares has its own
+  refusal, not a migrate hint: `the database at <path> stores schema version 4 and already holds every
+  table this ATE declares: this ATE has no migration from version 4 to 5, so it is not stamped as version 5`.
+  `ate db status`, `ate db migrate` and the launch dialog print that one line and exit 1; the database is
+  not copied, opened or written.
 - Migrations are forward only and idempotent: they create the missing tables and stamp the version, and never rewrite or drop anything.
 - A migration copies the database first. `ate db migrate` and `ate setup` both call
   `src/ate/storage/backup.py`'s `backup_for_migration`, which writes
   `<db>.backup-<YYYYMMDD-HHMMSS>` (UTC) beside the file with SQLite's backup API, so the copy
-  includes what is still in `-wal`. No copy when the file does not exist, when it has no tables, or
-  when nothing is missing. A name that is taken gets a `-2`, `-3` counter; nothing is overwritten. If
-  the copy cannot be written, the migration is refused: `refusing to migrate: <reason>`, `nothing in
-  the database was changed`, exit 1.
+  includes what is still in `-wal`. A copy is taken exactly when this build has a table to create:
+  no copy when the file does not exist or holds no tables at all (a zero-byte file included), a copy
+  when a table is missing even if the version is already current. The copy is written as
+  `<name>.partial`, checked (`integrity_check`, the same tables, the same version), then renamed; a
+  copy that cannot be finished inside the ten-second deadline is refused, naming the lock. A name
+  that is taken gets a `-2`, `-3` counter; nothing is overwritten. If the copy cannot be written,
+  the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
+  exit 1.
 - Copies are never deleted. They pile up beside the database until the Administrator removes them.
 - What is still backed up by hand: the config (`apt purge` deletes it), the reports directory, and
   the data directory as a whole now and then. A database that never migrates never gets a copy.
-- Restore is the copy backwards: stop ATE, put the copy at `database.path` with its `-wal` and
-  `-shm` companions removed, start again. There is no undo of one run and no partial restore.
+- Restore is the copy backwards: stop ATE, put the copy at `database.path`, start again. A migration
+  copy is one file: the backup API folds `-wal` in and the copy is set back to the plain journal
+  before it is renamed. A copy made with `cp` needs its `-wal` and `-shm` companions as well, or the
+  latest writes are missing. There is no undo of one run and no partial restore.
 
 At launch the application also closes any run with no end time as `INTERRUPTED` with result `FAIL`
 and logs `Closed N interrupted run(s) at launch.`

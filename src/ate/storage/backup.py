@@ -151,6 +151,24 @@ def _close_quietly(conn: Optional[sqlite3.Connection]) -> None:
             pass
 
 
+def _match_source_permissions(source: Path, copy: Path) -> None:
+    """Give the copy the database's mode, and its group where the platform has one.
+
+    A copy that is 0644 while the database is 0600 leaks the run records to anyone on the
+    machine; a copy nobody but the root can read is not a way back for the Administrator who
+    needs it. The source's own mode and group are the answer. Windows has no Unix mode or
+    group: there the copy inherits the directory's ACL, and :mod:`ate.permissions` is what
+    governs it, so this is a no-op there. Best effort: a filesystem that refuses the change
+    still leaves a valid copy, and the migration goes on."""
+    try:
+        stat = source.stat()
+        os.chmod(copy, stat.st_mode & 0o7777)
+        if os.name == "posix":
+            os.chown(copy, stat.st_uid, stat.st_gid)
+    except OSError:
+        pass
+
+
 def backup_for_migration(path: str | Path) -> Optional[Path]:
     """Copy the database at ``path`` if a migration is about to change it.
 
@@ -186,14 +204,19 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
     source: Optional[sqlite3.Connection] = None
     copy: Optional[sqlite3.Connection] = None
 
+    def _discard_partial() -> None:
+        """Delete the half-written copy and the WAL companions it may have grown."""
+        for doomed in (partial, partial.with_name(partial.name + "-wal"), partial.with_name(partial.name + "-shm")):
+            try:
+                doomed.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _give_up(reason: str) -> BackupError:
         """Close everything, delete the half-written copy, and raise one line naming it."""
         _close_quietly(copy)
         _close_quietly(source)
-        try:
-            partial.unlink(missing_ok=True)
-        except OSError:
-            pass  # the copy could not be written at all; the message already names it
+        _discard_partial()
         return BackupError(f"cannot back up {path} to {target}: {reason}")
 
     def _remaining() -> float:
@@ -228,6 +251,11 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
         copy.execute(f"PRAGMA busy_timeout={int(_remaining() * 1000)}")
         try:
             source.backup(copy)
+            # A copy of a WAL database carries the WAL header, so the fresh file picks up its own
+            # -wal/-shm companions. Folding them back into the file leaves the backup as one file:
+            # a copy whose data is still sitting in a side file is not a copy you can take away.
+            copy.execute("PRAGMA journal_mode=DELETE")
+            copy.commit()
         except sqlite3.Error as exc:
             raise _give_up(f"the copy was interrupted: {exc}") from exc
         # Step 3: close the copy (Windows cannot delete an open file) and check it.
@@ -241,16 +269,15 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
         if target.exists():
             raise _give_up(f"{target} already exists and is not overwritten")
         os.rename(partial, target)
+        _discard_partial()  # any WAL companions the copy grew, before the mode is copied
+        _match_source_permissions(path, target)
     except (OSError, sqlite3.Error) as exc:
         # Anything else that can go wrong with the copy: a directory that is not there, a
         # permission the process does not have, a rename that fails. It is reported as one line
         # naming the copy, never as a traceback (packet 35 review).
         _close_quietly(copy)
         _close_quietly(source)
-        try:
-            partial.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _discard_partial()
         raise BackupError(f"cannot write a backup of {path} to {target}: {exc}") from exc
     finally:
         _close_quietly(copy)
@@ -301,12 +328,13 @@ def migrate_database(path: str | Path, *, config_file: Path | None = None) -> in
     try:
         store = RunStore(path)
         store.close()  # creates the tables this build declares and stamps the version
-    except (ATEError, sqlite3.Error, SQLAlchemyError) as exc:
-        # Every way a database can fail to be opened or written. The Operator gets one line and
-        # the path of the copy that was already taken; a traceback is not a migration message.
-        print(f"migration failed: {exc}", file=sys.stderr)
+    except (ATEError, sqlite3.Error, SQLAlchemyError, OSError) as exc:
+        # Every way a database can fail to be opened or written, a PermissionError included:
+        # one line naming the copy that was already taken, never a traceback (packet 35 review).
         if copy is not None:
-            print(f"the copy taken before it is at {copy}", file=sys.stderr)
+            print(f"migration failed: {exc}; the copy taken before it is at {copy}", file=sys.stderr)
+        else:
+            print(f"migration failed: {exc}", file=sys.stderr)
         return 1
 
     print(f"created or upgraded database at {path} (schema version {current_version(path)})")
