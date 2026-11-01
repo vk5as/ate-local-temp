@@ -24,6 +24,8 @@ You cannot run a schedule that is not in a Test Definition. Do step 2 before ste
   `COMPLETED`, `PRETEST_FAILED`, `STOPPED_ON_FAIL`, `ABORTED` or `INTERRUPTED`.
 - **Device** - a connection ATE opens (TCP, SERIAL, UDP, VISA). **Equipment** - a bench record
   the schedule declares for the report. They are not the same thing and ATE never links them.
+  GLOSSARY.md fixes the name for the handle `ATE.open` returns: it is a Device, not an instrument,
+  a resource or a port. "Instrument" below means the physical equipment the connection reaches.
 
 ## How much Lua this manual assumes
 
@@ -31,7 +33,9 @@ Basic Lua: `local`, functions, tables, `if`, `for`, `while`, `..` for strings, `
 idioms are ATE-specific: every setter returns its object so calls chain (`:setStepNo("1.")
 :setAction(...)`); a params table is a Lua table written `key = value`; a step's action is an
 anonymous function, and a Sub-schedule's parameters arrive as `local kv = ...`. A step's action
-runs synchronously on the worker thread - do not use coroutines (see Abort).
+runs synchronously on the worker thread. Coroutines are not removed from the sandbox and using one
+is allowed, but the abort hook does not reach a coroutine, so a busy loop inside one is a documented
+exception to the 10 s abort rule (see Abort).
 
 ## The schedule format
 
@@ -39,7 +43,9 @@ The top level of the file runs before any Test Run exists. Plain Lua is fine the
 `ATE.log`, the builders, the enums, and any of the standard library (`os.getenv` in
 `tcp.tslua` reads its host and port at load time). What is not legal is an `ATE` call that needs
 a run: `ATE.open`, `ATE.close`, `ATE.read`, `ATE.write`, `ATE.flush`, `ATE.report`, `ATE.input`
-and `ATE.addEquipment` each raise a load error naming the function. The file must return a
+and `ATE.addEquipment` each raise a load error naming the function. "Load error" is this manual's
+name for anything the loader rejects: one of those `ATE` calls at the top level, or a schedule that
+fails validation (a duplicate Step Number, a step with no action). The file must return a
 `ScheduleParams`.
 
 Setters stash values and return the object, so they chain; the order does not matter, and every
@@ -1043,22 +1049,25 @@ an abort `ATE` calls raise `"aborted"`, a busy loop in the step's own code is st
 instruction-count hook (`debug.sethook(check_abort, "", 1000)`), and `pcall` and `xpcall`
 re-raise. ATE aims to stop in 0.5 s and the suite fails a run that takes longer than 10 s.
 
-That 10 s holds only for what the hook can reach. Three measured cases break it, and they are
-not covered by the abort tests:
+That 10 s holds only for what the hook can reach. Story 83 names two exceptions as allowed rather
+than as bugs, both measured against the shipped code. They are not forbidden; they are the two
+cases where the abort has to wait, and a writer should know which steps they apply to.
 
-- **A coroutine is not reached by the hook.** A loop of `120000000` iterations inside
-  `coroutine.wrap` ran to completion after an abort: 2.67 s from the abort to `FINISHED`, the
-  step reporting `PASS` and the next step recording the abort. An unbounded `while true do end`
-  inside `coroutine.wrap` never stopped at all - the run sat there until the process was killed,
-  its `test_run` row left open. The engine's own docstring says a schedule must not use
-  coroutines for this reason (`src/ate/engine/run_engine.py`, "Because a schedule must not use
-  coroutines").
-- **`os.execute` blocks the abort for the whole command.** A step that ran
-  `os.execute("sleep 20")` was aborted 19.5 s before it ended: the run finished only when the
-  command did. The step still reported `PASS`.
-- **`os.exit` ends ATE.** `os.exit(7)` in a step exits the process with status 7. The run row is
-  left with no `ended_at` and no result; the next launch closes it as `INTERRUPTED`/`FAIL`. No
-  Post-test Action runs, and no report is written.
+- **A command run by `os.execute` is allowed, and the abort waits for it.** `os.execute` is
+  available in a step. A step that ran `os.execute("sleep 20")` was aborted 19.5 s before it ended:
+  the run finished only when the command did. The step still reported `PASS`. ATE cannot end a
+  process it did not start.
+- **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop of
+  `120000000` iterations inside `coroutine.wrap` ran to completion after an abort: 2.67 s from the
+  abort to `FINISHED`, the step reporting `PASS` and the next step recording the abort. An unbounded
+  `while true do end` inside `coroutine.wrap` stopped only when the process was killed, its
+  `test_run` row left open. The engine's own docstring advises against coroutines for this reason
+  (`src/ate/engine/run_engine.py`, "Because a schedule must not use coroutines"): the exception is
+  real, but it is hard to stop.
+
+`os.exit` is not an exception and stays a never. `os.exit(7)` in a step exits the process with
+status 7. The run row is left with no `ended_at` and no result; the next launch closes it as
+`INTERRUPTED`/`FAIL`. No Post-test Action runs, and no report is written.
 
 A plain loop in a step, `ATE.sleep` and `ATE.input` all do stop within the 10 s.
 
@@ -1096,9 +1105,10 @@ return ScheduleParams("Manual: abort", "a sleep the Operator aborts, and the tea
 `dofile`, `loadfile`, `load` and `python` are gone. `package` exists but `package.path` and
 `package.cpath` are empty. `debug` is reduced to `debug.traceback`. `io`, `os`, `string`,
 `table` and the rest of the standard library are still there. This is traceability, not
-security: ATE needs to know which files a run ran. That is why `os.execute` and `os.exit` are
-reachable from a step: nothing in the sandbox stops them, and both are ways to break a run (see
-Abort). A schedule can still open a file with `io.open` if it names a path.
+security: ATE needs to know which files a run ran. `os.execute` is reachable from a step and is
+allowed: the only cost is that an abort waits for the command (see Abort). `os.exit` is also
+reachable, and is the one thing in `os` never to call, because it ends the process with nothing
+recorded. A schedule can still open a file with `io.open` if it names a path.
 
 ```lua:docs/manuals/examples/test-writer/sandbox.tslua
 -- sandbox.tslua: what the Test Schedule sandbox gives a schedule, and takes away.
@@ -1372,13 +1382,16 @@ the database.
 - Never call `ATE.report` or `ATE.input` in an Action.
 - Never rely on `package.path`, `dofile` or `loadfile`: they do not work.
 - Never use `pcall` to survive an abort: it re-raises.
-- Never put a busy loop in a coroutine: the abort hook does not reach coroutines, so an abort
-  cannot stop it.
-- Never run a long command with `os.execute` in a step: the abort waits for the command to end.
-- Never call `os.exit` in a step: it ends the whole ATE process and leaves the run row open.
+- Never call `os.exit` in a step: it ends the whole ATE process and leaves the run row open with
+  nothing recorded.
 - Never assume a checksum mismatch stops the run; it only warns.
 - Never write to `ATE.run`; it is read-only.
 - Never ship a schedule without running `ate definition update` on its `.atedef`.
+
+Two things are deliberately not on this list, because story 83 records them as allowed exceptions
+to the must-stop-within-10-s rule: a command a step runs with `os.execute`, and a busy loop inside
+a coroutine. Both are measured, both are explained under Abort, and neither is a reason to refuse
+a schedule.
 
 ## Where the assets and the code disagree
 

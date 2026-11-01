@@ -162,13 +162,22 @@ exceed `2**31 - 1`.
 - A Device call is interrupted by `src/ate/devices/abort.py`, which runs the call in slices of
   `POLL_SECONDS` and checks the flag between them.
 
+Story 83 allows two exceptions to the 10 s bound, and the suite measures them instead of trying to
+fix them: a command a step runs with `os.execute`, which the abort cannot end, and a busy loop
+inside a coroutine, where the count hook never ticks
+(`tests/test_manuals.py`: `test_a_command_in_a_step_holds_the_abort_until_it_finishes`,
+`test_a_coroutine_loop_runs_to_completion_after_an_abort`). Neither is forbidden in a schedule.
+`os.exit` is not an exception: it ends the process with the run row left open and nothing recorded.
+
 Three things cannot be interrupted: a SQLite commit already in progress, one Lua C call such as a
 pattern match on a huge string, and `set_visa_attribute` or `resource.timeout` on the worker.
 
-Allowed on the worker: step and Action closures, synchronously (schedules must not use coroutines, so
-`ATE.report` is attributed to a step by snapshotting the host's report log before the closure and
-diffing it afterwards); store writes, each its own commit; Device reads, writes, opens and closes
-through the registry; and the drains `_flush_device_warnings`, `_flush_equipment` and `_record_files`.
+Allowed on the worker: step and Action closures, synchronously (`run_engine.py`'s docstring assumes
+this --- the sandbox does not remove coroutines, but story 83 records a busy loop in one as an
+exception to the abort bound, so `ATE.report` is attributed to a step by snapshotting the host's
+report log before the closure and diffing it afterwards); store writes, each its own commit; Device
+reads, writes, opens and closes through the registry; and the drains `_flush_device_warnings`,
+`_flush_equipment` and `_record_files`.
 
 Not allowed: touching a widget or importing `QtWidgets`; a loop that does not check the abort flag;
 emitting into the engine from the main thread as if it were the worker. The main thread calls `choose()`

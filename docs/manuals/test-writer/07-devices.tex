@@ -5,6 +5,11 @@ socket, a serial connection, a datagram peer, a VISA instrument. Four Device Typ
 Each one takes connection details from the schedule, and the schedule names them --- ATE has no
 Device discovery.
 
+GLOSSARY.md fixes the name. The object \texttt{ATE.open} returns is a \textbf{Device}; \emph{instrument},
+\emph{resource} and \emph{port} are what people on the bench call it, and this manual uses
+\emph{instrument} only for the equipment at the far end of the connection, never for the handle a
+step holds.
+
 \begin{center}
 \footnotesize
 \begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{11.2cm}@{}}

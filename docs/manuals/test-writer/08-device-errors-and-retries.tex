@@ -63,28 +63,31 @@ within half a second, and the test suite fails a run that takes longer than ten.
 Post-test Actions still run afterwards, each with the run's result. A second abort ends only the
 Action it lands in. Every Device still open is closed.
 
-\section{Three things an abort does not stop}
+\section{Two exceptions to the ten-second rule, and one thing never to do}
 
-The ten seconds hold only for what the hook can reach. These three were measured against the
-shipped code, and none of them is covered by the abort tests; treat them as limits of the
-mechanism, not as bugs in your schedule.
+The ten seconds hold only for what the hook can reach. Story 83 names two cases as allowed
+exceptions rather than bugs, both measured against the shipped code. They are not forbidden; they
+are the two situations in which the Operator's Abort has to wait, and a writer should know which
+steps are affected before promising a stop.
 
 \begin{itemize}
-  \item \textbf{A coroutine.} The count hook does not reach a coroutine. A loop of
-    \texttt{120000000} iterations inside \texttt{coroutine.wrap} ran to completion after an
+  \item \textbf{A command run by \texttt{os.execute}.} \texttt{os.execute} is available in a step,
+    and using it is allowed. A step that ran \texttt{os.execute("sleep 20")} was aborted 19.5 s
+    before it ended: the run finished when the command did, not when the Operator asked. The step
+    still reported \texttt{PASS}. The abort cannot end a process ATE did not start.
+  \item \textbf{A busy loop inside a coroutine.} The count hook does not reach a coroutine. A loop
+    of \texttt{120000000} iterations inside \texttt{coroutine.wrap} ran to completion after an
     abort: 2.67 s from the abort to \texttt{FINISHED}, the step reporting \texttt{PASS} and the
     following step recording the abort. An unbounded \texttt{while true do end} inside
-    \texttt{coroutine.wrap} never stopped: the run sat there until the process was killed, with
-    its \texttt{test\_run} row left open. This is why the engine's own docstring says a schedule
-    must not use coroutines.
-  \item \textbf{\texttt{os.execute}.} A step that ran \texttt{os.execute("sleep 20")} was
-    aborted 19.5 s before it ended: the run finished when the command did, not when the Operator
-    asked. The step still reported \texttt{PASS}.
-  \item \textbf{\texttt{os.exit}.} \texttt{os.exit(7)} called in a step exits the whole ATE
-    process with status 7. The run row is left with no \texttt{ended\_at} and no result; the
-    next launch closes it as \texttt{INTERRUPTED}/\texttt{FAIL}. No Post-test Action runs and no
-    report is written.
+    \texttt{coroutine.wrap} stopped at all only when the process was killed, with its
+    \texttt{test\_run} row left open. This is why the engine's own docstring advises a schedule
+    not to use coroutines: the exception is real, but it is not easy to stop.
 \end{itemize}
+
+\texttt{os.exit} is not an exception, and stays a never. \texttt{os.exit(7)} called in a step exits
+the whole ATE process with status 7: the run row is left with no \texttt{ended\_at} and no result,
+the next launch closes it as \texttt{INTERRUPTED}/\texttt{FAIL}, no Post-test Action runs and no
+report is written. Nothing is recorded.
 
 A plain loop in a step, \texttt{ATE.sleep} and \texttt{ATE.input} all do stop inside the ten
 seconds.

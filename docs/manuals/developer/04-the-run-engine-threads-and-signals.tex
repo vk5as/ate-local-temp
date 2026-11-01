@@ -142,9 +142,10 @@ SQLite commit already in progress, one Lua C call such as a pattern match on a h
 Allowed, because the abort flag is checked inside it and it never touches a widget:
 
 \begin{itemize}
-  \item a Test Step or Action closure, synchronously. Schedules must not use coroutines, so
-    \texttt{ATE.report} is attributed to a step by snapshotting the host's report log before the closure
-    runs and diffing it afterwards;
+  \item a Test Step or Action closure, synchronously. \texttt{run\_engine.py}'s docstring assumes
+    this: the sandbox does not remove coroutines, but story 83 records a busy loop in one as an
+    exception to the abort bound, so \texttt{ATE.report} is attributed to a step by snapshotting the
+    host's report log before the closure runs and diffing it afterwards;
   \item store writes. Each is its own commit (the Engine is autocommit), which is what makes the record
     append-only and crash-safe, and also why a run with many rows costs many commits --- see
     chapter~\ref{ch:storage};

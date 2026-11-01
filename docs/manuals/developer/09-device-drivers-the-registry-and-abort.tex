@@ -58,6 +58,14 @@ behind gets its own line, \texttt{open <device> aborted (ms)} or \texttt{close <
 
 \section{Abort, and what an abort cannot stop}
 
+Story 83 names two \emph{allowed} exceptions to the ten-second bound, and the suite measures both
+rather than trying to fix them: a command a step runs with \texttt{os.execute}, which the abort
+cannot end, and a busy loop inside a coroutine, where the count hook never ticks
+(\texttt{tests/test\_\allowbreak{}manuals.py}: \texttt{test\_\allowbreak{}a\_\allowbreak{}command\_\allowbreak{}in\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}holds\_\allowbreak{}the\_\allowbreak{}abort\_\allowbreak{}until\_\allowbreak{}it\_\allowbreak{}finishes},
+\texttt{test\_\allowbreak{}a\_\allowbreak{}coroutine\_\allowbreak{}loop\_\allowbreak{}runs\_\allowbreak{}to\_\allowbreak{}completion\_\allowbreak{}after\_\allowbreak{}an\_\allowbreak{}abort}).
+Neither is forbidden in a schedule. \texttt{os.exit} is not one of them: it ends the process with the
+run row left open, and the next launch closes it as \texttt{INTERRUPTED}/\texttt{FAIL}.
+
 \texttt{ate/devices/abort.py} is packet 32b's answer to ``the abort does not stop the worker in 10 s''.
 There are two kinds of Device wait:
 

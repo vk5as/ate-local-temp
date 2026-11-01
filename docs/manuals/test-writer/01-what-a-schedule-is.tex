@@ -11,7 +11,9 @@ one installation of ATE on one computer. A \textbf{Device} is a connection ATE t
 a TCP socket, a serial connection, a UDP datagram channel, or a VISA resource.
 \textbf{Equipment} is a record of what was on the bench, declared by the schedule so it appears
 in the Test Report. A \textbf{Media Release} is a set of Lua files delivered together, described
-by a \textbf{Test Definition}.
+by a \textbf{Test Definition}. The names are the ones in GLOSSARY.md: the handle a step gets from
+\texttt{ATE.open} is a Device, never an instrument or a port, and \emph{instrument} means the
+physical equipment it reaches.
 
 \section{How much Lua this manual assumes}
 
@@ -32,14 +34,18 @@ Nothing else in the language is used by the examples in this manual.
 
 ATE targets Lua 5.5. The runtime is a normal Lua 5.5 interpreter with a few entry points
 removed (chapter~\ref{ch:sandbox}), so plain Lua knowledge transfers. A step's action runs
-synchronously on the worker thread: a schedule should not use coroutines, because the abort
-hook does not reach a coroutine and a loop inside one cannot be stopped (chapter~\ref{ch:errors}).
+synchronously on the worker thread. Coroutines are not taken away, and using one is not
+forbidden, but the count hook does not reach a coroutine: a busy loop inside one is one of the
+two documented exceptions to the ten-second abort rule (chapter~\ref{ch:errors}).
 
 \section{The shape of a Test Schedule}
 
 A Test Schedule is a Lua file with the extension \texttt{.tslua}. Its top level runs when the
 file is loaded, before any Test Run exists, and it must \emph{return} a schedule object built
-with \texttt{ScheduleParams}. Nothing in the file executes a Test Step itself.
+with \texttt{ScheduleParams}. Nothing in the file executes a Test Step itself. Two things make a
+file fail to load, and the manual calls both a load error: an \texttt{ATE} call that needs a run
+at the top level, which raises with the function's name (chapter~\ref{ch:sandbox}), and a
+schedule that fails validation, such as a duplicate Step Number or a step with no action.
 
 \section{Where a schedule lives}
 
