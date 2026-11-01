@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -282,8 +283,8 @@ def test_the_admin_coverage_check_can_fail() -> None:
 #: A listing in the admin manual whose lines are commands an administrator types.
 SHELL_LISTING = re.compile(r"\\begin\{lstlisting\}\[language=ATEShell\](.*?)\\end\{lstlisting\}", re.S)
 
-#: A listing line is a command when it starts with one of these. Everything else in a listing is
-#: a message the machine printed.
+#: A listing line is a command when it starts with one of these, or with an artifact name such as
+#: `ate-1.2.3-windows-x64-setup.exe`. Everything else in a listing is a message the machine printed.
 COMMAND_TOKENS = {"ate", "sudo", "apt-get", "pipx", "python", "./install.sh"}
 
 
@@ -298,7 +299,7 @@ def shell_commands(manual: Manual) -> list[str]:
         for block in SHELL_LISTING.findall(tex.read_text(encoding="utf-8")):
             for line in (line.split("#", 1)[0].strip() for line in block.splitlines()):
                 tokens = line.split()
-                if not tokens or tokens[0] not in COMMAND_TOKENS:
+                if not tokens or (tokens[0] not in COMMAND_TOKENS and not tokens[0].startswith("ate-")):
                     continue
                 if len(tokens) > 1 and tokens[1].endswith(":"):
                     continue
@@ -337,8 +338,8 @@ COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
 #: this file, not a limitation of the test suite.
 COMMANDS_NOT_RUN: dict[str, str] = {
     "ate-1.2.3-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS":
-        "Windows only. The same flags are packaging/windows/smoke_installer.py's INSTALL_FLAGS, "
-        "which tests/test_inno_installer_27b.py reads and asserts the .iss uses",
+        "Windows only. The flags are packaging/windows/smoke_installer.py's INSTALL_FLAGS, which the "
+        "test below matches against the manual and tests/test_release_ci_27c.py asserts exist",
     "./install.sh --prefix /opt/ate --bin /usr/bin/ate":
         "runs in a debian:stable container (tests/test_release_ci_28c.py, ATE_DOCKER_TESTS=1)",
     "apt-get install -y ./ate_1.2.3_amd64.deb":
@@ -359,7 +360,7 @@ COMMANDS_NOT_RUN: dict[str, str] = {
     "ate --allow-unsandboxed-pdf":
         "also opens the application; the flag's effect on the PDF is asserted in "
         "tests/test_pdf_sandbox_choice_30d.py",
-    "ate _pdf <html> <pdf> --paper A4|Letter [--unsandboxed]":
+    "ate _pdf report.html report.pdf --paper A4":
         "not for humans to run, as the manual says; it is started by the report writer, and its "
         "messages are checked against src/ate/report/pdf.py below",
 }
@@ -396,7 +397,7 @@ def station(tmp_path) -> Path:
     """A Station prepared once in a temporary directory, ready for the commands above."""
     root = tmp_path / "station"
     root.mkdir()
-    code, out, err = run_ate(["setup", "--root", str(root), "--no-permissions"], root)
+    code, _out, err = run_ate(["setup", "--root", str(root), "--no-permissions"], root)
     assert code == 0, f"setup failed: {err}"
     # The manual's Media Release example, so `ate definition update` and `--scan` have real files.
     # The example's definition is called manual.atedef; the manual's example is release.atedef.
@@ -428,6 +429,8 @@ def test_the_admin_manual_shows_no_command_that_is_never_run() -> None:
     assert not unaccounted, f"the admin manual shows commands no test runs or explains: {unaccounted}"
     missing = sorted({line for line, *_ in COMMANDS_RUN} - shown)
     assert not missing, f"the suite runs commands the manual no longer shows: {missing}"
+    stale = sorted(set(COMMANDS_NOT_RUN) - shown)
+    assert not stale, f"reasons kept for commands the manual no longer prints: {stale}"
 
 
 @pytest.mark.parametrize("line, argv, expected, wanted, cwd", COMMANDS_RUN)
@@ -510,6 +513,28 @@ def test_definition_update_fixes_the_checksums_the_manual_says_it_fixes(station)
     for entry in updated["files"]:
         computed = hashlib.sha256((station / "data" / "definitions" / "MR-1043" / entry["path"]).read_bytes()).hexdigest()
         assert entry["sha256"] == computed, f"{entry['path']} still does not match after the update"
+
+
+def test_the_windows_silent_install_line_matches_what_ci_passes() -> None:
+    """The one command the manual shows that this machine can never run is still checked.
+
+    The silent-install line is compared with the flags `packaging/windows/smoke_installer.py`
+    actually passes to the installer on the Windows runner: a manual that changes the flags, or
+    the artifact name, is caught here rather than by someone reading a PDF."""
+    script = ROOT / "packaging" / "windows" / "smoke_installer.py"
+    spec = importlib.util.spec_from_file_location("smoke_installer", script)
+    smoke = importlib.util.module_from_spec(spec)
+    sys.modules["smoke_installer"] = smoke  # the script's @dataclass classes need their module to exist
+    spec.loader.exec_module(smoke)
+
+    line = next(
+        (line for line in shell_commands(MANUALS["admin"]) if line.endswith(" ".join(smoke.INSTALL_FLAGS))),
+        None,
+    )
+    assert line, f"the manual no longer shows the flags the CI uses: {smoke.INSTALL_FLAGS}"
+    name, _, flags = line.partition(" ")
+    assert re.fullmatch(r"ate-\d+\.\d+\.\d+-windows-x64-setup\.exe", name), f"{name} is not an ATE installer name"
+    assert flags == " ".join(smoke.INSTALL_FLAGS)
 
 
 #: Every message the admin manual quotes, and where the code prints it: (text in the manual,
@@ -685,7 +710,7 @@ def test_the_real_linux_permission_commands_work_in_debian_stable(tmp_path: Path
     work = tmp_path / "permissions"
     work.mkdir()
     shutil.copy(ROOT / "src" / "ate" / "permissions.py", work / "permissions.py")
-    (work / "check.py").write_text(CONTAINER_PERMISSIONS_SCRIPT, encoding="utf-8")
+    (work / "check.py").write_text(CONTAINER_PERMISSIONS_SCRIPT, encoding="utf-8", newline="\n")
 
     proc = subprocess.run(
         ["docker", "run", "--rm", "-v", f"{work}:/work", "-w", "/work",

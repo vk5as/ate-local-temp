@@ -46,7 +46,8 @@ ate                      # opens the application; exit 1 with a refusal if confi
 ate --help               # usage at any level, exit 0
 ate -V                   # same as --version
 ate --version
-ate --config PATH        # read that config instead of the platform default; works with every command
+ate --config PATH        # the platform config to read instead of the default; it belongs to `ate`,
+                         # so it comes before the subcommand: `ate --config PATH db status`
 ate --allow-unsandboxed-pdf   # privileged only: render Test Report PDFs without Chromium's sandbox
 ```
 
@@ -298,6 +299,8 @@ The build fails on an overfull box wider than 5 pt or an undefined reference.
 - Never run `groupadd`, `chown`, `chmod` or `icacls` on the test machine for a permission claim. Use
   `RecordingPermissions` (see `tests/test_cli_setup.py`) or the gated `debian:stable` container.
 - Never trust an error message you have not grepped in `src/ate/`.
+- Never write `ate db status --config PATH`. `--config` belongs to `ate`, so the path after `db` is
+  read as the database and the command dies on a JSON file; write `ate --config PATH db status`.
 - Never assume a checksum mismatch stops a run; it warns.
 - Never assume a PDF was written; check for one, and check it has text.
 - Never migrate without a backup copy — `ate db migrate` makes none.
