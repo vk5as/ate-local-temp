@@ -3,8 +3,10 @@
 What an agent needs to know to install, prepare, run, debug and upgrade an ATE Station. Every key,
 command and message here is checked against the code by `tests/test_manuals.py`: the config keys
 and the `ate` commands are derived from `src/ate/config.py` and `src/ate/cli.py`, every command
-listed below is executed in a temporary Station, and every quoted message is looked up in the file
-that prints it. Facts the wayfinding assets state differently from the code are listed at the end.
+listed below is executed in a temporary Station, and each message this manual quotes is checked
+against the file that prints it. The message check is a hand-written list, `QUOTED_MESSAGES` in
+`tests/test_manuals.py`: it proves the messages it contains are still what the code prints, and it
+only covers the messages someone thought to put in it. Facts the wayfinding assets state differently from the code are listed at the end.
 
 The manual for a human is `docs/manuals/admin/main.tex` (eleven chapters, built to PDF by
 `docs/manuals/build.py admin`). This file is not a conversion of it: it is written for an agent, in

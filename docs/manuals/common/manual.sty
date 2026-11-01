@@ -15,6 +15,8 @@
 \usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{array}  % for the raggedright p-columns every reference table uses
+\usepackage{longtable}  % the reference and config-key tables are longer than one page, so they
+                        % must be able to break rather than be pushed whole onto the next page
 \usepackage{enumitem}
 \usepackage{hyperref}
 \usepackage{amsmath}  % for the small amounts of maths in the timing tables
@@ -51,6 +53,66 @@
   captionpos=b,
   numbers=none,
   numberstyle=\tiny\color{ategray},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+% -- Shell, Python and JSON listings -------------------------------------------
+% The same shape as the Lua one: same colours, same frame, only the keywords differ. A
+% manual that quoted a shell command without these would fail the build with "Couldn't load
+% requested language".
+\lstdefinelanguage{ATEShell}{
+  morekeywords={ate,python,pytest,latexmk,docker,git,apt,pip,pipx,sudo,venv,source,export,cd,mkdir,cp,ls,find,grep,crlf,systemctl,dpkg,mkdir},
+  sensitive=true,
+  morecomment=[l]{\#},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\lstdefinelanguage{ATEPython}{
+  keywords={def,class,return,if,elif,else,for,while,import,from,as,with,not,and,or,None,True,False,lambda,try,except,finally,raise,pass,assert,in,is,global,yield,self},
+  sensitive=true,
+  morecomment=[l]{\#},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment},
+  stringstyle=\color{ategreen},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\lstdefinelanguage{ATEJSON}{
+  keywords={format,mediaNumber,name,version,depends,files,path,sha256,module,hidden,true,false,null},
+  sensitive=true,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
   columns=fullflexible,
   keepspaces=true,
   showstringspaces=false

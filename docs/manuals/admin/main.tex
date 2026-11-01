@@ -11,27 +11,6 @@
 
 \usepackage{manual}  % docs/manuals/common/manual.sty, on TEXINPUTS by the build script
 
-% The admin manual quotes shell commands rather than Lua, so it needs a shell listing style
-% in addition to the Lua one the shared preamble defines.
-\lstdefinelanguage{ATEShell}{
-  morekeywords={ate,setup,db,status,migrate,definition,update,install,apt,pipx,sudo,crlf},
-  sensitive=true,
-  morecomment=[l]{\#},
-  basicstyle=\ttfamily\footnotesize,
-  keywordstyle=\bfseries\color{codekey},
-  commentstyle=\itshape\color{codecomment},
-  backgroundcolor=\color{codebg},
-  frame=single,
-  rulecolor=\color{ategray},
-  breaklines=true,
-  breakatwhitespace=true,
-  captionpos=b,
-  numbers=none,
-  columns=fullflexible,
-  keepspaces=true,
-  showstringspaces=false
-}
-
 \title{%
   \textbf{Running an ATE Station}\\[6pt]
   \large The system administrator's manual\\[10pt]

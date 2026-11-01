@@ -111,12 +111,17 @@ hardware.
 \noindent\textbf{\texttt{serial.tslua}}\par
 \lstinputlisting[language=ATELua]{../examples/test-writer/serial.tslua}
 
-A VISA Device is named by a resource string, and the string's shape says what kind of
-connection it is: \texttt{GPIB0::5::INSTR} is an instrument on a GPIB bus,
-\texttt{TCPIP0::192.168.1.10::inst0::INSTR} is a VXI-11 instrument over TCPIP, and
-\texttt{TCPIP0::127.0.0.1::5025::SOCKET} is a raw TCP socket wrapped in a VISA session ---
-not a VXI-11 instrument, and the same stream a \texttt{DeviceType.TCP} Device would open. ATE
-uses whatever pyvisa backend it finds and ships only pyvisa-py, which covers TCPIP and USBTMC.
+A VISA Device is named by a resource string, and the string's shape says what kind of connection
+it is:
+
+\begin{itemize}
+  \item \texttt{GPIB0::5::INSTR} --- an instrument on a GPIB bus;
+  \item \texttt{TCPIP0::192.168.1.10::inst0::INSTR} --- a VXI-11 instrument over TCPIP;
+  \item \texttt{TCPIP0::127.0.0.1::5025::SOCKET} --- a raw TCP socket wrapped in a VISA session,
+    not a VXI-11 instrument, and the same stream a \texttt{DeviceType.TCP} Device would open.
+\end{itemize}
+
+ATE uses whatever pyvisa backend it finds and ships only pyvisa-py, which covers TCPIP and USBTMC.
 A GPIB instrument needs a real VISA driver installed on the Station (NI-VISA, or linux-GPIB):
 nothing in ATE supplies one, so ask the schedule author what their instrument actually speaks
 before writing the schedule.
