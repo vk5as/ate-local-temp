@@ -377,6 +377,24 @@ def test_a_copy_is_checked_before_it_is_named_a_backup(tmp_path: Path, monkeypat
     assert str(target) in str(raised.value), str(raised.value)
 
 
+def test_a_copy_is_one_file_and_a_database_ate_can_open(tmp_path: Path) -> None:
+    """The copy is a standalone file: no `.partial`, no `-wal` left beside it, same tables, same version."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    copy = backup_for_migration(path)
+    assert copy is not None
+    beside = sorted(p.name for p in tmp_path.iterdir())
+    assert not any("partial" in name for name in beside), beside
+    assert copy.name in beside, beside
+    conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
+    try:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+    assert version == 4 and tables == _tables(path), beside
+
+
 def test_a_copy_never_overwrites_a_file_that_is_already_there(tmp_path: Path, monkeypatch) -> None:
     """An Operator's own file keeps its contents: the migration will not write over it."""
     from ate.storage import backup as backup_module
@@ -522,8 +540,26 @@ def test_ate_setup_migrates_the_database_the_config_names(tmp_path: Path, capsys
     assert not (station / "data" / "ate.db").exists()
 
 
-def test_ate_setup_falls_back_to_the_default_when_the_config_cannot_be_read(tmp_path: Path, capsys) -> None:
-    """No readable config means no configured path: the default beside the data directory is used, and setup says why."""
+def test_ate_setup_falls_back_to_the_data_directory_when_there_is_no_config(tmp_path: Path, capsys) -> None:
+    """No config file at all is not a fault: setup uses the data directory it prepared and says so."""
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    config.parent.mkdir(parents=True)
+    (station / "data").mkdir(parents=True)
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    default = station / "data" / "ate.db"
+    assert str(default) in out, out
+    assert "wrote default config" in out, out
+    assert default.exists()
+
+
+def test_ate_setup_refuses_a_config_it_cannot_read_instead_of_guessing(tmp_path: Path, capsys) -> None:
+    """A config that is there but unreadable is refused in one line, not silently replaced.
+
+    Falling back to ``<data>/ate.db`` migrates a database nobody opens while the real one stays
+    at the old schema: the opposite of what the Administrator asked for (packet 35 review)."""
     station = tmp_path / "station"
     config = station / "config" / "config.json"
     config.parent.mkdir(parents=True)
@@ -531,11 +567,38 @@ def test_ate_setup_falls_back_to_the_default_when_the_config_cannot_be_read(tmp_
     config.write_text("{ this is not json", encoding="utf-8", newline="\n")
 
     code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
-    assert code == 0, err
-    default = station / "data" / "ate.db"
-    assert str(default) in out, out
-    assert "config" in out, out
-    assert default.exists()
+    text = out + err
+    assert code == 1, text
+    assert str(config) in text, text
+    assert "cannot read the config" in text.lower(), text
+    assert "Traceback" not in err, err
+    assert not (station / "data" / "ate.db").exists(), "setup migrated a database it never read"
+
+
+@pytest.mark.parametrize("body", [
+    b'{"format": 1, "database": 5}',
+    b'{"format": 1, "database": {"path": "\xff\xfe"}}',
+    b'{"format": 1, "defnitions": {"directories": ["x"]}}',
+    b'{"format": 2, "database": {"path": "/tmp/x.db"}}',
+])
+def test_a_config_that_cannot_be_read_at_all_is_refused(tmp_path: Path, capsys, body: bytes) -> None:
+    """A wrong type, a bad encoding, a typo and a wrong format all refuse; none of them guesses.
+
+    Each of these used to fall back to ``<data>/ate.db`` with exit 0, migrating a database the
+    Station does not use (packet 35 review)."""
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    config.parent.mkdir(parents=True)
+    (station / "data").mkdir(parents=True)
+    config.write_bytes(body)
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    text = out + err
+    assert code == 1, text
+    assert str(config) in text, text
+    assert "cannot read the config" in text.lower(), text
+    assert "Traceback" not in err, err
+    assert not (station / "data" / "ate.db").exists(), "setup migrated a database it never read"
 
 
 def test_ate_setup_backs_up_an_older_database_it_upgrades(tmp_path: Path, capsys) -> None:
@@ -622,6 +685,269 @@ def test_a_path_that_is_not_a_database_fails_in_one_line(tmp_path: Path) -> None
 
     code, out, err = _cli_subprocess(["db", "migrate", str(not_a_db), "--yes"])
     assert code == 1 and "Traceback" not in err, err
+
+
+# --- a database nothing can migrate -----------------------------------------------------
+
+
+def _no_migration_message(path: Path) -> str:
+    """The whole line this ATE prints for a database at an older version with every table."""
+    return (
+        f"the database at {path} stores schema version {SCHEMA_VERSION - 1} and already holds every "
+        f"table this ATE declares: this ATE has no migration from version {SCHEMA_VERSION - 1} to "
+        f"{SCHEMA_VERSION}, so it is not stamped as {SCHEMA_VERSION}"
+    )
+
+
+def _database_at_an_older_version_with_every_table(path: Path) -> None:
+    """A database this ATE built, then stamped one version behind without dropping anything."""
+    RunStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION - 1}")
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_with_every_table_and_an_old_version_is_refused_by_name(tmp_path: Path, capsys) -> None:
+    """It is its own status, not NEEDS_MIGRATE: telling the Operator to migrate is a dead loop.
+
+    The whole message is checked, because the manual quotes it word for word."""
+    from ate.storage import DbLaunchStatus, check_database_at_launch
+
+    path = tmp_path / "ate.db"
+    _database_at_an_older_version_with_every_table(path)
+    expected = _no_migration_message(path)
+
+    result = check_database_at_launch(path)
+    assert result.status is DbLaunchStatus.NO_MIGRATION, result
+    assert result.user_version == SCHEMA_VERSION - 1
+
+    code, out, err = _cli(["db", "status", str(path)], capsys)
+    assert code == 1, out + err
+    assert err.strip() == expected, repr(err)
+
+    code, out, err = _cli_subprocess(["db", "migrate", str(path), "--yes"])
+    assert code == 1, out + err
+    assert err.strip() == expected, repr(err)
+    assert "Traceback" not in err, err
+
+
+def test_refusing_a_database_that_cannot_be_migrated_touches_nothing(tmp_path: Path) -> None:
+    """No copy, no rewrite, no new WAL: the refusal reads the file and stops."""
+    path = tmp_path / "ate.db"
+    _database_at_an_older_version_with_every_table(path)
+    before = path.read_bytes()
+    files = {p.name for p in tmp_path.iterdir()}
+
+    assert migrate_database(path) == 1
+    assert path.read_bytes() == before
+    # SQLite creates the -wal/-shm companions just by reading a WAL database; nothing else
+    # may appear, and the file itself is unchanged.
+    added = {p.name for p in tmp_path.iterdir()} - files
+    assert added <= {"ate.db-wal", "ate.db-shm"}, sorted(added)
+    assert _backups(tmp_path) == [], sorted(tmp_path.iterdir())
+    assert _version(path) == SCHEMA_VERSION - 1
+
+
+def test_the_launch_dialog_says_the_same_one_line(tmp_path: Path) -> None:
+    """The GUI never migrates, and it refuses with the same sentence `db status` prints."""
+    from ate.app import launch
+
+    station = tmp_path / "station"
+    station.mkdir()
+    config = station / "config.json"
+    path = station / "ate.db"
+    _database_at_an_older_version_with_every_table(path)
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{path}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    seen: list[str] = []
+    outcome = launch(["--config", str(config)], prompt=lambda p: True, alert=seen.append, exec_=False)
+    assert outcome.code == 1, outcome
+    assert len(seen) == 1, seen
+    assert seen[0] == _no_migration_message(path), repr(seen[0])
+
+
+def test_a_migration_that_fails_with_a_permission_error_names_the_copy(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Every failure after the copy names it, in one line, with a non-zero exit and no traceback."""
+    from ate.storage import store as store_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+
+    class StoreThatCannotWrite:
+        def __init__(self, db_path):
+            self.path = db_path
+
+        def close(self) -> None:
+            raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(store_module, "RunStore", StoreThatCannotWrite)
+
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    copies = _backups(tmp_path)
+    assert code == 1, out + err
+    assert len(copies) == 1, sorted(tmp_path.iterdir())
+    assert str(copies[0]) in err, err
+    assert "Permission denied" in err, err
+    lines = [line for line in err.strip().splitlines() if line]
+    assert len(lines) == 1, lines
+    assert "Traceback" not in err, err
+    assert _version(path) == 4
+
+
+def test_the_copy_keeps_the_database_mode_and_group(tmp_path: Path) -> None:
+    """A copy of a 0600 database is not 0644: the run records do not leak to the machine."""
+    if os.name != "posix":
+        pytest.skip("file modes are a Unix notion; on Windows the directory's ACL governs the copy")
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    path.chmod(0o600)
+    copy = backup_for_migration(path)
+    assert copy is not None
+    assert copy.stat().st_mode & 0o777 == 0o600, oct(copy.stat().st_mode)
+    assert copy.stat().st_gid == path.stat().st_gid
+    path.chmod(0o644)
+
+
+def test_an_empty_or_table_less_database_gets_no_copy(tmp_path: Path) -> None:
+    """The copy rule, stated exactly once: a table has to be about to be created.
+
+    A zero-byte file, or a file with no tables, has nothing to lose. A database at this build's
+    version that is missing a table does get a copy, because that migration changes real data."""
+    from ate.storage.backup import current_version
+
+    empty = tmp_path / "empty.db"
+    empty.write_bytes(b"")
+    assert backup_for_migration(empty) is None
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+
+    bare = tmp_path / "bare.db"
+    conn = sqlite3.connect(bare)
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+    conn.close()
+    assert backup_for_migration(bare) is None
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+
+    current = tmp_path / "current.db"
+    RunStore(current).close()
+    conn = sqlite3.connect(current)
+    conn.execute("DROP TABLE equipment")
+    conn.commit()
+    conn.close()
+    assert current_version(current) == SCHEMA_VERSION, "the version stayed current while a table is missing"
+    copy = backup_for_migration(current)
+    assert copy is not None, sorted(tmp_path.iterdir())
+    assert _tables(copy) == _tables(current)
+
+
+# --- the command line reads its options exactly -----------------------------------------
+
+
+def test_a_config_for_ate_is_not_read_as_config_dir(tmp_path: Path, capsys) -> None:
+    """`ate setup --config FILE` used to be the prefix of `--config-dir`: it now means the file.
+
+    Setup reads a config (it decides which database to migrate from it), so the flag means the
+    same thing here as everywhere else: the config file to use."""
+    station = tmp_path / "station"
+    data = station / "data"
+    config = tmp_path / "elsewhere" / "station-config.json"
+    db = tmp_path / "other" / "station.db"
+    data.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    code, out, err = _cli(["setup", "--root", str(station), "--config", str(config), "--no-permissions"], capsys)
+    assert code == 0, out + err
+    assert str(db) in out, out
+    assert db.exists()
+    assert not (station / "config" / "config.json").exists(), "setup wrote a config in a directory it was never told to use"
+
+
+def test_an_unreadable_config_named_by_a_flag_does_not_change_the_answer(tmp_path: Path, capsys) -> None:
+    """Setup reads only the database path from a config: it never writes a station.uuid back.
+
+    A config directory this user cannot write used to make setup fall back to the default
+    database, because `read_config` generates a uuid and writes the file."""
+    from ate.config import database_path_from_config
+
+    station = tmp_path / "station"
+    config_dir = station / "config"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "config.json"
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35"}, '
+        f'"database": {{"type": "sqlite", "path": "{tmp_path / 'elsewhere.db'}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+    os.chmod(config_dir, 0o555)  # readable, not writable: setup cannot add a uuid
+
+    assert database_path_from_config(config) == tmp_path / "elsewhere.db"
+    assert (config_dir / "config.json").read_text(encoding="utf-8") == config.read_text(encoding="utf-8")
+    assert not any(p.name.endswith(".tmp") for p in config_dir.iterdir()), sorted(config_dir.iterdir())
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, out + err
+    assert str(tmp_path / "elsewhere.db") in out, out
+    os.chmod(config_dir, 0o755)
+
+
+def test_a_config_option_with_no_value_is_a_usage_error(tmp_path: Path, capsys) -> None:
+    """`ate db status --config=` names nothing: one line, exit 1, no silent default."""
+    code, out, err = _cli(["db", "status", "--config="], capsys)
+    assert code == 1, out + err
+    assert "--config needs a path" in err, err
+    assert "Traceback" not in err, err
+
+    code, out, err = _cli(["db", "status", "--config"], capsys)
+    assert code == 1, out + err
+    assert "--config needs a path" in err, err
+
+    code, out, err = _cli(["--config=", "db", "status", str(tmp_path / "nope.db")], capsys)
+    assert code == 1, out + err
+    assert "--config needs a path" in err, err
+
+
+def test_two_configs_that_disagree_are_a_usage_error(tmp_path: Path, capsys) -> None:
+    """`ate --config A db status --config B` has no right answer, so it gives none."""
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    for name, db in ((first, tmp_path / "one.db"), (second, tmp_path / "two.db")):
+        name.write_text(
+            '{"format": 1, "station": {"name": "S", "uuid": "u"}, '
+            f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    code, out, err = _cli(["--config", str(first), "db", "status", "--config", str(second)], capsys)
+    assert code == 1, out + err
+    assert "two --config values" in err, err
+    assert str(first) in err and str(second) in err, err
+
+    code, out, err = _cli(["--config", str(first), "db", "status", "--config", str(first)], capsys)
+    assert code == 1, out + err
+    assert "two --config values" not in err, err
+    assert "create or upgrade the database" in err, err
+
+
+def test_a_flag_ate_does_not_have_is_a_usage_error_not_a_silent_misread(tmp_path: Path, capsys) -> None:
+    """`--conf`, `--con` and `--roo` are no longer prefixes of real options."""
+    for flag in ("--conf", "--con", "--roo"):
+        code, out, err = _cli(["setup", "--root", str(tmp_path / "station"), flag, str(tmp_path), "--no-permissions"], capsys)
+        assert code == 1, f"{flag}: {out + err}"
+        assert "unknown argument" in err, f"{flag}: {err}"
 
 
 # --- os.exit in the sandbox -------------------------------------------------------------

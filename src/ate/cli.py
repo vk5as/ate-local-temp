@@ -74,7 +74,7 @@ def _cmd_pdf_helper(argv: list[str]) -> int:
     exit so the GUI side can raise. Packet 30d: the sandbox is never turned off on its own — the
     parent says so with ``--unsandboxed``, and a privileged helper run without it refuses.
     """
-    parser = argparse.ArgumentParser(prog="ate _pdf", add_help=True)
+    parser = argparse.ArgumentParser(prog="ate _pdf", add_help=True, allow_abbrev=False)
     parser.add_argument("html", help="path to the saved HTML report")
     parser.add_argument("pdf", help="path to write the PDF")
     parser.add_argument("--paper", choices=["A4", "Letter"], default="A4", help="paper size (default: A4)")
@@ -120,7 +120,7 @@ def _cmd_selftest(argv: list[str], allow_unsandboxed_pdf: bool = False) -> int:
     and scans a Test Definition directory — the shipped example Media Release, copied into the
     configured definitions directory — reporting the schedules it found and the broken entries.
     """
-    parser = argparse.ArgumentParser(prog="ate _selftest", add_help=True)
+    parser = argparse.ArgumentParser(prog="ate _selftest", add_help=True, allow_abbrev=False)
     parser.add_argument("--run", action="store_true", help="run a built-in one-step Test Schedule head end to end")
     parser.add_argument("--scan", metavar="DIR", help="scan a Test Definition directory headless and check the database version")
     parser.add_argument("--config", metavar="PATH", help="config file for --scan (default: the platform config)")
@@ -427,6 +427,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ate",
         description="ATE — Automated Test Execution. With no subcommand, opens the application.",
+        allow_abbrev=False,
     )
     parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
     parser.add_argument(
@@ -438,16 +439,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="db|setup|definition")
 
-    db = sub.add_parser("db", help="create or check the database")
+    db = sub.add_parser("db", help="create or check the database", allow_abbrev=False)
     db.add_argument("--yes", "-y", action="store_true", help="skip the migrate confirmation prompt")
 
-    setup = sub.add_parser("setup", help="create the Station directories, config and database")
+    setup = sub.add_parser("setup", help="create the Station directories, config and database", allow_abbrev=False)
     setup.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root")
     setup.add_argument("--data-dir", metavar="DIR")
     setup.add_argument("--config-dir", metavar="DIR")
     setup.add_argument("--no-permissions", action="store_true", help="skip group/ownership/ACL setup")
 
-    definition = sub.add_parser("definition", help="Test Definition commands")
+    definition = sub.add_parser("definition", help="Test Definition commands", allow_abbrev=False)
 
     return parser
 
@@ -470,8 +471,8 @@ def _take_config(argv: list[str]) -> tuple[list[str], str | None]:
     ``--config`` belongs to ``ate``, and the manual said it must come before the subcommand:
     written after it, `ate db status --config X` read `X` as a database path and died on an
     unhandled ``sqlite3.DatabaseError`` (packet 35). Accepting it after the subcommand too
-    removes that trap. ``--config`` with nothing after it is an error, not a silent default.
-    """
+    removes that trap. ``--config`` with nothing after it — `--config` alone or `--config=` —
+    is an error, not a silent default (packet 35 review)."""
     rest: list[str] = []
     config = None
     index = 0
@@ -489,6 +490,8 @@ def _take_config(argv: list[str]) -> tuple[list[str], str | None]:
             continue
         rest.append(token)
         index += 1
+    if config is not None and not config.strip():
+        raise CliUsageError("--config needs a path")
     return rest, config
 
 
@@ -525,6 +528,10 @@ def main(argv=None) -> int:
             )
             return 1
         raise
+
+    if args.config is not None and not args.config.strip():
+        print("ate: --config needs a path", file=sys.stderr)
+        return 1
 
     if args.version:
         return _print_version()
@@ -567,6 +574,14 @@ def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
         print(f"ate db: {exc}", file=sys.stderr)
         return 1
     if inline_config is not None:
+        if config_path is not None and config_path != inline_config:
+            # Two different configs on one command: there is no right answer, so the command
+            # refuses rather than quietly preferring one (packet 35 review).
+            print(
+                f"ate db: two --config values given, {config_path} and {inline_config}; give one",
+                file=sys.stderr,
+            )
+            return 1
         config_path = inline_config
 
     if not argv:
@@ -629,7 +644,7 @@ def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
     database beside itself first when a migration is about to run, then opens it with
     :class:`RunStore`, which creates the tables if missing and sets the schema version.
     """
-    parser = argparse.ArgumentParser(prog="ate db migrate", add_help=False)
+    parser = argparse.ArgumentParser(prog="ate db migrate", add_help=False, allow_abbrev=False)
     parser.add_argument("--yes", "-y", action="store_true", help="do not prompt for confirmation")
     args, _unknown = parser.parse_known_args(extra)
 
@@ -657,16 +672,26 @@ def _cmd_setup(argv: list[str]) -> int:
     """
     from argparse import ArgumentParser
 
-    parser = ArgumentParser(prog="ate setup", add_help=False)
+    parser = ArgumentParser(prog="ate setup", add_help=False, allow_abbrev=False)
     parser.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root (for automation and tests)")
     parser.add_argument("--data-dir", metavar="DIR", help="use this data directory instead of --root's data/ (packagers and tests)")
     parser.add_argument("--config-dir", metavar="DIR", help="use this config directory instead of --root's config/ (packagers and tests)")
+    parser.add_argument("--config", metavar="FILE", help="the config file to read (and write if there is none) instead of <config-dir>/config.json")
     parser.add_argument("--no-permissions", action="store_true", help="skip group/ownership/ACL setup (unprivileged or test runs)")
-    args, _unknown = parser.parse_known_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+
+    stray = [token for token in unknown if token.startswith("-")]
+    if stray:
+        # With allow_abbrev=False an abbreviation is no longer silently read as a longer option:
+        # `--config` is its own option now, and a flag setup does not know is a usage error rather
+        # than something ignored (packet 35 review).
+        print(f"ate setup: unknown argument(s): {' '.join(stray)}", file=sys.stderr)
+        return 1
 
     layout = StationLayout.from_root(args.root) if args.root is not None else default_layout()
     data_dir = Path(args.data_dir) if args.data_dir is not None else layout.data_dir
     config_dir = Path(args.config_dir) if args.config_dir is not None else layout.config_dir
+    config_file = Path(args.config) if args.config is not None else None
 
     elevated = _is_root()
     skip_permissions = args.no_permissions or not elevated  # unprivileged: warn and skip, don't fail
@@ -677,7 +702,7 @@ def _cmd_setup(argv: list[str]) -> int:
         )
     permissions = SKIP_PERMISSIONS if skip_permissions else None
     try:
-        report = prepare_station(data_dir, config_dir, permissions=permissions)  # directories + a default config.json when none exists, then migrate the database
+        report = prepare_station(data_dir, config_dir, permissions=permissions, config_file=config_file)  # directories + a default config.json when none exists, then migrate the database
     except SetupError as exc:
         print(f"setup failed: {exc}", file=sys.stderr)
         return 1

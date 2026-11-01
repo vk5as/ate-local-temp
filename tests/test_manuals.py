@@ -789,7 +789,7 @@ QUOTED_MESSAGES: list[tuple[str, str, str]] = [
     ("this ATE is too old for the database", "this ATE is too old for", "src/ate/storage/store.py"),
     ("cannot open the database at /var/lib/ate/ate.db", "cannot open the database at {self.path}", "src/ate/storage/store.py"),
     ("is not a SQLite database", "is not a SQLite database", "src/ate/storage/store.py"),
-    ("no step from version 4 to 5 ran", "no step from version {stored} to {SCHEMA_VERSION} ran", "src/ate/storage/store.py"),
+    ("this ATE has no migration from version 4 to 5", "no migration from version {stored} to {SCHEMA_VERSION}", "src/ate/storage/store.py"),
     ("backed up /var/lib/ate/ate.db to", "backed up {path} to", "src/ate/storage/backup.py"),
     ("refusing to migrate: cannot write a backup of", "cannot write a backup of {path} to", "src/ate/storage/backup.py"),
     ("nothing in the database was changed", "nothing in the database was changed", "src/ate/storage/backup.py"),
@@ -2216,7 +2216,7 @@ def test_adding_a_schema_version_the_way_the_manual_says_works(tmp_path) -> None
         newline="\n",
     )
     code, out = migrate(bump_src)
-    assert code == 1 and "no step from version 5 to 6 ran" in out, out
+    assert code == 1 and "this ATE has no migration from version 5 to 6" in out, out
     conn = sqlite3.connect(db)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 5

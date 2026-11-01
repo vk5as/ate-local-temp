@@ -491,6 +491,29 @@ def config_hint(config_file: str | Path | None) -> Optional[Path]:
     return None if path == _platform_default().resolve() else path
 
 
+def database_path_from_config(config_path: str | Path) -> Optional[Path]:
+    """The ``database.path`` a config names, read without validating the rest of the file.
+
+    :func:`read_config` is the whole reader, and the whole reader writes: a config with no
+    ``station.uuid`` has one generated and written back. ``ate setup`` only needs to know which
+    database to migrate, and a config directory it cannot write (``/etc/ate`` on a Station where
+    setup is not elevated) would then change the answer it is looking for. So this reads the one
+    key directly, with the same ``<data>`` expansion and the same resolution against the config
+    file's directory as the full reader. ``None`` means the config has no ``database.path``.
+
+    Anything that stops the file from being read raises — bad JSON, a bad encoding, a
+    ``{"database": 5}``, an unknown placeholder — and the caller refuses rather than guessing a
+    path (packet 35 review).
+    """
+    config_file = Path(config_path)
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    # Validate first: a config with a typo is refused here too, not quietly ignored.
+    filled = _validate_and_fill(data, str(config_file), hostname=_hostname())
+    if not (data.get("database") or {}).get("path"):
+        return None  # the config says nothing about where the database is
+    return Config_from_resolved(config_file, filled).database_path
+
+
 def read_config(config_path: str | Path | None = None, on_missing_prompt: Optional[Callable[[str], bool]] = None) -> Config:
     """Read and fully validate the application config for one launch.
 

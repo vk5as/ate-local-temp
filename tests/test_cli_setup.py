@@ -171,6 +171,50 @@ def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     assert str(root / "config" / "config.json") not in perms.group_writable_paths
 
 
+def test_the_permission_pass_covers_the_directory_the_database_actually_is_in(tmp_path, monkeypatch, capsys):
+    """``database.path`` outside the data directory: that directory gets the same treatment.
+
+    The recursive pass over ``data_dir`` never reaches a database that lives elsewhere, so the
+    copies written beside it stay unreadable to ordinary users."""
+    root = tmp_path / "station"
+    data = root / "data"
+    config_dir = root / "config"
+    db = tmp_path / "elsewhere" / "station.db"
+    config_dir.mkdir(parents=True)
+    data.mkdir(parents=True)
+    db.parent.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    perms = RecordingPermissions()
+    monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
+    prepare_station(data, config_dir, permissions=perms)
+
+    assert perms.group_writable_paths == [str(data), str(db.parent)], perms.calls
+    assert [c["op"] for c in perms.calls] == [
+        "ensure_group", "set_group_writable", "set_group_writable", "set_admin_only", "set_admin_only",
+    ]
+    out = capsys.readouterr().out
+    assert f"the permission pass runs over {db.parent}" in out, out
+    assert "no separate permission pass" not in out, out
+
+
+def test_a_database_inside_the_data_directory_needs_no_extra_pass(tmp_path, monkeypatch, capsys):
+    """When the database is under the data directory, setup says so instead of passing twice."""
+    root = tmp_path / "station"
+    perms = RecordingPermissions()
+    monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
+    prepare_station(root / "data", root / "config", permissions=perms)
+
+    assert perms.group_writable_paths == [str(root / "data")], perms.calls
+    out = capsys.readouterr().out
+    assert "no separate permission pass" in out, out
+
+
 def test_prepare_station_second_run_is_idempotent_with_fake(tmp_path):
     """A second prepare_station run repeats the exact same permission operations."""
     root = tmp_path / "station"

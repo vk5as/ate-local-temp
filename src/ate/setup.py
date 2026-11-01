@@ -23,7 +23,6 @@ a migration runs.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -100,7 +99,7 @@ def default_layout() -> StationLayout:
     return StationLayout(data_dir=Path("/var/lib/ate"), config_dir=Path("/etc/ate"), platform="linux")
 
 
-def _station_database_path(config_dir: Path, data_dir: Path) -> tuple[Path, str]:
+def _station_database_path(config_file: Path, data_dir: Path) -> tuple[Path, str]:
     """Which database setup migrates, and why that one.
 
     The config is the Station's own statement of where its database is. An installer running
@@ -111,25 +110,31 @@ def _station_database_path(config_dir: Path, data_dir: Path) -> tuple[Path, str]
     A config that names no ``database.path`` is not a statement about where a database lives:
     the default is ``<data>/ate.db``, and ``<data>`` is the platform data directory, which is not
     the data directory setup was asked to prepare (``--root DIR``). In that case the Station's
-    own data directory is used. The installer also cannot always read the config:
-    ``/etc/ate/config.json`` is admin-only, and a Station may not have one yet. Either way the
-    caller prints the chosen path and the reason, so an Administrator is never left guessing
-    which file was touched."""
-    config_file = config_dir / "config.json"
+    own data directory is used. A config that is *there* but cannot be read is different: silently
+    falling back to ``<data>/ate.db`` migrates a database the Operator never opens and leaves the
+    real one at the old schema, so it is refused in one line (packet 35 review). The missing file
+    is not that case: a Station may not have a config yet, and an installer running ``ate setup``
+    on a Station it owns cannot always read ``/etc/ate/config.json``. Either way the caller prints
+    the chosen path and the reason, so an Administrator is never left guessing which file was
+    touched."""
+    config_file = Path(config_file)
+    if not config_file.exists():
+        return data_dir / "ate.db", f"no config at {config_file}"
+
     try:
-        raw = json.loads(config_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return data_dir / "ate.db", f"no readable config at {config_file} ({exc})"
-    if not isinstance(raw, dict) or "path" not in (raw.get("database") or {}):
+        from .config import ConfigError, database_path_from_config
+
+        database = database_path_from_config(config_file)
+    except (OSError, ValueError, TypeError, ConfigError) as exc:
+        # A file that is there but cannot be read at all — bad JSON, a bad encoding, a
+        # ``{"database": 5}`` that is not an object. Reading it is the whole job here, so there
+        # is no partial answer to fall back to: refuse, name the config, exit non-zero.
+        raise SetupError(
+            f"cannot read the config {config_file} ({exc}); fix it or remove it and run 'ate setup' again"
+        ) from exc
+    if database is None:
         return data_dir / "ate.db", f"{config_file} names no database.path"
-
-    try:
-        from .config import read_config
-
-        config = read_config(str(config_file))
-    except ATEError as exc:
-        return data_dir / "ate.db", f"config {config_file} is not usable ({exc})"
-    return config.database_path, f"database.path in {config_file}"
+    return database, f"database.path in {config_file}"
 
 
 def _migrate_database(path: str) -> int:
@@ -146,17 +151,27 @@ def _migrate_database(path: str) -> int:
     return migrate_database(path)
 
 
-def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> dict[str, Any]:
+def prepare_station(
+    data_dir: Path,
+    config_dir: Path,
+    *,
+    permissions=None,
+    config_file: Optional[Path] = None,
+) -> dict[str, Any]:
     """Create the Station's directories and default config, then migrate its database.
 
     Creates ``data_dir`` with ``reports``, ``logs`` and ``definitions`` under it and ``config_dir``,
     writes a default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
     overwriting one — and runs the shared migration against the database the config names, or
-    ``<data_dir>/ate.db`` when the config cannot be read or names no ``database.path``. It prints
-    which database it migrated and why (packet 35). Returns a report describing what was created
-    versus already present; raises :class:`SetupError` if anything could not be created or written
-    (for example, an unwritable target), if a backup could not be written, or if applying
-    permissions failed.
+    ``<data_dir>/ate.db`` when there is no config or it names no ``database.path``. A config that
+    exists but cannot be read is refused instead (packet 35). It prints which database it migrated
+    and why. Returns a report describing what was created versus already present; raises
+    :class:`SetupError` if anything could not be created or written (for example, an unwritable
+    target), if the config named by ``config_file`` cannot be read, if a backup could not be
+    written, or if applying permissions failed.
+
+    ``config_file`` is the file ``--config FILE`` names; without it the machine-wide
+    ``<config_dir>/config.json`` is used, which is what every install format writes.
 
     ``definitions`` is created because the default config lists ``<data>/definitions`` as a Test
     Definition directory, and a directory that does not exist is a warning on the Run screen at
@@ -169,11 +184,12 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
     """
     data_dir = Path(data_dir)
     config_dir = Path(config_dir)
+    config_file = Path(config_file) if config_file is not None else config_dir / "config.json"
 
     # 1. Create every directory ATE needs (parents included). Idempotent: an existing directory is
     # left untouched so re-running setup never errors on an already-prepared Station.
     created_dirs: list[str] = []
-    for directory in (data_dir, data_dir / "reports", data_dir / "logs", data_dir / "definitions", config_dir):
+    for directory in (data_dir, data_dir / "reports", data_dir / "logs", data_dir / "definitions", config_dir, config_file.parent):
         if not directory.exists():
             try:
                 directory.mkdir(parents=True, exist_ok=True)
@@ -183,30 +199,38 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
 
     # 2. A default config with a fresh station.uuid only when none exists — never an overwrite.
     default_written = False
-    if not (config_dir / "config.json").exists():
+    if not config_file.exists():
         try:
             from .config import build_default_config, write_config
 
             data = build_default_config(_hostname(), data_dir=data_dir)  # resolved paths, not <data> placeholders (30c)
-            write_config(str(config_dir / "config.json"), data)
+            write_config(str(config_file), data)
             default_written = True
         except OSError as exc:
-            raise SetupError(f"cannot write config to {config_dir / 'config.json'}: {exc}") from exc
+            raise SetupError(f"cannot write config to {config_file}: {exc}") from exc
 
     # 3. Create or upgrade the database. The config, if there is one, says which database the
     # Station uses; setup migrates that one and prints the choice and the reason (packet 35).
-    db_path, why = _station_database_path(config_dir, data_dir)
+    db_path, why = _station_database_path(config_file, data_dir)
     if not db_path.parent.exists():
         try:
             db_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise SetupError(f"cannot create the directory for the database {db_path}: {exc}") from exc
     print(f"database to migrate: {db_path} ({why})")
+    if db_path.parent != data_dir:
+        print(f"the database is not under the data directory {data_dir}: the permission pass runs over {db_path.parent} too")
+    else:
+        print(f"the database sits in the data directory {data_dir}: no separate permission pass")
     report = _migrate_database(str(db_path))
     if report != 0:
+        # create_all runs table by table, so a migration that fails may have created some of
+        # them: "nothing was changed" would be a lie. The copy taken before it is the way back
+        # (packet 35 review).
         raise SetupError(
-            f"database migration failed at {db_path}; nothing was changed, and 'ate setup' can be "
-            f"run again once the problem it reported is fixed"
+            f"database migration failed at {db_path}; some tables may already have been created, "
+            f"and the copy taken beside it (if one was) is the way back. Run 'ate setup' again once "
+            f"the problem it reported is fixed"
         )
 
     # 4. Apply the filesystem/permissions treatment now that everything exists — users can modify the
@@ -220,7 +244,7 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
 
     if perms is not None:
         try:
-            _apply_permissions(perms, data_dir, config_dir)
+            _apply_permissions(perms, data_dir, config_dir, config_file, db_path.parent)
         except OSError as exc:
             raise SetupError(f"cannot apply permissions to {data_dir}: {exc}") from exc
 
@@ -228,26 +252,37 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
         "ok": True,
         "created_dirs": created_dirs,
         "default_config_written": default_written,
-        "config_file": str(config_dir / "config.json"),
+        "config_file": str(config_file),
         "database_path": str(db_path),
+        "database_dir": str(db_path.parent),
     }
 
 
-def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path) -> None:
+def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path, config_file: Path, database_dir: Path) -> None:
     """Grant ordinary users modify rights on the data tree and keep the config admin-only.
 
     Linux owns everything under ``data_dir`` to the group (recursively, with setgid so new files like
     ``ate.db-wal``/``-shm`` and fresh reports inherit it) and makes both ``config.json`` and
     ``config_dir`` root-owned; Windows grants Users Modify across ``data_dir`` and leaves
     ``config.json`` read-only for them.
+
+    ``database_dir`` is where the database actually lives. When ``database.path`` points outside
+    ``data_dir`` it gets its own pass, because the pass over ``data_dir`` never reaches it: the
+    backup copies written beside it would stay unreadable to ordinary users (packet 35 review).
+    When it is inside, the recursive pass over ``data_dir`` already covers it and nothing extra is
+    done.
     """
     if _current_platform() == "windows":
         perms.grant_users_modify(data_dir)
-        perms.admin_only(config_dir / "config.json")
+        if database_dir != data_dir:
+            perms.grant_users_modify(database_dir)
+        perms.admin_only(config_file)
     else:  # linux — a separate data tree, with the config dir itself admin-only (dir and file)
         perms.ensure_group(ATE_GROUP)
         perms.set_group_writable(data_dir, ATE_GROUP, recursive=True)
-        perms.set_admin_only(config_dir / "config.json")
+        if database_dir != data_dir:
+            perms.set_group_writable(database_dir, ATE_GROUP, recursive=True)
+        perms.set_admin_only(config_file)
         perms.set_admin_only(config_dir)
 
 
