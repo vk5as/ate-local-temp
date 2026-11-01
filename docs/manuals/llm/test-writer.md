@@ -591,7 +591,7 @@ Here is the definition the manual's own examples ship, exactly as it sits on dis
     },
     {
       "path": "abort.tslua",
-      "sha256": "80cd7bf7c4a3cac88078bdf3d788fed0cd43b7f205c069fe7d4ce313a1cf35a0"
+      "sha256": "b164d0057d61fa7d5f4092a2b47154dc4ca16dfd685640ef09338f4b862eb308"
     },
     {
       "path": "sandbox.tslua",
@@ -1076,8 +1076,10 @@ A plain loop in a step, `ATE.sleep` and `ATE.input` all do stop within the 10 s.
 --
 -- The Operator's Abort is a whole-run abort. ATE gives way within about 0.5 s and must
 -- stop within 10 s: ATE.sleep and ATE.input wake at once, and a busy Lua loop is stopped
--- by the instruction-count hook. A step that is running when the abort lands records
--- Result.ERROR "Aborted by Operator"; every step that never ran records NOTRUN.
+-- by the instruction-count hook. Two cases are documented exceptions, allowed rather than
+-- forbidden: a command run with os.execute, which the abort waits for, and a busy loop
+-- inside a coroutine, which the hook never reaches. A step that is running when the abort
+-- lands records Result.ERROR "Aborted by Operator"; every step that never ran records NOTRUN.
 --
 -- Post-test Actions still run after an abort - ATE clears the abort flag before them so
 -- a run can always tear down - and each one is called with the run's result, which is

@@ -2,8 +2,10 @@
 --
 -- The Operator's Abort is a whole-run abort. ATE gives way within about 0.5 s and must
 -- stop within 10 s: ATE.sleep and ATE.input wake at once, and a busy Lua loop is stopped
--- by the instruction-count hook. A step that is running when the abort lands records
--- Result.ERROR "Aborted by Operator"; every step that never ran records NOTRUN.
+-- by the instruction-count hook. Two cases are documented exceptions, allowed rather than
+-- forbidden: a command run with os.execute, which the abort waits for, and a busy loop
+-- inside a coroutine, which the hook never reaches. A step that is running when the abort
+-- lands records Result.ERROR "Aborted by Operator"; every step that never ran records NOTRUN.
 --
 -- Post-test Actions still run after an abort - ATE clears the abort flag before them so
 -- a run can always tear down - and each one is called with the run's result, which is

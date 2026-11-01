@@ -85,7 +85,7 @@
     },
     {
       "path": "abort.tslua",
-      "sha256": "80cd7bf7c4a3cac88078bdf3d788fed0cd43b7f205c069fe7d4ce313a1cf35a0"
+      "sha256": "b164d0057d61fa7d5f4092a2b47154dc4ca16dfd685640ef09338f4b862eb308"
     },
     {
       "path": "sandbox.tslua",
