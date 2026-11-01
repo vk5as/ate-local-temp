@@ -1,0 +1,48 @@
+\chapter{Pre-test and Post-test Actions, and Equipment}\label{ch:actions}
+
+A schedule can do work before the first step and after the last one. These are Pre-test and
+Post-test Actions: not steps, so they have no Step Number, no result and no inputs.
+
+\begin{itemize}
+  \item \texttt{:setPreTestAction(fn)} runs once before the first Test Step. It is the place to
+    open a Device, declare Equipment and read the bench configuration.
+  \item \texttt{:setPostTestAction(fn)} runs once after the last step, in the reverse of the
+    Pre-test order, and is called with the run's overall result: \texttt{"PASS"} or
+    \texttt{"FAIL"}.
+  \item A Pre-test Action that raises aborts the run before any step runs. The run records
+    \texttt{PRETEST\_FAILED} and every step \texttt{NOTRUN}.
+  \item Post-test Actions run even after an abort. ATE clears the abort flag before them so a
+    run can always tear down; an abort that lands during one Action ends that Action and leaves
+    the rest to run. An Action that errors fails the run and the others still run.
+\end{itemize}
+
+Both Actions are called with the run's standing result as their first argument. For a Pre-test
+Action that is always \texttt{"PASS"}; nothing has had a chance to fail yet.
+
+\example{../examples/test-writer/actions.tslua}{actions.tslua}
+
+\section{Equipment}
+
+\texttt{ATE.addEquipment(name, serial, connection, calDue, notes)} records a piece of test
+equipment for the Test Report's Equipment section. Every argument is a string, only
+\texttt{name} is required, and \texttt{calDue} is free text that ATE prints as given without
+checking it. Declaring the same name and serial twice adds no second row. Equipment is not a
+Device: ATE never links the two, and a schedule may list Equipment it never connects to.
+
+\section{Logging, and reading the run's own context}
+
+\texttt{ATE.log(level, \dots)} writes a line into the Test Run's log; the arguments are turned
+to text and joined with spaces. \texttt{level} is one of \texttt{Log.DEBUG},
+\texttt{Log.INFO}, \texttt{Log.WARNING} or \texttt{Log.ERROR}. The main screen shows INFO and
+above; every level is stored. \texttt{print} is redirected to \texttt{ATE.log(Log.INFO, \dots)},
+so a stray print is still recorded.
+
+\texttt{ATE.run} is a read-only table describing the run in progress: \texttt{UUT\_serial},
+\texttt{Operator}, \texttt{Station}, \texttt{Project}, \texttt{Test\_Schedule\_Name},
+\texttt{Media\_Release\_Media\_Number}, \texttt{name} and \texttt{version}. Writing to it is an
+error.
+
+\example{../examples/test-writer/logging.tslua}{logging.tslua}
+
+\cando{open a Device and declare the bench in a Pre-test Action, log what happened, and close
+things up in a Post-test Action that runs whatever the run did.}

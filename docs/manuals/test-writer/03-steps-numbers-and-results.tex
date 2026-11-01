@@ -1,0 +1,64 @@
+\chapter{Steps, Step Numbers and Results}\label{ch:steps}
+
+A Test Step is the unit of execution and the unit of recorded result. Two commands build one:
+\texttt{StepParams(name)} and its setters.
+
+\section{What a step must have}
+
+An ordinary step needs a Step Number and an Action. A Step Name is optional; without one the
+Run screen and the report show nothing under the number. The Step Number is free-form text
+(\texttt{"1."}, \texttt{"4.0.1"}) shown on the report; it is not the step's position in the
+run, and duplicates among siblings are a load error.
+
+These are the setters, and what each one does:
+
+\begin{itemize}
+  \item \texttt{:setStepNo(s)} --- the Step Number as displayed.
+  \item \texttt{:setEnable(b)} --- the step's default enabled state. The Operator can change
+    it before the run; a step disabled at run start never executes and records
+    \texttt{Result.NOTRUN}.
+  \item \texttt{:setInputs(t)} --- the step's Step Input declarations (chapter~\ref{ch:inputs}).
+  \item \texttt{:setAction(fn)} --- the step's logic.
+  \item \texttt{:setInclude(file, keyvals)} --- makes the step a Sub-schedule header instead
+    (chapter~\ref{ch:sub-schedules}).
+  \item \texttt{:setPrefix(s)} --- only with \texttt{setInclude}: prepended to the included
+    steps' Step Numbers.
+\end{itemize}
+
+\example{../examples/test-writer/steps.tslua}{steps.tslua}
+
+\section{Results}
+
+A step's result is whatever its last \texttt{ATE.report} call said. Every call is logged, only
+the last one counts, and a step that never reports records \texttt{Result.NOREPORT} and logs a
+WARNING. ATE stores \texttt{actual} and \texttt{expected} as text and does no comparing: the
+schedule decides whether a reading passes and says so with the first argument.
+
+These are the seven values a step can record:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\texttt{Result} & Means & Fails the run \\
+\midrule
+PASS & the step ran and passed & no \\
+FAIL & the step ran and failed & yes \\
+ERROR & the step raised, or was aborted, or said it could not be completed & yes \\
+SKIPPED & the step ran and chose not to test anything & no \\
+NOTRUN & the step never executed & no \\
+FORCED\_NOTRUN & the step does not apply to this UUT & no \\
+NOREPORT & the step ran but never reported & no \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A Test Run is \texttt{FAIL} if any step is \texttt{FAIL} or \texttt{ERROR}. \texttt{NOREPORT}
+does not fail the run on its own; it is a warning the Operator has to read.
+
+\example{../examples/test-writer/results.tslua}{results.tslua}
+
+Run that schedule and the record shows each of the seven values, with the WARNING that
+\texttt{NOREPORT} carries and the run's overall result \texttt{FAIL} because of step 2.
+
+\cando{write a schedule whose steps report every result you need, and explain what each step
+left in the record.}

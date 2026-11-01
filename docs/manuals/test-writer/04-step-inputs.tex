@@ -1,0 +1,56 @@
+\chapter{Step Inputs: asking the Operator for a value}\label{ch:inputs}
+
+A step declares its inputs with \texttt{:setInputs(\{\dots\})}, keyed from 1 in the order they
+are asked for, and reads them with \texttt{ATE.input(n)}. Every declaration needs \texttt{desc}
+and \texttt{type}; the rest depend on the type.
+
+\begin{center}
+\begin{tabular}{@{}llp{7cm}@{}}
+\toprule
+Field & Applies to & Meaning \\
+\midrule
+\texttt{desc} & all & the text shown to the Operator (required) \\
+\texttt{type} & all & \texttt{ENUM}, \texttt{INTEGER}, \texttt{FLOAT}, \texttt{STRING},
+  \texttt{PROMPT} or \texttt{POLL} (required) \\
+\texttt{input} & \texttt{ENUM} & the widget: \texttt{RADIOBUT}, \texttt{CHECKBOX} or
+  \texttt{PUSHBUT} \\
+\texttt{enum} & \texttt{ENUM} & the option labels, at least one \\
+\texttt{range} & \texttt{INTEGER}, \texttt{FLOAT} & \texttt{\{min=, max=\}}; empty means
+  unbounded \\
+\texttt{pattern} & \texttt{STRING} & a regular expression the value must match \\
+\texttt{prompt} & \texttt{PROMPT}, \texttt{POLL} & the button text: a string, or an array of
+  strings \\
+\texttt{tooltip} & all & hover help \\
+\texttt{orient} & all & \texttt{VERT} or \texttt{HORIZ} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A field used on a type it does not belong to is a load error, so an \texttt{enum} on an
+\texttt{INTEGER} is caught when the file loads rather than at run time.
+
+\section{What \texttt{ATE.input(n)} returns}
+
+\begin{itemize}
+  \item \texttt{RADIOBUT} or \texttt{PUSHBUT} --- the label the Operator chose, as a string.
+  \item \texttt{CHECKBOX} --- a Lua table of every label ticked; empty when none are.
+  \item \texttt{INTEGER} --- a Lua integer. \texttt{FLOAT} --- a Lua float.
+  \item \texttt{STRING} --- the text as typed.
+  \item \texttt{PROMPT} --- blocks the step until the Operator presses the button, then returns
+    its text.
+  \item \texttt{POLL} --- never blocks. It returns \texttt{nil} until a button is clicked, then
+    that button's text, and keeps returning it until the Attempt starts again. A POLL click is
+    recorded when it happens, not when the schedule reads it.
+\end{itemize}
+
+Asking for an input the step did not declare is an error, and a value outside a range or a
+pattern is refused before the step sees it.
+
+\example{../examples/test-writer/inputs.tslua}{inputs.tslua}
+
+By the end of this chapter you can put a prompt on a step and read the Operator's answer back
+in the right type. \texttt{POLL} is the one to reach for when a step has to watch for a click
+while it works, and the loop in step 8 is the pattern.
+
+\cando{declare every kind of Step Input a schedule needs, and read each one back without
+guessing its type.}
