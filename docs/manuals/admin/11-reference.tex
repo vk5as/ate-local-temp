@@ -21,9 +21,12 @@ Command & What it does \\
 \texttt{ate db migrate [PATH] [--yes|-y]} & Create or upgrade the database, after confirmation unless
   \texttt{--yes}. Refuses a database built by a newer ATE. \\
 \texttt{ate setup} & Create the Station's directories, write a default config if none exists, and
-  migrate the database. \texttt{--root DIR} puts the Station under DIR;
-  \texttt{--data-dir}\allowbreak{} DIR and \texttt{--config-dir}\allowbreak{} DIR override one of the
-  two; \texttt{--no-permissions} skips the group, ownership and ACL treatment explicitly. \\
+  migrate the database. \\
+\texttt{--root DIR} & Prepare DIR as the Station root: DIR/data and DIR/config. \\
+\texttt{--data-dir DIR} & Use DIR for the data directory instead of the root's \texttt{data/}. \\
+\texttt{--config-dir DIR} & Use DIR for the config directory instead of the root's \texttt{config/}. \\
+\texttt{--no-permissions} & Skip the group, ownership and ACL treatment explicitly (packagers and
+  test runs). \\
 \texttt{ate definition update <file.atedef>} & Recompute every listed file's SHA-256 in place,
   filling in missing ones. Rewrites only if something changed. \\
 \texttt{ate \_pdf <html> <pdf> --paper A4|Letter [--unsandboxed]} & Hidden helper ATE starts as a
