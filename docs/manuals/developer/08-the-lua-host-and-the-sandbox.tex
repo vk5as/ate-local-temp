@@ -1,0 +1,87 @@
+\chapter{The Lua host and the sandbox}\label{ch:lua}
+
+\texttt{src/ate/engine/lua\_host.py} is 1798 lines, and most of them are about one thing: a Test
+Schedule is untrusted input, and the host has to run it without letting it reach the machine. Read it as
+three parts: the runtime and its lockdown, the \texttt{ATE} table, and the schedule builders that turn a
+Lua file into the tree the engine walks.
+
+\section{One runtime per schedule load}
+
+Each load makes a fresh \texttt{lupa} runtime. Nothing is shared between schedules in a run, so a
+schedule cannot read another schedule's globals, and a Test Run's state does not leak from one step to
+another through the interpreter. The runtime is created with \texttt{register\_builtins=False}, so
+Python's builtins are not present at all, and then \texttt{\_lockdown} shadows the file-loading entry
+points:
+
+\begin{itemize}
+  \item \texttt{dofile}, \texttt{loadfile} and \texttt{load} are set to \texttt{nil}. The Lua standard
+    library still provides them, so they must be shadowed explicitly; calling a nil value raises
+    ``attempt to call a nil value'', which the engine turns into an ERROR Attempt.
+  \item \texttt{python} is set to nil, so the host's Python is not reachable from a schedule.
+  \item \texttt{require} is replaced by ATE's own, and \texttt{package.path} and \texttt{package.cpath}
+    are emptied (packet 06a), so only the whitelist from the Test Definition --- and the modules bundled
+    in \texttt{src/ate/lua/}, reachable as \texttt{require("ate.devices")} --- can be loaded.
+  \item \texttt{debug} is reduced to \texttt{debug.traceback}. With the full library a schedule could
+    reach the instance loader through \texttt{debug.getregistry}, strip the read-only locks with
+    \texttt{debug.setmetatable}, read shared globals past \texttt{\_\_metatable\_\_} or remove the abort
+    hook. ATE keeps what it needs on the Python side; only \texttt{debug.traceback} stays, because error
+    tracebacks are built through it.
+  \item Each schedule instance --- the top level and every include --- gets its own global table, built by
+    a loader that captured the stock \texttt{load} before the lockdown removed it.
+\end{itemize}
+
+The lockdown runs \emph{before} anything else is registered, so a schedule cannot escape at load time
+either. \texttt{tests/test\_lua\_isolation.py} and \texttt{test\_lua\_lockdown\_calls.py} are the tests
+that prove this, and the example \texttt{forbidden.tslua} in
+\texttt{docs/manuals/examples/test-writer/} is a schedule that opens a Device while the file is loading,
+which the host refuses.
+
+The abort hook is installed before the schedule runs: \texttt{debug.sethook(check\_abort, "", 1000)}, and
+\texttt{pcall}/\texttt{xpcall} are wrapped to re-raise \texttt{aborted} so a schedule's own error handling
+cannot swallow an abort (packet 13c). \texttt{print} is redirected to \texttt{ATE.log(INFO, \dots)}, so
+schedule output is always logged.
+
+\section{The \texttt{ATE} table}
+
+\texttt{\_AteTable} is what a schedule sees. Two things about it are not obvious:
+
+\begin{itemize}
+  \item every function is wrapped by \texttt{\_isolate}, which turns a raised ATE error into the
+    ``(false, message)`` Device failure shape or an ERROR Attempt, and names the schedule file and line
+    in the message;
+  \item \texttt{ATE.run} is a read-only Lua table built from \texttt{\_RUN\_FIELDS}:
+    \texttt{UUT\_serial}, \texttt{Operator}, \texttt{Station}, \texttt{Project},
+    \texttt{Test\_Schedule\_Name}, \texttt{Media\_Release\_Media\_Number}, \texttt{name}, \texttt{version}.
+    Writing to it raises \texttt{ATE.run: read-only}. It is rebuilt by \texttt{publish\_run} through
+    \texttt{rawset}, which is how the engine fills it without tripping the guard.
+\end{itemize}
+
+The enums a schedule can use are \texttt{Result}, \texttt{Log}, \texttt{DeviceType}, \texttt{Parity} and
+\texttt{FlowControl}, declared by \texttt{\_declare\_enums} as read-only tables, and
+\texttt{tests/test_manuals.py} derives them from \texttt{\_ENUMS} so a manual cannot list fewer than the
+code has.
+
+Context matters: \texttt{\_context} is one of \texttt{"load"}, \texttt{"pretest"}, \texttt{"posttest"} or
+\texttt{"step"}, and the functions that are only legal in one of them raise when called in another. A
+Device opened at load time is a load error, not a runtime error.
+
+\section{Adding an \texttt{ATE} function}
+
+A new function has to do four things or it is not really available:
+
+\begin{enumerate}
+  \item define it on \texttt{\_AteTable} and \texttt{register} it, so the table exposes it;
+  \item make it record what it did through the host (the \texttt{logs}, \texttt{reports} or
+    \texttt{equipment} lists) rather than writing to the store directly --- the engine owns the rows and
+    attributes them to the step or Action running;
+  \item check the context if it is only legal in one phase;
+  \item add it to both manuals. \texttt{ate\_table\_functions()} in
+    \texttt{tests/test\_manuals.py} reads the table off the object, so a function the code has and the
+    manual does not name fails the suite.
+\end{enumerate}
+
+Seams excluded from that list are \texttt{register} and \texttt{publish\_run}, which build the table
+rather than being calls a schedule makes.
+
+\cando{say why a schedule cannot open a file, and add a function to the sandbox without breaking the
+coverage test.}
