@@ -14,6 +14,8 @@ dist/
 *.egg-info/
 *.egg
 .eggs/
+# PDFs built by docs/manuals/build.py (packet 34a): LaTeX output, never committed
+docs/manuals/build/
 
 # Test / tooling caches
 .pytest_cache/

@@ -488,6 +488,42 @@ valid PDF with no glyphs is exactly the failure the release CI is meant to catch
 > installed the `.deb`, `install.sh` has installed the tarball, and `pipx` has installed the wheel.
 > The Windows jobs, `ate.iss` and `smoke_installer.py` have still never run anywhere.
 
+## The manuals (packet 34a)
+
+The manuals are LaTeX: one `.tex` per chapter, a shared preamble, and a Markdown copy for agents.
+No TeX toolchain is installed on the build machine, so the build is a Docker call:
+
+```bash
+python docs/manuals/build.py                 # every manual
+python docs/manuals/build.py test-writer     # one manual
+```
+
+`build.py` finds a manual by looking for a directory under `docs/manuals/` that holds a
+`main.tex`, runs `latexmk -lualatex` in `texlive/texlive:latest` with `TEXINPUTS=.:../common:`
+(so the manual can `\usepackage{manual}`), and writes the PDF to `docs/manuals/build/<name>/`,
+which is gitignored. The container runs as the invoking user with `HOME=/tmp`: the texlive image's
+own HOME is not writable for a non-root user, and `lualatex` then dies in its font cache with
+"no writeable cache path".
+
+The build is not satisfied with a PDF. It reads `main.log` and fails on a TeX error, an undefined
+`\ref`, or a box that overflows the text width by more than 5 pt — a manual that quietly runs off
+the margin is a manual nobody can read.
+
+Each manual keeps its facts next to the code they come from:
+
+| Piece | Where |
+| --- | --- |
+| Shared preamble (page geometry, the Lua listing language, the capability box) | `docs/manuals/common/manual.sty` |
+| The test writer's manual | `docs/manuals/test-writer/` |
+| The agent-readable version | `docs/manuals/llm/test-writer.md` |
+| The examples the manuals quote, which are real files that run | `docs/manuals/examples/test-writer/` |
+
+`tests/test_manuals.py` runs every one of those examples headless, fails if a listing in either
+manual is not the exact bytes of the file it quotes, and fails if a function, enum, parameter or
+Device type that the code exposes is missing from the manuals. Adding a manual for another
+audience (packets 34b and 34c) is a new directory under `docs/manuals/`, a new entry in that
+test's `MANUALS` table, and nothing else.
+
 ## Tests
 
 ```bash
