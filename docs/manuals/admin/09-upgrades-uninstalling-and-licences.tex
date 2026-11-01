@@ -6,17 +6,21 @@ Upgrades install in place and keep the config and all the data. The order that h
 is:
 
 \begin{enumerate}
-  \item \textbf{Back up the database and the config} (chapter~\ref{ch:database}). An upgrade never
-    touches them, but a migration that turns out to be the wrong one has no built-in undo.
+  \item \textbf{Back up the config} (chapter~\ref{ch:database}). The database backs itself up
+    before any migration runs, and an upgrade never touches either file, but a migration that
+    turns out to be the wrong one has no built-in undo --- the copy the migration took is the
+    way back.
   \item \textbf{Install the new artifact over the old one.} The Windows installer, \texttt{install.sh}
     and the \texttt{.deb} postinst each run \texttt{ate setup} as their last step, and that runs the
-    migration, so an install through those three leaves the database current. The database it
-    migrates is \texttt{\textless data\textgreater/ate.db}, which is what the default config points
-    at; a config with a custom \texttt{database.path} is not migrated, so a custom database still
-    needs \texttt{ate db migrate} after the install. Step 4 below is what catches it. A wheel
+    migration, so an install through those three leaves the database current. \texttt{ate setup}
+    migrates the database the Station's config names: it reads \texttt{config.json} and takes
+    \texttt{database.path} from it, so a Station with a custom path is migrated at that path. It
+    prints which file it chose and why. Only when the config cannot be read --- it does not exist
+    yet, or setup is not elevated and the config is admin-only --- does setup fall back to
+    \texttt{\textless data\textgreater/ate.db}, which is why step 4 still matters. A wheel
     installed with \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema
     until you migrate it, and ATE refuses to start against a database older than itself.
-  \item \textbf{Migrate, when the artifact did not, or when \texttt{database.path} points elsewhere.}
+  \item \textbf{Migrate, when the artifact did not.}
     \texttt{ate db migrate} is idempotent: run it on an already-current database and it succeeds,
     prints the version, and changes nothing.
   \item \textbf{Check with \texttt{ate db status}.} It reads the configured path, so it also catches a

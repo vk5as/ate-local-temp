@@ -14,22 +14,20 @@ platform's directory choices in one place and resolves them against an explicit 
 automation and tests, while :func:`prepare_station` is pure logic over those two directories — the
 CLI decides where a Station lives (the platform default or an explicit root) and prints what it did.
 
-The database migration reuses the exact code path ``ate db migrate`` uses (:class:`RunStore`,
-:class:`check_database_at_launch`) so setup never creates or upgrades a database any differently than
-the standalone command does.
+The database migration is the one routine ``ate db migrate`` also calls
+(:func:`ate.storage.migrate_database`), so setup never creates or upgrades a database any
+differently than the standalone command does — including the timestamped copy it takes before
+a migration runs.
 """
 
 from __future__ import annotations
 
-import sqlite3
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from .errors import ATEError
 from .permissions import ATE_GROUP, SKIP_PERMISSIONS, _current_platform, Permissions, real_permissions_for
-from .storage import DbLaunchStatus, RunStore, check_database_at_launch
 
 
 class SetupError(ATEError):
@@ -100,29 +98,40 @@ def default_layout() -> StationLayout:
     return StationLayout(data_dir=Path("/var/lib/ate"), config_dir=Path("/etc/ate"), platform="linux")
 
 
+def _station_database_path(config_dir: Path, data_dir: Path) -> tuple[Path, str]:
+    """Which database setup migrates, and why that one.
+
+    The config is the Station's own statement of where its database is. An installer running
+    ``ate setup`` on a Station that already exists must migrate the database that config names;
+    migrating ``<data_dir>/ate.db`` instead would upgrade a file the Operator never opens and
+    leave the real one at the old schema, which the next launch refuses.
+
+    The installer cannot always read the config: ``/etc/ate/config.json`` is admin-only, and a
+    Station may not have one yet. When it can be read, its ``database.path`` wins; otherwise the
+    default beside the data directory is used. Either way the caller prints the choice and the
+    reason, so an Administrator is never left guessing which file was touched."""
+    config_file = config_dir / "config.json"
+    try:
+        from .config import ConfigError, read_config
+
+        config = read_config(str(config_file))
+    except (ConfigError, OSError) as exc:
+        return data_dir / "ate.db", f"no readable config at {config_file} ({exc})"
+    return config.database_path, f"database.path in {config_file}"
+
+
 def _migrate_database(path: str) -> int:
     """Create or upgrade the database at ``path`` (non-interactive; shared by ``ate setup``).
 
-    A database built by a newer ATE is refused rather than downgraded; everything else — a missing
-    or older database — is opened with :class:`RunStore`, which creates the tables if missing and
-    sets the schema version. Mirrors ``ate db migrate --yes`` exactly so setup never migrates any
-    differently than the standalone command does.
+    This is :func:`ate.storage.migrate_database` — the one routine every path that changes a
+    database goes through, including ``ate db migrate``: a database built by a newer ATE is
+    refused rather than downgraded, a copy is taken beside the file first when a migration will
+    run, and the migration itself is :class:`RunStore` opening it. setup never migrates
+    differently from the standalone command because it is the same call.
     """
-    from .storage import DbLaunchStatus, RunStore, check_database_at_launch
+    from .storage import migrate_database
 
-    result = check_database_at_launch(path)
-    if result.status == DbLaunchStatus.TOO_OLD:
-        print(result.message, file=sys.stderr)
-        return 1
-
-    RunStore(path).close()  # creates the tables if missing and sets the schema version
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    finally:
-        conn.close()
-    print(f"created or upgraded database at {path} (schema version {version})")
-    return 0
+    return migrate_database(path)
 
 
 def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> dict[str, Any]:
@@ -130,9 +139,12 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
 
     Creates ``data_dir`` with ``reports``, ``logs`` and ``definitions`` under it and ``config_dir``,
     writes a default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
-    overwriting one — and runs the shared migration against ``<data_dir>/ate.db``. Returns a report
-    describing what was created versus already present; raises :class:`SetupError` if anything could
-    not be created or written (for example, an unwritable target) or if applying permissions failed.
+    overwriting one — and runs the shared migration against the database the config names, or
+    ``<data_dir>/ate.db`` when there is no readable config to read a path from. It prints which
+    database it migrated and why (packet 35). Returns a report describing what was created versus
+    already present; raises :class:`SetupError` if anything could not be created or written (for
+    example, an unwritable target), if a backup could not be written, or if applying permissions
+    failed.
 
     ``definitions`` is created because the default config lists ``<data>/definitions`` as a Test
     Definition directory, and a directory that does not exist is a warning on the Run screen at
@@ -169,10 +181,21 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
         except OSError as exc:
             raise SetupError(f"cannot write config to {config_dir / 'config.json'}: {exc}") from exc
 
-    # 3. Create or upgrade the database (the same migration ``ate db migrate`` performs).
-    report = _migrate_database(str(data_dir / "ate.db"))
+    # 3. Create or upgrade the database. The config, if there is one, says which database the
+    # Station uses; setup migrates that one and prints the choice and the reason (packet 35).
+    db_path, why = _station_database_path(config_dir, data_dir)
+    if not db_path.parent.exists():
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SetupError(f"cannot create the directory for the database {db_path}: {exc}") from exc
+    print(f"database to migrate: {db_path} ({why})")
+    report = _migrate_database(str(db_path))
     if report != 0:
-        raise SetupError(f"database migration failed at {data_dir / 'ate.db'}")
+        raise SetupError(
+            f"database migration failed at {db_path}; nothing was changed, and 'ate setup' can be "
+            f"run again once the problem it reported is fixed"
+        )
 
     # 4. Apply the filesystem/permissions treatment now that everything exists — users can modify the
     # database, WAL files and reports/logs; config.json (and the config dir on Linux) stays admin-only.
@@ -194,7 +217,7 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
         "created_dirs": created_dirs,
         "default_config_written": default_written,
         "config_file": str(config_dir / "config.json"),
-        "database_path": str(data_dir / "ate.db"),
+        "database_path": str(db_path),
     }
 
 

@@ -508,6 +508,8 @@ COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
     ("ate --config /tmp/station/config/config.json db status",
      ["--config", "{config}", "db", "status"], 0, "", "{station}"),
     ("ate db status", ["db", "status"], 0, "", "{station}"),
+    ("ate db status --config /tmp/station/config/config.json",
+     ["db", "status", "--config", "{config}"], 0, "", "{station}"),
     ("ate db migrate --yes", ["db", "migrate", "--yes"], 0, "created or upgraded database at", "{station}"),
     ("ate db migrate /tmp/station/data/ate.db --yes",
      ["db", "migrate", "{db}", "--yes"], 0, "schema version 5", "{station}"),
@@ -687,14 +689,27 @@ def test_db_status_prints_the_schema_version_the_manual_gives(station) -> None:
     assert code == 1 and "run `ate db migrate`" in err, f"a missing database should refuse: {err}"
 
 
-def test_the_config_flag_belongs_to_ate_not_to_db(station) -> None:
-    """The manual warns that `--config` must come before `db`, and the code proves it.
+def test_the_config_flag_works_before_or_after_the_subcommand(station) -> None:
+    """The manual says `--config` may sit before or after the subcommand, and the code proves it.
 
-    After the subcommand the path is read as a token, so `ate db status --config X` opens X as the
-    database. The manual tells an admin this, so the suite has to show it is true."""
-    code, out, err = run_ate(["db", "status", "--config", str(station / "config" / "config.json")], station)
-    assert code == 1 and "file is not a database" in err, f"expected the documented trap, got {err[-300:]}"
-    assert "ate --config PATH db status" in "\n".join(text for _label, text in MANUALS["admin"].texts())
+    Packet 35: written after the subcommand the token used to be read as a database path, so
+    `ate db status --config X` opened X as the database and died on an unhandled
+    `sqlite3.DatabaseError`. Both positions now read the config, and a path that is not a
+    database is refused in one line."""
+    from ate.storage.schema import SCHEMA_VERSION
+
+    config = station / "config" / "config.json"
+    code, out, err = run_ate(["db", "status", "--config", str(config)], station)
+    assert code == 0 and out.strip() == str(SCHEMA_VERSION), f"expected the config to be read, got {err[-300:]}"
+
+    not_a_db = station / "data" / "not-a-database.db"
+    not_a_db.write_text("this is a text file, not a database", encoding="utf-8")
+    code, out, err = run_ate(["db", "status", str(not_a_db)], station)
+    assert code == 1 and "is not a SQLite database" in err, f"a text file is not a database: {err[-300:]}"
+    assert "Traceback" not in err, err
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "ate db status --config PATH" in manual, "the manual no longer shows the flag after the subcommand"
 
 
 def test_migrate_refuses_a_database_from_a_newer_ate(station) -> None:
@@ -766,11 +781,18 @@ QUOTED_MESSAGES: list[tuple[str, str, str]] = [
     ("'database.type' must be 'sqlite', got 'postgres'", "'database.type' must be 'sqlite'", "src/ate/config.py"),
     ("'ui.layout' must be 'staged' or 'threePane', got 'wide'", "'ui.layout' must be 'staged' or 'threePane'", "src/ate/config.py"),
     ("'devices.receiveBufferBytes' must be a positive integer", "'devices.receiveBufferBytes' must be a positive integer", "src/ate/config.py"),
+    ("'reports.paperSize' must be 'A4' or 'Letter'", "'reports.paperSize' must be 'A4' or 'Letter'", "src/ate/config.py"),
     ("has unknown placeholder '<datat>'", "has unknown placeholder {token!r}", "src/ate/config.py"),
     ("invalid JSON in config file", "invalid JSON in config file", "src/ate/config.py"),
     ("cannot write station.uuid to /etc/ate/config.json", "cannot write station.uuid to", "src/ate/config.py"),
     ("run `ate db migrate` to create or upgrade the database", "run `{hint}` to create or upgrade the database", "src/ate/storage/store.py"),
     ("this ATE is too old for the database", "this ATE is too old for", "src/ate/storage/store.py"),
+    ("cannot open the database at /var/lib/ate/ate.db", "cannot open the database at {self.path}", "src/ate/storage/store.py"),
+    ("is not a SQLite database", "is not a SQLite database", "src/ate/storage/store.py"),
+    ("no step from version 4 to 5 ran", "no step from version {stored} to {SCHEMA_VERSION} ran", "src/ate/storage/store.py"),
+    ("backed up /var/lib/ate/ate.db to", "backed up {path} to", "src/ate/storage/backup.py"),
+    ("refusing to migrate: cannot write a backup of", "cannot write a backup of {path} to", "src/ate/storage/backup.py"),
+    ("nothing in the database was changed", "nothing in the database was changed", "src/ate/storage/backup.py"),
     ("Run 'ate setup' as admin, or point", "Run 'ate setup' as admin, or point the", "src/ate/app.py"),
     ("running unprivileged; skipping group/ownership/ACL setup", "running unprivileged; skipping group/ownership/ACL setup", "src/ate/cli.py"),
     ("checksum mismatch for lib/scpi.lua (expected", "checksum mismatch for {rel_path} (expected", "src/ate/engine/run_engine.py"),
@@ -1732,13 +1754,17 @@ def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -
     assert "'1.': 'PASS'" in proc.stdout, proc.stdout
 
 
-def test_os_exit_in_a_step_ends_the_process_with_that_status(tmp_path: Path) -> None:
-    """``os.exit(7)`` kills ATE where it stands: the process ends with 7 and the run row is left
-    open, with no result and no end time - the third limit the manual lists."""
+def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error(tmp_path: Path) -> None:
+    """``os.exit`` is nil in a schedule: the step ERRORs, the run is recorded, ATE keeps going.
+
+    Measured before packet 35, ``os.exit(7)`` in a step ended the whole process with status 7 and
+    left the run row open with nothing recorded. The lockdown removes it the way it removes
+    ``dofile``, ``loadfile`` and ``load``, so the call is an ordinary Lua error."""
     proc = _run_abort_probe(tmp_path, "os.exit(7)", abort_after=0.2)
-    assert proc.returncode == 7, f"os.exit(7) gave exit {proc.returncode}: {proc.stdout} {proc.stderr[-300:]}"
+    assert proc.returncode == 0, f"os.exit ended the process: {proc.stdout} {proc.stderr[-300:]}"
+    assert "'1.': 'ERROR'" in proc.stdout, proc.stdout
     row = _open_run_row(tmp_path / "station" / "ate.db")
-    assert row and row["ended_at"] is None and row["result"] is None, f"the run row is not open: {row}"
+    assert row and row["ended_at"] is not None and row["result"] is not None, f"the run row is not closed: {row}"
 
 
 # --- Packet 34c: the developer manuals are held to the code ------------------------------
@@ -2177,9 +2203,41 @@ def test_adding_a_schema_version_the_way_the_manual_says_works(tmp_path) -> None
     finally:
         conn.close()
     assert "schedule_instance" in before, sorted(before)
+    # A database that did not exist has nothing to copy: the first migration makes no backup.
+    assert not [p for p in tmp_path.iterdir() if ".backup-" in p.name], sorted(tmp_path.iterdir())
+
+    # Chapter 17's warning, executed: a version bump with no table to create is refused, not stamped.
+    bump_only = tmp_path / "bump-only"
+    bump_src = _copy_src(bump_only)
+    bump_schema = bump_src / "ate/storage/schema.py"
+    bump_schema.write_text(
+        bump_schema.read_text(encoding="utf-8").replace("SCHEMA_VERSION = 5", "SCHEMA_VERSION = 6", 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+    code, out = migrate(bump_src)
+    assert code == 1 and "no step from version 5 to 6 ran" in out, out
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    finally:
+        conn.close()
+    assert not [p for p in tmp_path.iterdir() if ".backup-" in p.name], "nothing to migrate makes no copy"
 
     code, out = migrate(src)
     assert code == 0 and "schema version 6" in out, out
+    # The upgrade of an existing database copies it first, and says where the copy is.
+    copies = [p for p in tmp_path.iterdir() if ".backup-" in p.name]
+    assert len(copies) == 1, sorted(tmp_path.iterdir())
+    assert str(copies[0]) in out, out
+    conn = sqlite3.connect(copies[0])
+    try:
+        copied_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        copied_tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+    assert copied_version == 5 and "review_note" not in copied_tables, sorted(copied_tables)
+
     conn = sqlite3.connect(db)
     try:
         after = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

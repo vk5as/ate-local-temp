@@ -25,9 +25,11 @@ directory that does not exist is a warning on the Run screen at every scan; setu
 Station quiet until a Media Release is dropped in.
 
 What it prints is the list of directories it created, whether it wrote the config or kept the one
-that was there, and the database path:
+that was there, and the database it migrated:
 
 \begin{lstlisting}[language=ATEShell]
+database to migrate: /tmp/station/data/ate.db (database.path in /tmp/station/config/config.json)
+created or upgraded database at /tmp/station/data/ate.db (schema version 5)
 ate setup:
   created: /tmp/station/data
   created: /tmp/station/data/reports
@@ -37,6 +39,13 @@ ate setup:
   wrote default config: /tmp/station/config/config.json
   database: /tmp/station/data/ate.db
 \end{lstlisting}
+
+The database setup migrates is the one the config names, not \texttt{<data>/ate.db} by assumption: it
+reads \texttt{config.json} and takes \texttt{database.path} from it, and prints both the path and the
+reason it chose it. A Station whose config points the database somewhere else is migrated where the
+config says, which is what an installer needs to do (chapter~\ref{ch:upgrades}). If no config can be
+read --- it does not exist yet, or it is admin-only and setup is not elevated --- setup falls back to
+\texttt{<data>/ate.db} and says so in the same line. Setup never migrates a database it did not print.
 
 \texttt{--root DIR} puts the Station under \texttt{DIR} (\texttt{DIR/data} and
 \texttt{DIR/config}); \texttt{--data-dir} and \texttt{--config-dir} override one of them. Those
@@ -100,8 +109,9 @@ ate db status
 \texttt{ate --version} prints the version the build stamped in (a git tag, or \texttt{0.0.0-dev}
 from a checkout). \texttt{ate db status} prints the database's schema version and exits 0; a
 missing or outdated database makes it print the refusal and exit 1. If the Station's config is not
-the platform default, name it before the subcommand:
-\texttt{ate --config /tmp/station/config/config.json db status}.
+the platform default, name it with \texttt{--config}, either before the subcommand
+(\texttt{ate --config /tmp/station/config/config.json db status}) or after it
+(\texttt{ate db status --config /tmp/station/config/config.json}).
 
 \cando{prepare a Station from nothing, read what setup said, and tell which rights an Operator
 needs in order to run a Test Run.}

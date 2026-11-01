@@ -3,9 +3,9 @@
 The Test Run record is defined in one file, \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}schema.py}, and one number:
 \texttt{SCHEMA\_VERSION}. Everything that reads or writes the record goes through
 \texttt{RunStore}, so a table added here is the only way a table exists. The example below is run by
-\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}: it migrates a database with the shipped code, migrates the same
-database with a copy of the code that declares version 6 and one more table, and then shows the
-shipped code refusing that database.
+\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}: it migrates a database with the shipped code,
+tries a copy of the code that bumps only the number, migrates the same database with a copy that
+declares version 6 and one more table, and then shows the shipped code refusing that database.
 
 \section{The two edits}
 
@@ -46,13 +46,15 @@ not a schema change. The only raw SQL in the storage layer is the two pragmas (W
 python -m ate db migrate /tmp/station/data/ate.db --yes
 \end{lstlisting}
 
-prints \texttt{created or upgraded database at \dots (schema version 6)}. In the test this is run
-twice against the same file: with the shipped code it reports version 5 and creates the ten tables
-the record has; with the patched copy it reports version 6 and adds \texttt{review\_note} on top.
-The assertion that matters is that the set of tables only grew --- a migration adds, it never
-rewrites or drops.
+prints \texttt{backed up \dots to \dots.backup-<YYYYMMDD-HHMMSS>} and then
+\texttt{created or upgraded database at \dots (schema version 6)}. In the test this is run against the
+same file more than once: with the shipped code it creates the ten tables the record has and makes no
+copy, because there was no database to copy; with the patched copy it takes the version 5 database as
+a copy beside itself, then adds \texttt{review\_note} on top. The assertion that matters is that the
+set of tables only grew --- a migration adds, it never rewrites or drops --- and that the copy is the
+database as it was, version 5 and no \texttt{review\_note}.
 
-The third run is the reason the version check exists: the shipped code, pointed at the version 6
+The last run is the reason the version check exists: the shipped code, pointed at the version 6
 database, exits 1 with \texttt{this ATE is too old for \dots; update ATE}. \texttt{check\_\allowbreak{}database\_\allowbreak{}at\_\allowbreak{}launch}
 compares \texttt{PRAGMA user\_version} with \texttt{SCHEMA\_VERSION} and returns
 \texttt{NEEDS\_MIGRATE} when the database is behind, \texttt{TOO\_OLD} when it is ahead, and
@@ -60,20 +62,30 @@ compares \texttt{PRAGMA user\_version} with \texttt{SCHEMA\_VERSION} and returns
 first insert; the check is what makes the failure a message instead of an \texttt{OperationalError}
 in a worker.
 
-Note what the manual tells an administrator and what the code does: \texttt{ate db migrate} makes no
-backup, despite spec rule 20 (see chapter~\ref{ch:unproven}).
+Spec rule 20 asked for a timestamped backup before an upgrade. It is no longer something the
+Administrator has to do by hand: \texttt{ate db migrate} and \texttt{ate setup} both go through
+\texttt{src/ate/storage/backup.py}, which copies the database beside itself before a migration runs
+(chapter~\ref{ch:database} says what an Administrator still has to back up).
 
 \section{Adding a column instead of a table}
 
 \texttt{create\_\allowbreak{}all} does not alter a table that already exists, so adding a column to
-\texttt{node} with a version bump leaves existing databases without it. Worse: \texttt{RunStore.\_ensure\_\allowbreak{}schema}
-(\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}store.py}) stamps \texttt{PRAGMA user\_\allowbreak{}version} unconditionally, so the
-first time any code opens that database it is declared current --- the version check then passes, and
-the missing column only shows up later, as an \texttt{OperationalError} on the insert or a \texttt{NULL}
-where a value should have been. Nothing in \texttt{src/ate} writes an \texttt{ALTER} or an
-\texttt{add\_column}, and every insert names its columns explicitly (\texttt{insert\_test\_run} builds its
-row field by field), so a new column is never filled by an upgrade. A change of that shape has to be
-written and tested as an explicit migration; the version number is a guard, not a migration.
+\texttt{node} with a version bump leaves existing databases without it. Packet 35 closed the quiet
+version of that mistake: \texttt{RunStore.\_ensure\_\allowbreak{}schema} stamps \texttt{PRAGMA user\_\allowbreak{}version}
+only when \texttt{missing\_\allowbreak{}tables} found something to create. A database that stores an older
+version but already holds every table this ATE declares gets no stamp and no silent pass: opening it
+raises \texttt{SchemaVersionError} naming the version it holds, e.g.
+
+\begin{verbatim}
+the database at /var/lib/ate/ate.db stores schema version 5 but is missing nothing to
+migrate: no step from version 5 to 6 ran, so it is not stamped as version 6
+\end{verbatim}
+
+The test runs exactly that: the shipped code, with only the number changed, migrates the version 5
+database and exits 1 with that sentence, and the database still says version 5 afterwards. Nothing in
+\texttt{src/ate} writes an \texttt{ALTER} or an \texttt{add\_column}, and every insert names its columns
+explicitly (\texttt{insert\_test\_run} builds its row field by field), so a new column has to be written
+and tested as an explicit migration. The version number is a guard, not a migration.
 
 \section{Where a new field reaches the report}
 

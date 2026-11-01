@@ -1,12 +1,14 @@
 """Storage: the only place ATE talks to SQL.
 
-Public interface is :class:`RunStore` plus :data:`SCHEMA_VERSION`, and — for launch —
-:class:`check_database_at_launch` over :class:`DbLaunchResult`. The tables live in
-:mod:`ate.storage.schema`; nothing outside this package imports them directly.
+Public interface is :class:`RunStore` plus :data:`SCHEMA_VERSION`, — for launch —
+:class:`check_database_at_launch` over :class:`DbLaunchResult`, and :func:`migrate_database`
+for the one routine that backs a database up and then creates or upgrades it. The tables live
+in :mod:`ate.storage.schema`; nothing outside this package imports them directly.
 """
 
 from __future__ import annotations
 
+from .backup import BackupError, SchemaVersionError, backup_for_migration, migrate_database
 from .schema import SCHEMA_VERSION
 from .store import (
     DbLaunchResult,
@@ -25,4 +27,8 @@ __all__ = [
     "DbLaunchResult",
     "DbLaunchStatus",
     "check_database_at_launch",
+    "BackupError",
+    "SchemaVersionError",
+    "backup_for_migration",
+    "migrate_database",
 ]

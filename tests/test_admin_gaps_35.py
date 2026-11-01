@@ -1,0 +1,537 @@
+"""Packet 35: the gaps the admin manual had to warn about, now closed in the code.
+
+Every test here runs against real SQLite files in a temporary directory and the real `ate`
+command line — through :func:`ate.cli.main` where the exit code and the printed lines are what
+matter, and in a subprocess where "no traceback" is part of the contract. Nothing on the host
+is touched: no `groupadd`, no `chown`, no `icacls`, and every file is under ``tmp_path``.
+What is pinned:
+
+* ``ate db migrate`` and ``ate setup`` share one routine that copies the database beside
+  itself before a migration changes it, refuses when the copy cannot be made, and leaves the
+  copy in place when the migration then fails;
+* a database is never stamped with the current version unless a migration actually created
+  something for this build;
+* ``ate setup`` migrates the database the Station's config names, and says which it chose;
+* ``--config`` works after a subcommand, and a path that is not a database fails in one line;
+* ``os.exit`` is no longer reachable from a schedule;
+* ``reports.paperSize`` is validated when the config is read.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from PySide6.QtCore import QCoreApplication
+
+from ate.cli import main
+from ate.config import ConfigError, read_config
+from ate.engine.lua_host import LuaHost
+from ate.engine.run_engine import RunEngine
+from ate.storage import SCHEMA_VERSION, RunStore, migrate_database
+from ate.storage.backup import BackupError, SchemaVersionError, backup_for_migration
+
+from ._fixtures import _drive, scratch_directory
+
+BACKUP_NAME = re.compile(r"\.backup-\d{8}-\d{6}$")
+ROOT = Path(__file__).parents[1]  # this checkout, whose src the subprocess tests must run
+
+
+def _version(path: Path) -> int:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _tables(path: Path) -> set[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+
+
+def _backups(directory: Path) -> list[Path]:
+    return sorted(p for p in directory.iterdir() if BACKUP_NAME.search(p.name))
+
+
+def _older_database(path: Path, version: int, drop: list[str]) -> None:
+    """A database this ATE built, then rolled back to an older schema by dropping a table."""
+    store = RunStore(path)
+    store.insert_test_run({"uut_serial": "OLD-1", "schedule_name": "before the upgrade"})
+    store.close()
+    conn = sqlite3.connect(path)
+    for table in drop:
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"PRAGMA user_version={version}")
+    conn.commit()
+    conn.close()
+
+
+def _cli(argv: list[str], capsys) -> tuple[int, str, str]:
+    """The real CLI, in this process: returns ``(exit code, stdout, stderr)``."""
+    code = main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _cli_subprocess(argv: list[str]) -> tuple[int, str, str]:
+    """The real CLI as a separate process, for the contract that nothing reaches a traceback.
+
+    ``PYTHONPATH`` points at this checkout's ``src``: the venv has an editable install of the
+    project, and without it ``python -m ate`` would run a different copy of the code."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "ate", *argv],
+        capture_output=True, text=True, timeout=60, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT / "src")},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+# --- the name ---------------------------------------------------------------------------
+
+
+def test_the_cli_calls_ate_automated_test_execution() -> None:
+    """The parser's description matches GLOSSARY: ATE is Automated Test Execution, not Equipment."""
+    from ate.cli import _build_parser
+
+    help_text = _build_parser().format_help()
+    assert "Automated Test Execution" in help_text, help_text
+    assert "Automated Test Equipment" not in help_text, help_text
+
+
+# --- the backup before a migration ------------------------------------------------------
+
+
+def test_a_new_database_is_created_without_a_copy(tmp_path: Path) -> None:
+    """There is nothing to back up before the first database exists."""
+    path = tmp_path / "ate.db"
+    assert migrate_database(path) == 0
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert _version(path) == SCHEMA_VERSION
+
+
+def test_migrating_an_older_database_copies_it_first(tmp_path: Path, capsys) -> None:
+    """A v4 database missing ``equipment`` is copied, then upgraded, and the copy is named clearly."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    assert code == 0, err
+
+    copies = _backups(tmp_path)
+    assert len(copies) == 1, sorted(p.name for p in tmp_path.iterdir())
+    copy = copies[0]
+    assert copy.name == "ate.db" + BACKUP_NAME.search(copy.name).group(), copy.name
+    assert copy.parent == path.parent
+    assert str(copy) in out, out
+
+    # The copy is the database as it was: older version, the table still missing.
+    assert _version(copy) == 4
+    assert "equipment" not in _tables(copy)
+    # ... and the real database now has it.
+    assert _version(path) == SCHEMA_VERSION
+    assert "equipment" in _tables(path)
+
+
+def test_a_database_that_needs_nothing_makes_no_copy(tmp_path: Path) -> None:
+    """Migrating a database that is already current changes nothing, so nothing is copied."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    assert migrate_database(path) == 0
+    copies = _backups(tmp_path)
+    assert len(copies) == 1
+    assert migrate_database(path) == 0
+    assert _backups(tmp_path) == copies
+
+
+def test_the_copy_includes_what_is_still_in_the_wal(tmp_path: Path) -> None:
+    """SQLite's backup API folds ``-wal`` into the copy; a plain file copy would not.
+
+    This is also the case a backup has to survive on Windows: the database is open by another
+    connection when the copy is taken."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("INSERT INTO test_run (run_uuid, uut_serial) VALUES ('wal-row', 'WAL-1')")
+    conn.commit()
+    assert (tmp_path / "ate.db-wal").exists(), "the write is still in the WAL, not the main file"
+
+    copy = backup_for_migration(path)
+    plain = tmp_path / "plain-copy.db"
+    plain.write_bytes(path.read_bytes())  # what an admin's `cp ate.db` would have gotten
+    conn.close()
+
+    assert copy is not None
+    with contextlib.closing(sqlite3.connect(copy)) as checked:
+        serials = [row[0] for row in checked.execute("SELECT uut_serial FROM test_run ORDER BY uut_serial")]
+    with contextlib.closing(sqlite3.connect(plain)) as checked:
+        plain_serials = [row[0] for row in checked.execute("SELECT uut_serial FROM test_run ORDER BY uut_serial")]
+
+    assert serials == ["OLD-1", "WAL-1"], serials
+    assert plain_serials == ["OLD-1"], plain_serials
+
+
+def test_restoring_from_the_copy_gives_the_old_data_back(tmp_path: Path) -> None:
+    """The copy is a database you can roll back to: the runs it held are still in it."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    assert migrate_database(path) == 0
+    copy = _backups(tmp_path)[0]
+
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(copy.read_bytes())
+    assert _version(restored) == 4 and "equipment" not in _tables(restored)
+
+    assert migrate_database(restored) == 0  # the copy is a database ATE can open and upgrade
+    store = RunStore(str(restored))
+    rows = store.query_runs()
+    store.close()
+
+    assert [row["uut_serial"] for row in rows] == ["OLD-1"]
+    assert _version(restored) == SCHEMA_VERSION
+
+
+def test_two_copies_in_the_same_second_do_not_overwrite(tmp_path: Path, monkeypatch) -> None:
+    """The copy never replaces a file that is already there: the next one gets a counter."""
+    from ate.storage import backup as backup_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    monkeypatch.setattr(backup_module, "_stamp", lambda: "20261102-120000")
+    first = backup_for_migration(path)
+    assert first.name == "ate.db.backup-20261102-120000", first.name
+    first.unlink()
+
+    # A file sitting at that exact name is left alone; the next copy takes the next name.
+    (tmp_path / "ate.db.backup-20261102-120000").write_text("someone's own backup", encoding="utf-8")
+    second = backup_for_migration(path)
+    assert second.name == "ate.db.backup-20261102-120000-2", second.name
+    assert (tmp_path / "ate.db.backup-20261102-120000").read_text(encoding="utf-8") == "someone's own backup"
+    assert _version(second) == 4
+
+
+def test_an_unwritable_data_directory_refuses_the_migration(tmp_path: Path, capsys, deny_writes) -> None:
+    """A Station whose data directory this user cannot write: refuse, name the path and the reason, change nothing."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    before = path.read_bytes()
+    deny_writes(tmp_path)
+
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    text = out + err
+    assert code == 1, text
+    assert str(path) in text, text
+    assert "cannot open" in text.lower(), text
+    assert "Traceback" not in err, text
+    assert path.read_bytes() == before, "a refused migration must leave the database alone"
+    assert _backups(tmp_path) == []
+
+
+def test_a_copy_that_cannot_be_written_refuses_the_migration(tmp_path: Path, capsys, monkeypatch) -> None:
+    """The copy is the first thing a migration does: when it cannot be written, nothing is migrated."""
+    from ate.storage import backup as backup_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    before = path.read_bytes()
+    # The copy has to land beside the database; point it at a directory that is not there.
+    monkeypatch.setattr(backup_module, "_copy_name", lambda p: tmp_path / "no-such-directory" / p.name)
+
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    text = out + err
+    assert code == 1, text
+    assert "refusing to migrate" in text.lower(), text
+    assert str(path) in text and "no-such-directory" in text, text
+    assert "Traceback" not in err, text
+    assert path.read_bytes() == before, "a refused migration must leave the database alone"
+    assert _version(path) == 4 and "equipment" not in _tables(path)
+
+    with pytest.raises(BackupError) as raised:
+        backup_for_migration(path)
+    assert str(path) in str(raised.value)
+
+
+def test_a_backup_taken_while_another_process_has_the_database_open(tmp_path: Path, capsys) -> None:
+    """A Station with a Test Run in flight still gets its copy: the database is open, WAL and all.
+
+    This is the case a plain `cp` gets wrong, and the one a Windows installer has to get right:
+    the backup is taken while another process holds the database."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time, sqlite3;"
+         "conn = sqlite3.connect(sys.argv[1]);"
+         "conn.execute('PRAGMA journal_mode=WAL');"
+         "conn.execute(\"INSERT INTO test_run (run_uuid, uut_serial) VALUES ('in-flight', 'IN-FLIGHT')\");"
+         "conn.commit(); time.sleep(5)",
+         str(path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(ROOT),
+    )
+    time.sleep(1.2)  # let the other process open and write
+
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    holder.wait(timeout=30)
+    assert code == 0, out + err
+
+    copy = _backups(tmp_path)[0]
+    with contextlib.closing(sqlite3.connect(copy)) as checked:
+        serials = [row[0] for row in checked.execute("SELECT uut_serial FROM test_run ORDER BY uut_serial")]
+    assert serials == ["IN-FLIGHT", "OLD-1"], serials
+
+
+def test_a_migration_that_fails_leaves_the_copy_and_names_it(tmp_path: Path) -> None:
+    """The copy is taken first, so a migration that then fails can be rolled back — and says where."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    path.chmod(0o444)  # readable, so it can be copied; not writable, so the migration cannot run
+
+    code, out, err = _cli_subprocess(["db", "migrate", str(path), "--yes"])
+    text = out + err
+    assert code == 1, text
+    copies = _backups(tmp_path)
+    assert len(copies) == 1, text
+    assert str(copies[0]) in text, text
+    assert "Traceback" not in err, err
+    assert _version(path) == 4, "the failed migration changed a database it could not write"
+    path.chmod(0o644)
+
+
+# --- the version is stamped only when a migration ran ----------------------------------
+
+
+def test_a_database_missing_a_table_is_stamped_after_the_migration(tmp_path: Path) -> None:
+    """The honest stamp: the migration created the table, so the version is raised."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    assert migrate_database(path) == 0
+    assert _version(path) == SCHEMA_VERSION and "equipment" in _tables(path)
+
+
+def test_a_version_bump_with_no_migration_is_refused(tmp_path: Path) -> None:
+    """A database that stores an older version but has every table is not stamped: it is refused."""
+    path = tmp_path / "ate.db"
+    RunStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION - 1}")
+    conn.commit()
+    conn.close()
+    assert "equipment" in _tables(path)
+
+    raised: Exception | None = None
+    try:
+        RunStore(path).close()
+    except SchemaVersionError as exc:
+        raised = exc
+    assert raised is not None, "opening a database that needs no migration must not stamp it"
+    assert str(SCHEMA_VERSION - 1) in str(raised), str(raised)
+
+    code, out, err = _cli_subprocess(["db", "migrate", str(path), "--yes"])
+    assert code == 1
+    text = out + err
+    assert str(SCHEMA_VERSION - 1) in text, text
+    assert "Traceback" not in err, err
+
+
+def test_the_refusal_leaves_the_database_as_it_was(tmp_path: Path) -> None:
+    """Refusing a stamp changes nothing in the file, and makes no copy."""
+    path = tmp_path / "ate.db"
+    RunStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION - 1}")
+    conn.commit()
+    conn.close()
+    before = path.read_bytes()
+    assert migrate_database(path) != 0
+    assert path.read_bytes() == before
+    assert _backups(tmp_path) == [], "a database that needed no migration gets no copy"
+    assert _version(path) == SCHEMA_VERSION - 1
+
+
+# --- ate setup migrates the database the config names ----------------------------------
+
+
+def test_ate_setup_migrates_the_database_the_config_names(tmp_path: Path, capsys) -> None:
+    """A Station whose ``database.path`` is elsewhere gets *that* database migrated."""
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    db = tmp_path / "other" / "station.db"
+    config.parent.mkdir(parents=True)
+    (station / "data").mkdir(parents=True)
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+    )
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    assert str(db) in out, out
+    assert db.exists()
+    assert _version(db) == SCHEMA_VERSION
+    assert not (station / "data" / "ate.db").exists()
+
+
+def test_ate_setup_falls_back_to_the_default_when_the_config_cannot_be_read(tmp_path: Path, capsys) -> None:
+    """No readable config means no configured path: the default beside the data directory is used, and setup says why."""
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    config.parent.mkdir(parents=True)
+    (station / "data").mkdir(parents=True)
+    config.write_text("{ this is not json", encoding="utf-8")
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    default = station / "data" / "ate.db"
+    assert str(default) in out, out
+    assert "config" in out, out
+    assert default.exists()
+
+
+def test_ate_setup_backs_up_an_older_database_it_upgrades(tmp_path: Path, capsys) -> None:
+    """The installers' path — ``ate setup`` — takes the same copy ``ate db migrate`` takes."""
+    station = tmp_path / "station"
+    data = station / "data"
+    data.mkdir(parents=True)
+    path = data / "ate.db"
+    _older_database(path, 4, ["equipment"])
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    copies = _backups(data)
+    assert len(copies) == 1, out
+    assert str(copies[0]) in out, out
+    assert _version(path) == SCHEMA_VERSION
+
+
+# --- --config after the subcommand ------------------------------------------------------
+
+
+def test_config_after_a_subcommand_selects_the_config(tmp_path: Path, capsys) -> None:
+    """`ate db status --config X` reads X as the config, not as a database path."""
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    config.parent.mkdir(parents=True)
+    _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    capsys.readouterr()
+
+    code, out, err = _cli(["db", "status", "--config", str(config)], capsys)
+    assert code == 0, err
+    assert out.strip() == str(SCHEMA_VERSION), out
+
+    # Before the subcommand still works, and an explicit database path still wins.
+    code, out, err = _cli(["db", "--config", str(config), "status"], capsys)
+    assert code == 0 and out.strip() == str(SCHEMA_VERSION), out
+    db = station / "data" / "ate.db"
+    code, out, err = _cli(["db", "migrate", str(db), "--yes", "--config", str(config)], capsys)
+    assert code == 0 and str(db) in out, out
+
+
+def test_config_flag_with_no_value_is_a_one_line_error(tmp_path: Path, capsys) -> None:
+    code, out, err = _cli(["db", "status", "--config"], capsys)
+    assert code == 1
+    assert "needs a path" in err, err
+    assert "Traceback" not in err
+
+
+def test_a_path_that_is_not_a_database_fails_in_one_line(tmp_path: Path) -> None:
+    """Not a traceback and not an unhandled sqlite3.DatabaseError: one line, exit 1."""
+    not_a_db = tmp_path / "not-a-database.db"
+    not_a_db.write_text("this is a text file, not a database", encoding="utf-8")
+
+    code, out, err = _cli_subprocess(["db", "status", str(not_a_db)])
+    assert code == 1
+    assert "not a SQLite database" in err, err
+    assert "Traceback" not in err, err
+    assert err.count("\n") <= 1, err
+
+    code, out, err = _cli_subprocess(["db", "migrate", str(not_a_db), "--yes"])
+    assert code == 1 and "Traceback" not in err, err
+
+
+# --- os.exit in the sandbox -------------------------------------------------------------
+
+
+EXIT_SCHEDULE = """-- exit.tslua: a step that tries to leave the process.
+return ScheduleParams("os.exit probe")
+  :setSchedule({
+    StepParams("os.exit"):setStepNo("1.")
+      :setAction(function() os.exit(7) end),
+    StepParams("Afterwards"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "the next step ran") end),
+  })
+"""
+
+
+def test_os_exit_is_nil_in_the_sandbox_while_os_execute_and_getenv_stay() -> None:
+    """The lockdown removes ``os.exit`` the way it removes ``dofile``, ``loadfile`` and ``load``."""
+    with scratch_directory() as td:
+        path = Path(td) / "schedule.tslua"
+        path.write_text('return ScheduleParams("probe") :setSchedule({})', encoding="utf-8", newline="\n")
+        host = LuaHost(str(path))
+        env = host._runtime.globals()
+        os_table = env["os"]
+        assert os_table["exit"] is None, "os.exit must be nil in a schedule"
+        assert os_table["execute"] is not None, "os.execute stays available"
+        assert os_table["getenv"] is not None, "os.getenv stays available"
+        assert env["dofile"] is None and env["load"] is None
+
+
+def test_os_exit_in_a_step_ends_the_step_with_an_error_not_the_process(app: QCoreApplication) -> None:
+    """``os.exit(7)`` is a plain Lua error now: the step is ERROR, the run is recorded, ATE survives."""
+    with scratch_directory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        schedule = Path(td) / "exit.tslua"
+        schedule.write_text(EXIT_SCHEDULE, encoding="utf-8", newline="\n")
+        engine = RunEngine(store, str(schedule))
+        uuid: dict[str, str] = {}
+        engine.run_uuid_reported.connect(lambda run_uuid: uuid.setdefault("run_uuid", run_uuid))
+        _drive(engine, app)
+        run = store.get_test_run(uuid["run_uuid"])
+        steps = {n["step_number"]: n["result"] for n in store.nodes(uuid["run_uuid"]) if n["kind"] == "step"}
+        store.close()
+
+    assert run["result"] == "FAIL" and run["ended_at"], run
+    assert steps == {"1.": "ERROR", "2.": "PASS"}, steps
+
+
+# --- reports.paperSize -----------------------------------------------------------------
+
+
+def _config_written(tmp_path: Path, body: str) -> Path:
+    config = tmp_path / "config.json"
+    config.write_text(body, encoding="utf-8", newline="\n")
+    return config
+
+
+def test_paper_size_is_validated_when_the_config_is_read(tmp_path: Path) -> None:
+    """A bad `reports.paperSize` is named at read time, with the values that are allowed."""
+    try:
+        read_config(_config_written(tmp_path, '{"format": 1, "reports": {"paperSize": "Legal"}}'))
+    except ConfigError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("a bad reports.paperSize must not read")
+
+    assert "reports.paperSize" in message, message
+    assert "A4" in message and "Letter" in message, message
+    assert "Legal" in message, message
+
+
+def test_the_two_shipped_paper_sizes_read(tmp_path: Path) -> None:
+    for size in ("A4", "Letter"):
+        config = _config_written(tmp_path, f'{{"format": 1, "reports": {{"paperSize": "{size}"}}}}')
+        assert read_config(config).reports_paper_size == size
+    assert read_config(_config_written(tmp_path, '{"format": 1}')).reports_paper_size == "A4"

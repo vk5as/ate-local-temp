@@ -39,8 +39,9 @@ Key & Default & Meaning \\
 \texttt{reports.logo} & \texttt{null} & The validator accepts only \texttt{null} today: a path is
   refused with \texttt{must be a null}, even though the report renderer can embed one. Setting a
   logo is not currently possible through the config. \\
-\texttt{reports.paperSize} & \texttt{A4} & \texttt{A4} or \texttt{Letter}. The config does not check
-  the value; the PDF helper refuses anything else when a report is rendered. \\
+\texttt{reports.paperSize} & \texttt{A4} & \texttt{A4} or \texttt{Letter}. The config checks it, so
+  a wrong value stops startup with \texttt{'reports.paperSize' must be 'A4' or 'Letter'} rather than
+  failing later when a report is rendered. \\
 \texttt{log.directory} & \texttt{<data>/logs} & Where the application log is written
   (chapter~\ref{ch:logs}). \\
 \texttt{log.level} & \texttt{info} & Floor for the application log: \texttt{debug}, \texttt{info},

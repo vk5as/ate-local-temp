@@ -360,6 +360,17 @@ def _validate_and_fill(raw: Any, path: str, hostname: str = "") -> dict[str, Any
             f"config file {path}: 'ui.layout' must be 'staged' or 'threePane', got {ui.get('layout')!r}"
         )
 
+    # A Test Report is printed on one of two paper sizes. The PDF helper rejects anything else at
+    # render time, so a typo in the config only surfaced when a report was printed (packet 35).
+    reports = raw.get("reports")
+    if isinstance(reports, dict) and reports.get("paperSize", "A4") not in ("A4", "Letter"):
+        raise ConfigError(
+            f"config file {path}: 'reports.paperSize' must be 'A4' or 'Letter', "
+            f"got {reports.get('paperSize')!r}"
+        )
+
+    # ui.theme and reports.logo are not validated: what they accept is part of the appearance
+    # work (packet 33), which has not decided the values yet. Both are stored and read as given.
     return result
 
 

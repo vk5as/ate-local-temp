@@ -3,6 +3,7 @@
 -- The sandbox is about traceability, not security: ATE wants to know exactly which files
 -- a Test Run ran, and it cannot do that if a schedule reads Lua from wherever it likes.
 --   * dofile, loadfile, load and the python table are gone; calling one is an error;
+--   * os.exit is nil too: a step that calls it gets an error, not an exit;
 --   * package exists but its path and cpath are empty, so nothing outside the Test
 --     Definition can be required;
 --   * debug is reduced to debug.traceback;
@@ -14,6 +15,7 @@ return ScheduleParams("Manual: the sandbox", "what a Test Schedule can reach")
     StepParams("Check what is removed"):setStepNo("1.")
       :setAction(function()
         local removed = dofile == nil and loadfile == nil and load == nil and python == nil
+                          and os.exit == nil
         local noPaths = type(package) == "table" and package.path == "" and package.cpath == ""
         ATE.log(Log.INFO, "debug now holds only: " .. table.concat(
           (function() local t = {} for k in pairs(debug) do t[#t + 1] = k end return t end)(), ", "))

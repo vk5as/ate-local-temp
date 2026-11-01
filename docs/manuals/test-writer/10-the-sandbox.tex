@@ -1,9 +1,9 @@
 \chapter{What the sandbox takes away}\label{ch:sandbox}
 
 ATE removes the Lua entry points that could run code it has not checksummed:
-\texttt{dofile}, \texttt{loadfile} and \texttt{load} are gone, \texttt{package.path} and
-\texttt{package.cpath} are empty, \texttt{debug} is reduced to \texttt{debug.traceback}, and
-there is no \texttt{python} table.
+\texttt{dofile}, \texttt{loadfile} and \texttt{load} are gone, \texttt{os.exit} is nil,
+\texttt{package.path} and \texttt{package.cpath} are empty, \texttt{debug} is reduced to
+\texttt{debug.traceback}, and there is no \texttt{python} table.
 
 This is traceability, not security. \texttt{io} and \texttt{os} are still there --- a schedule
 can read a file if it knows the path. What ATE is guaranteeing is that it knows exactly which

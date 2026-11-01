@@ -49,8 +49,9 @@ ate                      # opens the application; exit 1 with a refusal if confi
 ate --help               # usage at any level, exit 0
 ate -V                   # same as --version
 ate --version
-ate --config PATH        # the platform config to read instead of the default; it belongs to `ate`,
-                         # so it comes before the subcommand: `ate --config PATH db status`
+ate --config PATH        # the platform config to read instead of the default; it may sit before
+                         # the subcommand (`ate --config PATH db status`) or after it
+                         # (`ate db status --config PATH`)
 ate --allow-unsandboxed-pdf   # privileged only: render Test Report PDFs without Chromium's sandbox
 ```
 
@@ -65,8 +66,14 @@ ate setup --no-permissions                   # skip the group/ownership/ACL trea
 ```
 
 `ate setup` is idempotent: it creates nothing that exists and never overwrites an existing config.
-It also runs the migration `ate db migrate` runs. Bare `ate setup` writes to the platform
-directories, which the test suite is not allowed to touch; the `--root` form is what is executed.
+It also runs the migration `ate db migrate` runs — the same routine, `migrate_database` in
+`src/ate/storage/backup.py` — and it migrates the database the config names: it reads
+`config.json`, takes `database.path` from it, and prints the path and the reason
+(`database to migrate: /var/lib/ate/ate.db (database.path in /etc/ate/config.json)`). When the
+config cannot be read (it does not exist yet, or setup is not elevated and the config is
+admin-only), setup uses `<data>/ate.db` and says so in the same line. Bare `ate setup` writes to the
+platform directories, which the test suite is not allowed to touch; the `--root` form is what is
+executed.
 
 Moving a Station is copying its config file and its data directory: setup writes every path in the
 config out in full, not as `<data>`, so a copied config still names the old locations. Edit
@@ -80,7 +87,7 @@ next launch generates a fresh uuid and writes it back.
 
 ```bash
 ate db status [PATH]                         # print PRAGMA user_version, exit 0; read-only
-ate db migrate [PATH]                        # create or upgrade, after confirmation
+ate db migrate [PATH]                        # copy the database if a migration will run, then upgrade
 ate db migrate --yes                         # no prompt; -y is the same
 ate definition update <file.atedef>          # recompute every listed sha256, in place
 ```
@@ -129,7 +136,7 @@ Every key the validator knows, with its default:
 | `reports.directory` | `<data>/reports` | where Test Reports are written |
 | `reports.organisation` | `""` | text in the Test Report page header |
 | `reports.logo` | `null` | the validator accepts only `null`, though the renderer can embed a logo — see the disagreements at the end |
-| `reports.paperSize` | `A4` | not validated here; the PDF helper refuses anything but `A4` or `Letter` |
+| `reports.paperSize` | `A4` | `A4` or `Letter`; the config validates it, so a typo stops startup rather than failing at render time |
 | `log.directory` | `<data>/logs` | the application log |
 | `log.level` | `info` | `debug`, `info`, `warning`, `error`; an unknown name is treated as `info` |
 | `devices.receiveBufferBytes` | 16777216 | per-Device receive buffer; must be a positive integer |
@@ -159,9 +166,21 @@ purge.
 - `ate db status` on a current database prints `5` and exits 0.
 - A missing, empty or older database exits 1 with: `run \`ate db migrate\` to create or upgrade the database at <path>`.
 - A database built by a newer ATE exits 1 with: `this ATE is too old for the database at <path>; update ATE`. There is no downgrade.
-- Migrations are forward only and idempotent.
-- Nothing in ATE backs anything up. Copy `ate.db`, `ate.db-wal` and `ate.db-shm` together, or stop ATE first: a lone `ate.db` copy while a run is writing can lose the writes sitting in the WAL.
-- Restore is the same copy backwards: stop ATE, put the three files back where `database.path` points, start again. There is no undo of one run and no partial restore; the copy you made is the state you go back to.
+- A file that is not a database exits 1 with `the file at <path> is not a SQLite database`; a database this process cannot open exits 1 with `cannot open the database at <path>: <reason>`. Neither prints a traceback.
+- A database storing an older version that already has every table this build declares is refused, not stamped: `the database at <path> stores schema version 4 but is missing nothing to migrate: no step from version 4 to 5 ran, so it is not stamped as version 5`.
+- Migrations are forward only and idempotent: they create the missing tables and stamp the version, and never rewrite or drop anything.
+- A migration copies the database first. `ate db migrate` and `ate setup` both call
+  `src/ate/storage/backup.py`'s `backup_for_migration`, which writes
+  `<db>.backup-<YYYYMMDD-HHMMSS>` (UTC) beside the file with SQLite's backup API, so the copy
+  includes what is still in `-wal`. No copy when the file does not exist, when it has no tables, or
+  when nothing is missing. A name that is taken gets a `-2`, `-3` counter; nothing is overwritten. If
+  the copy cannot be written, the migration is refused: `refusing to migrate: <reason>`, `nothing in
+  the database was changed`, exit 1.
+- Copies are never deleted. They pile up beside the database until the Administrator removes them.
+- What is still backed up by hand: the config (`apt purge` deletes it), the reports directory, and
+  the data directory as a whole now and then. A database that never migrates never gets a copy.
+- Restore is the copy backwards: stop ATE, put the copy at `database.path` with its `-wal` and
+  `-shm` companions removed, start again. There is no undo of one run and no partial restore.
 
 At launch the application also closes any run with no end time as `INTERRUPTED` with result `FAIL`
 and logs `Closed N interrupted run(s) at launch.`
@@ -282,14 +301,15 @@ call is still running finds it busy. This is the boundary of an abort, not a fau
 
 ## Upgrades, uninstalling, licences
 
-Order: back up the database and the config; install the new artifact over the old; migrate if the
-artifact did not; check; then `ate definition update` on any Media Release whose files changed. The
-Windows installer, `install.sh` and the `.deb` postinst run `ate setup` at the end, and that runs the
-migration, so those three leave the database current — the one at `<data>/ate.db`, which is what the
-default config uses. A config with a custom `database.path` is not migrated by `ate setup`, so that
-database still needs `ate db migrate` after an install; `ate db status` reads the configured path and
-catches it. A `pip`/`pipx` wheel install runs nothing, so
-its database stays at the old schema and ATE refuses to start against it until you migrate.
+Order: back up the config; install the new artifact over the old; migrate if the artifact did not;
+check; then `ate definition update` on any Media Release whose files changed. The Windows installer,
+`install.sh` and the `.deb` postinst run `ate setup` at the end, and that runs the migration, so
+those three leave the database current — the database the config names, whichever path
+`database.path` holds. Setup prints which file it migrated and why. It can only read the config if
+it is allowed to: when it cannot, it falls back to `<data>/ate.db`, and a custom database then still
+needs `ate db migrate`; `ate db status` reads the configured path and catches it. A `pip`/`pipx`
+wheel install runs nothing, so its database stays at the old schema and ATE refuses to start against
+it until you migrate.
 
 `ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
 version: the two numbers are unrelated, so comparing them means nothing. A missing or older database
@@ -333,19 +353,24 @@ The build fails on an overfull box wider than 5 pt or an undefined reference.
 - Never run `groupadd`, `chown`, `chmod` or `icacls` on the test machine for a permission claim. Use
   `RecordingPermissions` (see `tests/test_cli_setup.py`) or the gated `debian:stable` container.
 - Never trust an error message you have not grepped in `src/ate/`.
-- Never write `ate db status --config PATH`. `--config` belongs to `ate`, so the path after `db` is
-  read as the database and the command dies on a JSON file; write `ate --config PATH db status`.
+- Never assume `--config` has to come before the subcommand: `ate --config PATH db status` and
+  `ate db status --config PATH` both read that config. Before packet 35 the second form read `PATH`
+  as the database and died on a JSON file.
 - Never assume a checksum mismatch stops a run; it warns.
 - Never assume a PDF was written; check for one, and check it has text.
-- Never migrate without a backup copy — `ate db migrate` makes none.
-- Never set `reports.paperSize` to something the helper will reject; the config does not check it.
+- Never expect a migration to be undoable without the copy it took: `ate db migrate` and `ate setup`
+  copy the database first and refuse to migrate if the copy cannot be written, but they are not a
+  backup policy. The config and the reports are still yours, and a database that never migrates
+  never gets a copy.
+- Never set `reports.paperSize` to anything but `A4` or `Letter`; the config refuses it at startup.
 - Never point two Stations at the same database file; nothing prevents a cloned `station.uuid`.
 - Never rely on `ATE_DEFAULT_CONFIG` or `ATE_DATA_DIR` on a real Station.
 
 ## What is proven, and what is not
 
-Proven by the suite: config parsing and every refusal it produces; database status, migration and
-migration refusal; `ate setup`'s directories, config and database; `ate definition update`; the PDF
+Proven by the suite: config parsing and every refusal it produces; database status, migration,
+migration refusal and the copy a migration takes before it runs; `ate setup`'s directories, config
+and database; `ate definition update`; the PDF
 sandbox decision and its messages; the abort path that leaves a Device closing; the
 full test suite on Windows and Linux with Python 3.13 and 3.14, headless; the Windows installer
 compiled, silently installed, upgraded and uninstalled on a CI runner; the Linux artifacts smoke
@@ -364,15 +389,13 @@ sharing is the behaviour.
 ## Where the design specs and the code disagree
 
 The specs are the files under `.scratch/ate-v1-wayfinding/assets/`, named in each line below.
+Two of the disagreements this list used to hold are closed: `test-run-record.md`'s timestamped
+backup before an upgrade is now taken by the code, and `app-config-format.md`'s `reports.logo` and
+`reports.paperSize` match what the validator accepts.
 
-- `test-run-record.md` says `ate db migrate` makes a timestamped backup copy first. It does not.
-- `app-config-format.md` shows `reports.logo` as a path. The validator accepts only `null` (`'reports.logo' must
-  be a null, got 'x.png'`), even though `src/ate/report/html.py` can embed a logo.
 - `ui.theme` is stored and never read by the shipped code.
-- `reports.paperSize` is not validated by the config; the PDF helper is what rejects a bad value.
 - `test-run-record.md`'s wording for a launch refusal differs from `DbLaunchResult.message`, which names the
   database path and adds `--config <path>` when a non-default config is in use.
-- GLOSSARY says "Automated Test Execution"; `src/ate/cli.py` says "Automated Test Equipment".
 - `packaging.md` says unsigned installers "may trigger SmartScreen warnings". Nothing in this
   repository establishes that; the installer is unsigned, and it has only ever been installed
   headlessly on a CI runner.

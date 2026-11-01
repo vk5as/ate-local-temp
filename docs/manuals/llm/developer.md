@@ -89,6 +89,7 @@ blocking input and records the thread each slot ran on.
 | `src/ate/setup.py` | `ate setup`: directories, config and permissions for every install format |
 | `src/ate/storage/__init__.py` | the storage package: the only place ATE talks SQL |
 | `src/ate/storage/_uuid.py` | UUIDv7 run keys without `uuid.uuid7` |
+| `src/ate/storage/backup.py` | `backup_for_migration` and `migrate_database`: the copy taken before a migration, and the migration both `ate db migrate` and `ate setup` call |
 | `src/ate/storage/schema.py` | the Test Run record tables and `SCHEMA_VERSION` |
 | `src/ate/storage/store.py` | `RunStore`: every write, the batching, `_log_seq`, the launch check |
 | `src/ate/ui/__init__.py` | layouts and screens: the only place `QtWidgets` is allowed |
@@ -167,7 +168,8 @@ fix them: a command a step runs with `os.execute`, which the abort cannot end, a
 inside a coroutine, where the count hook never ticks
 (`tests/test_manuals.py`: `test_a_command_in_a_step_holds_the_abort_until_it_finishes`,
 `test_a_coroutine_loop_runs_to_completion_after_an_abort`). Neither is forbidden in a schedule.
-`os.exit` is not an exception: it ends the process with the run row left open and nothing recorded.
+`os.exit` is nil in a schedule, so it is not an exception at all: calling it in a step raises and the
+step is recorded as an ERROR Attempt.
 
 Three things cannot be interrupted: a SQLite commit already in progress, one Lua C call such as a
 pattern match on a huge string, and `set_visa_attribute` or `resource.timeout` on the worker.
@@ -420,8 +422,8 @@ new row type that is emitted inline with steps must take its `seq` from the same
 will order it wrong.
 
 The launch check, `check_database_at_launch`, compares `PRAGMA user_version` with `SCHEMA_VERSION` and
-returns `NEEDS_MIGRATE`, `TOO_OLD` or `OK`. `ate db status` prints the version; `ate db migrate` creates
-or upgrades.
+returns `NEEDS_MIGRATE`, `TOO_OLD`, `NOT_A_DATABASE`, `NOT_READABLE` or `OK`. `ate db status` prints the
+version; `ate db migrate` creates or upgrades, after the copy.
 
 ## The Lua host and the sandbox
 
@@ -432,6 +434,8 @@ entry points before anything is registered:
 - `dofile`, `loadfile` and `load` are set to `nil` (the Lua standard library still provides them, so they
   have to be shadowed explicitly);
 - `python` is set to nil, so the host's Python is not reachable from a schedule;
+- `os.exit` is set to nil (packet 35): a step that calls it gets an error, not an exit. `os.execute`
+  and `os.getenv` stay, as does `os.abort`, which no schedule has ever needed;
 - `require` is ATE's own, and `package.path` and `package.cpath` are emptied: only the whitelist from the
   Test Definition and the modules in `src/ate/lua/` (as `require("ate.devices")`) can be loaded;
 - `debug` is reduced to `debug.traceback`. The full library reaches the instance loader through
@@ -953,10 +957,10 @@ review_note = Table(
 
 Nothing else is needed: `RunStore._ensure_schema` calls `metadata.create_all`, which reflects each table
 through the backend's own catalog and never raises on a database that already has it, and sets
-`PRAGMA user_version`. Use the record's types: UUIDs as 36-character `Text`, times as ISO-8601 `Text`,
-booleans as `Integer` 0/1, structured values as JSON `Text`. No SQLite-only column: a Postgres backend
-is a connection change. The only raw SQL in the storage layer is the two pragmas, and they stay in
-`src/ate/storage/store.py`.
+`PRAGMA user_version` only when `missing_tables` found something to create. Use the record's types:
+UUIDs as 36-character `Text`, times as ISO-8601 `Text`, booleans as `Integer` 0/1, structured values as
+JSON `Text`. No SQLite-only column: a Postgres backend is a connection change. The only raw SQL in the
+storage layer is the two pragmas, and they stay in `src/ate/storage/store.py`.
 
 Then:
 
@@ -964,20 +968,32 @@ Then:
 python -m ate db migrate /tmp/station/data/ate.db --yes
 ```
 
-prints `created or upgraded database at ... (schema version 6)`. The test runs it twice against the same
-file --- first with the shipped code, which reports version 5, then with the patched copy, which adds
-`review_note` on top --- and asserts the set of tables only grew. Pointed at the version 6 database, the
-shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is `check_database_at_launch`
-returning `TOO_OLD`.
+prints `backed up ... to ....backup-<YYYYMMDD-HHMMSS>` and `created or upgraded database at ...
+(schema version 6)`. The test runs it against the same file more than once --- first with the shipped
+code, which creates the version 5 record and makes no copy because there was no database to copy, then
+with the patched copy, which copies the version 5 database beside itself and adds `review_note` on
+top --- and asserts the set of tables only grew and that the copy still says version 5. Pointed at the
+version 6 database, the shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is
+`check_database_at_launch` returning `TOO_OLD`.
 
-Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
-not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
-migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
-`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
-current, the launch check then passes, and the missing column appears later as an `OperationalError` on
-insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
-and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
-upgrade never fills a new column.
+`src/ate/storage/backup.py` is where the copy comes from, and `migrate_database` is the routine both
+`ate db migrate` and `ate setup` call, so an installer upgrade and a hand-run upgrade take the same
+copy. No copy is made for a database that does not exist, one with no tables, or one that needs no
+migration; SQLite's `Connection.backup` writes `<db>.backup-<YYYYMMDD-HHMMSS>` beside the file and never
+over an existing name. If the copy cannot be written the migration is refused: the command names the
+path and the reason, exits 1, and changes nothing.
+
+Spec rule 20's timestamped backup is no longer the Administrator's job (see
+`.scratch/ate-v1-wayfinding/assets/test-run-record.md`).
+
+And `create_all` does not alter a table that already exists, so adding a column is not a version bump ---
+it needs an explicit migration, written and tested as one. Packet 35 removed the silent version of that
+mistake: `RunStore._ensure_schema` stamps `PRAGMA user_version` only when a table was created, so a
+database storing an older version that already has every table is refused by name, e.g. `the database at
+... stores schema version 5 but is missing nothing to migrate: no step from version 5 to 6 ran, so it is
+not stamped as version 6`. There is no `ALTER` or `add_column` anywhere in `src/ate`, and every insert
+names its columns by hand (`insert_test_run` builds its row field by field), so an upgrade never fills a
+new column.
 
 A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
 table nothing queries is invisible on the page. Batching applies to a new row type as well
@@ -1075,7 +1091,6 @@ python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
 
 Where the documents and the code disagree, the code was followed and the document left as it is:
 
-- spec rule 20 says `ate db migrate` upgrades "after a timestamped backup". It makes none.
 - spec rule 08 says `log_line` rows are written "about once a second". They are inserted per step.
 - The 32a notes say the release workflow has "5 jobs". It defines three: `windows-installer`,
   `linux-build`, and `linux-smoke` with a `deb`/`tar`/`wheel` matrix --- five job runs.

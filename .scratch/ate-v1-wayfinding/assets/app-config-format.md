@@ -57,8 +57,8 @@ Keys are camelCase, grouped in sections.
 | `database.storeMismatchedFiles` | `ask` | `ask`, `always` or `never`: whether the raw bytes of a Lua file with a checksum mismatch are stored with the Test Run |
 | `reports.directory` | `<data>/reports` | Where Test Reports are written |
 | `reports.organisation` | `""` | Text in every Test Report page header |
-| `reports.logo` | `null` | Image file embedded in every Test Report page header |
-| `reports.paperSize` | `A4` | `A4` or `Letter` |
+| `reports.logo` | `null` | Image embedded in every Test Report page header. The validator accepts only `null` until the appearance work (packet 33) settles the values; a path is refused |
+| `reports.paperSize` | `A4` | `A4` or `Letter`, validated when the config is read |
 | `log.directory` | `<data>/logs` | Where the application log is written |
 | `log.level` | `info` | Application log level |
 | `devices.receiveBufferBytes` | `16777216` (16 MiB) | Receive buffer limit per Device; overflow drops the oldest data (see `ate-table-reference.md`) |

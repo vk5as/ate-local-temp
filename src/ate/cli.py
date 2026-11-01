@@ -426,7 +426,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="ate",
-        description="ATE — Automated Test Equipment. With no subcommand, opens the application.",
+        description="ATE — Automated Test Execution. With no subcommand, opens the application.",
     )
     parser.add_argument("--config", metavar="PATH", help="config file to read (default: the platform config)")
     parser.add_argument(
@@ -458,6 +458,38 @@ def _subcommand_args(argv: list[str], command: str) -> list[str]:
         if token == command:
             return argv[index + 1 :]
     return []
+
+
+class CliUsageError(Exception):
+    """A command line the CLI cannot make sense of; reported as one line and exit 1."""
+
+
+def _take_config(argv: list[str]) -> tuple[list[str], str | None]:
+    """Pull ``--config PATH`` out of ``argv`` wherever it sits, returning what is left.
+
+    ``--config`` belongs to ``ate``, and the manual said it must come before the subcommand:
+    written after it, `ate db status --config X` read `X` as a database path and died on an
+    unhandled ``sqlite3.DatabaseError`` (packet 35). Accepting it after the subcommand too
+    removes that trap. ``--config`` with nothing after it is an error, not a silent default.
+    """
+    rest: list[str] = []
+    config = None
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--config":
+            if index + 1 >= len(argv):
+                raise CliUsageError("--config needs a path")
+            config = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("--config="):
+            config = token.split("=", 1)[1]
+            index += 1
+            continue
+        rest.append(token)
+        index += 1
+    return rest, config
 
 
 def main(argv=None) -> int:
@@ -526,7 +558,17 @@ def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
     in the db arguments without being taken as the path (30a review item 6). With no path the
     configured database is used — from ``--config`` or the platform default config — so
     ``ate --config X db migrate --yes`` touches the database that config names, not a stray
-    ``./ate.db`` in the working directory (packet 30c). An explicit path still overrides it."""
+    ``./ate.db`` in the working directory (packet 30c). An explicit path still overrides it.
+    ``--config`` is also accepted after the subcommand, where an Operator naturally writes it
+    (packet 35): ``ate db status --config X`` reads X as the config, not as the database."""
+    try:
+        argv, inline_config = _take_config(argv)
+    except CliUsageError as exc:
+        print(f"ate db: {exc}", file=sys.stderr)
+        return 1
+    if inline_config is not None:
+        config_path = inline_config
+
     if not argv:
         print("ate db: no subcommand given\ntry 'ate db status' or 'ate db migrate'", file=sys.stderr)
         return 1
@@ -557,14 +599,19 @@ def _db_status(path: str, hint: Path | None = None) -> int:
     """Print the database's schema version (PRAGMA user_version); read-only.
 
     The refusal names the database and, when a non-default config is in use, the ``--config``
-    to migrate it through (packet 30c review)."""
+    to migrate it through (packet 30c review). A file that is not a database is refused in one
+    line, with an exit of 1 and no traceback (packet 35)."""
     from .storage import DbLaunchStatus, check_database_at_launch
 
     result = check_database_at_launch(path, config_file=hint)
     if result.status != DbLaunchStatus.OK:
         print(result.message, file=sys.stderr)
         return 1
-    conn = __import__("sqlite3").connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        print(f"ate db status: cannot open {path}: {exc}", file=sys.stderr)
+        return 1
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     finally:
@@ -577,7 +624,9 @@ def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
     """Create or upgrade the database at ``path`` after confirmation.
 
     ``--yes``/``-y`` skips the interactive prompt (for automation and tests). A database
-    built by a newer ATE is refused rather than downgraded; everything else is opened with
+    built by a newer ATE is refused rather than downgraded; everything else goes through
+    :func:`ate.storage.migrate_database`, the same routine ``ate setup`` uses: it copies the
+    database beside itself first when a migration is about to run, then opens it with
     :class:`RunStore`, which creates the tables if missing and sets the schema version.
     """
     parser = argparse.ArgumentParser(prog="ate db migrate", add_help=False)
@@ -590,23 +639,9 @@ def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
             print("aborted", file=sys.stderr)
             return 1
 
-    from .storage import DbLaunchStatus, RunStore, check_database_at_launch
+    from .storage import migrate_database
 
-    result = check_database_at_launch(path, config_file=hint)
-    # Only a database built by a newer ATE must be refused; a missing or older one is
-    # exactly what migrate exists to create or upgrade.
-    if result.status == DbLaunchStatus.TOO_OLD:
-        print(result.message, file=sys.stderr)
-        return 1
-
-    RunStore(path).close()  # creates the tables if missing and sets the schema version
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    finally:
-        conn.close()
-    print(f"created or upgraded database at {path} (schema version {version})")
-    return 0
+    return migrate_database(path, config_file=hint)
 
 
 def _cmd_setup(argv: list[str]) -> int:

@@ -24,6 +24,7 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import create_engine, event, func, select
 
 from ._uuid import new_uuid7
+from .backup import SchemaVersionError, current_version, missing_tables
 from .schema import (
     SCHEMA_VERSION,
     action,
@@ -48,6 +49,7 @@ class DbLaunchResult:
     user_version: Optional[int] = None  # PRAGMA user_version, or None if unreadable/missing
     path: Optional[Path] = None  # the database checked, so the message can name it (30c)
     config_file: Optional[Path] = None  # a non-default config in use, to carry into the hint
+    reason: Optional[str] = None  # what SQLite said, when the file itself could not be read
 
     @property
     def message(self) -> str:
@@ -64,6 +66,10 @@ class DbLaunchResult:
         if self.status == DbLaunchStatus.TOO_OLD:
             where = f"the database at {self.path}" if self.path else "this database"
             return f"this ATE is too old for {where}; update ATE"
+        if self.status == DbLaunchStatus.NOT_A_DATABASE:
+            return f"the file at {self.path} is not a SQLite database"
+        if self.status == DbLaunchStatus.NOT_READABLE:
+            return f"cannot open the database at {self.path}: {self.reason}"
         return ""
 
 
@@ -73,43 +79,63 @@ class DbLaunchStatus(enum.Enum):
     OK = "OK"  # schema version matches; safe to open
     NEEDS_MIGRATE = "NEEDS_MIGRATE"  # missing, empty, or older than this ATE
     TOO_OLD = "TOO_OLD"  # built by a newer ATE
+    NOT_A_DATABASE = "NOT_A_DATABASE"  # a file is there, but it is not a SQLite database
+    NOT_READABLE = "NOT_READABLE"  # it is a database, but this process cannot open it (packet 35)
 
 
-def _inspect_db(path: str | Path) -> tuple[bool, Optional[int]]:
+def _inspect_db(path: str | Path) -> tuple[bool, Optional[int], Optional[str]]:
     """Inspect ``path`` read-only without creating it.
 
-    Returns ``(has_v1_table, user_version)``. A missing file yields ``(False, None)``;
-    an existing but empty database (no v1 table yet) yields ``(False, 0)``. Opening in
-    ``mode=ro`` never creates the file, so a refusal at launch leaves nothing behind.
+    Returns ``(has_v1_table, user_version, reason)``. A missing file yields
+    ``(False, None, None)``; an existing but empty database (no v1 table yet) yields
+    ``(False, 0, None)``; a file SQLite cannot read yields ``reason`` instead of a version.
+    Opening in ``mode=ro`` never creates the file, so a refusal at launch leaves nothing
+    behind, and a file that is not a database is reported rather than raised (packet 35).
     """
     path = Path(path)
     if not path.exists():
-        return False, None
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        return False, None, None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return False, None, str(exc)
     try:
         has_tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('test_run','node','attempt')"
         ).fetchone() is not None
         user_version = conn.execute("PRAGMA user_version").fetchone()[0] or 0
+    except sqlite3.Error as exc:
+        return False, None, str(exc)
     finally:
         conn.close()
-    return has_tables, int(user_version)
+    return has_tables, int(user_version), None
 
 
 def check_database_at_launch(path: str | Path, config_file: str | Path | None = None) -> DbLaunchResult:
     """Decide whether ATE may launch against ``path``; never migrates.
 
     Compares the database's PRAGMA user_version to :data:`SCHEMA_VERSION`: a missing,
-    empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), and a
-    newer one refuses with TOO_OLD ("this ATE is too old"). Only an exact match returns OK.
+    empty or older database refuses with NEEDS_MIGRATE ("run `ate db migrate`"), a
+    newer one refuses with TOO_OLD ("this ATE is too old"), a file that is not a
+    database at all refuses with NOT_A_DATABASE, and a database this process cannot
+    open refuses with NOT_READABLE. Only an exact match returns OK.
 
     ``config_file`` is the config this launch read, already filtered by
     :func:`ate.config.config_hint` to ``None`` when it is the platform default: it lets the
     refusal tell the Operator which config to migrate (packet 30c review).
     """
-    has_tables, user_version = _inspect_db(path)
+    has_tables, user_version, reason = _inspect_db(path)
     database = Path(path)
     hint = Path(config_file) if config_file is not None else None
+    if reason is not None:
+        # A file that is not a database and a database this process cannot open are different
+        # problems, and the Administrator fixes them differently (packet 35).
+        status = (
+            DbLaunchStatus.NOT_A_DATABASE
+            if "not a database" in reason.lower()
+            else DbLaunchStatus.NOT_READABLE
+        )
+        return DbLaunchResult(status, None, database, hint, reason)
     if not has_tables or user_version < SCHEMA_VERSION:
         return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version, database, hint)
     if user_version > SCHEMA_VERSION:
@@ -237,7 +263,14 @@ class RunStore:
         # rely on; input_value shares _log_seq with actions because it is emitted inline with steps.
         self._media_seq: dict[str, int] = {}
         self._runfile_seq: dict[str, int] = {}
-        self._ensure_schema()
+        try:
+            self._ensure_schema()
+        except Exception:
+            # A store that cannot open its database must not keep it open: the refusal is a
+            # message for the Operator, and a handle left behind is a file nobody can delete
+            # (packet 35, and Windows in particular).
+            self.close()
+            raise
 
     def _run(self, stmt) -> Any:
         """Execute a Core statement on the Engine's connection, with every row read inside the context.
@@ -256,16 +289,33 @@ class RunStore:
             return result.fetchall() if result.returns_rows else result
 
     def _ensure_schema(self) -> None:
-        # Idempotent table creation via a throwaway engine (reflects existence, so
-        # reopening an existing database never fails), then set the pragmas on our
-        # own stdlib connection. Both persist in the database file header, so they
-        # survive reopen and WAL mode stays enabled for every future connection.
+        """Create the tables this build declares, and stamp the version only when that ran.
+
+        Idempotent table creation via a throwaway engine (reflects existence, so reopening an
+        existing database never fails), then the pragmas on our own stdlib connection. Both
+        persist in the database file header, so they survive reopen and WAL mode stays enabled
+        for every future connection.
+
+        ``PRAGMA user_version`` is set only when this call actually created a table. A database
+        that stores an older version while already holding every table of the current one has
+        had no migration to earn the stamp: raising it anyway would make an old database claim
+        to be current, and the version check at launch would then pass on a database nobody
+        migrated (packet 35). Such a database is refused, naming the version it stores."""
+        missing = missing_tables(self.path)
         _create_schema(str(self.path))
         # Set the pragmas on our own stdlib connection. Both persist in the database
         # file header, so they survive reopen and WAL mode stays enabled for every
         # future connection.
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        if missing:
+            self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        elif current_version(self.path) < SCHEMA_VERSION:
+            stored = current_version(self.path)
+            raise SchemaVersionError(
+                f"the database at {self.path} stores schema version {stored} but is missing nothing "
+                f"to migrate: no step from version {stored} to {SCHEMA_VERSION} ran, so it is not "
+                f"stamped as version {SCHEMA_VERSION}"
+            )
 
     # -- test_run -----------------------------------------------------------
 
