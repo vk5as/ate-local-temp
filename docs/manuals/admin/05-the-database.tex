@@ -50,7 +50,8 @@ plainly that no migration exists:
 
 \begin{lstlisting}[language=ATEShell]
 the database at /var/lib/ate/ate.db stores schema version 4 and already holds every table this ATE
-declares: this ATE has no migration from version 4 to 5, so it is not stamped as version 5
+declares: this ATE has no migration from version 4 to 5, so it is not stamped as version 5, and
+`ate db migrate` on it changes nothing
 \end{lstlisting}
 
 Nothing would be created, so stamping it as current would be a claim with no migration behind it.

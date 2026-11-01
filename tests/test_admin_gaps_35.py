@@ -31,7 +31,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -405,7 +404,7 @@ def test_a_copy_never_overwrites_a_file_that_is_already_there(tmp_path: Path, mo
     path = tmp_path / "ate.db"
     _older_database(path, 4, ["equipment"])
     taken = tmp_path / "ate.db.backup-today"
-    taken.write_text("the Administrator's own copy", encoding="utf-8")
+    taken.write_text("the Administrator's own copy", encoding="utf-8", newline="\n")
     monkeypatch.setattr(backup_module, "_copy_name", lambda p: taken)
 
     with pytest.raises(BackupError) as raised:
@@ -698,7 +697,8 @@ def _no_migration_message(path: Path) -> str:
     return (
         f"the database at {path} stores schema version {SCHEMA_VERSION - 1} and already holds every "
         f"table this ATE declares: this ATE has no migration from version {SCHEMA_VERSION - 1} to "
-        f"{SCHEMA_VERSION}, so it is not stamped as {SCHEMA_VERSION}"
+        f"{SCHEMA_VERSION}, so it is not stamped as {SCHEMA_VERSION}, and `ate db migrate` on it "
+        f"changes nothing"
     )
 
 
@@ -1074,7 +1074,7 @@ def test_the_registry_closes_the_handle_and_never_calls_a_driver_close() -> None
 
 #: Windows cannot delete a file it still has open: `WinError 32`. Every headless run the harness
 #: starts opens its own application log inside the scratch directory, so a session left open makes
-#: `tempfile.TemporaryDirectory` fail on the way out - which is what the CI runners did. The spy
+#: the scratch directory undeletable when the test ends - which is what the CI runners hit. The spy
 #: records the sessions `run_schedule` creates, since the record it returns does not carry them.
 
 
@@ -1108,7 +1108,7 @@ def test_a_headless_run_closes_its_session_before_returning(tmp_path: Path) -> N
 
     opened, real = _spy_sessions(run_examples)
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        with scratch_directory() as tmp:
             work = Path(tmp)
             config = run_examples.write_config(work)
             peers = run_examples.Peers()
@@ -1130,7 +1130,7 @@ def test_a_run_that_times_out_still_closes_its_session(tmp_path: Path) -> None:
 
     opened, real = _spy_sessions(run_examples)
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        with scratch_directory() as tmp:
             scratch = Path(tmp)
             config = run_examples.write_config(scratch, scratch)
             schedule = scratch / "hang.tslua"

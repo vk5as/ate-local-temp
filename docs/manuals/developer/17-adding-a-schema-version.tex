@@ -80,7 +80,7 @@ no stamp and no silent pass. It has its own launch status, \texttt{NO\_\allowbre
 \begin{verbatim}
 the database at /var/lib/ate/ate.db stores schema version 5 and already holds
 every table this ATE declares: this ATE has no migration from version 5 to 6,
-so it is not stamped as version 6
+so it is not stamped as version 6, and `ate db migrate` on it changes nothing
 \end{verbatim}
 
 The test runs exactly that: the shipped code, with only the number changed, exits 1 with that

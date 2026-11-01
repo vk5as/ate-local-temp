@@ -1008,7 +1008,8 @@ mistake where nothing is created at all: `RunStore._ensure_schema` stamps `PRAGM
 when a table was created, so a database storing an older version that already has every table gets its
 own launch status, `NO_MIGRATION`, and `db status`, `db migrate` and the launch dialog refuse it with
 one line, e.g. `the database at ... stores schema version 5 and already holds every table this ATE
-declares: this ATE has no migration from version 5 to 6, so it is not stamped as version 6`. There is
+declares: this ATE has no migration from version 5 to 6, so it is not stamped as version 6, and
+`ate db migrate` on it changes nothing`. There is
 no `ALTER` or `add_column` anywhere in `src/ate`, and every insert names its columns by hand
 (`insert_test_run` builds its row field by field), so an upgrade never fills a new column. What the
 guard cannot see is a bump that adds a column *next to* a new table: the new table makes

@@ -169,7 +169,8 @@ purge.
 - A file that is not a database exits 1 with `the file at <path> is not a SQLite database`; a database this process cannot open exits 1 with `cannot open the database at <path>: <reason>`. Neither prints a traceback.
 - A database storing an older version that already has every table this build declares has its own
   refusal, not a migrate hint: `the database at <path> stores schema version 4 and already holds every
-  table this ATE declares: this ATE has no migration from version 4 to 5, so it is not stamped as version 5`.
+  table this ATE declares: this ATE has no migration from version 4 to 5, so it is not stamped as
+  version 5, and `ate db migrate` on it changes nothing`.
   `ate db status`, `ate db migrate` and the launch dialog print that one line and exit 1; the database is
   not copied, opened or written.
 - Migrations are forward only and idempotent: they create the missing tables and stamp the version, and never rewrite or drop anything.

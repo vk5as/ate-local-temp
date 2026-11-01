@@ -100,7 +100,7 @@ def _no_migration_message(path: Optional[Path], stored: int) -> str:
     return (
         f"{where} stores schema version {stored} and already holds every table this ATE declares: "
         f"this ATE has no migration from version {stored} to {SCHEMA_VERSION}, "
-        f"so it is not stamped as {SCHEMA_VERSION}"
+        f"so it is not stamped as {SCHEMA_VERSION}, and `ate db migrate` on it changes nothing"
     )
 
 
