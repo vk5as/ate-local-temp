@@ -1,8 +1,9 @@
 \chapter{Devices: talking to the bench}\label{ch:devices}
 
-A Device is a connection ATE opens for the schedule: an instrument on the LAN, a serial port,
-a datagram peer, a VISA instrument. Four Device Types exist in v1. Each one takes connection
-details from the schedule, and the schedule names them --- ATE has no Device discovery.
+A Device is a connection ATE opens for the schedule: an instrument on the LAN reached over a
+socket, a serial connection, a datagram peer, a VISA instrument. Four Device Types exist in v1.
+Each one takes connection details from the schedule, and the schedule names them --- ATE has no
+Device discovery.
 
 \begin{center}
 \footnotesize
@@ -66,8 +67,12 @@ expression, with no \texttt{:build()} step at the end: \texttt{devices.Tcp(host,
 For \texttt{read}, \texttt{write} and \texttt{close} every field is optional; a field you leave
 out uses what the Device was opened with. \texttt{read} takes \texttt{size}, \texttt{timeout}
 and \texttt{readTerm}. \texttt{write} takes \texttt{data} (required), \texttt{writeTerm} and
-\texttt{timeout}. \texttt{close} takes nothing. UDP's \texttt{read} and \texttt{write} take
-\texttt{size}, \texttt{timeout} and \texttt{data} only.
+\texttt{timeout}. \texttt{close(dev [, params] [, onError])} takes no fields of its own: the
+params table is accepted so an \texttt{onError} can be given, and it is used only if the close
+itself fails. UDP has no terminators at all, because a datagram is already a whole message:
+its \texttt{read} takes \texttt{size} and \texttt{timeout}, and its \texttt{write} takes
+\texttt{data} (required) and \texttt{timeout}; a \texttt{readTerm} on a UDP Device is refused
+with the field named.
 
 Data is raw bytes both ways. The terminator is stripped from \texttt{data} and \texttt{count} is
 what is left; a \texttt{write}'s \texttt{count} includes the terminator it sent. Convert with
@@ -76,10 +81,10 @@ what is left; a \texttt{write}'s \texttt{count} includes the terminator it sent.
 From \texttt{open} to \texttt{close} ATE reads every TCP, SERIAL and UDP Device in the
 background and buffers what arrives, so a reply that comes before the schedule asks for it is
 not lost. \texttt{ATE.read} takes from that buffer first and waits only for what is not there
-yet. Each buffer holds \texttt{devices.receiveBufferBytes} (16 MiB by default); on overflow ATE
-drops the oldest bytes, logs one WARNING, and the next read result carries
-\texttt{overflow = true}. \texttt{ATE.flush(dev)} empties the buffer and returns how many bytes
-it discarded --- useful just before sending a command. VISA has no background reader and no
+yet. Each buffer holds the Station config key \texttt{devices.receiveBufferBytes} (16 MiB by
+default); on overflow ATE drops the oldest bytes, logs one WARNING, and the next read result
+carries \texttt{overflow = true}. \texttt{ATE.flush(dev)} empties the buffer and returns how many
+bytes it discarded --- useful just before sending a command. VISA has no background reader and no
 buffer, so \texttt{flush} discards nothing: polling an SCPI instrument with empty reads makes it
 log \emph{Query UNTERMINATED} ($-420$) and ties up the bus.
 
@@ -101,10 +106,15 @@ hardware.
 \noindent\textbf{\texttt{serial.tslua}}\par
 \lstinputlisting[language=ATELua]{../examples/test-writer/serial.tslua}
 
-VISA addresses an instrument by a resource string. GPIB instruments are
-\texttt{GPIB0::5::INSTR}, VXI-11 instruments are
-\texttt{TCPIP0::127.0.0.1::5025::SOCKET}. ATE uses whatever pyvisa backend it finds; it does
-not ship NI-VISA.
+A VISA Device is named by a resource string, and the string's shape says what kind of
+connection it is: \texttt{GPIB0::5::INSTR} is an instrument on a GPIB bus,
+\texttt{TCPIP0::192.168.1.10::inst0::INSTR} is a VXI-11 instrument over TCPIP, and
+\texttt{TCPIP0::127.0.0.1::5025::SOCKET} is a raw TCP socket wrapped in a VISA session ---
+not a VXI-11 instrument, and the same stream a \texttt{DeviceType.TCP} Device would open. ATE
+uses whatever pyvisa backend it finds and ships only pyvisa-py, which covers TCPIP and USBTMC.
+A GPIB instrument needs a real VISA driver installed on the Station (NI-VISA, or linux-GPIB):
+nothing in ATE supplies one, so ask the schedule author what their instrument actually speaks
+before writing the schedule.
 
 \noindent\textbf{\texttt{visa.tslua}}\par
 \lstinputlisting[language=ATELua]{../examples/test-writer/visa.tslua}

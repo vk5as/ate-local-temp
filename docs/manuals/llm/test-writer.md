@@ -25,11 +25,22 @@ You cannot run a schedule that is not in a Test Definition. Do step 2 before ste
 - **Device** - a connection ATE opens (TCP, SERIAL, UDP, VISA). **Equipment** - a bench record
   the schedule declares for the report. They are not the same thing and ATE never links them.
 
+## How much Lua this manual assumes
+
+Basic Lua: `local`, functions, tables, `if`, `for`, `while`, `..` for strings, `nil`. Three
+idioms are ATE-specific: every setter returns its object so calls chain (`:setStepNo("1.")
+:setAction(...)`); a params table is a Lua table written `key = value`; a step's action is an
+anonymous function, and a Sub-schedule's parameters arrive as `local kv = ...`. A step's action
+runs synchronously on the worker thread - do not use coroutines (see Abort).
+
 ## The schedule format
 
-The top level of the file runs before any Test Run exists. It may use `require`, `ATE.log`, the
-builders and the enums, and it must return a `ScheduleParams`. Everything else at the top level
-is a load error.
+The top level of the file runs before any Test Run exists. Plain Lua is fine there: `require`,
+`ATE.log`, the builders, the enums, and any of the standard library (`os.getenv` in
+`tcp.tslua` reads its host and port at load time). What is not legal is an `ATE` call that needs
+a run: `ATE.open`, `ATE.close`, `ATE.read`, `ATE.write`, `ATE.flush`, `ATE.report`, `ATE.input`
+and `ATE.addEquipment` each raise a load error naming the function. The file must return a
+`ScheduleParams`.
 
 Setters stash values and return the object, so they chain; the order does not matter, and every
 step is validated when the file finishes loading.
@@ -291,9 +302,12 @@ return ScheduleParams("Manual: step inputs", "one step per Step Input type")
 A Pre-test Action runs before the first step; a Post-test Action runs after the last one, in
 reverse Pre-test order. Both are called with the run's standing result as their first argument
 - always `"PASS"` for a Pre-test Action, because nothing has failed yet. A Pre-test Action that
-raises aborts the run with `PRETEST_FAILED` and every step `NOTRUN`. Post-test Actions run even
-after an abort: ATE clears the abort flag before them, an abort during one ends that Action
-only, and an error in one fails the run while the rest still run.
+raises aborts the run with `PRETEST_FAILED` and every step `NOTRUN`, and the Post-test Actions
+still run: every schedule instance the Pre-test pass reached gets its teardown, in reverse
+order, including the instance whose own Pre-test Action raised; an instance the pass never got
+to has none. Post-test Actions run even after an abort: ATE clears the abort flag before them,
+an abort during one ends that Action only, and an error in one fails the run while the rest
+still run.
 
 `ATE.addEquipment(name, serial, connection, calDue, notes)` - all strings, `name` required.
 A repeat of the same `name` and `serial` adds no row and logs a DEBUG line.
@@ -461,9 +475,128 @@ bundled with ATE (`ate.devices`).
 
 Checksums are SHA-256 of the raw bytes, lowercase hex. A mismatch is a WARNING, the file still
 loads, and both checksums are recorded with the run. `ate definition update <file.atedef>`
-rewrites every checksum in place.
+computes each listed file's SHA-256 and writes it back over the old value, filling in any
+`sha256` that is absent; the file is only rewritten if a checksum actually changed, so a
+correct `.atedef` comes back byte for byte the same. A listed file it cannot read keeps its
+current value and warns.
+
+Every field a `.atedef` can carry:
+
+| Field | Meaning |
+| --- | --- |
+| `format` | must be `1`; anything else makes the definition broken |
+| `mediaNumber` | the release's identity; not a version |
+| `name`, `version` | `version` must be valid semver 2.0.0; other releases name it in `depends` |
+| `depends` | a list of `{"name": ..., "version": ...}`; resolved depth first, in declaration order |
+| `files[]` | one entry per Lua file: `path`, `sha256` |
+| `files[].path` | relative to the `.atedef` (or absolute), forward slashes on both platforms |
+| `files[].hidden` | only on a `.tslua`: keeps it off the Run screen while still allowing it as a Sub-schedule |
+| `files[].module` | only on a `.lua`: the name `require` uses. Otherwise the path derives it: `lib/rails.lua` is `lib.rails`. An absolute path, or one containing `..`, must state it |
+
+Here is the definition the manual's own examples ship, exactly as it sits on disk - note
+`channel.tslua` and `led.tslua` marked `hidden`, and `modules/limits.lua` given the module name
+`board_limits`:
 
 ```json:docs/manuals/examples/test-writer/manual.atedef
+{
+  "format": 1,
+  "mediaNumber": "MR-MANUAL-TW",
+  "name": "Test writer manual examples",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "first.tslua",
+      "sha256": "a260d2b923819ff6f71804370d4afce9ac77269ec9d9cf9c4b0dae35b85e48c8"
+    },
+    {
+      "path": "steps.tslua",
+      "sha256": "2203cddc55bf0daf0e557d3ecf1b847e77bf8fa873385cea775e32f240c5af97"
+    },
+    {
+      "path": "inputs.tslua",
+      "sha256": "6a746ebad482542f81d5b846b65a57adb467942e5289d9fc7e76b9bdaabd22fc"
+    },
+    {
+      "path": "actions.tslua",
+      "sha256": "a15e9a9fa060f0e829cc2e047d2c0313a1a2203c7c33356e792f699d1b02c526"
+    },
+    {
+      "path": "retry.tslua",
+      "sha256": "5375d9870ad11af1553eeaa1d5fd27ce586c2a5cce78af6b4a493a029fee58c9"
+    },
+    {
+      "path": "results.tslua",
+      "sha256": "49f80374f637c13e34281140912335fcb583fa87865674def089b18188130ce7"
+    },
+    {
+      "path": "main.tslua",
+      "sha256": "fc768ae110764fb3a7a9a4a29fdd93df3beafc09b8fff6ea7fa71efa825964d4"
+    },
+    {
+      "path": "channel.tslua",
+      "hidden": true,
+      "sha256": "1cecd8b3566e4783c86375ebcdac6b69eaae52f1ea74e32c495babf7009b6e63"
+    },
+    {
+      "path": "led.tslua",
+      "hidden": true,
+      "sha256": "3477e6a5a1578108bd76687e13e211ca1c48b5bac3343160a4e86319f87f46f8"
+    },
+    {
+      "path": "modules.tslua",
+      "sha256": "f34234441c454b9e0559e778fb86c6f10086f2edd4248207953ce67f22fae386"
+    },
+    {
+      "path": "lib/rails.lua",
+      "sha256": "392e385ab81dfb814a7ddec0cb1c0799c97d714b3d97c2cfb3306e6ba6cde029"
+    },
+    {
+      "path": "modules/limits.lua",
+      "module": "board_limits",
+      "sha256": "ea8a21a8a7bef16b0abaa9efcc07c8f08416b4a07b712ac35b9ffdbf8c31fd99"
+    },
+    {
+      "path": "tcp.tslua",
+      "sha256": "8439beda05cc96f5c6bd69629951fc2318a7526eb085fb2bb322fc711c2cb8c7"
+    },
+    {
+      "path": "udp.tslua",
+      "sha256": "324ce6659ab74bcea159fbe20d063925e5b5a88992b2ad1755e4d68625f461b4"
+    },
+    {
+      "path": "serial.tslua",
+      "sha256": "dd717a441db74b490b84b999f82a54b7e0d2b3b3185906ae83150562c7dcb768"
+    },
+    {
+      "path": "visa.tslua",
+      "sha256": "5c9d69646277814d6d0e134380ba32e6402ce4d9d3f4006dbe4f622bb107afb8"
+    },
+    {
+      "path": "errors.tslua",
+      "sha256": "66151279fc9e62462e80a75e273785fac0bb1c8f2a7bf0aeec62f312a1fb0fe2"
+    },
+    {
+      "path": "left_open.tslua",
+      "sha256": "a53f424fe15813bafdcdf74f0c7eb4e69b37bbbb5fa27d833b58eb7d1923b279"
+    },
+    {
+      "path": "logging.tslua",
+      "sha256": "ee6b7ee6f1a3b1ed15522544d93645c694dfd29d27d53188416c8e956170dd02"
+    },
+    {
+      "path": "abort.tslua",
+      "sha256": "80cd7bf7c4a3cac88078bdf3d788fed0cd43b7f205c069fe7d4ce313a1cf35a0"
+    },
+    {
+      "path": "sandbox.tslua",
+      "sha256": "e40b7d8eafd167b5d52f844957962b505f53009d791a38bb2729413462aaee99"
+    },
+    {
+      "path": "forbidden.tslua",
+      "sha256": "eae7b5e968792a6abdcf883ccde1e956fdf4f7a6c14e2d8aab8ff02c1fc8dd97"
+    }
+  ]
+}
 ```
 
 ```lua:docs/manuals/examples/test-writer/modules.tslua
@@ -535,19 +668,32 @@ is required - there are no defaults in `ATE.open`; the builders supply them.
 | `DeviceType.VISA` | `resource`, `timeout`, `readTerm`, `writeTerm` | `devices.Visa(resource)`: timeout 1.0, terminators `"\n"` |
 
 Per-call fields, all optional, falling back to the open-time configuration: `read` takes
-`size`, `timeout`, `readTerm`; `write` takes `data` (required), `writeTerm`, `timeout`; UDP's
-`read` and `write` take no terminators. Builder setters: `setHost`, `setPort`, `setLocalPort`,
-`setResource`, `setBaud`, `setDataBits`, `setStopBits`, `setParity`, `setFlowControl`,
-`setTimeout`, `setReadTerm`, `setWriteTerm`, `setSize`, and `devices.Write(data)`.
+`size`, `timeout`, `readTerm`; `write` takes `data` (required), `writeTerm`, `timeout`;
+`close` takes no fields of its own but accepts an optional params table and an optional
+`onError` — `ATE.close(dev [, params] [, onError])` — which is used if the close itself fails.
+UDP has no terminators: its `read` takes `size` and `timeout`, and its `write` takes `data`
+(required) and `timeout`. Passing a `readTerm` to a UDP Device is an error naming the field.
+Builder setters: `setHost`, `setPort`, `setLocalPort`, `setResource`, `setBaud`, `setDataBits`,
+`setStopBits`, `setParity`, `setFlowControl`, `setTimeout`, `setReadTerm`, `setWriteTerm`,
+`setSize`, and `devices.Write(data)`.
 
 Reads and writes are raw bytes. The terminator is stripped from `data`; `count` is what is
 left. A write's `count` includes the terminator.
 
 TCP, SERIAL and UDP are read in the background from `open` to `close` and buffered, capped at
-`devices.receiveBufferBytes` (16 MiB); on overflow ATE drops the oldest bytes, logs one
-WARNING, and the next read carries `overflow = true`. `ATE.flush(dev)` empties the buffer and
-returns the count discarded. VISA has no background reader and no buffer, so `flush` discards
-nothing.
+the Station config key `devices.receiveBufferBytes` (16777216, 16 MiB); on overflow ATE drops
+the oldest bytes, logs one WARNING, and the next read carries `overflow = true`. `ATE.flush(dev)`
+empties the buffer and returns the count discarded. VISA has no background reader and no buffer,
+so `flush` discards nothing.
+
+A VISA resource string names the instrument, and the shape matters:
+`GPIB0::5::INSTR` is a GPIB instrument, `TCPIP0::192.168.1.10::inst0::INSTR` is a VXI-11
+instrument, and `TCPIP0::127.0.0.1::5025::SOCKET` is a plain TCP socket wrapped in a VISA
+session - the same stream a `DeviceType.TCP` Device would open, with pyvisa in the way. ATE
+uses whichever pyvisa backend it finds; only pyvisa-py is shipped, which reaches TCPIP and
+USBTMC. A GPIB instrument needs a real VISA driver on the Station (NI-VISA or linux-GPIB): ask
+the schedule author which resource string their instrument needs before writing the schedule,
+because nothing installed with ATE can open a GPIB address.
 
 ```lua:docs/manuals/examples/test-writer/tcp.tslua
 -- tcp.tslua: a TCP Device, from open to close.
@@ -893,8 +1039,28 @@ return ScheduleParams("Manual: retry", "the first Attempt fails, the Retry passe
 
 Abort is whole-run. The running step records `ERROR` "Aborted by Operator", every step that
 never ran records `NOTRUN`, and the run's End Reason is `ABORTED`. It cannot be caught: after
-an abort `ATE` calls raise `"aborted"`, a busy loop is stopped by the instruction-count hook,
-and `pcall` and `xpcall` re-raise. ATE aims to stop in 0.5 s and must stop within 10 s.
+an abort `ATE` calls raise `"aborted"`, a busy loop in the step's own code is stopped by the
+instruction-count hook (`debug.sethook(check_abort, "", 1000)`), and `pcall` and `xpcall`
+re-raise. ATE aims to stop in 0.5 s and the suite fails a run that takes longer than 10 s.
+
+That 10 s holds only for what the hook can reach. Three measured cases break it, and they are
+not covered by the abort tests:
+
+- **A coroutine is not reached by the hook.** A loop of `120000000` iterations inside
+  `coroutine.wrap` ran to completion after an abort: 2.67 s from the abort to `FINISHED`, the
+  step reporting `PASS` and the next step recording the abort. An unbounded `while true do end`
+  inside `coroutine.wrap` never stopped at all - the run sat there until the process was killed,
+  its `test_run` row left open. The engine's own docstring says a schedule must not use
+  coroutines for this reason (`src/ate/engine/run_engine.py`, "Because a schedule must not use
+  coroutines").
+- **`os.execute` blocks the abort for the whole command.** A step that ran
+  `os.execute("sleep 20")` was aborted 19.5 s before it ended: the run finished only when the
+  command did. The step still reported `PASS`.
+- **`os.exit` ends ATE.** `os.exit(7)` in a step exits the process with status 7. The run row is
+  left with no `ended_at` and no result; the next launch closes it as `INTERRUPTED`/`FAIL`. No
+  Post-test Action runs, and no report is written.
+
+A plain loop in a step, `ATE.sleep` and `ATE.input` all do stop within the 10 s.
 
 ```lua:docs/manuals/examples/test-writer/abort.tslua
 -- abort.tslua: what an abort stops, and what it does not.
@@ -930,7 +1096,9 @@ return ScheduleParams("Manual: abort", "a sleep the Operator aborts, and the tea
 `dofile`, `loadfile`, `load` and `python` are gone. `package` exists but `package.path` and
 `package.cpath` are empty. `debug` is reduced to `debug.traceback`. `io`, `os`, `string`,
 `table` and the rest of the standard library are still there. This is traceability, not
-security: ATE needs to know which files a run ran.
+security: ATE needs to know which files a run ran. That is why `os.execute` and `os.exit` are
+reachable from a step: nothing in the sandbox stops them, and both are ways to break a run (see
+Abort). A schedule can still open a file with `io.open` if it names a path.
 
 ```lua:docs/manuals/examples/test-writer/sandbox.tslua
 -- sandbox.tslua: what the Test Schedule sandbox gives a schedule, and takes away.
@@ -1017,18 +1185,179 @@ Parity:      NONE, EVEN, ODD, MARK, SPACE
 FlowControl: NONE, RTSCTS, XONXOFF, DSRDTR
 ```
 
-## How to check a schedule worked
+## Running a schedule of your own
 
-Run it headless and read the record back:
+There is no `ate run <schedule>`. An installed ATE has no headless runner: what it has is
+`ate _selftest --run`, which runs a built-in one-step schedule to prove a bundle can run a
+Test Run, and `ate _selftest --scan DIR`, which loads every schedule in DIR and reports the
+broken ones - a load check, not a run. To run your own schedule from a command line you need a
+source checkout, and the script kept beside this manual does it:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest tests/test_manuals.py -q
+QT_QPA_PLATFORM=offscreen python docs/manuals/examples/test-writer/run_your_schedule.py \
+  --release docs/manuals/examples/test-writer --schedule "Manual: step inputs" \
+  --input "Pick one=Green" --input "Tick several=A" --input "Press a button=RETEST" \
+  --input "Whole number=42" --input "Decimal=1.25" --input "Text with a pattern=AB-1234" \
+  --input "Blocking prompt=CONTINUE" --poll "POLL in a loop=STOP"
 ```
 
-`run_schedule(config, "schedule name", release_dir=Path("docs/manuals/examples/test-writer"))`
-returns the run row, the nodes, the Attempts, the Actions, the log lines, the Equipment, the
-input values and the report paths. Assert on that. A schedule you have not run is a schedule
-whose record you do not know.
+It writes a throwaway config in a temporary directory, runs the schedule through
+`HeadlessRunSession`, and prints the run row, the step results, the Actions, the Equipment
+count, the WARNING and ERROR log lines and the report paths. `--input` is keyed by the
+**Step Name**, not the step number; `--choice` answers each Stop-on-Fail pause in order;
+`--poll` clicks a POLL input's button; `--enable` turns a step on or off before the run.
+
+```python:docs/manuals/examples/test-writer/run_your_schedule.py
+#!/usr/bin/env python3
+"""Run one Test Schedule from a Media Release of your own, headless, and print its record.
+
+Works from a source checkout only: it imports ``ate`` and the example harness from this
+repository, and an installed ATE ships neither.
+
+    QT_QPA_PLATFORM=offscreen python docs/manuals/examples/test-writer/run_your_schedule.py \
+        --release docs/manuals/examples/test-writer --schedule "Manual: first schedule"
+
+Every Step Input the schedule declares has to be answered or the worker blocks forever, so a
+schedule with inputs needs ``--input`` for each one, keyed by the Step Name:
+
+    --input "Operator input=1.5" --input "Pick one=Green"
+
+A Stop-on-Fail pause needs an answer too, given in order with ``--choice``. A schedule whose
+input is never answered does not fail: it hangs, and this script exits 1 saying
+``schedule never finished``.
+
+The Test Report PDF is stubbed out (``pdf_stub`` in the harness) so the run completes on a
+machine with no fonts and no Chromium sandbox; the HTML report is still written.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[4]  # docs/manuals/examples/test-writer -> the repository
+for _path in (_ROOT / "src", _ROOT):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from examples.harness.peers import Peers  # noqa: E402
+from examples.harness.run_examples import bench_env, pdf_stub, run_schedule, write_config  # noqa: E402
+
+
+def parse_value(text: str) -> object:
+    """``--input NAME=VALUE``: an int, then a float, otherwise the string as written."""
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="run_your_schedule.py", description=__doc__)
+    parser.add_argument("--release", required=True, help="directory holding the .atedef and the Lua files")
+    parser.add_argument("--schedule", required=True, help="the Test Schedule name, as the .atedef's file returns it")
+    parser.add_argument("--input", action="append", default=[], metavar="STEP NAME=VALUE",
+                        help="answer for one Step Input, keyed by the Step Name; repeat for each input")
+    parser.add_argument("--choice", action="append", default=[], choices=("CONTINUE", "RETRY", "ABORT"),
+                        help="answer to each Stop-on-Fail pause, in the order the pauses come up")
+    parser.add_argument("--poll", action="append", default=[], metavar="STEP NAME=BUTTON",
+                        help="click a POLL input's button, keyed by the Step Name; repeat per POLL")
+    parser.add_argument("--enable", action="append", default=[], metavar="STEP NAME=true|false",
+                        help="turn a step on or off before the run starts")
+    parser.add_argument("--operator", default="Script runner")
+    parser.add_argument("--project", default="Manual example")
+    parser.add_argument("--uut-type", default="Example board")
+    parser.add_argument("--uut-serial", default="RUN-0001")
+    args = parser.parse_args()
+
+    release = Path(args.release).resolve()
+    if not release.is_dir():
+        print(f"release directory not found: {release}", file=sys.stderr)
+        return 1
+
+    inputs = {}
+    for item in args.input:
+        name, _, value = item.partition("=")
+        inputs[name.strip()] = parse_value(value)
+
+    enable = {}
+    for item in args.enable:
+        name, _, value = item.partition("=")
+        enable[name.strip()] = value.strip().lower() in ("true", "1", "yes")
+
+    polls = {}
+    for item in args.poll:
+        name, _, value = item.partition("=")
+        polls[name.strip()] = (1, value.strip())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        config = write_config(work, release)
+        peers = Peers()
+        peers.start()
+        try:
+            with bench_env(peers), pdf_stub():
+                record = run_schedule(
+                    config,
+                    args.schedule,
+                    inputs=inputs or None,
+                    choices=args.choice or None,
+                    enable=enable or None,
+                    polls=polls or None,
+                    release_dir=release,
+                    operator=args.operator,
+                    project=args.project,
+                    uut_type=args.uut_type,
+                    uut_serial=args.uut_serial,
+                )
+        except TimeoutError as exc:
+            print(f"FAILED: {exc}", file=sys.stderr)
+            print("An unanswered Step Input blocks the worker: give every input a --input, "
+                "and every Stop-on-Fail pause a --choice.", file=sys.stderr)
+            print(f"The run row is left open: {config.parent / 'ate.db'}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"FAILED: an answer the schedule refused: {exc}", file=sys.stderr)
+            print("A Step Input declaration checks its value: a whole-number input rejects 42.0, "
+                "a pattern input rejects text that does not match.", file=sys.stderr)
+            return 1
+        finally:
+            peers.stop()
+
+        run = record["run"]
+        steps = {n["step_number"]: n["result"] for n in record["nodes"] if n["kind"] == "step"}
+        print(f"result={run['result']}  end_reason={run['end_reason']}  run_uuid={run['run_uuid']}")
+        print(f"steps: {json.dumps(steps)}")
+        print(f"actions: {[(a['phase'], a['outcome']) for a in record['actions']]}")
+        print(f"equipment: {len(record['equipment'])}  log lines: {len(record['logs'])}")
+        for line in record["logs"]:
+            if line["level"] in ("WARNING", "ERROR"):
+                print(f"  {line['level']}: {line['text']}")
+        for html, pdf in record["reports"]:
+            print(f"report: {html}" + (f"  pdf: {pdf}" if pdf else "  (no PDF)"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+Two things this shows that are easy to get wrong:
+
+- An unanswered Step Input does not fail the schedule. The worker blocks in
+  `OperatorInput.get_raw` and the harness raises `TimeoutError: schedule never finished`. The
+  run row is left open with no `ended_at`; the next launch closes it as `INTERRUPTED`/`FAIL`.
+- `--input` is keyed by Step Name, and a POLL is answered with `--poll`, not `--input`: a POLL
+  is a button the Operator clicks while the step's loop reads it, never a blocking call.
+
+The same shape is what `tests/test_manuals.py` uses for every example: `run_schedule(config,
+"schedule name", inputs=..., choices=..., release_dir=...)`, asserting on the record it
+returns. A schedule you have not run is a schedule whose record you do not know.
 
 The report is written at run end to
 `<reports.directory>/<UUT Type>/<UUT Type>_<serial>_<yyyymmdd-HHMMSS>_<PASS|FAIL>.html`
@@ -1043,6 +1372,10 @@ the database.
 - Never call `ATE.report` or `ATE.input` in an Action.
 - Never rely on `package.path`, `dofile` or `loadfile`: they do not work.
 - Never use `pcall` to survive an abort: it re-raises.
+- Never put a busy loop in a coroutine: the abort hook does not reach coroutines, so an abort
+  cannot stop it.
+- Never run a long command with `os.execute` in a step: the abort waits for the command to end.
+- Never call `os.exit` in a step: it ends the whole ATE process and leaves the run row open.
 - Never assume a checksum mismatch stops the run; it only warns.
 - Never write to `ATE.run`; it is read-only.
 - Never ship a schedule without running `ate definition update` on its `.atedef`.

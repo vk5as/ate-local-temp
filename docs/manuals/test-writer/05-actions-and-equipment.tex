@@ -10,7 +10,10 @@ Post-test Actions: not steps, so they have no Step Number, no result and no inpu
     Pre-test order, and is called with the run's overall result: \texttt{"PASS"} or
     \texttt{"FAIL"}.
   \item A Pre-test Action that raises aborts the run before any step runs. The run records
-    \texttt{PRETEST\_FAILED} and every step \texttt{NOTRUN}.
+    \texttt{PRETEST\_FAILED} and every step \texttt{NOTRUN}. The Post-test Actions still run:
+    every schedule instance whose Pre-test pass reached it gets its teardown, in the reverse of
+    the Pre-test order, including the instance whose own Pre-test Action raised. An instance the
+    Pre-test pass never got to has no Post-test Action run.
   \item Post-test Actions run even after an abort. ATE clears the abort flag before them so a
     run can always tear down; an abort that lands during one Action ends that Action and leaves
     the rest to run. An Action that errors fails the run and the others still run.

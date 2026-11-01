@@ -48,7 +48,18 @@ neither \texttt{.tslua} nor \texttt{.lua}, if two entries share a path or a modu
 dependency cannot be resolved. A schedule that raises while loading is listed as broken with
 that error; the rest of its release is unaffected.
 
-Run \texttt{ate definition update <file.atedef>} to recompute every checksum in place.
+Run \texttt{ate definition update <file.atedef>} to recompute every checksum in place: it
+computes the SHA-256 of each listed file, writes it over the old value, and fills in a
+\texttt{sha256} that is absent. The file is rewritten only if a checksum changed, so a correct
+Test Definition comes back byte for byte the same; a listed file the command cannot read keeps
+its value and warns.
+
+The Test Definition these very examples ship, exactly as it stands on disk: \texttt{channel.tslua}
+and \texttt{led.tslua} are \texttt{hidden}, and \texttt{modules/limits.lua} is given the module
+name \texttt{board_limits} because a name derived from the path would be \texttt{modules.limits}.
+
+\noindent\textbf{\texttt{manual.atedef}}\par
+\lstinputlisting[language=ATEJSON]{../examples/test-writer/manual.atedef}
 
 \section{Checksums that do not match}
 

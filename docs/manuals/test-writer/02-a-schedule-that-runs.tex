@@ -24,18 +24,45 @@ setters only stash values, and ATE checks the whole schedule when the file finis
 \section{Running it}
 
 Point a Station at the examples directory, then run it from the GUI or headless. Headless, from
-a source checkout:
+a source checkout, there is one script beside this manual that runs any Test Schedule any
+Media Release contains:
 
-\begingroup\footnotesize
-\begin{verbatim}
+\begin{lstlisting}[language=ATEShell]
+QT_QPA_PLATFORM=offscreen python docs/manuals/examples/test-writer/run_your_schedule.py \
+  --release docs/manuals/examples/test-writer --schedule "Manual: first schedule"
+\end{lstlisting}
+
+\noindent\textbf{\texttt{run\_your\_schedule.py}}\par
+\lstinputlisting[language=ATEPython, caption={\texttt{docs/manuals/examples/test-writer/run\_your\_schedule.py}}]{../examples/test-writer/run_your_schedule.py}
+
+A Step Input has to be answered or the run never ends, so each one is given with
+\texttt{--input}, keyed by the \textbf{Step Name}: \texttt{--input "Operator input=1.5"}. A
+Stop-on-Fail pause is answered with \texttt{--choice CONTINUE}, \texttt{RETRY} or
+\texttt{ABORT}, in order. A POLL input is clicked with \texttt{--poll "Step name=BUTTON"}.
+The script prints the run row, every step's Result, the Actions, the Equipment count, the
+WARNING and ERROR log lines, and the Test Report paths.
+
+The shipped example release can also be run whole:
+
+\begin{lstlisting}[language=ATEShell]
 QT_QPA_PLATFORM=offscreen python examples/harness/run_examples.py
-\end{verbatim}
-\endgroup
+\end{lstlisting}
 
-That harness runs the shipped example release; the manual's own examples are run by
-\texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML Test Report under
-\texttt{reports.directory}, and a PDF as well unless the Station is running elevated and the
-Operator declines the sandbox question.
+That harness runs the shipped example release with its simulator peers; the manual's own
+examples are run by \texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML
+Test Report under \texttt{reports.directory}, and a PDF as well unless the Station is running
+elevated and the Operator declines the sandbox question.
+
+An installed ATE has no headless runner. \texttt{ate \_selftest --run} runs a built-in one-step
+schedule to prove a bundle can run a Test Run, and \texttt{ate \_selftest --scan DIR} loads
+every schedule in a directory and reports the broken ones --- a load check, not a run. To run
+your own schedule from a command line you need a source checkout.
+
+Two traps this script makes visible. An unanswered Step Input does not fail the schedule: the
+worker blocks, and the harness raises \texttt{TimeoutError: schedule never finished}, leaving
+the run row open with no \texttt{ended\_at} for the next launch to close as
+\texttt{INTERRUPTED}/\texttt{FAIL}. And a POLL is answered by a click, not by a value:
+\texttt{--poll}, never \texttt{--input}.
 
 \section{What the run record shows}
 

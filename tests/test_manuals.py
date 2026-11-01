@@ -84,14 +84,76 @@ class Manual:
         those are not the names the code defines, so the coverage check sees the plain text."""
         return [(str(p.relative_to(ROOT)), plain(p.read_text(encoding="utf-8"))) for p in self.sources()]
 
+    def code_forms(self) -> list[tuple[str, str]]:
+        """The manual's two forms, each reduced to the text that is set as code.
 
-#: LaTeX that only affects how a line is broken up. Stripped by :meth:`Manual.texts`.
-_LAYOUT_MARKUP = re.compile(r"\\(?:allowbreak|texttt|textbf|text|emph|verb|sbox|par)\b|[{}]")
+        A name the reader can only find in prose is not a name the manual teaches: the coverage
+        check needs the code form, so ``ATE.flush`` counts and "the schedule can flush a Device"
+        does not. The LaTeX form is inline ``\\texttt`` and ``\\verb``, every ``verbatim`` and
+        ``lstlisting`` block, and every example file the manual pulls in with
+        ``\\lstinputlisting`` - the PDF really shows those bytes. The Markdown form is inline
+        backticks and fenced blocks."""
+        return [("LaTeX", self._latex_code()), ("Markdown", self._markdown_code())]
+
+    def _latex_code(self) -> str:
+        chunks: list[str] = []
+        for tex in self.tex_parts():
+            text = tex.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                match = re.search(r"\\lstinputlisting(?:\[[^\]]*\])?\{([^}]*)\}", line)
+                if match:
+                    included = (tex.parent / match.group(1)).resolve()
+                    if included.exists():
+                        chunks.append(included.read_text(encoding="utf-8"))
+            for environment in ("verbatim", "lstlisting"):
+                chunks.extend(_environment_body(text, environment))
+            chunks.extend(_inline_code(text))
+        return "\n".join(chunks)
+
+    def _markdown_code(self) -> str:
+        text = self.markdown.read_text(encoding="utf-8")
+        return "\n".join(re.findall(r"```[^\n]*\n(.*?)```", text, re.S) + re.findall(r"`([^`\n]+)`", text))
+
+
+#: LaTeX that only affects how a line is broken up. Stripped by :meth:`Manual.texts`. The lookahead
+#: is not ceremony: an underscore is a word character, so ``\allowbreak_`` would not match ``\b``.
+_LAYOUT_MARKUP = re.compile(r"\\(?:allowbreak|texttt|textbf|text|emph|verb|sbox|par)(?![a-zA-Z])|[{}]")
 
 
 def plain(text: str) -> str:
     """The manual's text without its line-breaking markup, so a name split across two runs matches."""
     return _LAYOUT_MARKUP.sub("", text.replace("\\_", "_"))
+
+
+def _environment_body(text: str, environment: str) -> list[str]:
+    """The contents of every ``\\begin{environment} ... \\end{environment}`` block."""
+    return re.findall(
+        rf"\\begin\{{{environment}\}}(?:\[[^\]]*\])?(.*?)\\end\{{{environment}\}}", text, re.S
+    )
+
+
+def _inline_code(text: str) -> list[str]:
+    """The argument of every ``\\texttt{...}``, braces matched by depth, plus every ``\\verb|...|``."""
+    found: list[str] = []
+    index = 0
+    while True:
+        start = text.find("\\texttt{", index)
+        if start < 0:
+            break
+        depth = 0
+        end = start + len("\\texttt{")
+        while end < len(text):
+            if text[end] == "{":
+                depth += 1
+            elif text[end] == "}":
+                if depth == 0:
+                    break
+                depth -= 1
+            end += 1
+        found.append(text[start + len("\\texttt{"):end])
+        index = end + 1
+    found.extend(re.findall(r"\\verb\|([^|]*)\|", text))
+    return [plain(chunk) for chunk in found]
 
 
 TEST_WRITER = Manual(
@@ -286,58 +348,75 @@ def device_drivers() -> set[str]:
     return names
 
 
-#: A group of code-derived names, and the manual each must appear in. 34c adds the developer manual's
-#: modules, signals, tables and drivers to the same table. Same shape, same failure.
-COVERAGE: list[tuple[str, str, Callable[[], set[str]]]] = [
-    ("test-writer", "ATE table functions", ate_table_functions),
-    ("test-writer", "enum tables and their members", enum_names),
-    ("test-writer", "ScheduleParams and StepParams setters", builder_methods),
-    ("test-writer", "Device Types", device_types),
-    ("test-writer", "ATE.run fields", run_fields),
-    ("admin", "config keys the validator reads", config_keys),
-    ("admin", "ate subcommands and flags", cli_names),
-    ("developer", "every module under src/ate", ate_modules),
-    ("developer", "RunEngine signals", lambda: declared_signals(RunEngine)),
-    ("developer", "HeadlessRunSession signals", lambda: declared_signals(HeadlessRunSession)),
-    ("developer", "every table in the Test Run record", schema_tables),
-    ("developer", "Device drivers and the Device Types they serve", device_drivers),
+#: A group of code-derived names, the manual each must appear in, and the code form that counts.
+#: ``ate_function`` wants the call as a reader types it, ``ATE.flush``; ``code`` is satisfied by
+#: the name anywhere in a listing. 34c adds the developer manual's modules, signals, tables and
+#: drivers to the same table. Same shape, same failure.
+COVERAGE: list[tuple[str, str, Callable[[], set[str]], str]] = [
+    ("test-writer", "ATE table functions", ate_table_functions, "ate_function"),
+    ("test-writer", "enum tables and their members", enum_names, "code"),
+    ("test-writer", "ScheduleParams and StepParams setters", builder_methods, "code"),
+    ("test-writer", "Device Types", device_types, "code"),
+    ("test-writer", "ATE.run fields", run_fields, "code"),
+    ("admin", "config keys the validator reads", config_keys, "code"),
+    ("admin", "ate subcommands and flags", cli_names, "code"),
+    ("developer", "every module under src/ate", ate_modules, "code"),
+    ("developer", "RunEngine signals", lambda: declared_signals(RunEngine), "code"),
+    ("developer", "HeadlessRunSession signals", lambda: declared_signals(HeadlessRunSession), "code"),
+    ("developer", "every table in the Test Run record", schema_tables, "code"),
+    ("developer", "Device drivers and the Device Types they serve", device_drivers, "code"),
 ]
 
 
-def missing_from(texts: Iterable[tuple[str, str]], names: Iterable[str]) -> list[str]:
-    """The names that appear nowhere in ``texts``.
+def _pattern(name: str, style: str) -> str:
+    """How a name is recognised in code, including the trouble a flag causes.
 
-    A name counts when it appears as a whole word, so ``readTerm`` does not count as ``read``
-    and prose that says the word counts. A flag is not a word: there is no word boundary before
-    the dashes of ``--yes``, and the ``-y`` inside ``--yes`` is not the short flag, so a flag has
-    to start after something that is neither a letter, a digit nor another dash.
+    A flag is not a word: there is no word boundary before the dashes of ``--yes``, and the
+    ``-y`` inside ``--yes`` is not the short flag, so a flag has to start after something that is
+    neither a letter, a digit nor another dash.
     """
+    if style == "ate_function":
+        return rf"ATE\.{re.escape(name)}\b"
+    start = r"(?<![-\w])" if name.startswith("-") else r"\b"
+    return f"{start}{re.escape(name)}\\b"
+
+
+def missing_from_code(forms: Iterable[tuple[str, str]], names: Iterable[str], style: str = "code") -> list[str]:
+    """The names no form of the manual sets as code.
+
+    Prose that says the word does not count: a name a reader can only find in a sentence is not a
+    name the manual teaches, because the reader cannot copy it. ``forms`` is the output of
+    :meth:`Manual.code_forms`, or one of its two entries when a single form is being tested."""
     remaining = set(names)
-    for _label, text in texts:
+    for _label, text in forms:
         for name in list(remaining):
-            start = r"(?<![-\w])" if name.startswith("-") else r"\b"
-            if re.search(f"{start}{re.escape(name)}\\b", text):
+            if re.search(_pattern(name, style), text):
                 remaining.discard(name)
     return sorted(remaining)
 
 
 def test_no_name_the_code_defines_is_missing_from_its_manual() -> None:
-    """Every ATE function, enum, setter, Device Type and run field is named in both manuals."""
-    for manual_name, group, derive in COVERAGE:
-        gone = missing_from(MANUALS[manual_name].texts(), derive())
-        assert not gone, f"the {manual_name} manual is missing from {group}: {', '.join(gone)}"
+    """Every ATE function, enum, setter, Device Type, run field, key and flag is in code, twice."""
+    for manual_name, group, derive, style in COVERAGE:
+        for label, code in MANUALS[manual_name].code_forms():
+            gone = missing_from_code([(label, code)], derive(), style)
+            if gone:
+                raise AssertionError(
+                    f"the {manual_name} manual names {group} only in prose ({label}): {', '.join(gone)}"
+                )
 
 
 def test_the_coverage_check_can_fail() -> None:
     """Show the check bites: the same names against a manual with one removed reports it.
 
-    This is not a bug report; it is the proof that a manual quietly losing a function is caught."""
-    texts = MANUALS["test-writer"].texts()
+    This is not a bug report; it is the proof that a manual quietly losing a function is caught,
+    in the LaTeX form and in the Markdown form separately."""
     names = ate_table_functions()
     assert "addEquipment" in names
-    stripped = [(label, text.replace("addEquipment", "somethingElse")) for label, text in texts]
-    assert missing_from(stripped, names) == ["addEquipment"], "removing a name must show up as missing"
-    assert not missing_from(texts, names), "the manual as written has every name"
+    for label, code in MANUALS["test-writer"].code_forms():
+        assert not missing_from_code([(label, code)], names, "ate_function"), f"{label} has every name"
+        stripped = code.replace("ATE.addEquipment", "ATE.somethingElse")
+        assert missing_from_code([(label, stripped)], names, "ate_function") == ["addEquipment"]
 
 
 def test_the_admin_coverage_check_can_fail() -> None:
@@ -345,22 +424,36 @@ def test_the_admin_coverage_check_can_fail() -> None:
 
     Delete one line of the key table and the suite says which key went missing; the check is not
     a table nobody reads."""
-    texts = MANUALS["admin"].texts()
     keys = config_keys()
     assert "ui.allowHistoryDuringRun" in keys, "the schema changed shape; the derivation is wrong"
-    stripped = [(label, text.replace("allowHistoryDuringRun", "somethingElse")) for label, text in texts]
-    assert missing_from(stripped, keys) == ["ui.allowHistoryDuringRun"], "removing a key must show up as missing"
-    assert not missing_from(texts, keys), "the admin manual as written has every config key"
+    for label, code in MANUALS["admin"].code_forms():
+        stripped = code.replace("allowHistoryDuringRun", "somethingElse")
+        assert missing_from_code([(label, stripped)], keys) == ["ui.allowHistoryDuringRun"]
+        assert not missing_from_code([(label, code)], keys)
+
+
+def test_a_word_in_a_sentence_is_not_a_name_in_code() -> None:
+    """``sleep`` and ``flush`` are ordinary English words, so only the code form proves them.
+
+    The old check accepted the word anywhere, which meant a manual could cover ``ATE.flush`` by
+    saying "flush the Device" and never show the call. Deleting the call from each form of the
+    test-writer manual proves the sentence alone is no longer enough."""
+    sentences = "Flushing the Device and sleeping between steps are both wise: flushing keeps the buffer clean."
+    assert missing_from_code([("prose", sentences)], {"sleep", "flush"}) == ["flush", "sleep"]
+    for label, code in MANUALS["test-writer"].code_forms():
+        assert not missing_from_code([(label, code)], {"flush"}), f"{label} does not show flush at all"
+        stripped = code.replace("flush", "somethingElse")
+        assert "flush" in missing_from_code([(label, stripped)], {"flush"}), f"{label} kept flush from outside its code"
 
 
 def test_the_agent_manual_names_every_key_and_command_on_its_own() -> None:
     """An agent working from ``docs/manuals/llm/admin.md`` alone must not need the PDF.
 
-    The coverage table counts a name as covered if it appears anywhere in the manual; this checks
-    the Markdown file by itself, because that is the file an agent is given."""
-    agent = [(label, text) for label, text in MANUALS["admin"].texts() if label.endswith(".md")]
-    gone = missing_from(agent, config_keys() | cli_names())
-    assert not gone, f"the agent manual alone is missing: {', '.join(gone)}"
+    The coverage table counts a name as covered if it appears in code anywhere in the manual;
+    this checks the Markdown file's code by itself, because that is the file an agent is given."""
+    agent = [(label, text) for label, text in MANUALS["admin"].code_forms() if label == "Markdown"]
+    gone = missing_from_code(agent, config_keys() | cli_names())
+    assert not gone, f"the agent manual alone is missing from its code: {', '.join(gone)}"
 
 
 # --- Every command the admin manual shows is run, or explained --------------------------
@@ -1217,11 +1310,11 @@ def test_the_test_definition_lists_every_example_file() -> None:
 
 #: A listing in the Markdown manual opens with the file it came from:
 #: ```lua:docs/manuals/examples/test-writer/first.tslua
-LISTING_FENCE = re.compile(r"^```lua:(\S+)\s*$")
+LISTING_FENCE = re.compile(r"^```(?:lua|python|json|ateshell|text):(\S+)\s*$")
 
 
 def markdown_listings(text: str) -> dict[str, str]:
-    """Every fenced Lua block in the Markdown manual, keyed by the file it came from."""
+    """Every fenced listing in the Markdown manual that names its file, keyed by that path."""
     blocks: dict[str, str] = {}
     lines = text.splitlines()
     index = 0
@@ -1240,8 +1333,14 @@ def markdown_listings(text: str) -> dict[str, str]:
 
 
 def example_files(manual: Manual) -> list[Path]:
-    """Every Lua file in the manual's example directory."""
-    return sorted(p for p in MANUAL_EXAMPLES[manual.name].rglob("*") if p.suffix in (".tslua", ".lua"))
+    """Every file in the manual's example directory that the manual quotes.
+
+    Schedules, Lua modules, the Test Definition beside them, and the scripts a reader runs: all of
+    them appear in both forms of the manual, so all of them are compared with what is on disk."""
+    return sorted(
+        p for p in MANUAL_EXAMPLES[manual.name].rglob("*")
+        if p.suffix in (".tslua", ".lua", ".py", ".atedef")
+    )
 
 
 def test_every_example_is_quoted_exactly_in_the_markdown_manual() -> None:
@@ -1263,10 +1362,8 @@ def test_every_example_is_included_by_the_latex_manual() -> None:
     manual = MANUALS["test-writer"]
     included: set[Path] = set()
     for tex in manual.tex_parts():
-        for line in tex.read_text(encoding="utf-8").splitlines():
-            if "\\lstinputlisting" in line:
-                argument = line.split("{", 1)[1].rsplit("}", 1)[0]
-                included.add((tex.parent / argument).resolve())
+        for match in re.findall(r"\\lstinputlisting(?:\[[^\]]*\])?\{([^}]*)\}", tex.read_text(encoding="utf-8")):
+            included.add((tex.parent / match).resolve())
     expected = {p.resolve() for p in example_files(manual)}
     assert included == expected, (
         f"the LaTeX manual includes {sorted(str(p) for p in included - expected)} that are not examples, "
@@ -1429,24 +1526,25 @@ def test_the_developer_coverage_check_can_fail() -> None:
     """Prove the module, signal, table and driver checks bite, one each.
 
     Each group is derived from the code, so a manual that quietly drops a name is caught. This test
-    removes one name from the manual's own text and shows the derivation reports it as missing."""
-    texts = MANUALS["developer"].texts()
-    for names, dropped in (
-        (ate_modules(), "src/ate/devices/stream.py"),
-        (declared_signals(RunEngine), "run_uuid_reported"),
-        (declared_signals(HeadlessRunSession), "report_written"),
-        (schema_tables(), "schedule_instance"),
-        (device_drivers(), "VisaDriver"),
-    ):
-        assert dropped in names, f"the derivation no longer contains {dropped}"
-        stripped = [(label, text.replace(dropped, "somethingElse")) for label, text in texts]
-        assert missing_from(stripped, names) == [dropped], f"removing {dropped} must show up as missing"
-        assert not missing_from(texts, names), f"the developer manual as written is missing {sorted(missing_from(texts, names))}"
+    removes one name from the manual's own code and shows the derivation reports it as missing."""
+    for label, code in MANUALS["developer"].code_forms():
+        for names, dropped in (
+            (ate_modules(), "src/ate/devices/stream.py"),
+            (declared_signals(RunEngine), "run_uuid_reported"),
+            (declared_signals(HeadlessRunSession), "report_written"),
+            (schema_tables(), "schedule_instance"),
+            (device_drivers(), "VisaDriver"),
+        ):
+            assert dropped in names, f"the derivation no longer contains {dropped}"
+            stripped = code.replace(dropped, "somethingElse")
+            assert missing_from_code([(label, stripped)], names) == [dropped], f"removing {dropped} must show up as missing"
+            assert not missing_from_code([(label, code)], names), (
+                f"the developer manual's {label} code is missing {sorted(missing_from_code([(label, code)], names))}"
+            )
 
 
 def test_the_developer_agent_manual_names_everything_on_its_own() -> None:
     """An agent given only ``docs/manuals/llm/developer.md`` must not need the PDF."""
-    agent = [(label, text) for label, text in MANUALS["developer"].texts() if label.endswith(".md")]
     names = (
         ate_modules()
         | declared_signals(RunEngine)
@@ -1454,8 +1552,8 @@ def test_the_developer_agent_manual_names_everything_on_its_own() -> None:
         | schema_tables()
         | device_drivers()
     )
-    gone = missing_from(agent, names)
-    assert not gone, f"the developer agent manual alone is missing: {', '.join(gone)}"
+    gone = missing_from_code(MANUALS["developer"].code_forms()[1:2], names)
+    assert not gone, f"the developer agent manual alone has none of it in code: {', '.join(gone)}"
 
 
 #: A dotted name in the manuals is a thing the code has. `ate db`, `ate _pdf` and `ate _selftest` are
