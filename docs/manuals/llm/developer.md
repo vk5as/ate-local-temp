@@ -423,7 +423,6 @@ in 223.72 s, and with `ATE_DOCKER_TESTS=1` as well all four gated tests passed i
 gate needs scratch space on disk: the first attempt wrote its artifacts into `/tmp`, which here is a
 7.7 GB tmpfs, and died with `No space left on device`; with `TMPDIR` set to a directory on the disk it
 passes. CI runs it either way.
-
 ## The test suite
 
 `conftest.py` is not boilerplate; every fixture in it exists because of a failure.
