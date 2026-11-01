@@ -1,0 +1,45 @@
+\chapter{A schedule that runs}\label{ch:a-schedule-that-runs}
+
+The shortest Test Schedule that does something is eight lines. Every example in this manual
+is a real file in \texttt{docs/manuals/examples/test-writer/}, and every one of them runs
+headless in the test suite (\texttt{tests/test\_manuals.py}). Read this one, then run it.
+
+\example{../examples/test-writer/first.tslua}{first.tslua}
+
+Three things are happening here.
+
+\begin{itemize}
+  \item \texttt{ScheduleParams(name, description)} builds the schedule. The name is required;
+    it is what the Operator sees on the Run screen.
+  \item \texttt{:setSchedule(\{\dots\})} gives the schedule its Test Steps, in the order they
+    run. Each \texttt{StepParams(name)} is one step.
+  \item \texttt{:setAction(function() \dots end)} is the step's logic. ATE calls it; inside it
+    the schedule calls the \texttt{ATE} table.
+\end{itemize}
+
+The setters all return the object they were given, so they chain. Order does not matter: the
+setters only stash values, and ATE checks the whole schedule when the file finishes loading.
+
+\section{Running it}
+
+Point a Station at the examples directory, then run it from the GUI or headless. Headless, from
+a source checkout:
+
+\begin{verbatim}
+QT_QPA_PLATFORM=offscreen python examples/harness/run_examples.py
+\end{verbatim}
+
+That harness runs the shipped example release; the manual's own examples are run by
+\texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML and a PDF report under
+\texttt{reports.directory} and a row in the database.
+
+\section{What the run record shows}
+
+A Test Run is one execution of one schedule against one UUT at one moment. ATE records the run
+itself, every step, every Attempt of every step, every Operator input, every Action, every
+Equipment declaration and every log line. The Test Report is generated from those rows, so
+anything the schedule does that is worth knowing has to reach one of them: a
+\texttt{ATE.report} call, an \texttt{ATE.log} line, or an \texttt{ATE.addEquipment} call.
+
+\cando{write, load and run a Test Schedule of your own, and say which rows of the Test Run
+record each part of it produced.}

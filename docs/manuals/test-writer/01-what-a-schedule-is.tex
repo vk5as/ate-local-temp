@@ -1,0 +1,37 @@
+\chapter{What a Test Schedule is}\label{ch:what-a-schedule-is}
+
+ATE runs a scripted test against a unit. The script is a \textbf{Test Schedule}: a Lua file
+that describes, in order, the \textbf{Test Steps} to run. ATE reads the file, executes the
+steps one after another, records every result in a database and writes a \textbf{Test Report}.
+A schedule never drives ATE; ATE drives the schedule.
+
+The vocabulary is fixed. A \textbf{UUT} is the unit under test, identified by its UUT Type and
+serial number. The \textbf{Operator} is the person running the Test Run. A \textbf{Station} is
+one installation of ATE on one computer. A \textbf{Device} is a connection ATE talks through:
+a serial port, a socket, a datagram channel, an instrument. \textbf{Equipment} is a record of
+what was on the bench, declared by the schedule so it appears in the Test Report. A
+\textbf{Media Release} is a set of Lua files delivered together, described by a
+\textbf{Test Definition}.
+
+\section{The shape of a Test Schedule}
+
+A Test Schedule is a Lua file with the extension \texttt{.tslua}. Its top level runs when the
+file is loaded, before any Test Run exists, and it must \emph{return} a schedule object built
+with \texttt{ScheduleParams}. Nothing in the file executes a Test Step itself.
+
+ATE targets Lua 5.5. The runtime is a normal Lua 5.5 interpreter with a few entry points
+removed (chapter~\ref{ch:sandbox}), so plain Lua knowledge transfers. Coroutines are not
+something a schedule should rely on: ATE hands each step's blocking work (a read, a sleep,
+an Operator prompt) to the host and resumes the step when it is done.
+
+\section{Where a schedule lives}
+
+A schedule is shipped inside a Media Release: a directory of Lua files plus one
+\texttt{.atedef} file that lists every file in it with its checksum (chapter~\ref{ch:modules}).
+ATE finds Test Definitions by searching the directories named in the application config,
+loads every visible schedule, and shows their names and descriptions on the Run screen.
+The Operator picks a schedule, types the UUT Type and serial number, and presses Start.
+
+\cando{name the pieces of a Test Schedule and say where each one comes from: the
+\texttt{.tslua} file, the \texttt{.atedef} that ships it, and the Station's config that
+makes it available to run.}

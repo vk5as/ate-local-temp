@@ -55,10 +55,11 @@
   showstringspaces=false
 }
 
-% A listing whose text is the file itself, never a retyped copy of it. The path is relative
-% to the manual's directory, so the same line works in every manual.
+% A listing whose text is the file itself, never a retyped copy of it. The first argument is
+% the path (relative to the manual's directory, so the same line works in every manual), the
+% second the short name shown in the caption.
 \newcommand{\example}[2]{%
-  \lstinputlisting[language=ATELua, caption={\texttt{#1}}, captionpos=b]{#2}%
+  \lstinputlisting[language=ATELua, caption={\texttt{#2}}, captionpos=b]{#1}%
 }
 
 % -- The end-of-chapter capability statement ---------------------------------
