@@ -10,7 +10,7 @@
 
 **Blocked by:** none
 
-**Status:** open until Windows CI is green
+**Status:** resolved (Windows CI green on f0ce56d, run 41277207979; the cause of the original stall stays unproven)
 
 **User decision, 2026-11-01 (spec story 83):** an abort should stop within 0.5 s and must stop within 10 s. A test fails only past 10 s; past 0.5 s it warns, so it stays visible in CI's summary. Where Windows' 2.2 s went is still not established.
 

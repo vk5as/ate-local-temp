@@ -4,9 +4,9 @@
 
 **What to build:** Three LaTeX manuals and three matching Markdown manuals for LLMs, written by Strata, then reviewed by Opus and Haiku. Start only when the CI fixes (31e, 32b) are done, because the manuals describe the PySide6 application.
 
-**Blocked by:** 32b, 31e
+**Blocked by:** none (32b, 31e done)
 
-**Status:** queued
+**Status:** in progress, split: 34a test-writer, 34b admin, 34c developer, one Strata session each; the Opus and Haiku review follows all three
 
 ## Manuals
 

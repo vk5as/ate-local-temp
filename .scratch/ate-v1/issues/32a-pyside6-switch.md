@@ -8,7 +8,7 @@
 
 **Blocked by:** none. Needs CI on Windows and Linux, so the repo must be able to run Actions when this is merged.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Size of the change (2026-10-31):** about 112 Qt import lines (63 `QtCore`, 25 `QtWidgets`, 12 `QtGui`, 5 `QtWebEngineCore`, 4 `QtTest`, 3 `from PyQt6 import`) and 31 `pyqtSignal` uses in `src`/`packaging`. No `pyqtSlot`, `pyqtProperty` or `QVariant`. 9 test lines use `sip`/`isdeleted`. Most of this is mechanical. The behaviour differences below are the real work.
 
@@ -63,7 +63,7 @@ These are the engineering steps for LGPL compliance. They are not legal advice, 
 
 - [x] Full suite passes three times in a row on Linux, with no new skips. The skip list is compared before and after; a third of the suite once skipped silently when WebEngine would not import.
 - [x] A real PDF renders with text in it, from source and from the frozen bundle.
-- [ ] CI is green on Linux and Windows, and a manual `release.yml` run is green on all 5 jobs, including the Windows installer checks and the `.deb`, tarball and wheel smokes.
+- [x] CI is green on Linux and Windows, and a manual `release.yml` run is green on all 5 jobs, including the Windows installer checks and the `.deb`, tarball and wheel smokes.
 - [x] One GUI run on Xvfb with screenshots of the Run and History screens, compared with the same screens on PyQt6: same layout, fonts and theme. PySide6 is the same Qt, so any visible difference is a bug to explain.
 
 Definitions live in `.scratch/ate-v1-wayfinding/assets/`; the spec is `.scratch/ate-v1/spec.md`. Keep to this packet's checkboxes.

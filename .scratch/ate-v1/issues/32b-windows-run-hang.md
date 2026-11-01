@@ -8,7 +8,7 @@
 
 **Blocked by:** none
 
-**Status:** open until Windows CI is green
+**Status:** resolved (Windows CI green on f0ce56d, run 41277207979; the cause of the original stall stays unproven)
 
 **What the log shows.**
 
