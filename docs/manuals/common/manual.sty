@@ -1,0 +1,79 @@
+% manual.sty - the preamble shared by every ATE manual (packets 34a, 34b and 34c).
+%
+% Everything a manual needs that is not specific to its subject lives here: page geometry,
+% the Lua listing style, the ATE colours, and the "what you can do by the end of this
+% chapter" box. A manual's own main.tex sets only its title, author and chapter list.
+%
+% Built with: latexmk -lualatex main.tex   (see docs/manuals/build.py)
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{manual}[2026-11-01 ATE manual preamble]
+
+\usepackage[a4paper,margin=24mm]{geometry}
+\usepackage{microtype}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{amsmath}  % for the small amounts of maths in the timing tables
+
+% -- ATE's palette ---------------------------------------------------------------
+\definecolor{ateblue}{RGB}{24,64,112}
+\definecolor{ategreen}{RGB}{20,92,58}
+\definecolor{ategray}{RGB}{96,100,106}
+\definecolor{codebg}{RGB}{246,247,249}
+\definecolor{codekey}{RGB}{24,64,112}
+\definecolor{codecomment}{RGB}{92,110,92}
+
+% -- Lua listings ------------------------------------------------------------
+% listings has no built-in Lua, and the schedules use ATE's own names, so the language is
+% defined here once and every manual uses it unchanged.
+\lstdefinelanguage{ATELua}{
+  keywords={local,function,return,if,then,else,elseif,end,for,do,while,repeat,until,
+            and,or,not,nil,true,false,require,break,in},
+  morekeywords={ATE,StepParams,ScheduleParams,Result,DeviceType,Log,Parity,FlowControl,
+                devices,os,string,table,math,print},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[s]{--[[}{]]},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment},
+  identifierstyle=\color{black},
+  stringstyle=\color{ategreen},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
+  numberstyle=\tiny\color{ategray},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+% A listing whose text is the file itself, never a retyped copy of it. The path is relative
+% to the manual's directory, so the same line works in every manual.
+\newcommand{\example}[2]{%
+  \lstinputlisting[language=ATELua, caption={\texttt{#1}}, captionpos=b]{#2}%
+}
+
+% -- The end-of-chapter capability statement ---------------------------------
+% Every chapter says what the reader can do by its end; this is the one line that says it.
+\newcommand{\cando}[1]{%
+  \par\medskip
+  \noindent\colorbox{codebg}{\parbox{\linewidth}{%
+    \textbf{By the end of this chapter you can}\ #1}}\par\smallskip
+}
+
+\hypersetup{colorlinks=true, linkcolor=ateblue, urlcolor=ateblue, citecolor=ateblue}
+
+% Every listing in every manual uses this set unless it overrides one key.
+\lstset{language=ATELua, basicstyle=\ttfamily\footnotesize, keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment}, stringstyle=\color{ategreen},
+  backgroundcolor=\color{codebg}, frame=single, rulecolor=\color{ategray},
+  breaklines=true, breakatwhitespace=true, captionpos=b, numbers=none,
+  columns=fullflexible, keepspaces=true, showstringspaces=false}

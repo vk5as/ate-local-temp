@@ -1,0 +1,60 @@
+-- errors.tslua: how Device failures reach the schedule, and what does not.
+--
+-- Demonstrates:
+--   * a Device failure with no onError raises a Lua error, which ends the step as
+--     Result.ERROR;
+--   * an onError that returns a value makes the call continue with that value;
+--   * a bad argument (a misspelled field) is a schedule bug, not a Device failure: it
+--     never reaches onError, it is logged at ERROR, and the call returns false with the
+--     message as its second result;
+--   * the handler given to open is the fallback for that Device's read, write and close.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_SCPI_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025
+local deadPort = tonumber(os.getenv("ATE_DEAD_PORT")) or 1
+
+return ScheduleParams("Manual: Device errors", "onError, a closed Device and a bad field")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("A misspelled field"):setStepNo("1.")
+      :setAction(function()
+        local opened, why = ATE.open(DeviceType.TCP, { host = host, port = port, timeout = 1.0,
+                                                     readTerm = "\n", writeTerm = "\n", buad = 9600 })
+        ATE.report(opened == false and Result.PASS or Result.FAIL, "the open was refused: " .. why)
+      end),
+
+    -- Nothing is listening on deadPort: the open fails. This handler logs and returns nil,
+    -- which means "no recovery", so ATE.open raises and the step records Result.ERROR.
+    StepParams("A port nothing listens on"):setStepNo("2.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, devices.Tcp(host, deadPort):setTimeout(0.5),
+          function(opResult, opArgs)
+            ATE.log(Log.WARNING, "nothing is listening on " .. opArgs.host .. ":" .. opArgs.port)
+            return nil
+          end)
+        ATE.report(Result.PASS, "this line is never reached")
+      end),
+
+    -- A Device that is closed cannot be read. With no handler the call raises.
+    StepParams("Read a closed Device"):setStepNo("3.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, devices.Tcp(host, port):setTimeout(1.0))
+        ATE.close(dev)
+        ATE.read(dev, devices.Read():setTimeout(0.2))
+        ATE.report(Result.PASS, "this line is never reached either")
+      end),
+
+    -- The same failure, handled: the step carries on with what onError returns.
+    StepParams("Handle the closed Device"):setStepNo("4.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.TCP, devices.Tcp(host, port):setTimeout(1.0),
+          function(opResult, opArgs)
+            ATE.log(Log.WARNING, "the Device is gone: " .. opResult.err)
+            return { data = nil, count = 0, partial = false }
+          end)
+        ATE.close(dev)
+        local r = ATE.read(dev, devices.Read():setTimeout(0.2))
+        ATE.report(r.count == 0 and Result.PASS or Result.FAIL, "recovered from reading a closed Device")
+      end),
+  })

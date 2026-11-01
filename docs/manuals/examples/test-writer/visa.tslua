@@ -1,0 +1,26 @@
+-- visa.tslua: a VISA instrument through pyvisa.
+--
+-- VISA has no background reader: ATE reads the instrument only when the schedule asks,
+-- because polling an SCPI instrument with reads that have nothing pending makes it log
+-- "Query UNTERMINATED" (-420) and ties up the bus. ATE ships pyvisa-py; a VISA resource
+-- string names the instrument, here the simulator peer as a plain TCPIP socket.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_SCPI_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025
+
+return ScheduleParams("Manual: VISA", "read an instrument through pyvisa")
+  :setStopOnFail(false)
+  :setSchedule({
+    StepParams("Ask the instrument who it is"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.VISA,
+          devices.Visa("TCPIP0::" .. host .. "::" .. port .. "::SOCKET"):setTimeout(2.0))
+        ATE.write(dev, devices.Write("*IDN?"))
+        local reply = ATE.read(dev)
+        local f = ATE.flush(dev)   -- VISA has no receive buffer: this discards nothing
+        ATE.log(Log.INFO, "flush discarded " .. f.count .. " bytes")
+        ATE.report(reply.count > 0 and Result.PASS or Result.FAIL, "VISA reply: " .. (reply.data or "nothing"))
+        ATE.close(dev)
+      end),
+  })

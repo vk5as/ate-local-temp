@@ -1,0 +1,34 @@
+-- modules.tslua: sharing code with require, including ATE's own bundled modules.
+--
+-- Demonstrates:
+--   * require finds only the files the Test Definition lists (and its dependencies'),
+--     never anything on package.path;
+--   * the module name is derived from a plain relative path, or given explicitly with the
+--     "module" field;
+--   * the reserved "ate." namespace is ATE's own: require("ate.devices") is always ATE's
+--     Device params builder, never a file in the Media Release.
+local rails = require("lib.rails")      -- derived name: the path without .lua, / as .
+local limits = require("board_limits")  -- explicit "module" name in manual.atedef
+local devices = require("ate.devices")  -- bundled with ATE
+
+return ScheduleParams("Manual: modules", "require and the ate. namespace")
+  :setSchedule({
+    StepParams("Check every rail"):setStepNo("1.")
+      :setAction(function()
+        local ok = true
+        for channel = 1, 3 do
+          local volts = rails.nominalVolts(channel)
+          ok = ok and volts >= limits.low and volts <= limits.high
+          ATE.log(Log.INFO, "channel " .. channel .. " nominal " .. volts .. " V")
+        end
+        ATE.report(ok and Result.PASS or Result.FAIL,
+                   "every rail is inside " .. limits.low .. " to " .. limits.high .. " V")
+      end),
+
+    -- A builder is just a params table: nothing is opened, so no Device is involved.
+    StepParams("Build params without opening"):setStepNo("2.")
+      :setAction(function()
+        local params = devices.Tcp("127.0.0.1", 5025):setTimeout(2.5)
+        ATE.report(Result.PASS, "timeout set to " .. params.timeout, params.timeout, 2.5)
+      end),
+  })

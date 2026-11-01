@@ -1,0 +1,90 @@
+-- tcp.tslua: a TCP Device, from open to close.
+--
+-- The host and port come from the environment, which the test harness sets to a
+-- simulator peer listening on 127.0.0.1. Point them at a real instrument to use this
+-- schedule as it is.
+--
+-- Demonstrates:
+--   * the ate.devices builders, whose setters chain, and how a Device opened in the
+--     Pre-test Action is still open in the steps, because a device object lives for the
+--     whole Test Run;
+--   * per-call overrides (timeout, readTerm, size) that do not change the open-time
+--     configuration;
+--   * a read that times out after some bytes is a partial read, not a Device failure;
+--   * a read that times out with nothing at all is a Device failure and goes through
+--     onError, which is given the failure table and the params table and may return a
+--     value for the call to carry on with;
+--   * flush discards whatever the receive buffer already holds.
+local devices = require("ate.devices")
+
+local host = os.getenv("ATE_SCPI_HOST") or "127.0.0.1"
+local port = tonumber(os.getenv("ATE_SCPI_PORT")) or 5025
+
+local instrument = nil
+
+return ScheduleParams("Manual: TCP", "open, write, read, flush and close a TCP Device")
+  :setStopOnFail(false)
+  :setPreTestAction(function()
+    -- devices.Tcp(host, port) fills in every field TCP needs: timeout 1.0 s,
+    -- readTerm and writeTerm "\n". open has no defaults of its own, so a plain table
+    -- would have to name them all.
+    instrument = ATE.open(DeviceType.TCP, devices.Tcp(host, port):setTimeout(2.0))
+    ATE.addEquipment("SCPI simulator", "SIM-TCP", "TCP " .. host .. ":" .. port, "2026-01-01")
+  end)
+  :setPostTestAction(function(passFail)
+    ATE.close(instrument)   -- closing a second time does nothing and still reports ok
+  end)
+  :setSchedule({
+    StepParams("Identify the instrument"):setStepNo("1.")
+      :setAction(function()
+        local sent = ATE.write(instrument, devices.Write("*IDN?"))
+        local reply = ATE.read(instrument, devices.Read():setTimeout(1.0))
+        ATE.report((sent.ok and reply.count > 0) and Result.PASS or Result.FAIL,
+                   "reply: " .. (reply.data or "nothing"),
+                   reply.count, 26)
+      end),
+
+    -- The peer answers "MEAS:VOLT?" with "1.234\n". readTerm "3" stops the read at the "3",
+    -- so the first read takes "1.2" and the second takes the rest of the reply.
+    StepParams("Stop a read at a terminator"):setStepNo("2.")
+      :setAction(function()
+        ATE.write(instrument, devices.Write("MEAS:VOLT?"))
+        local first = ATE.read(instrument, devices.Read():setReadTerm("3"))
+        local rest = ATE.read(instrument)
+        ATE.report((first.data == "1.2" and rest.data == "4") and Result.PASS or Result.FAIL,
+                   "first read " .. (first.data or "nothing") .. ", second " .. (rest.data or "nothing"),
+                   first.count + rest.count, 4)
+      end),
+
+    -- "PARTIAL?" is answered with bytes and no terminator: the read times out having taken
+    -- some of them. That is partial = true, a WARNING in the log, and not a Device failure.
+    StepParams("A read that times out partway"):setStepNo("3.")
+      :setAction(function()
+        ATE.write(instrument, devices.Write("PARTIAL?"))
+        local r = ATE.read(instrument, devices.Read():setTimeout(0.3))
+        ATE.report((r.partial and r.count > 0) and Result.PASS or Result.FAIL,
+                   "got " .. r.count .. " bytes before the timeout",
+                   tostring(r.partial), "true")
+      end),
+
+    -- "NEVER?" is answered with silence: the read times out with no bytes at all, which IS
+    -- a Device failure, so onError runs. Returning a value makes the call continue with it.
+    StepParams("Handle a read that times out"):setStepNo("4.")
+      :setAction(function()
+        ATE.write(instrument, devices.Write("NEVER?"))
+        local r = ATE.read(instrument, devices.Read():setTimeout(0.3), function(opResult, opArgs)
+          ATE.log(Log.WARNING, "no reply from the instrument: " .. opResult.err)
+          return { data = nil, count = 0, partial = false }
+        end)
+        ATE.report(r.count == 0 and Result.PASS or Result.FAIL, "the timeout was handled, so the step carried on")
+      end),
+
+    -- The peer sends three lines; the schedule reads the first and throws away the rest.
+    StepParams("Discard the receive buffer"):setStepNo("5.")
+      :setAction(function()
+        ATE.write(instrument, devices.Write("MULTI?"))
+        ATE.read(instrument, devices.Read():setSize(7))
+        local f = ATE.flush(instrument)
+        ATE.report((f.ok and f.count > 0) and Result.PASS or Result.FAIL, "discarded " .. f.count .. " buffered bytes")
+      end),
+  })

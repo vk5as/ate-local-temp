@@ -1,0 +1,11 @@
+-- led.tslua: the innermost Sub-schedule, included by channel.tslua.
+local kv = ...
+local channel = kv.channel or 1
+
+return ScheduleParams("LED check", "the indicator LEDs of one channel")
+  :setSchedule({
+    StepParams("The LED lights"):setStepNo("1.")
+      :setAction(function()
+        ATE.report(Result.PASS, "channel " .. channel .. " LED is lit")
+      end),
+  })

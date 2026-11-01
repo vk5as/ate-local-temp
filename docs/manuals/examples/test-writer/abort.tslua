@@ -1,0 +1,26 @@
+-- abort.tslua: what an abort stops, and what it does not.
+--
+-- The Operator's Abort is a whole-run abort. ATE gives way within about 0.5 s and must
+-- stop within 10 s: ATE.sleep and ATE.input wake at once, and a busy Lua loop is stopped
+-- by the instruction-count hook. A step that is running when the abort lands records
+-- Result.ERROR "Aborted by Operator"; every step that never ran records NOTRUN.
+--
+-- Post-test Actions still run after an abort - ATE clears the abort flag before them so
+-- a run can always tear down - and each one is called with the run's result, which is
+-- FAIL for an aborted run. A second abort ends only the Action it lands in.
+return ScheduleParams("Manual: abort", "a sleep the Operator aborts, and the teardown that runs anyway")
+  :setPostTestAction(function(passFail)
+    ATE.log(Log.INFO, "post-test action ran after the abort, result " .. passFail)
+  end)
+  :setSchedule({
+    StepParams("Wait for the rail to settle"):setStepNo("1.")
+      :setAction(function()
+        ATE.sleep(10.0)                 -- the Operator aborts while this is waiting
+        ATE.report(Result.PASS, "settled")
+      end),
+
+    StepParams("Measure after the wait"):setStepNo("2.")
+      :setAction(function()
+        ATE.report(Result.PASS, "this step never runs")
+      end),
+  })

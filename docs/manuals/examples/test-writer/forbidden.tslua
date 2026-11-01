@@ -1,0 +1,14 @@
+-- forbidden.tslua: a Test Schedule that fails while it loads.
+--
+-- A Device is opened inside a Test Run. At the top level of the file there is no run yet,
+-- so only the builders, require, ATE.log and the enums are legal there. ATE.open at load
+-- time is refused, and the schedule is listed as broken on the Run screen with that error;
+-- its Media Release is not.
+ATE.open(DeviceType.TCP, { host = "127.0.0.1", port = 5025, timeout = 1.0,
+                           readTerm = "\n", writeTerm = "\n" })
+
+return ScheduleParams("Manual: forbidden at load", "opens a Device while the file is loading")
+  :setSchedule({
+    StepParams("Never reached"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS) end),
+  })
