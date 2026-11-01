@@ -1,0 +1,114 @@
+\chapter{Installing the program}\label{ch:installing}
+
+There are four ways to put ATE on a machine. Pick by platform, not by preference: they are not
+interchangeable, and only the first two are supported in the sense that a Station should rely on
+them.
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.8cm}>{\raggedright\arraybackslash}p{2.4cm}>{\raggedright\arraybackslash}p{8.6cm}@{}}
+\toprule
+Artifact & Support & What it is \\
+\midrule
+\texttt{ate-<version>-}\allowbreak\texttt{windows-x64-setup.exe} & Supported & Inno Setup installer; the frozen bundle
+  under \texttt{Program Files}, \texttt{ate} added to the machine PATH, \texttt{ate setup} run at
+  the end \\
+\texttt{ate-<version>-}\allowbreak\texttt{linux-x86\_64.tar.gz} & Best effort & The same frozen bundle plus
+  \texttt{install.sh} next to it \\
+\texttt{ate\_<version>}\allowbreak\texttt{\_amd64.deb} & Best effort & The frozen bundle in \texttt{/opt/ate},
+  \texttt{/usr/bin/ate} linking to it, \texttt{postinst} running \texttt{ate setup} \\
+\texttt{ate-<version>-py3-none-any.whl} & Best effort & ATE as a Python package; dependencies come
+  from PyPI \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The three frozen artifacts bundle their own CPython (3.14), Qt, QtWebEngine, lupa and pyvisa-py.
+They carry no Media Releases: Media Releases have their own installers and are placed in a
+Test Definition directory (chapter~\ref{ch:media-releases}). ATE never ships NI-VISA; pyvisa-py
+is bundled, so a LAN or USBTMC instrument works without it, while GPIB needs NI-VISA installed
+separately.
+
+\section{Windows}
+
+The installer is per-machine and writes to the machine PATH, so it needs administrator
+privileges; it refuses 32-bit Windows. A silent install, which is what the release CI does, is:
+
+\begin{lstlisting}[language=ATEShell]
+ate-1.2.3-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS
+\end{lstlisting}
+
+Setup closes any ATE that is running before replacing the files, and does not restart it. An
+upgrade copies the new bundle over the old one after clearing \texttt{\_internal}, so nothing from
+the previous build is left behind. Config and data are not in the install directory: they are in
+\texttt{\%PROGRAMDATA\%\textbackslash ATE}, and they survive every upgrade.
+
+At the end of the install the installer runs \texttt{ate.exe setup} itself and checks its exit
+code, because a Station that is not prepared is not installed in any useful sense. If that fails
+you get a dialog saying so, with the words
+
+\begin{lstlisting}[language=ATEShell]
+ATE is installed, but "ate setup" exited with code 1
+\end{lstlisting}
+
+and the fix it names: run \texttt{ate setup} from an elevated command prompt. A silent install
+exits non-zero in that case, so a script that ignores the exit code will not notice a Station that
+was never created.
+
+Uninstalling removes the program and nothing else. It takes its own entry back out of the machine
+PATH, entry by entry, leaving every other entry and the value's type alone; the config, database,
+reports and logs stay where they are.
+
+\textbf{What is not established here:} the installer is unsigned --- there is no certificate, so
+the release build ships unsigned --- and it has only ever been installed headlessly on a CI
+runner. What a particular Windows machine shows for an unsigned installer, and what the wizard
+looks like to a person, are not known from this repository.
+
+\section{Linux}
+
+The tarball is a directory and a script. Run it from the extracted tarball:
+
+\begin{lstlisting}[language=ATEShell]
+./install.sh --prefix /opt/ate --bin /usr/bin/ate
+\end{lstlisting}
+
+\texttt{--prefix} is where the bundle goes (\texttt{PREFIX} is honoured too); \texttt{--bin} is
+where the \texttt{ate} command is linked, and when it is not given the script uses
+\texttt{/usr/bin/ate} as root and \texttt{<prefix>/bin/ate} for anyone else. Re-running it is an
+upgrade: the bundle's own contents are cleared before the new copy is written, so no file of the
+previous version survives. \texttt{./install.sh --uninstall} removes the bundle and its link, and
+leaves \texttt{/etc/ate} and \texttt{/var/lib/ate} alone.
+
+Run by an ordinary user, the link lands in the prefix's own \texttt{bin} and setup cannot create
+the \texttt{ate} group or set ownership on \texttt{/etc/ate} and \texttt{/var/lib/ate}; the script
+says so and tells you to finish with \texttt{sudo ate setup}.
+
+The \texttt{.deb} is the same bundle, and its \texttt{postinst} runs \texttt{ate setup}:
+
+\begin{lstlisting}[language=ATEShell]
+apt-get install -y ./ate_1.2.3_amd64.deb
+\end{lstlisting}
+
+It depends on the system for what a bundle cannot carry: libc, GL and EGL, the six X libraries the
+Qt platform plugin needs, and \texttt{fontconfig} with \texttt{fonts-dejavu-core}. The last pair
+matter more than they look: QtWebEngine renders the Test Report with the system's fonts, and with
+none installed it writes a valid PDF that contains no text at all.
+
+\texttt{apt remove} removes only the program and keeps the config and the data. \texttt{apt purge}
+also removes \texttt{/etc/ate/config.json}, and never touches \texttt{/var/lib/ate}: the database,
+its WAL files, reports and logs are records, and the package deliberately does not delete them.
+
+\section{The wheel}
+
+The wheel uses the machine's own Python and PyPI's PySide6, so it needs more system libraries than
+the bundle does, and it does not bundle Qt. \texttt{pipx} gives it its own virtual environment:
+
+\begin{lstlisting}[language=ATEShell]
+pipx install dist/ate-1.2.3-py3-none-any.whl
+ate setup
+\end{lstlisting}
+
+Nothing runs \texttt{ate setup} for a wheel install: you run it yourself, as root on Linux.
+
+\cando{choose the artifact for a platform, and tell what an upgrade and an uninstall each take
+away and what they leave behind.}
