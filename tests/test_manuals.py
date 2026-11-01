@@ -1,6 +1,6 @@
-"""Packet 34a: the manuals' examples really run, and the manuals cannot fall behind the code.
+"""Packet 34a and 34b: the manuals' examples really run, and the manuals cannot fall behind the code.
 
-Three things are checked here:
+Four things are checked here:
 
 1. Every Lua example under ``docs/manuals/examples/test-writer/`` runs headless through ATE
    (the same seam-1 harness the example Media Release uses) and records what the manual says
@@ -10,6 +10,9 @@ Three things are checked here:
 3. Every ``ATE`` function, enum, ``ScheduleParams``/``StepParams`` setter, Device Type and
    ``ATE.run`` field the code defines is named in both test-writer manuals. The list is
    derived from the code, never hand-kept, so a manual that drifts fails the suite.
+4. Packet 34b: the admin manual names every config key and every ``ate`` command the code
+   accepts, runs every command it tells an administrator to run in a temporary Station, and
+   quotes no error message that the code does not print.
 
 The coverage check is a table of manuals and name groups so packets 34b (admin, config keys)
 and 34c (developer, modules and seams) can add their own entries without touching this file.
@@ -17,15 +20,22 @@ and 34c (developer, modules and seams) can add their own entries without touchin
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib
 import inspect
+import io
 import json
+import os
 import pkgutil
 import re
 import shutil
+import sqlite3
+import subprocess
+import sys
 import threading
 import time
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -62,8 +72,22 @@ class Manual:
         return self.tex_parts() + [self.markdown]
 
     def texts(self) -> list[tuple[str, str]]:
-        """``(path relative to the repository, text)`` for every source file."""
-        return [(str(p.relative_to(ROOT)), p.read_text(encoding="utf-8")) for p in self.sources()]
+        """``(path relative to the repository, text)`` for every source file.
+
+        LaTeX that shapes a line rather than a word is removed first. A long key such as
+        ``database.storeMismatchedFiles`` is typeset as two ``\\texttt`` runs joined by
+        ``\\allowbreak``, and a hidden command is written ``\\_selftest``; read as printed,
+        those are not the names the code defines, so the coverage check sees the plain text."""
+        return [(str(p.relative_to(ROOT)), plain(p.read_text(encoding="utf-8"))) for p in self.sources()]
+
+
+#: LaTeX that only affects how a line is broken up. Stripped by :meth:`Manual.texts`.
+_LAYOUT_MARKUP = re.compile(r"\\(?:allowbreak|texttt|textbf|text|emph|verb|sbox|par)\b|[{}]")
+
+
+def plain(text: str) -> str:
+    """The manual's text without its line-breaking markup, so a name split across two runs matches."""
+    return _LAYOUT_MARKUP.sub("", text.replace("\\_", "_"))
 
 
 TEST_WRITER = Manual(
@@ -72,9 +96,15 @@ TEST_WRITER = Manual(
     markdown=MANUALS_DIR / "llm/test-writer.md",
 )
 
-#: Every manual this packet builds. 34b adds "admin" and 34c "developer" here, and a group of
-#: names for each in COVERAGE below.
-MANUALS: dict[str, Manual] = {"test-writer": TEST_WRITER}
+ADMIN = Manual(
+    name="admin",
+    tex_dir=MANUALS_DIR / "admin",
+    markdown=MANUALS_DIR / "llm/admin.md",
+)
+
+#: Every manual this packet builds. 34c adds "developer" here, and a group of names for it in
+#: COVERAGE below.
+MANUALS: dict[str, Manual] = {"test-writer": TEST_WRITER, "admin": ADMIN}
 
 #: The examples directory each manual is written against.
 MANUAL_EXAMPLES: dict[str, Path] = {"test-writer": EXAMPLES_DIR}
@@ -133,15 +163,68 @@ def run_fields() -> set[str]:
     return set(_RUN_FIELDS)
 
 
-#: A group of code-derived names, and the manual each must appear in. 34b adds the config keys
-#: read from ate/config.py for the admin manual; 34c adds module and seam names for the
-#: developer manual. Same shape, same failure.
+def config_keys() -> set[str]:
+    """Every config key :func:`ate.config.read_config` accepts, taken from its own schema.
+
+    ``_SCHEMA`` is the list the validator checks against, so a key added to the code and not to
+    the manual is caught. ``format`` and ``defaultProject`` are top-level and handled apart.
+    """
+    from ate.config import _SCHEMA
+
+    return {f"{section}.{key}" for section, keys in _SCHEMA.items() for key in keys} | {"format", "defaultProject"}
+
+
+def _usage_of(dispatch: Callable[[list[str]], int]) -> str:
+    """The usage text a hidden helper prints for ``--help``, captured without running it."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        try:
+            dispatch(["--help"])
+        except SystemExit:
+            pass  # argparse exits after printing; the text is what we want
+    return out.getvalue()
+
+
+def cli_names() -> set[str]:
+    """Every ``ate`` subcommand, flag and hidden helper, derived from ``src/ate/cli.py``.
+
+    The visible ones come from the parser ``--help`` builds. ``_pdf`` and ``_selftest`` are
+    deliberately not in ``ate --help``, so their own usage text is asked for. The subcommands of
+    ``db`` and ``definition`` are not in the parser at all: they are the strings the handlers
+    compare against.
+    """
+    from ate import cli
+
+    names: set[str] = set()
+
+    def walk(parser: argparse.ArgumentParser) -> None:
+        for action in parser._actions:
+            names.update(action.option_strings)
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):  # a subcommand table, not a list of allowed values
+                for command, sub in choices.items():
+                    names.add(command)
+                    walk(sub)
+
+    walk(cli._build_parser())
+    for dispatch in (cli._cmd_pdf_helper, cli._cmd_selftest):
+        names.add(re.search(r"usage: ate (\S+)", _usage_of(dispatch)).group(1))
+        names.update(re.findall(r"(?<![\w-])(-{1,2}[A-Za-z][A-Za-z-]*)", _usage_of(dispatch)))
+    for handler in (cli._cmd_db, cli._cmd_definition):
+        names.update(re.findall(r'if sub == "([a-z]+)"', inspect.getsource(handler)))
+    return names - {"-h"}  # `--help` is documented; its short form is the same flag
+
+
+#: A group of code-derived names, and the manual each must appear in. 34c adds module and seam
+#: names for the developer manual. Same shape, same failure.
 COVERAGE: list[tuple[str, str, Callable[[], set[str]]]] = [
     ("test-writer", "ATE table functions", ate_table_functions),
     ("test-writer", "enum tables and their members", enum_names),
     ("test-writer", "ScheduleParams and StepParams setters", builder_methods),
     ("test-writer", "Device Types", device_types),
     ("test-writer", "ATE.run fields", run_fields),
+    ("admin", "config keys the validator reads", config_keys),
+    ("admin", "ate subcommands and flags", cli_names),
 ]
 
 
@@ -149,12 +232,15 @@ def missing_from(texts: Iterable[tuple[str, str]], names: Iterable[str]) -> list
     """The names that appear nowhere in ``texts``.
 
     A name counts when it appears as a whole word, so ``readTerm`` does not count as ``read``
-    and prose that says the word counts.
+    and prose that says the word counts. A flag is not a word: there is no word boundary before
+    the dashes of ``--yes``, and the ``-y`` inside ``--yes`` is not the short flag, so a flag has
+    to start after something that is neither a letter, a digit nor another dash.
     """
     remaining = set(names)
     for _label, text in texts:
         for name in list(remaining):
-            if re.search(rf"\b{re.escape(name)}\b", text):
+            start = r"(?<![-\w])" if name.startswith("-") else r"\b"
+            if re.search(f"{start}{re.escape(name)}\\b", text):
                 remaining.discard(name)
     return sorted(remaining)
 
@@ -178,7 +264,403 @@ def test_the_coverage_check_can_fail() -> None:
     assert not missing_from(texts, names), "the manual as written has every name"
 
 
-# --- Running the examples ---------------------------------------------------------------
+def test_the_admin_coverage_check_can_fail() -> None:
+    """The config-key check fails on a manual that drops a key, which is what it is for.
+
+    Delete one line of the key table and the suite says which key went missing; the check is not
+    a table nobody reads."""
+    texts = MANUALS["admin"].texts()
+    keys = config_keys()
+    assert "ui.allowHistoryDuringRun" in keys, "the schema changed shape; the derivation is wrong"
+    stripped = [(label, text.replace("allowHistoryDuringRun", "somethingElse")) for label, text in texts]
+    assert missing_from(stripped, keys) == ["ui.allowHistoryDuringRun"], "removing a key must show up as missing"
+    assert not missing_from(texts, keys), "the admin manual as written has every config key"
+
+
+# --- Every command the admin manual shows is run, or explained --------------------------
+
+#: A listing in the admin manual whose lines are commands an administrator types.
+SHELL_LISTING = re.compile(r"\\begin\{lstlisting\}\[language=ATEShell\](.*?)\\end\{lstlisting\}", re.S)
+
+#: A listing line is a command when it starts with one of these. Everything else in a listing is
+#: a message the machine printed.
+COMMAND_TOKENS = {"ate", "sudo", "apt-get", "pipx", "python", "./install.sh"}
+
+
+def shell_commands(manual: Manual) -> list[str]:
+    """Every command line in a manual's ATEShell listings, comment stripped.
+
+    ``ate setup: running unprivileged ...`` looks like a command and is not: it is what setup
+    printed. A token ending in a colon at the second position is the output of the command named
+    first."""
+    commands: list[str] = []
+    for tex in manual.tex_parts():
+        for block in SHELL_LISTING.findall(tex.read_text(encoding="utf-8")):
+            for line in (line.split("#", 1)[0].strip() for line in block.splitlines()):
+                tokens = line.split()
+                if not tokens or tokens[0] not in COMMAND_TOKENS:
+                    continue
+                if len(tokens) > 1 and tokens[1].endswith(":"):
+                    continue
+                commands.append(line)
+    return commands
+
+
+#: The commands the suite runs, in a temporary Station, with the exit code the manual claims, a
+#: string its output must contain, and the directory it is run from. ``{station}``, ``{config}``,
+#: ``{db}``, ``{data}`` and ``{definitions}`` come from the fixture below.
+COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
+    ("ate --version", ["--version"], 0, "", "{station}"),
+    ("ate -V", ["-V"], 0, "", "{station}"),
+    ("ate --help", ["--help"], 0, "usage: ate", "{station}"),
+    ("ate setup --root /tmp/station --no-permissions",
+     ["setup", "--root", "{station}", "--no-permissions"], 0, "database:", "{station}"),
+    ("ate --config /tmp/station/config/config.json db status",
+     ["--config", "{config}", "db", "status"], 0, "", "{station}"),
+    ("ate db status", ["db", "status"], 0, "", "{station}"),
+    ("ate db migrate --yes", ["db", "migrate", "--yes"], 0, "created or upgraded database at", "{station}"),
+    ("ate db migrate /tmp/station/data/ate.db --yes",
+     ["db", "migrate", "{db}", "--yes"], 0, "schema version 5", "{station}"),
+    ("ate db migrate", ["db", "migrate"], 0, "created or upgraded database at", "{station}"),  # answered "y"
+    ("ate definition update definitions/MR-1043/release.atedef",
+     ["definition", "update", "definitions/MR-1043/release.atedef"], 0, "checksums", "{data}"),
+    ("ate _selftest", ["_selftest"], 0, "engine + report: ok", "{station}"),
+    ("ate _selftest --run", ["_selftest", "--run"], 0, "run end-to-end: ok", "{station}"),
+    ("ate _selftest --scan definitions/MR-1043",
+     ["_selftest", "--scan", "definitions/MR-1043"], 1, "1 broken", "{data}"),
+    ("python packaging/licence/notices.py --out build/licences",
+     ["__not_ate__"], 0, "THIRD_PARTY_NOTICES.txt", "{station}"),
+]
+
+#: The commands the manual shows that cannot be run on this machine, and what covers them
+#: instead. A command an admin is told to run that nobody runs and nobody explains is a bug in
+#: this file, not a limitation of the test suite.
+COMMANDS_NOT_RUN: dict[str, str] = {
+    "ate-1.2.3-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS":
+        "Windows only. The same flags are packaging/windows/smoke_installer.py's INSTALL_FLAGS, "
+        "which tests/test_inno_installer_27b.py reads and asserts the .iss uses",
+    "./install.sh --prefix /opt/ate --bin /usr/bin/ate":
+        "runs in a debian:stable container (tests/test_release_ci_28c.py, ATE_DOCKER_TESTS=1)",
+    "apt-get install -y ./ate_1.2.3_amd64.deb":
+        "same containers; this machine is not the Debian the artifact is for",
+    "pipx install dist/ate-1.2.3-py3-none-any.whl":
+        "same containers",
+    "sudo ate setup":
+        "needs root. The permissions it applies are checked through the seams named below, never "
+        "by running groupadd or chown on this machine",
+    "ate setup":
+        "writes to the platform config and data directories. conftest pins the platform data "
+        "directory for every test; the --root form above is the one that is executed",
+    "ate": "opens the application. tests/test_gui_launch_30a.py drives the same launch() with the "
+           "dialogs injected, so no window is ever shown",
+    "ate --config /tmp/station/config/config.json":
+        "opens the application with that config. The flag is exercised without opening a window by "
+        "`ate --config PATH db status` above, and the launch itself by tests/test_gui_launch_30a.py",
+    "ate --allow-unsandboxed-pdf":
+        "also opens the application; the flag's effect on the PDF is asserted in "
+        "tests/test_pdf_sandbox_choice_30d.py",
+    "ate _pdf <html> <pdf> --paper A4|Letter [--unsandboxed]":
+        "not for humans to run, as the manual says; it is started by the report writer, and its "
+        "messages are checked against src/ate/report/pdf.py below",
+}
+
+
+def run_ate(argv: list[str], station: Path, cwd: Path | None = None, stdin: str = "") -> tuple[int, str, str]:
+    """Run one ``ate`` command as its own process, in a temporary Station.
+
+    The platform config and data directory are steered at the temporary Station with
+    ``ATE_DEFAULT_CONFIG``/``ATE_DATA_DIR``, the test-only seam in :mod:`ate.config`, so nothing
+    is written to ``/etc/ate`` or ``/var/lib/ate``. ``ATE_ELEVATED=0`` is inherited from conftest,
+    so the command runs as an ordinary user wherever a real Station would not.
+    """
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT / "src"),
+        "ATE_DEFAULT_CONFIG": str(station / "config" / "config.json"),
+        "ATE_DATA_DIR": str(station / "data"),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "ate", *argv],
+        cwd=str(cwd or station),
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=180,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@pytest.fixture
+def station(tmp_path) -> Path:
+    """A Station prepared once in a temporary directory, ready for the commands above."""
+    root = tmp_path / "station"
+    root.mkdir()
+    code, out, err = run_ate(["setup", "--root", str(root), "--no-permissions"], root)
+    assert code == 0, f"setup failed: {err}"
+    # The manual's Media Release example, so `ate definition update` and `--scan` have real files.
+    # The example's definition is called manual.atedef; the manual's example is release.atedef.
+    release = root / "data" / "definitions" / "MR-1043"
+    shutil.copytree(EXAMPLES_DIR, release)
+    (release / "manual.atedef").rename(release / "release.atedef")
+    return root
+
+
+def _fill(placeholder: str, station: Path) -> str:
+    """Substitute the paths a command line refers to with the temporary Station's."""
+    return (
+        placeholder.replace("{station}", str(station))
+        .replace("{config}", str(station / "config" / "config.json"))
+        .replace("{db}", str(station / "data" / "ate.db"))
+        .replace("{data}", str(station / "data"))
+        .replace("{definitions}", str(station / "data" / "definitions"))
+    )
+
+
+def test_the_admin_manual_shows_no_command_that_is_never_run() -> None:
+    """Every command an admin is told to type is either run by the suite or explained.
+
+    Adding a line to a listing without adding it to one of the two tables fails this test, which
+    is the point: the manual cannot quietly start telling people to run something nobody has
+    ever executed."""
+    shown = set(shell_commands(MANUALS["admin"]))
+    unaccounted = sorted(shown - {line for line, *_ in COMMANDS_RUN} - set(COMMANDS_NOT_RUN))
+    assert not unaccounted, f"the admin manual shows commands no test runs or explains: {unaccounted}"
+    missing = sorted({line for line, *_ in COMMANDS_RUN} - shown)
+    assert not missing, f"the suite runs commands the manual no longer shows: {missing}"
+
+
+@pytest.mark.parametrize("line, argv, expected, wanted, cwd", COMMANDS_RUN)
+def test_a_command_in_the_admin_manual_runs_in_a_temporary_station(station, line, argv, expected, wanted, cwd) -> None:
+    """Run one command the manual shows, in a temporary Station, and check what it claims."""
+    if argv == ["__not_ate__"]:  # the licence script, not an `ate` command
+        out_dir = station / "licence-out"
+        proc = subprocess.run(
+            [sys.executable, "packaging/licence/notices.py", "--out", str(out_dir)],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+        )
+        assert proc.returncode == expected, proc.stderr[-500:]
+        assert wanted in proc.stdout, proc.stdout
+        assert {p.name for p in out_dir.iterdir()} == {
+            "NOTICE-Qt-PySide6.txt", "THIRD_PARTY_NOTICES.txt", "LGPL-3.0.txt", "GPL-3.0.txt"
+        }
+        return
+
+    code, out, err = run_ate([_fill(a, station) for a in argv], station, cwd=_fill(cwd, station), stdin="y\n")
+    assert code == expected, f"{line}: exit {code}, expected {expected}\n{out}\n{err}"
+    if wanted:
+        assert wanted in out + err, f"{line}: output was {out + err!r}, expected {wanted!r}"
+    if line in ("ate --version", "ate -V"):
+        assert re.fullmatch(r"\d+\.\d+\.\d+[^\s]*", out.strip()), f"{line}: printed {out!r}"
+
+
+def test_db_status_prints_the_schema_version_the_manual_gives(station) -> None:
+    """``ate db status`` on a Station ``ate setup`` prepared prints the current schema version."""
+    from ate.storage.schema import SCHEMA_VERSION
+
+    code, out, _ = run_ate(["db", "status"], station)
+    assert code == 0, out
+    assert out.strip() == str(SCHEMA_VERSION), f"the manual says {SCHEMA_VERSION}, status said {out.strip()}"
+
+    code, out, err = run_ate(["db", "status", str(station / "data" / "missing.db")], station)
+    assert code == 1 and "run `ate db migrate`" in err, f"a missing database should refuse: {err}"
+
+
+def test_the_config_flag_belongs_to_ate_not_to_db(station) -> None:
+    """The manual warns that `--config` must come before `db`, and the code proves it.
+
+    After the subcommand the path is read as a token, so `ate db status --config X` opens X as the
+    database. The manual tells an admin this, so the suite has to show it is true."""
+    code, out, err = run_ate(["db", "status", "--config", str(station / "config" / "config.json")], station)
+    assert code == 1 and "file is not a database" in err, f"expected the documented trap, got {err[-300:]}"
+    assert "ate --config PATH db status" in "\n".join(text for _label, text in MANUALS["admin"].texts())
+
+
+def test_migrate_refuses_a_database_from_a_newer_ate(station) -> None:
+    """The refusal the manual quotes for a newer database is what the command prints."""
+    from ate.storage.schema import SCHEMA_VERSION
+
+    code, out, _ = run_ate(["db", "migrate", "--yes"], station)
+    assert code == 0, out
+    db = station / "data" / "ate.db"
+    conn = sqlite3.connect(db)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+
+    code, out, err = run_ate(["db", "migrate", str(db), "--yes"], station)
+    assert code == 1 and "this ATE is too old for" in err, f"expected the refusal, got {err}"
+    # The same refusal when the path is not given, since the configured database is that one.
+    code, out, err = run_ate(["db", "migrate", "--yes"], station)
+    assert code == 1 and "this ATE is too old for" in err, f"the configured database was migrated anyway: {out}{err}"
+
+
+def test_definition_update_fixes_the_checksums_the_manual_says_it_fixes(station) -> None:
+    """Break a checksum, run the command the manual shows, and the file matches again."""
+    atedef = station / "data" / "definitions" / "MR-1043" / "release.atedef"
+    data = json.loads(atedef.read_text(encoding="utf-8"))
+    for entry in data["files"]:
+        if entry["path"] == "first.tslua":
+            entry["sha256"] = "0" * 64
+    atedef.write_text(json.dumps(data), encoding="utf-8", newline="\n")
+
+    code, out, err = run_ate(["definition", "update", "definitions/MR-1043/release.atedef"], station / "data")
+    assert code == 0, err
+    updated = json.loads(atedef.read_text(encoding="utf-8"))
+    for entry in updated["files"]:
+        computed = hashlib.sha256((station / "data" / "definitions" / "MR-1043" / entry["path"]).read_bytes()).hexdigest()
+        assert entry["sha256"] == computed, f"{entry['path']} still does not match after the update"
+
+
+#: Every message the admin manual quotes, and where the code prints it: (text in the manual,
+#: text in the source, file). If the code changes a message and the manual does not, this fails.
+QUOTED_MESSAGES: list[tuple[str, str, str]] = [
+    ("No config file at /etc/ate/config.json", "No config file at {path}", "src/ate/app.py"),
+    ("unknown config key 'defnitions'", "unknown config key '{key}' in", "src/ate/config.py"),
+    ("'log.level' must be a string", "'{full}' must be a {kind}, got", "src/ate/config.py"),
+    ("'format' is required (expected 1)", "'format' is required (expected 1)", "src/ate/config.py"),
+    ("unknown 'format' value 2 (expected 1)", "unknown 'format' value", "src/ate/config.py"),
+    ("'database.type' must be 'sqlite', got 'postgres'", "'database.type' must be 'sqlite'", "src/ate/config.py"),
+    ("'ui.layout' must be 'staged' or 'threePane', got 'wide'", "'ui.layout' must be 'staged' or 'threePane'", "src/ate/config.py"),
+    ("'devices.receiveBufferBytes' must be a positive integer", "'devices.receiveBufferBytes' must be a positive integer", "src/ate/config.py"),
+    ("has unknown placeholder '<datat>'", "has unknown placeholder {token!r}", "src/ate/config.py"),
+    ("invalid JSON in config file", "invalid JSON in config file", "src/ate/config.py"),
+    ("cannot write station.uuid to /etc/ate/config.json", "cannot write station.uuid to", "src/ate/config.py"),
+    ("run `ate db migrate` to create or upgrade the database", "run `{hint}` to create or upgrade the database", "src/ate/storage/store.py"),
+    ("this ATE is too old for the database", "this ATE is too old for", "src/ate/storage/store.py"),
+    ("Run 'ate setup' as admin, or point", "Run 'ate setup' as admin, or point the", "src/ate/app.py"),
+    ("running unprivileged; skipping group/ownership/ACL setup", "running unprivileged; skipping group/ownership/ACL setup", "src/ate/cli.py"),
+    ("checksum mismatch for lib/scpi.lua (expected", "checksum mismatch for {rel_path} (expected", "src/ate/engine/run_engine.py"),
+    ("Test Report PDF skipped", "Test Report PDF skipped", "src/ate/run_session/headless.py"),
+    ("the PDF has no fonts", "the PDF has no fonts:", "src/ate/cli.py"),
+    ("refusing to render as root or an administrator without --unsandboxed",
+     "refusing to render as root or an administrator without --unsandboxed", "src/ate/report/pdf.py"),
+    ("PDF helper crashed or timed out after 60 s", "PDF helper crashed or timed out after", "src/ate/report/pdf_job.py"),
+    ("PDF helper wrote no PDF", "PDF helper wrote no PDF", "src/ate/report/pdf_job.py"),
+    ("paper must be 'A4' or 'Letter'", "paper must be 'A4' or 'Letter'", "src/ate/report/pdf.py"),
+    ("Internal error: this window may have stopped updating", "Internal error: this window may have stopped updating", "src/ate/app.py"),
+    ("Unhandled exception on thread", "Unhandled exception on thread", "src/ate/exception_log.py"),
+    ("interrupted run(s) at launch.", "interrupted run(s) at launch.", "src/ate/run_session/headless.py"),
+    ("receive buffer overflow - dropped 4096 oldest byte(s)", "receive buffer overflow - dropped", "src/ate/engine/lua_host.py"),
+    ("left open at end of run", "left open at end of run", "src/ate/engine/run_engine.py"),
+    ("was still closing when the aborted run ended", "was still closing when the aborted run ended", "src/ate/engine/run_engine.py"),
+    ("unknown .atedef format: 2", "unknown .atedef format: {fmt!r}", "src/ate/catalog.py"),
+    ("required 'mediaNumber' is missing or empty", "required '{field_name}' is missing or empty", "src/ate/catalog.py"),
+    ("is not valid semver 2.0.0", "is not valid semver 2.0.0", "src/ate/catalog.py"),
+    ("listed file is missing: lib/scpi.lua", "listed file is missing: {rel}", "src/ate/catalog.py"),
+    ("duplicate path 'lib/scpi.lua' listed more than once", "duplicate path '{rel}' listed more than once", "src/ate/catalog.py"),
+    ("unknown file extension '.py' for lib/helper.py", "unknown file extension '{suffix}' for {rel}", "src/ate/catalog.py"),
+    ("depends[0] needs 'name' and 'version'", "depends[{index}] needs 'name' and 'version'", "src/ate/catalog.py"),
+    ("WARNING: Test Definition directory does not exist", "WARNING: Test Definition directory does not exist", "src/ate/catalog.py"),
+]
+
+
+def test_every_message_the_manual_quotes_is_one_the_code_prints() -> None:
+    """The troubleshooting chapter says its text is copied from the code. This is where that is checked.
+
+    A message reworded in the code without the manual following it, or a message the manual invented,
+    both fail here."""
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    for quoted, source, path in QUOTED_MESSAGES:
+        code = (ROOT / path).read_text(encoding="utf-8")
+        assert quoted in manual, f"the manual no longer quotes {quoted!r}"
+        assert source in code, f"{path} no longer prints {source!r}, which {quoted!r} came from"""
+
+
+def test_the_pdf_helper_timeout_is_the_sixty_seconds_the_manual_says() -> None:
+    """The manual says 60 s; that number comes from PDF_TIMEOUT_MS, not from prose."""
+    from ate.report.pdf_job import PDF_TIMEOUT_MS
+
+    assert PDF_TIMEOUT_MS == 60_000, f"the manual says 60 s, the code says {PDF_TIMEOUT_MS / 1000} s"
+    assert "timed out after 60 s" in "\n".join(text for _label, text in MANUALS["admin"].texts())
+
+
+# --- setup's permissions, proven where they can be ---------------------------------------
+
+#: The container script that runs the real `groupadd`/`chgrp`/`chmod` that `ate setup` uses. It
+#: only ever runs inside debian:stable, never on this machine.
+CONTAINER_PERMISSIONS_SCRIPT = r"""
+import grp, os, sys
+sys.path.insert(0, "/work")
+from permissions import ATE_GROUP, LinuxPermissions
+
+root = "/tmp/station"
+data, config = root + "/data", root + "/config"
+os.makedirs(data + "/reports", exist_ok=True)
+os.makedirs(config, exist_ok=True)
+open(data + "/ate.db", "w").close()
+open(config + "/config.json", "w").write("{}")
+
+perms = LinuxPermissions()
+perms.ensure_group(ATE_GROUP)
+perms.ensure_group(ATE_GROUP)          # a second run must not fail on a group that exists
+perms.set_group_writable(data, ATE_GROUP, recursive=True)
+perms.set_admin_only(config + "/config.json")
+perms.set_admin_only(config)
+
+def entry(path):
+    # 0o7777 keeps the setgid bit but drops the file-type bits.
+    st = os.stat(path)
+    return f"{path} mode={st.st_mode & 0o7777:o} group={grp.getgrgid(st.st_gid).gr_name}"
+
+open(data + "/ate.db-wal", "w").close()   # created after setup, like a WAL file during a run
+print("data " + entry(data))
+print("reports " + entry(data + "/reports"))
+print("db " + entry(data + "/ate.db"))
+print("wal " + entry(data + "/ate.db-wal"))
+print("configdir " + entry(config))
+print("config " + entry(config + "/config.json"))
+"""
+
+
+@pytest.mark.build
+@pytest.mark.slow
+def test_the_real_linux_permission_commands_work_in_debian_stable(tmp_path: Path) -> None:
+    """Run :class:`ate.permissions.LinuxPermissions` for real, in a fresh debian:stable container.
+
+    Skipped unless ``ATE_DOCKER_TESTS=1``: it needs Docker and takes a couple of minutes. On this
+    machine the permissions are only ever asserted through ``RecordingPermissions``, which records
+    the calls instead of making them (tests/test_cli_setup.py); this is the check that the commands
+    themselves do what the manual says they do.
+    """
+    if os.environ.get("ATE_DOCKER_TESTS") != "1":
+        pytest.skip("the Debian container takes minutes; set ATE_DOCKER_TESTS=1 to run it")
+    if shutil.which("docker") is None:
+        pytest.skip("docker is not installed: the container cannot start")
+
+    work = tmp_path / "permissions"
+    work.mkdir()
+    shutil.copy(ROOT / "src" / "ate" / "permissions.py", work / "permissions.py")
+    (work / "check.py").write_text(CONTAINER_PERMISSIONS_SCRIPT, encoding="utf-8")
+
+    proc = subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{work}:/work", "-w", "/work",
+         "-e", "PYTHONDONTWRITEBYTECODE=1", "debian:stable", "sh", "-c",
+         "apt-get update -qq && apt-get install -y -qq python3 >/dev/null && python3 /work/check.py"],
+        capture_output=True, text=True, timeout=900,
+    )
+    assert proc.returncode == 0, f"the container run failed: {proc.stderr[-1000:]}"
+    lines = {line.split()[0]: line for line in proc.stdout.splitlines() if line}
+
+    def mode_and_group(key):
+        match = re.search(r"mode=(\d+) group=(\w+)", lines[key])
+        assert match, f"{key}: {lines[key]}"
+        return int(match.group(1), 8), match.group(2)
+
+    # The data tree is group-owned by `ate`, and its directories carry setgid so a file created
+    # afterwards (a WAL file, a new report) inherits the group rather than dropping it. If the
+    # `ate` group had not been created, `chgrp` would have failed and the run would not be 0.
+    for key in ("data", "reports", "db"):
+        assert mode_and_group(key)[1] == "ate", f"{key}: {lines[key]}"
+    data_mode = mode_and_group("data")[0]
+    assert data_mode & 0o2000, f"the data directory must carry the setgid bit: {lines['data']}"
+    assert data_mode & 0o070, f"the data directory must be group-writable: {lines['data']}"
+    assert mode_and_group("wal")[1] == "ate", f"a file created after setup must inherit the group: {lines['wal']}"
+    # The config and its directory stay root-owned and not group-writable.
+    config_mode, config_group = mode_and_group("config")
+    dir_mode, dir_group = mode_and_group("configdir")
+    assert dir_group == "root" and dir_mode & 0o777 == 0o755, lines["configdir"]
+    assert config_group == "root" and config_mode & 0o777 == 0o644, lines["config"]
 
 @dataclass
 class Example:
