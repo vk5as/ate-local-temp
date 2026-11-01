@@ -1,0 +1,82 @@
+\chapter{Worked example: adding a schema version}\label{ch:schema-version}
+
+The Test Run record is defined in one file, \texttt{src/ate/storage/schema.py}, and one number:
+\texttt{SCHEMA\_VERSION}. Everything that reads or writes the record goes through
+\texttt{RunStore}, so a table added here is the only way a table exists. The example below is run by
+\texttt{tests/test\_manuals.py}: it migrates a database with the shipped code, migrates the same
+database with a copy of the code that declares version 6 and one more table, and then shows the
+shipped code refusing that database.
+
+\section{The two edits}
+
+Add the table to the metadata, and bump the version. The comment that explains each bump is part of
+the convention: the file's own history is written in those comments --- \texttt{input\_value} made it
+2, \texttt{media\_release} and \texttt{run\_file} made it 3, \texttt{schedule\_instance} made it 4,
+\texttt{equipment} made it 5.
+
+\begin{lstlisting}[language=ATEPython]
+SCHEMA_VERSION = 6
+\end{lstlisting}
+
+\begin{lstlisting}[language=ATEPython]
+review_note = Table(
+    "review_note",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # the composite key, as every other run table
+    Column("text", Text, nullable=True),
+    Column("at", Text, nullable=True),
+)
+\end{lstlisting}
+
+Nothing else is required: no hand-written DDL, no migration script. The version lives in
+\texttt{PRAGMA user\_version}, and the tables are created by
+\texttt{metadata.create\_all(engine)} in \texttt{RunStore.\_ensure\_schema}, which reflects each
+table through the backend's own catalog and so never raises on a database that already has it.
+
+The types are the ones the record uses everywhere: UUIDs as 36-character \texttt{Text}, times as
+ISO-8601 \texttt{Text}, booleans as \texttt{Integer} 0/1, structured values as JSON \texttt{Text}.
+There is deliberately no SQLite-specific column: a future Postgres backend is a connection change,
+not a schema change. The only raw SQL in the storage layer is the two pragmas (WAL mode and
+\texttt{user\_version}), and they stay in \texttt{store.py}.
+
+\section{What a migration does, and what it does not}
+
+\begin{lstlisting}[language=ATEShell]
+python -m ate db migrate /tmp/station/data/ate.db --yes
+\end{lstlisting}
+
+prints \texttt{created or upgraded database at \dots (schema version 6)}. In the test this is run
+twice against the same file: with the shipped code it reports version 5 and creates the ten tables
+the record has; with the patched copy it reports version 6 and adds \texttt{review\_note} on top.
+The assertion that matters is that the set of tables only grew --- a migration adds, it never
+rewrites or drops.
+
+The third run is the reason the version check exists: the shipped code, pointed at the version 6
+database, exits 1 with \texttt{this ATE is too old for \dots; update ATE}. \texttt{check\_database\_at\_launch}
+compares \texttt{PRAGMA user\_version} with \texttt{SCHEMA\_VERSION} and returns
+\texttt{NEEDS\_MIGRATE} when the database is behind, \texttt{TOO\_OLD} when it is ahead, and
+\texttt{OK} only when they match. A run against a database whose tables are missing fails at the
+first insert; the check is what makes the failure a message instead of an \texttt{OperationalError}
+in a worker.
+
+Note what the manual tells an administrator and what the code does: \texttt{ate db migrate} makes no
+backup, despite spec rule 20 (see chapter~\ref{ch:unproven}).
+
+\section{Adding a column instead of a table}
+
+\texttt{create\_all} does not alter a table that already exists, so adding a column to
+\texttt{node} with a version bump leaves existing databases without it. That is not what v1 does,
+and nothing in the code silently \texttt{ALTER}s a table. If a change of that shape is ever needed,
+it has to be written and tested as an explicit migration, and the manual and this chapter have to
+say so; the version number is only a guard, not a migration.
+
+\section{Where a new field reaches the report}
+
+A table is not a report. The HTML writer in \texttt{src/ate/report/html.py} reads the record through
+the store's query methods; a new table that nothing queries is invisible on the printed page. The
+batching rules in chapter~\ref{ch:storage} apply to a new row type as well:
+\texttt{\_rows\_per\_statement} keeps an insert under SQLite's variable limit, and
+\texttt{\_log\_seq} is what orders a new row against the rest of the run.
+
+\cando{add a table, bump the version, and show what a database at a different version does.}

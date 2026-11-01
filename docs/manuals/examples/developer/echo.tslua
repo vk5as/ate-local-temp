@@ -1,0 +1,43 @@
+-- echo.tslua: the ECHO Device Type from the developer manual, run for real.
+--
+-- The manual tells a developer to add a driver, register it and add the enum member. This
+-- schedule is what proves it worked: tests/test_manuals.py copies src/ate into a temporary
+-- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the two lines the
+-- manual shows, and runs this schedule headless against that copy.
+--
+-- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
+-- a read cut short by `size` being a truncation; and the trace lines a Device produces when
+-- deviceTrace.enabled is on.
+return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to it, read it back")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("Open and write"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "manual-example"})
+        local w = ATE.write(dev, {data = "hello", writeTerm = "\n"})
+        ATE.report((w.ok and w.count == 6) and Result.PASS or Result.FAIL,
+                   "wrote " .. w.count .. " bytes including the terminator", w.count, 6)
+        ATE.close(dev)
+      end),
+
+    -- A Device left open is closed by the engine at run end with one WARNING (packet 16a), so
+    -- step 2 opens one and deliberately does not close it.
+    StepParams("Leave a Device open"):setStepNo("2.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "left-open"})
+        ATE.write(dev, {data = "unbounded"})
+        ATE.report(Result.PASS, "the run will close this Device for me")
+      end),
+
+    -- `size` cuts a read short: partial is true, and for this Device Type the WARNING says
+    -- "truncated", not "timed out", because there is no stream and no deadline.
+    StepParams("Cut a read with size"):setStepNo("3.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "sized"})
+        ATE.write(dev, {data = "ABCDEFGH"})
+        local r = ATE.read(dev, {size = 4})
+        ATE.report((r.partial and r.count == 4 and r.data == "ABCD") and Result.PASS or Result.FAIL,
+                   "read " .. r.count .. " of 8 bytes", r.count, 4)
+        ATE.close(dev)
+      end),
+  })

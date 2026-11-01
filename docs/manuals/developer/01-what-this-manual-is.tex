@@ -52,7 +52,9 @@ ATE_BUILD_TESTS=1 pytest -m build      # builds the real PyInstaller bundle
 ATE_DOCKER_TESTS=1 pytest -m build     # runs the debian:stable container smokes
 \end{lstlisting}
 
-Both are described in chapter~\ref{ch:tests}, and both were run for this manual.
+Both are described in chapter~\ref{ch:tests}. The build gate was run for this manual (one test, 40.81 s);
+the container gate was attempted and did not complete on this machine, which chapter~\ref{ch:unproven}
+states rather than glosses over.
 
 \section{What is proven here, and what is not}
 
