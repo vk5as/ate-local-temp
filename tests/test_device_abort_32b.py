@@ -193,11 +193,14 @@ class _StuckResource:
         self.timeout = None
         self.visalib = self
         self.calls: list[str] = []
+        self.events: list[str] = []  # everything in the order it happened, terminators included
 
     def read(self, _session, _count):
         self.reads += 1
+        self.events.append("read")
         self.release.wait(30.0)
         self.calls.append("read ended")
+        self.events.append("read ended")
         return b"late\n", constants.StatusCode.success
 
     @contextlib.contextmanager
@@ -205,14 +208,16 @@ class _StuckResource:
         yield
 
     def set_visa_attribute(self, *_args) -> None:
-        pass
+        self.events.append("attr")  # an attribute call needs the session, and cannot be made during a read
 
     def write_raw(self, payload: bytes) -> int:
         self.calls.append(f"write {payload!r}")
+        self.events.append(f"write {payload!r}")
         return len(payload)
 
     def close(self) -> None:
         self.calls.append("close")
+        self.events.append("close")
 
 
 class _StuckManager:
@@ -270,6 +275,35 @@ def test_a_post_test_action_waits_for_the_call_an_abort_left_behind(qapp, monkey
             resource.release.set()
             assert run.pump(qapp, run.finished, MUST_STOP_SECONDS), describe_stuck_runs()
             assert resource.calls[:2] == ["read ended", "write b'OUTP OFF'"]
+            run.assert_ended_aborted()
+        finally:
+            resource.release.set()
+            run.engine.stop_and_wait()
+
+
+def test_a_read_after_an_abandoned_read_waits_for_it(qapp, monkeypatch):
+    """`read` sets the terminator on the session before it reads, so it cannot do that while an
+    abandoned `viRead` still holds the session: `write` and `_visa_read` wait first, and so must `read`."""
+    resource = _stuck_visa(monkeypatch)
+    with scratch_directory() as td:
+        opened = 'ATE.open(DeviceType.VISA, {resource="GPIB0::5::INSTR", timeout=600, readTerm="\\n", writeTerm=""})'
+        source = _schedule(f"dev = {opened} ATE.ready() ATE.read(dev)", post='ATE.read(dev)')
+        run = _Run(td, source)
+        try:
+            run.engine.start()
+            assert run.pump(qapp, run.ready, 10.0), describe_stuck_runs()
+            time.sleep(0.3)
+            started = time.monotonic()
+            run.engine.request_abort()
+            time.sleep(0.5)  # the Post-test Action has begun its read
+            assert not run.finished.is_set(), describe_stuck_runs()
+            assert resource.events == ["attr", "attr", "attr", "read"], f"the second read touched the session during the first: {resource.events}"
+            resource.release.set()
+            assert run.pump(qapp, run.finished, MUST_STOP_SECONDS), describe_stuck_runs()
+            assert resource.events == [
+                "attr", "attr", "attr", "read", "read ended",
+                "attr", "attr", "read", "read ended", "close",
+            ], resource.events
             run.assert_ended_aborted()
         finally:
             resource.release.set()

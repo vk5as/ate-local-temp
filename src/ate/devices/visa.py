@@ -282,6 +282,9 @@ class _VisaDevice:
         term = self._term(params, "readTerm")
         deadline = time.monotonic() + self._timeout(params)
         session = _socket_session(self.resource)
+        # A read an abort left behind still holds this session: its terminator must not be set, and
+        # no read issued, until it has ended (packet 32b, as `_visa_read` and `write` already do).
+        self._calls.wait_for_left_behind()
         exact = session is not None or self._set_termchar(term)
         # A raw socket has no END: pyvisa-py's "success" (and NI-VISA's with SUPPRESS_END off) only
         # means a TCP segment ended, which says nothing about where the reply ends.
