@@ -29,6 +29,7 @@ that was there, and the database it migrated:
 
 \begin{lstlisting}[language=ATEShell]
 database to migrate: /tmp/station/data/ate.db (database.path in /tmp/station/config/config.json)
+no separate permission pass: the database is inside the data directory /tmp/station/data
 created or upgraded database at /tmp/station/data/ate.db (schema version 5)
 ate setup:
   created: /tmp/station/data
@@ -44,11 +45,12 @@ The database setup migrates is the one the config names, not \texttt{<data>/ate.
 reads \texttt{config.json} and takes \texttt{database.path} from it, and prints both the path and the
 reason it chose it. A Station whose config points the database somewhere else is migrated where the
 config says, which is what an installer needs to do (chapter~\ref{ch:upgrades}). Setup falls back to
-the data directory it just prepared in two cases: the config cannot be read --- it does not exist
-yet, or it is admin-only and setup is not elevated --- or it names no \texttt{database.path}, in
-which case the default's \texttt{<data>} placeholder means the platform directory rather than the
-Station setup was asked to make. Either fallback is printed. Setup never migrates a database it did
-not print.
+the data directory it just prepared in two cases only: there is no config file at all, or the config
+names no \texttt{database.path}, in which case the default's \texttt{<data>} placeholder means the
+platform directory rather than the Station setup was asked to make. A config that is there but cannot
+be read is not a fallback: setup stops with one line naming the file and exits 1, because migrating a
+database nobody opens would leave the Station's real database at the old schema. Each fallback is
+printed. Setup never migrates a database it did not print.
 
 \texttt{--root DIR} puts the Station under \texttt{DIR} (\texttt{DIR/data} and
 \texttt{DIR/config}); \texttt{--data-dir} and \texttt{--config-dir} override one of them. Those

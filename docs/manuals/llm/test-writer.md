@@ -1058,8 +1058,8 @@ abort has to wait, and a writer should know which steps they apply to.
   command does: a command holds the abort for as long as it runs, however long that is. The step
   still reported `PASS` when it returned.
 - **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop in a
-  coroutine runs to completion after an abort and the run ends when the loop does, so a long enough
-  loop holds the abort the same way. An unbounded
+  coroutine may run on after an abort, and the run ends only when the loop does, so a long enough
+  loop holds the abort for as long as it takes. An unbounded
   `while true do end` inside `coroutine.wrap` stopped only when the process was killed, its
   `test_run` row left open. The engine's own docstring advises against coroutines for this reason
   (`src/ate/engine/run_engine.py`, "Because a schedule must not use coroutines"): the exception is

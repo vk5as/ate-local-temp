@@ -427,7 +427,8 @@ version; `ate db migrate` creates or upgrades, after the copy.
 
 ## The Lua host and the sandbox
 
-`src/ate/engine/lua_host.py` treats a Test Schedule as untrusted input. Each schedule load gets a fresh
+`src/ate/engine/lua_host.py` treats a Test Schedule as code it has to account for, not as an enemy to
+defend against: a schedule is the Station's own code. Each schedule load gets a fresh
 `lupa` runtime, created with `register_builtins=False`, and then `_lockdown` shadows the file-loading
 entry points before anything is registered:
 
@@ -435,7 +436,8 @@ entry points before anything is registered:
   have to be shadowed explicitly);
 - `python` is set to nil, so the host's Python is not reachable from a schedule;
 - `os.exit` is set to nil (packet 35): a step that calls it gets an error, not an exit. `os.execute`
-  and `os.getenv` stay, as does `os.abort`, which no schedule has ever needed;
+  and `os.getenv` stay; lupa's `os` is only `clock`, `date`, `difftime`, `execute`, `exit`, `getenv`,
+  `remove`, `rename`, `setlocale`, `time`, `tmpname`, so `os.abort` was never there to remove;
 - `require` is ATE's own, and `package.path` and `package.cpath` are emptied: only the whitelist from the
   Test Definition and the modules in `src/ate/lua/` (as `require("ate.devices")`) can be loaded;
 - `debug` is reduced to `debug.traceback`. The full library reaches the instance loader through
@@ -446,6 +448,11 @@ entry points before anything is registered:
 The abort hook is installed before the schedule runs: `debug.sethook(check_abort, "", 1000)`, and
 `pcall`/`xpcall` are wrapped to re-raise `aborted` so a schedule's own error handling cannot swallow an
 abort. `print` is redirected to `ATE.log(INFO, ...)`.
+
+None of this is a defence against the person who wrote the schedule. `os.execute`, `os.remove` and
+`os.rename` are reachable from a step: `os.execute("kill -9 $PPID")` ends ATE with the run row left
+open, and `os.remove` on the database takes the record away under a running run. The lockdown buys
+traceability, not protection.
 
 `_AteTable` is what a schedule sees. Every function is wrapped by `_isolate`, which turns a raised ATE
 error into the `(false, message)` Device failure shape or an ERROR Attempt, naming the schedule file and
@@ -629,8 +636,12 @@ Commands the suite runs and checks, all in a temporary Station:
 QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider
 QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples
 python -m ate db migrate /tmp/station/data/ate.db --yes
-python -c "import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"
+python -c "import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())" /tmp/station/data/ate.db
 ```
+
+The database path is an argument, not a string inside the `-c` code: on Windows it arrives with
+backslashes, and a Windows path pasted into a string literal is a `SyntaxError` about a truncated
+`\U` escape before SQLite is ever opened.
 
 `python docs/manuals/build.py developer` builds this manual's PDF in Docker with texlive; it is run by
 hand, not by the suite, which checks the sources rather than the rendered pages.

@@ -71,22 +71,31 @@ The admin manual's database chapter says what an Administrator still has to back
 
 \texttt{create\_\allowbreak{}all} does not alter a table that already exists, so adding a column to
 \texttt{node} with a version bump leaves existing databases without it. Packet 35 closed the quiet
-version of that mistake: \texttt{RunStore.\_ensure\_\allowbreak{}schema} stamps \texttt{PRAGMA user\_\allowbreak{}version}
-only when \texttt{missing\_\allowbreak{}tables} found something to create. A database that stores an older
-version but already holds every table this ATE declares gets no stamp and no silent pass: opening it
-raises \texttt{SchemaVersionError} naming the version it holds, e.g.
+version of that mistake, the one where nothing at all is created: \texttt{RunStore.\_ensure\_\allowbreak{}schema}
+stamps \texttt{PRAGMA user\_\allowbreak{}version} only when \texttt{missing\_\allowbreak{}tables} found something to
+create. A database that stores an older version but already holds every table this ATE declares gets
+no stamp and no silent pass. It has its own launch status, \texttt{NO\_\allowbreak{}MIGRATION}, and
+\texttt{ate db status}, \texttt{ate db migrate} and the launch dialog refuse it with the same line:
 
 \begin{verbatim}
-the database at /var/lib/ate/ate.db stores schema version 5 but is
-missing nothing to migrate: no step from version 5 to 6 ran, so it is
-not stamped as version 6
+the database at /var/lib/ate/ate.db stores schema version 5 and already holds
+every table this ATE declares: this ATE has no migration from version 5 to 6,
+so it is not stamped as version 6
 \end{verbatim}
 
-The test runs exactly that: the shipped code, with only the number changed, migrates the version 5
-database and exits 1 with that sentence, and the database still says version 5 afterwards. Nothing in
+The test runs exactly that: the shipped code, with only the number changed, exits 1 with that
+sentence, and the database still says version 5 afterwards. Nothing in
 \texttt{src/ate} writes an \texttt{ALTER} or an \texttt{add\_column}, and every insert names its columns
 explicitly (\texttt{insert\_test\_run} builds its row field by field), so a new column has to be written
 and tested as an explicit migration. The version number is a guard, not a migration.
+
+What packet 35 did not close is the case the guard cannot see. A version bump that adds a column
+\emph{alongside} a new table is still stamped silently: \texttt{missing\_tables} finds the new table, so
+the stamp is raised, and the column on the table that already existed is never added. The database
+then claims version 6 with an old \texttt{node} in it, and nothing notices. Before the next schema
+version there has to be a migration registry --- a list of steps, each from version N to N+1, run in
+order, each tested against a database at N --- so that a version number means "these steps ran"
+instead of "some table was created".
 
 \section{Where a new field reaches the report}
 

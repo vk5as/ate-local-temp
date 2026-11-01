@@ -21,7 +21,10 @@ points:
   \item \texttt{os.exit} is set to nil (packet 35). Before it, a step that called \texttt{os.exit}
     ended the process with the run row left open; now the call is ``attempt to call a nil value'',
     the step ERRORs, and the run is recorded like any other failed step. \texttt{os.execute} and
-    \texttt{os.getenv} stay, and so does \texttt{os.abort}, which no schedule has ever needed.
+    \texttt{os.getenv} stay. lupa's \texttt{os} is a small table --- \texttt{clock}, \texttt{date},
+    \texttt{difftime}, \texttt{execute}, \texttt{exit}, \texttt{getenv}, \texttt{remove},
+    \texttt{rename}, \texttt{setlocale}, \texttt{time}, \texttt{tmpname} --- and \texttt{abort} was
+    never in it, so there is nothing to remove.
   \item \texttt{require} is replaced by ATE's own, and \texttt{package.path} and \texttt{package.cpath}
     are emptied (packet 06a), so only the whitelist from the Test Definition --- and the modules bundled
     in \texttt{src/ate/lua/}, reachable as \texttt{require("ate.devices")} --- can be loaded.
@@ -39,6 +42,14 @@ either. \texttt{tests/\allowbreak{}test\_\allowbreak{}lua\_\allowbreak{}isolatio
 that prove this, and the example \texttt{forbidden.tslua} in
 \texttt{docs/\allowbreak{}manuals/\allowbreak{}examples/\allowbreak{}test-writer/\allowbreak} is a schedule that opens a Device while the file is loading,
 which the host refuses.
+
+What the lockdown is \emph{not} is a defence against the person who wrote the schedule. A Test
+Schedule is the Station's own code, and \texttt{os.execute}, \texttt{os.remove} and \texttt{os.rename}
+are reachable from a step: \texttt{os.execute("kill -9 \$PPID")} ends ATE with the run row left open,
+and \texttt{os.remove} on the database takes the record away under a running Test Run. The guarantee
+is traceability --- ATE knows which files a run ran --- not protection from a schedule that means
+harm (\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}:
+\texttt{test\_\allowbreak{}a\_\allowbreak{}schedule\_\allowbreak{}is\_\allowbreak{}the\_\allowbreak{}station\_\allowbreak{}s\_\allowbreak{}own\_\allowbreak{}code\_\allowbreak{}and\_\allowbreak{}can\_\allowbreak{}end\_\allowbreak{}the\_\allowbreak{}process}).
 
 The abort hook is installed before the schedule runs: \texttt{debug.sethook(check\_\allowbreak{}abort, "", 1000)}, and
 \texttt{pcall}/\texttt{xpcall} are wrapped to re-raise \texttt{aborted} so a schedule's own error handling

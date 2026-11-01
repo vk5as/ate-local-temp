@@ -316,10 +316,27 @@ check; then `ate definition update` on any Media Release whose files changed. Th
 `install.sh` and the `.deb` postinst run `ate setup` at the end, and that runs the migration, so
 those three leave the database current — the database the config names, whichever path
 `database.path` holds. Setup prints which file it migrated and why. It can only read the config if
-it is allowed to: when it cannot, it falls back to `<data>/ate.db`, and a custom database then still
-needs `ate db migrate`; `ate db status` reads the configured path and catches it. A `pip`/`pipx`
-wheel install runs nothing, so its database stays at the old schema and ATE refuses to start against
-it until you migrate.
+it is allowed to: a config that exists but cannot be read is a refusal, not a fallback (setup names
+the file and exits 1); only a missing config, or one with no `database.path`, falls back to
+`<data>/ate.db`, and a custom database then still needs `ate db migrate`; `ate db status` reads the
+configured path and catches it. A `pip`/`pipx` wheel install runs nothing, so its database stays at
+the old schema and ATE refuses to start against it until you migrate.
+
+## When the install left the Station unprepared
+
+Every format runs `ate setup` as its last step, and each reports a failure of that step differently.
+
+- **Windows:** the installer calls `ate.exe setup` through `Exec` with `SW_HIDE`, so the setup step
+  has no window and nothing it prints reaches the screen; the message box is the only sign. Run
+  `ate setup` in an elevated command prompt to see the lines it prints.
+- **.deb:** `postinst` exits 1 when `ate setup` fails, and dpkg treats that as an interrupted
+  install: `/opt/ate` and the `ate` link are in place, the data directory, the config and the
+  database are not, and other packages will not install until this one is configured. Fix the cause
+  (an unwritable `/etc/ate` or `/var/lib/ate` is the usual one), then `sudo /opt/ate/ate setup` and
+  `sudo dpkg --configure -a`.
+- **`install.sh`:** run by an ordinary user it links `ate` into the prefix's own `bin`, setup cannot
+  create the `ate` group or set ownership, and the script says so and exits 1 telling you to finish
+  with `sudo ate setup`.
 
 `ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
 version: the two numbers are unrelated, so comparing them means nothing. A missing or older database

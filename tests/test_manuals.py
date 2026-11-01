@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import hashlib
 import importlib
 import importlib.util
@@ -540,6 +541,13 @@ COMMANDS_NOT_RUN: dict[str, str] = {
     "sudo ate setup":
         "needs root. The permissions it applies are checked through the seams named below, never "
         "by running groupadd or chown on this machine",
+    "sudo /opt/ate/ate setup":
+        "needs root and the installed bundle. tests/test_linux_packages_28b.py runs the real "
+        "postinst in a temporary root and shows it calls this same setup and exits 1 when that "
+        "call fails, which is the state the recovery below is for",
+    "sudo dpkg --configure -a":
+        "only means anything on a machine with a half-configured ATE package; the failure it "
+        "recovers from is the postinst test named just above",
     "ate setup":
         "writes to the platform config and data directories. conftest pins the platform data "
         "directory for every test; the --root form above is the one that is executed",
@@ -1334,7 +1342,11 @@ def test_a_checksum_mismatch_is_recorded_and_warned(bench) -> None:
 
 
 def test_the_test_definition_lists_every_example_file() -> None:
-    """Every Lua file beside the manual's ``.atedef`` is listed by it, and only those files."""
+    """Every Lua file beside the manual's ``.atedef`` is listed by it, and only those files.
+
+    The checksums are checked at the same time: an example edited for the manual without running
+    `ate definition update` is a release whose files do not match their recorded hashes, and the
+    suite would run it as if it were valid (packet 35 review)."""
     atedef = json.loads((EXAMPLES_DIR / "manual.atedef").read_text(encoding="utf-8"))
     listed = {entry["path"] for entry in atedef["files"]}
     on_disk = {
@@ -1343,6 +1355,12 @@ def test_the_test_definition_lists_every_example_file() -> None:
         if p.suffix in (".tslua", ".lua")
     }
     assert listed == on_disk, f"Test Definition and directory disagree: {listed ^ on_disk}"
+    stale = [
+        entry["path"]
+        for entry in atedef["files"]
+        if hashlib.sha256((EXAMPLES_DIR / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]
+    ]
+    assert not stale, f"manual.atedef records hashes for files that changed: {stale}"
     hidden = {entry["path"] for entry in atedef["files"] if entry.get("hidden")}
     assert hidden == {"channel.tslua", "led.tslua"}, "only the Sub-schedules are hidden"
     for entry in atedef["files"]:
@@ -1644,8 +1662,10 @@ with bench_env(peers), pdf_stub():
         app.processEvents()
         time.sleep(0.02)
     run = session.store.get_test_run(session.run_uuid)
-    steps = {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"}
-    print(f"elapsed={time.monotonic() - t0:.2f} run={run['result']}/{run['end_reason']} steps={steps}")
+    nodes = [n for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"]
+    steps = {n["step_number"]: n["result"] for n in nodes}
+    logs = [line["text"] for line in session.store.log_lines(session.run_uuid)]
+    print(f"elapsed={time.monotonic() - t0:.2f} run={run['result']}/{run['end_reason']} steps={steps} logs={logs}")
 session.close()
 peers.stop()
 """
@@ -1654,7 +1674,24 @@ peers.stop()
 #: inside a coroutine. A plain loop is cut off by the count hook; a coroutine is not hooked.
 LOOP = "local acc = 0 for i = 1, 120000000 do acc = acc + i end ATE.report(Result.PASS, 'the loop finished on its own')"
 COROUTINE_LOOP = ("local run = coroutine.wrap(function() " + LOOP + " end) run() "
+                  "ATE.log(Log.INFO, 'the coroutine finished on its own') "
                   "ATE.report(Result.PASS, 'the coroutine finished on its own')")
+
+
+@functools.lru_cache(maxsize=1)
+def _loop_seconds() -> float:
+    """How long the manual's loop takes on this machine, with the same lupa the engine uses.
+
+    The abort has to be judged against the loop's own length, not against a fixed number of
+    seconds. The CI runner did 120 million iterations in well under a second, so ``elapsed > 0.5``
+    failed on a machine that behaved exactly as the manual says (packet 35 review)."""
+    from lupa import LuaRuntime
+
+    runtime = LuaRuntime(register_eval=False, register_builtins=False)
+    started = time.perf_counter()
+    runtime.execute("local acc = 0 for i = 1, 120000000 do acc = acc + i end return acc")
+    return time.perf_counter() - started
+
 
 #: One long step and one after it: the abort's effect is visible in which of the two ran.
 ABORT_SCHEDULE = """-- probe.tslua: what an abort can and cannot interrupt.
@@ -1705,20 +1742,34 @@ def test_a_plain_busy_loop_gives_way_to_an_abort(tmp_path: Path) -> None:
     proc = _run_abort_probe(tmp_path, LOOP)
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed < 1.0, f"a plain loop took {elapsed} s to stop after an abort: {proc.stdout}"
+    loop = _loop_seconds()
+    assert elapsed < min(loop, 1.0), (
+        f"a plain loop took {elapsed} s to stop after an abort, while the loop itself takes "
+        f"{loop:.2f} s on this machine: {proc.stdout}"
+    )
     assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
     assert "'1.': 'ERROR'" in proc.stdout and "'2.': 'NOTRUN'" in proc.stdout, proc.stdout
 
 
 def test_a_coroutine_loop_runs_to_completion_after_an_abort(tmp_path: Path) -> None:
     """The count hook does not reach a coroutine, so the step finishes its work and the abort is
-    recorded on the next step - the limit the manual tells a test writer to avoid."""
+    recorded on the next step - the limit the manual tells a test writer to avoid.
+
+    The bound is the loop's own length on this machine, not a fixed number of seconds: a runner
+    fast enough to do 120 million iterations in a third of a second is not a runner that was cut
+    off (packet 35 review)."""
     proc = _run_abort_probe(tmp_path, COROUTINE_LOOP)
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed > 0.5, f"the coroutine was cut off in {elapsed} s; the manual says it is not: {proc.stdout}"
+    loop = _loop_seconds()
+    assert elapsed > loop / 2, (
+        f"the run ended {elapsed} s after the abort, while the loop alone takes {loop:.2f} s here: "
+        f"the step either finished its coroutine or was cut off, and the manual promises neither: {proc.stdout}"
+    )
+    assert elapsed < loop + 5.0, f"the run never ended: {elapsed} s for a {loop:.2f} s loop: {proc.stdout}"
     assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
     assert "'1.': 'PASS'" in proc.stdout and "'2.': 'ERROR'" in proc.stdout, proc.stdout
+    assert "the coroutine finished on its own" in proc.stdout, proc.stdout
 
 
 def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
@@ -1746,12 +1797,33 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
 
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
     """``os.execute`` is outside the hook: the run ends when the command does, not when the
-    Operator asks."""
-    proc = _run_abort_probe(tmp_path, 'os.execute("sleep 3") ATE.report(Result.PASS, "the command finished")')
+    Operator asks.
+
+    The command is timed here rather than assumed: ``sleep`` is not a Windows command, and the CI
+    runner that passed this test had a ``sleep`` only because a Git tool happened to be on its PATH.
+    The wait is measured, so the assertion is about the hold and not about a shell that may or may
+    not have the command (packet 35 review)."""
+    command = f'"{sys.executable}" -c "import time; time.sleep(3)"'
+    started = time.perf_counter()
+    held = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+    held_seconds = time.perf_counter() - started
+    assert held.returncode == 0 and held_seconds >= 2.0, (
+        f"the timing command itself took {held_seconds:.2f} s and exited {held.returncode}: {held.stderr[-200:]}"
+    )
+    proc = _run_abort_probe(
+        tmp_path,
+        f'local ok, how, code = os.execute({command!r}) '
+        f'ATE.log(Log.INFO, "the step ran a command that exited " .. tostring(code)) '
+        f"ATE.report(Result.PASS, 'the command finished')",
+    )
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed > 2.5, f"the abort ended the run in {elapsed} s while a 3 s command was running: {proc.stdout}"
+    assert elapsed >= held_seconds - 0.5, (
+        f"the abort ended the run in {elapsed} s while the same command takes {held_seconds:.2f} s "
+        f"outside ATE: {proc.stdout}"
+    )
     assert "'1.': 'PASS'" in proc.stdout, proc.stdout
+    assert "the step ran a command that exited 0" in proc.stdout, proc.stdout
 
 
 def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error(tmp_path: Path) -> None:
@@ -1765,6 +1837,70 @@ def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error
     assert "'1.': 'ERROR'" in proc.stdout, proc.stdout
     row = _open_run_row(tmp_path / "station" / "ate.db")
     assert row and row["ended_at"] is not None and row["result"] is not None, f"the run row is not closed: {row}"
+
+
+#: The command the manual names as the way a schedule ends ATE from inside a step.
+KILL_COMMAND = "kill -9 $PPID"
+
+
+def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tmp_path: Path) -> None:
+    """lupa's `os` has no `abort`, and the manual used to say it stayed "unneeded".
+
+    Two things were wrong with that sentence: it names a function the runtime does not have, and it
+    implied the sandbox kept a schedule from hurting the Station. A step can run a command and can
+    delete a file; a Test Schedule is the Station's own code. The probe runs the command the manual
+    now quotes, and the process dies with the run row still open."""
+    proc = _run_abort_probe(tmp_path, f'os.execute("{KILL_COMMAND}") ATE.report(Result.PASS, "never reached")')
+    assert proc.returncode != 0, f"the step was expected to end the process, it returned {proc.returncode}: {proc.stdout[-300:]}"
+    row = _open_run_row(tmp_path / "station" / "ate.db")
+    assert row and row["ended_at"] is None, f"the process ended without closing its run row: {row}"
+
+    manual = "\n".join(text for _label, text in MANUALS["developer"].texts())
+    assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
+    assert "no schedule has ever needed" not in manual, "the manual still claims os.abort is there and unused"
+    assert "traceability" in manual, "the manual stopped saying what the sandbox is actually for"
+
+
+# --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------
+
+#: The two ways an install can leave a Station half-prepared, and the recovery the manual gives.
+#: Neither is a ATE bug: the Windows installer runs setup with its window hidden, and the .deb's
+#: postinst exits 1 when setup fails, which leaves the package half-configured.
+
+def test_the_manual_recovers_from_an_install_that_left_the_station_unprepared() -> None:
+    """The packaging files say what they do, and the admin manual tells the Operator what to do about it.
+
+    A reader who has just installed ATE and finds no database needs the two commands, in order, and
+    neither of them is obvious from the installer's own message."""
+    iss = (ROOT / "packaging" / "windows" / "ate.iss").read_text(encoding="utf-8")
+    postinst = (ROOT / "packaging" / "linux" / "deb" / "postinst").read_text(encoding="utf-8")
+    assert "SW_HIDE" in iss, "the installer no longer runs 'ate setup' with a hidden window"
+    assert "'ate setup' failed" in postinst and "exit 1" in postinst, "postinst no longer fails with setup"
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "dpkg --configure -a" in manual, "the manual never tells an Operator to finish a half-configured package"
+    assert "sudo /opt/ate/ate setup" in manual, "the manual never names the setup command to re-run"
+    assert "hidden" in manual, "the manual stopped saying the Windows setup step has no output to read"
+
+
+def test_a_command_the_manual_shows_does_not_put_a_path_inside_the_code() -> None:
+    """A Windows path inside `python -c "..."` is an escape sequence, not a path.
+
+    The suite substitutes a real temporary path into every command the developer manual shows, and
+    the CI runner died on `SyntaxError: unicodeescape` because the database path sat inside the
+    quoted code (packet 35 review). Any command the suite runs through `-c` takes its paths as
+    arguments, where backslashes are just characters."""
+    for line, argv, *_expected in DEV_COMMANDS_RUN:
+        if argv[:1] != ["-c"]:
+            continue
+        code = argv[1]
+        assert "\\" not in code, f"{line}: the -c code carries a path, which is a Windows escape trap"
+        assert not any(placeholder in code for placeholder in ("{db}", "{config}", "{station}", "{data}")), (
+            f"{line}: a path belongs in the arguments, not inside the code"
+        )
+        assert any("{db}" in arg or "{config}" in arg for arg in argv[2:]), (
+            f"{line}: no argument names the file the code reads"
+        )
 
 
 # --- Packet 34c: the developer manuals are held to the code ------------------------------
@@ -1812,8 +1948,8 @@ DEV_COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
      ["-m", "build", "--wheel", "--no-isolation", "-o", "{dist}"], 0, "Successfully built", "{repo}"),
     ("QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples",
      ["-m", "examples.harness.run_examples"], 0, "ran 13 headless runs", "{repo}"),
-    ("python -c \"import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())\"",
-     ["-c", "import sqlite3; rows=sqlite3.connect('{db}').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"],
+    ("python -c \"import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())\" /tmp/station/data/ate.db",
+     ["-c", "import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())", "{db}"],
      0, "", "{repo}"),
     ("python -m ate db migrate /tmp/station/data/ate.db --yes",
      ["-m", "ate", "db", "migrate", "{db}", "--yes"], 0, "schema version", "{repo}"),

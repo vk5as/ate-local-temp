@@ -94,6 +94,31 @@ Qt platform plugin needs, and \texttt{fontconfig} with \texttt{fonts-dejavu-core
 matter more than they look: QtWebEngine renders the Test Report with the system's fonts, and with
 none installed it writes a valid PDF that contains no text at all.
 
+\section{When the install leaves the Station unprepared}
+
+Every format runs \texttt{ate setup} as its last step, and each reports a failure of that step in a
+different way, so the recovery is different too.
+
+\textbf{Windows.} The installer runs \texttt{ate.exe setup} through \texttt{Exec} with
+\texttt{SW\_HIDE}, so the setup step has no window: nothing it prints ever reaches the screen, and
+the only sign of a failure is the message box. Re-running it in a console is what shows the lines:
+
+\begin{lstlisting}[language=ATEShell]
+ate setup
+\end{lstlisting}
+
+\textbf{The \texttt{.deb}.} Its \texttt{postinst} exits 1 when \texttt{ate setup} fails, and dpkg
+treats a failing \texttt{postinst} as an interrupted install: the files are in \texttt{/opt/ate} and
+the \texttt{ate} command is on the PATH, but the data directory, the config and the database were
+never created. Other packages then refuse to install until this one is configured. Fix the cause --
+an unwritable \texttt{/etc/ate} or \texttt{/var/lib/ate} is the usual one -- and then finish the
+install:
+
+\begin{lstlisting}[language=ATEShell]
+sudo /opt/ate/ate setup          # creates the directories, the config and the database
+sudo dpkg --configure -a         # dpkg finishes the package setup it left half done
+\end{lstlisting}
+
 \texttt{apt remove} removes only the program and keeps the config and the data. \texttt{apt purge}
 also removes \texttt{/etc/ate/config.json}, and never touches \texttt{/var/lib/ate}: the database,
 its WAL files, reports and logs are records, and the package deliberately does not delete them.
