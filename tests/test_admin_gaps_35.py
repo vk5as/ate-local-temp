@@ -9,6 +9,9 @@ What is pinned:
 * ``ate db migrate`` and ``ate setup`` share one routine that copies the database beside
   itself before a migration changes it, refuses when the copy cannot be made, and leaves the
   copy in place when the migration then fails;
+* that copy is written as ``<name>.partial``, checked, and only then renamed to its
+  ``.backup-<stamp>`` name, and every step of it runs inside :data:`BACKUP_LOCK_TIMEOUT_S`
+  rather than waiting on a lock indefinitely;
 * a database is never stamped with the current version unless a migration actually created
   something for this build;
 * ``ate setup`` migrates the database the Station's config names, and says which it chose;
@@ -22,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -290,6 +294,139 @@ def test_a_backup_taken_while_another_process_has_the_database_open(tmp_path: Pa
     with contextlib.closing(sqlite3.connect(copy)) as checked:
         serials = [row[0] for row in checked.execute("SELECT uut_serial FROM test_run ORDER BY uut_serial")]
     assert serials == ["IN-FLIGHT", "OLD-1"], serials
+
+
+def _bulk_rows(path: Path, count: int) -> None:
+    """Put ``count`` 4 KB rows in a table of its own, so a copy of this file takes real pages."""
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE IF NOT EXISTS bulk(x BLOB)")
+    conn.executemany("INSERT INTO bulk VALUES (?)", [(b"\x00" * 4096,) for _ in range(count)])
+    conn.commit()
+    conn.close()
+
+
+def _locked_holder(path: Path, seconds: int) -> subprocess.Popen:
+    """A separate process that opens the database, starts writing, and sits on it."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time, sqlite3;"
+         "conn = sqlite3.connect(sys.argv[1], timeout=120);"
+         "conn.execute('PRAGMA journal_mode=WAL');"
+         "conn.execute('BEGIN IMMEDIATE');"
+         "conn.execute(\"INSERT INTO test_run (run_uuid, uut_serial) VALUES ('in-flight', 'IN-FLIGHT')\");"
+         "time.sleep(float(sys.argv[2]))",
+         str(path), str(seconds)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    time.sleep(1.0)  # let it open and start its transaction
+    assert proc.poll() is None, "the process meant to hold the lock died instead of holding it"
+    return proc
+
+
+def test_a_copy_interrupted_halfway_is_never_left_named_as_a_backup(tmp_path: Path) -> None:
+    """A process killed while the copy is in flight leaves nothing that reads like a backup.
+
+    The copy is written to ``<name>.partial`` and renamed only after it is checked, so a kill
+    in the middle can only leave a ``.partial`` file: an interrupted SQLite file is well formed
+    enough to pass ``integrity_check``, which is exactly why the name is not trusted."""
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 12000)
+    before = path.read_bytes()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "ate", "db", "migrate", str(path), "--yes"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT / "src")},
+    )
+    partial = None
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        partial = next((p for p in tmp_path.iterdir() if p.name.endswith(".partial")), None)
+        if partial is not None:
+            break
+        time.sleep(0.02)
+    assert partial is not None, "the copy never started"
+    os.kill(proc.pid, signal.SIGKILL)
+    proc.wait(timeout=10)
+
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert path.read_bytes() == before, "killing the copy changed the database it was copying"
+    assert _version(path) == 4
+
+
+def test_a_copy_is_checked_before_it_is_named_a_backup(tmp_path: Path, monkeypatch) -> None:
+    """The rename happens only after the copy is verified: a truncated copy is deleted, not kept."""
+    from ate.storage import backup as backup_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    target = tmp_path / "ate.db.backup-20260101-000000"
+    monkeypatch.setattr(backup_module, "_copy_name", lambda p: target)
+
+    def truncated_copy(source: Path, copy: Path) -> str | None:
+        """Say the copy is missing a table, as a copy stopped halfway would."""
+        return "the copy holds 6 of the source's 7 tables"
+
+    monkeypatch.setattr(backup_module, "_copy_is_sound", truncated_copy)
+    with pytest.raises(BackupError) as raised:
+        backup_for_migration(path)
+    assert not target.exists(), "a copy that failed its check was renamed anyway"
+    assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert str(target) in str(raised.value), str(raised.value)
+
+
+def test_a_copy_never_overwrites_a_file_that_is_already_there(tmp_path: Path, monkeypatch) -> None:
+    """An Operator's own file keeps its contents: the migration will not write over it."""
+    from ate.storage import backup as backup_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    taken = tmp_path / "ate.db.backup-today"
+    taken.write_text("the Administrator's own copy", encoding="utf-8")
+    monkeypatch.setattr(backup_module, "_copy_name", lambda p: taken)
+
+    with pytest.raises(BackupError) as raised:
+        backup_for_migration(path)
+    assert taken.read_text(encoding="utf-8") == "the Administrator's own copy"
+    assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert "already" in str(raised.value).lower(), str(raised.value)
+
+
+def test_a_copy_that_runs_past_the_deadline_is_refused_in_one_line(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A database locked by another process is refused inside the deadline, not waited out.
+
+    The holder sits on a write transaction for 30 s. :data:`BACKUP_LOCK_TIMEOUT_S` is shortened
+    to 2 s: the copy gives up inside it, in one line naming the lock, leaving the database and
+    no copy behind. Before the deadline was enforced this waited for the lock instead."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    before = path.read_bytes()
+    holder = _locked_holder(path, 30)
+    try:
+        started = time.monotonic()
+        code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+    text = out + err
+    assert elapsed < 6, f"the migration waited {elapsed} s on a locked database"
+    assert code == 1, text
+    assert "lock" in text.lower(), text
+    assert "2.0" in text, text
+    assert "Traceback" not in err, err
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert path.read_bytes() == before, "the refused copy changed the database"
+    assert _version(path) == 4
 
 
 def test_a_migration_that_fails_leaves_the_copy_and_names_it(tmp_path: Path) -> None:
