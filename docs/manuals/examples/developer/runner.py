@@ -11,7 +11,8 @@ Report is still written.
 Answers are given from the script: ``--input STEP NAME=VALUE`` for every Step Input the schedule
 declares, ``--choice`` for each Stop-on-Fail pause in the order the pauses come. A run nobody
 answers never ends, so a schedule with inputs needs these flags or this script waits out its
-25-second deadline and reports the run as it stands.
+25-second deadline and reports the run as it stands. The exit code is 0 only when the session
+reached ``FINISHED``, so a caller can tell a completed run from one it gave up on.
 """
 from __future__ import annotations
 
@@ -30,9 +31,30 @@ except ImportError:
             sys.path.insert(0, str(_path))
 
 from PySide6.QtCore import QCoreApplication  # noqa: E402
+from ate.catalog import (  # noqa: E402
+    include_map,
+    module_map,
+    resolve_schedule_definition,
+    resolve_schedule_path,
+)
 from ate.config import read_config  # noqa: E402
+from ate.engine.lua_host import LuaHost  # noqa: E402
 from ate.report.pdf import PDF_SKIPPED  # noqa: E402
 from ate.run_session.headless import HeadlessRunSession, SessionState  # noqa: E402
+
+
+def _step_names(config, schedule: str) -> dict[int, str]:
+    """``node_seq -> Step Name`` for one schedule, the same tree the Run screen shows.
+
+    A step's row is written to the record only after its last Attempt, so while a step is waiting
+    for an input the store has nothing to look up: the names come from the loaded schedule.
+    """
+    definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule)
+    path = resolve_schedule_path(definition, schedule) if definition else None
+    if path is None:
+        raise SystemExit(f"no Test Definition covers schedule {schedule!r}")
+    host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
+    return {seq: node.name for seq, node in enumerate(host.tree) if not node.is_header}
 
 
 def main() -> int:
@@ -53,9 +75,23 @@ def main() -> int:
         except ValueError:
             inputs[name.strip()] = float(value) if value.replace(".", "", 1).replace("-", "", 1).isdigit() else value
 
-    session = HeadlessRunSession(read_config(Path(args.config)), pdf_choice=lambda _html: PDF_SKIPPED)
+    config = read_config(Path(args.config))
+    names = _step_names(config, args.schedule)
+    session = HeadlessRunSession(config, pdf_choice=lambda _html: PDF_SKIPPED)
     states: list[SessionState] = []
     session.state_changed.connect(states.append)
+    # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
+    # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
+    # the name is looked up in the schedule's tree before the value is supplied.
+    def _supply(node_seq: int, attempt_no: int, index: int) -> None:
+        name = names.get(node_seq)
+        if name in inputs:
+            session.supply_input(node_seq, attempt_no, index, inputs[name])
+        else:
+            print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+
+    if inputs:
+        session.input_asked.connect(_supply)
     # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
     # somebody here, so every pause gets the scripted answer in order.
     answers = list(args.choice)
@@ -82,6 +118,7 @@ def main() -> int:
         "result": run["result"],
         "end_reason": run["end_reason"],
         "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+        "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
         "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
         "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
     }))

@@ -13,11 +13,14 @@ happen''.
     \texttt{TCPIP0::127.0.0.1::\dots::SOCKET} resource for \texttt{VISA}. No GPIB instrument, no real
     serial adapter, no NI-VISA stack has ever been opened by this suite. The driver contract is
     proven; the driver against an instrument is not.
-  \item \textbf{Real Windows sessions.} The same tests run on \texttt{windows-latest} in CI, and
-    the notes record those CI runs being green. Nothing in this manual was executed on Windows by
-    us. The \texttt{icacls} permission paths, the Inno installer and the frozen Windows bundle are
-    asserted by reading the scripts and by \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak27c.py}, which checks the
-    workflow's shape, never by an install.
+  \item \textbf{A Windows session a human watched.} The same tests run on \texttt{windows-latest} in
+    CI, and the release workflow installed the Windows installer there: at \texttt{v0.1.0-rc2} (run
+    41198438867) \texttt{packaging/\allowbreak{}windows/\allowbreak{}ate.iss} was compiled and the installer
+    silently installed, run, upgraded and uninstalled on that runner. None of it happened on this
+    machine, and nobody watched a window open. The \texttt{icacls} permission paths, the Inno installer
+    and the frozen Windows bundle are asserted here by reading the scripts and by
+    \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak27c.py}, which checks the
+    workflow's shape rather than an installed program.
   \item \textbf{The Debian container smokes, on \texttt{/tmp}.}
     \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py}
     ran here and passed --- the container smoke takes several minutes, and \texttt{docker smoke: all kinds

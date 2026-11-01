@@ -249,7 +249,8 @@ Report is still written.
 Answers are given from the script: ``--input STEP NAME=VALUE`` for every Step Input the schedule
 declares, ``--choice`` for each Stop-on-Fail pause in the order the pauses come. A run nobody
 answers never ends, so a schedule with inputs needs these flags or this script waits out its
-25-second deadline and reports the run as it stands.
+25-second deadline and reports the run as it stands. The exit code is 0 only when the session
+reached ``FINISHED``, so a caller can tell a completed run from one it gave up on.
 """
 from __future__ import annotations
 
@@ -268,9 +269,30 @@ except ImportError:
             sys.path.insert(0, str(_path))
 
 from PySide6.QtCore import QCoreApplication  # noqa: E402
+from ate.catalog import (  # noqa: E402
+    include_map,
+    module_map,
+    resolve_schedule_definition,
+    resolve_schedule_path,
+)
 from ate.config import read_config  # noqa: E402
+from ate.engine.lua_host import LuaHost  # noqa: E402
 from ate.report.pdf import PDF_SKIPPED  # noqa: E402
 from ate.run_session.headless import HeadlessRunSession, SessionState  # noqa: E402
+
+
+def _step_names(config, schedule: str) -> dict[int, str]:
+    """``node_seq -> Step Name`` for one schedule, the same tree the Run screen shows.
+
+    A step's row is written to the record only after its last Attempt, so while a step is waiting
+    for an input the store has nothing to look up: the names come from the loaded schedule.
+    """
+    definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule)
+    path = resolve_schedule_path(definition, schedule) if definition else None
+    if path is None:
+        raise SystemExit(f"no Test Definition covers schedule {schedule!r}")
+    host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
+    return {seq: node.name for seq, node in enumerate(host.tree) if not node.is_header}
 
 
 def main() -> int:
@@ -291,9 +313,23 @@ def main() -> int:
         except ValueError:
             inputs[name.strip()] = float(value) if value.replace(".", "", 1).replace("-", "", 1).isdigit() else value
 
-    session = HeadlessRunSession(read_config(Path(args.config)), pdf_choice=lambda _html: PDF_SKIPPED)
+    config = read_config(Path(args.config))
+    names = _step_names(config, args.schedule)
+    session = HeadlessRunSession(config, pdf_choice=lambda _html: PDF_SKIPPED)
     states: list[SessionState] = []
     session.state_changed.connect(states.append)
+    # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
+    # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
+    # the name is looked up in the schedule's tree before the value is supplied.
+    def _supply(node_seq: int, attempt_no: int, index: int) -> None:
+        name = names.get(node_seq)
+        if name in inputs:
+            session.supply_input(node_seq, attempt_no, index, inputs[name])
+        else:
+            print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+
+    if inputs:
+        session.input_asked.connect(_supply)
     # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
     # somebody here, so every pause gets the scripted answer in order.
     answers = list(args.choice)
@@ -320,6 +356,7 @@ def main() -> int:
         "result": run["result"],
         "end_reason": run["end_reason"],
         "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+        "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
         "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
         "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
     }))
@@ -432,8 +469,8 @@ tracks every handle opened this run so leftovers are closed at run end.
 |---|---|---|
 | `TcpDriver` | `TCP` | host/port socket with a background reader and the receive buffer cap |
 | `SerialDriver` | `SERIAL` | a pyserial port, on the same buffered stream as TCP |
-| `UdpDriver` | `UDP` | one datagram per message; `size` truncates and the tail is discarded |
-| `VisaDriver` | `VISA` | a pyvisa resource, read on demand, no background reader |
+| `UdpDriver` | `UDP` | one datagram per message, drained by its own `_reader_loop` on the shared stream base; `size` truncates and the tail is discarded |
+| `VisaDriver` | `VISA` | `_VisaDevice`, not a `_StreamDevice`: read on demand, no background reader |
 
 A driver declares `name`, `fields` (each accepted open param as `(accepted types, required)`), and
 `read_fields`/`write_fields` (usually `READ_FIELDS` and `WRITE_FIELDS` from
@@ -469,9 +506,10 @@ HTML is on disk; if the sandbox cannot be used and the Operator declines, the re
 ## Config and the exception log
 
 `src/ate/config.py` reads one file, once, at launch. There is no per-user override, no environment
-expansion in values, no `~` expansion; `<data>` expands to the platform data directory, and any other
-relative path resolves against the **config file's directory**, not the data directory (absolute paths
-are used as given, and forward slashes work on Windows). `_SCHEMA` is the list of every key the
+expansion in values, no `~` expansion; `<data>` expands to the platform data directory, and every other
+relative path is resolved against the **config file's own directory** (`Config.data_dir` is
+`self.path.parent`, so "the data directory" in the config sense is that directory; absolute paths are
+used as given, and forward slashes work on Windows). `_SCHEMA` is the list of every key the
 validator accepts, and `tests/test_manuals.py` derives the admin manual's key list from it, so a key
 added to the code and not shown in code in the admin manual fails the suite. `_platform_data_dir` is
 the seam the test suite redirects so no test writes to `/var/lib/ate` or `C:\ProgramData`.
@@ -521,10 +559,13 @@ ATE_DOCKER_TESTS=1 pytest -m build -q     # the debian:stable container smokes
 
 Both gates are off by default and marked `build`. `tests/test_release_ci_28c.py` asserts the gate is
 written as documented. Both ran for this manual on the machine that wrote it, with `TMPDIR` pointed at a
-directory on disk: the build gate takes a few minutes, the container gate several. Timings are not
-quoted because they belong to one machine. The container gate needs scratch space on disk: the first
-attempt wrote its artifacts into `/tmp`, which here is a small tmpfs, and died with `No space left on
-device`. CI runs it either way.
+directory on disk, and each number below is a separate run of a separate command: the build gate alone
+gave `2 passed, 2 skipped, 1587 deselected in 223.72 s`, the container gate alone gave
+`1 passed in 533.95 s`, and both flags together gave `4 passed, 1587 deselected in 768.00 s`. They
+belong to one machine in one afternoon and are not comparable with a CI job. The container gate needs
+scratch space on disk: the first attempt wrote its artifacts into `/tmp`, which here is a small tmpfs,
+and died with `No space left on device`. CI runs it either way.
+
 ## The test suite
 
 `conftest.py` is not boilerplate; every fixture in it exists because of a failure.
@@ -651,8 +692,8 @@ Warnings after an abort: `left open at end of run` is a Device the schedule neve
 ## Worked example: adding a Device Type
 
 Run by `tests/test_manuals.py`: it copies `src/` into a temporary directory, puts this file at
-`src/ate/devices/echo.py`, applies exactly the three edits below to
-`src/ate/engine/lua_host.py`, and runs the schedule headless against that copy.
+`src/ate/devices/echo.py`, makes the three edits to `src/ate/engine/lua_host.py` shown below --- the
+import, the register line, the enum member --- and runs the schedule headless against that copy.
 
 ```python:docs/manuals/examples/developer/echo_driver.py
 """The ECHO Device driver: the developer manual's worked example of a Device Type.
@@ -751,8 +792,9 @@ class EchoDriver(Driver):
         device.close()
 ```
 
-Register the driver, and import it the way the other drivers are imported — from its own module, not
-from the package's `__init__`. Both go in `src/ate/engine/lua_host.py`:
+Two of the three edits are in `src/ate/engine/lua_host.py`: import the new module in the style the
+other drivers use (`serial`, `udp` and `visa` are imported from their own modules, not through the
+package's `__init__`), and add the register line beside the others.
 
 ```python
 from ..devices.abort import DeviceAborted
@@ -791,8 +833,8 @@ Then run it. `runner.py` is the headless driver shown above; the schedule is:
 -- manual shows, and runs this schedule headless against that copy.
 --
 -- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
--- a read cut short by `size` being a truncation; and the trace lines a Device produces when
--- deviceTrace.enabled is on.
+-- a read cut short by `size` being a truncation; the trace lines a Device produces when
+-- deviceTrace.enabled is on; and a Step Input answered from the script with --input.
 return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to it, read it back")
   :setStopOnFail(true)
   :setSchedule({
@@ -825,14 +867,23 @@ return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to i
                    "read " .. r.count .. " of 8 bytes", r.count, 4)
         ATE.close(dev)
       end),
+
+    -- A Step Input blocks the worker until it is answered. runner.py answers it from
+    -- --input "Operator reading=42", which is how a headless run gets an Operator.
+    StepParams("Operator reading"):setStepNo("4.")
+      :setInputs({ [1] = { desc = "board current, mA", type = "INTEGER" } })
+      :setAction(function()
+        local mA = ATE.input(1)
+        ATE.report((mA == 42) and Result.PASS or Result.FAIL, "operator read " .. mA .. " mA", mA, 42)
+      end),
   })
 ```
 
 ```bash
-python runner.py /tmp/station/config/config.json "Developer: echo Device"   # PYTHONPATH=<the copy of src>
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
 ```
 
-What the run records, asserted by the test: result `PASS`, `end_reason` `COMPLETED`, all three steps
+What the run records, asserted by the test: result `PASS`, `end_reason` `COMPLETED`, all four steps
 `PASS`, and these lines in the Run log:
 
 - `open ECHO ok (0.3 ms)` — the open line names the Device as `device_label` derives it from the open
@@ -979,10 +1030,13 @@ python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
 - Real hardware behaviour. Every Device test uses a loopback peer, a pseudo-terminal, or pyvisa-py
   behind a socket. No GPIB instrument, real serial adapter or NI-VISA stack has been opened by this
   suite.
-- Real Windows behaviour. The same tests run on `windows-latest` in CI; nothing here was executed on
-  Windows by us. The `icacls` paths, the Inno installer and the frozen Windows bundle are asserted by
-  reading scripts and by `tests/test_release_ci_27c.py`, which checks the workflow's shape, never an
-  installed program.
+- Real Windows behaviour a human watched. The same tests run on `windows-latest` in CI, and the
+  release workflow installed the Windows installer there: at `v0.1.0-rc2` (run 41198438867)
+  `packaging/windows/ate.iss` was compiled and the installer silently installed, run, upgraded and
+  uninstalled on that runner, which is what the admin manual says. None of it happened on this
+  machine and nobody watched a window open. The `icacls` paths, the Inno installer and the frozen
+  Windows bundle are asserted here by reading scripts and by `tests/test_release_ci_27c.py`, which
+  checks the workflow's shape, never an installed program.
 - Any container other than `debian:stable`. `ATE_DOCKER_TESTS=1 pytest -m build` and
   `packaging/linux/docker_smoke.py` do pass here — 1 passed in 533.95 s with `TMPDIR` on a disk-backed
   directory — but the first attempt on this machine's `/tmp` failed with `No space left on device`, and

@@ -1708,9 +1708,10 @@ DEV_COMMANDS_NOT_RUN: dict[str, str] = {
     "python docs/manuals/build.py developer":
         "builds this manual's PDF in Docker with texlive. It is run by hand before anyone reads the PDF; "
         "the suite checks the sources, not the rendered pages",
-    "python runner.py /tmp/station/config/config.json \"Developer: echo Device\"":
-        "executed by test_adding_a_device_type_the_way_the_manual_says_works, which writes this runner "
-        "and calls it with these arguments against a temporary copy of src/ that has the ECHO driver in it",
+    "python runner.py /tmp/station/config/config.json \"Developer: echo Device\" --input \"Operator reading=42\"":
+        "executed by test_adding_a_device_type_the_way_the_manual_says_works, which runs the runner file "
+        "itself against a temporary copy of src/ that has the ECHO driver in it, and answers the "
+        "schedule's Step Input with the same --input the manual shows",
 }
 
 
@@ -1929,9 +1930,14 @@ def _echo_config(tmp: Path, src: Path) -> Path:
 
 
 def _run_echo(tmp: Path, src: Path) -> dict[str, Any]:
-    """Run the worked example against ``src``, in its own process, and return its record."""
+    """Run the worked example against ``src``, in its own process, and return its record.
+
+    The schedule's Step Input has to be answered or the run never ends, so the runner is called
+    with the same ``--input`` the manual shows; the runner exits non-zero unless the session
+    reached FINISHED."""
     proc = subprocess.run(
-        [sys.executable, str(RUNNER), str(_echo_config(tmp, src)), "Developer: echo Device"],
+        [sys.executable, str(RUNNER), str(_echo_config(tmp, src)), "Developer: echo Device",
+         "--input", "Operator reading=42"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=180,
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(src)},
     )
@@ -1959,7 +1965,9 @@ def test_adding_a_device_type_the_way_the_manual_says_works(tmp_path) -> None:
 
     record = _run_echo(tmp_path, src)
     assert record["result"] == "PASS" and record["end_reason"] == "COMPLETED", record
-    assert record["steps"] == {"1.": "PASS", "2.": "PASS", "3.": "PASS"}, record["steps"]
+    assert record["steps"] == {"1.": "PASS", "2.": "PASS", "3.": "PASS", "4.": "PASS"}, record["steps"]
+    # The runner answered the Step Input, which is the only way this run reaches FINISHED.
+    assert record["inputs"] == ["42"], record["inputs"]
     # The trace lines are what the registry wrapped around the new driver, and the WARNING is the
     # Device the schedule never closed being closed by the engine at run end.
     assert any("open ECHO ok" in line for line in record["logs"]), record["logs"]

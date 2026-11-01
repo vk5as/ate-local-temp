@@ -42,9 +42,13 @@ manual fails the suite.
 TCP, SERIAL and UDP share \texttt{devices/stream.py}: a background reader thread, a receive buffer
 capped by \texttt{devices.receiveBufferBytes} (default 16777216 bytes), an overflow that drops the oldest
 bytes and reports \texttt{overflow = true} with one WARNING on the next read
-(\texttt{receive buffer overflow - dropped 4096 oldest byte(s)}), and the failure and warning logic. VISA
-has no background reader, so \texttt{accepts\_\allowbreak{}receive\_\allowbreak{}buffer\_\allowbreak{}bytes} is \texttt{False} for it: there is no
-buffer to cap.
+(\texttt{receive buffer overflow - dropped 4096 oldest byte(s)}), and the failure and warning logic.
+UDP is that same machinery with one change: \texttt{\_UdpDevice} subclasses \texttt{\_StreamDevice} and
+replaces \texttt{\_reader\_loop} (\texttt{udp.py}, "The shared drain loop, except that an empty datagram
+is data"), because the base loop skips a falsy chunk and a zero-length datagram is a real message. VISA
+is not on the stream at all: \texttt{\_VisaDevice} in \texttt{visa.py} is its own class, reads on demand
+and has no reader thread, so \texttt{accepts\_\allowbreak{}receive\_\allowbreak{}buffer\_\allowbreak{}bytes} is \texttt{False} for it --- there
+is no buffer to cap.
 
 \section{Tracing}
 

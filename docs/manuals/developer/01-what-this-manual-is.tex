@@ -52,9 +52,11 @@ ATE_BUILD_TESTS=1 pytest -m build      # builds the real PyInstaller bundle
 ATE_DOCKER_TESTS=1 pytest -m build     # runs the debian:stable container smokes
 \end{lstlisting}
 
-Both are described in chapter~\ref{ch:tests}, and both were run for this manual. The build gate gave
-\texttt{2 passed, 2 skipped, 1587 deselected in 223.72 s}; with both flags set all four gated tests
-ran, \texttt{4 passed, 1587 deselected in 768.00 s}. The container gate needs scratch space: the
+Both are described in chapter~\ref{ch:tests}, and both were run for this manual, each as its own command
+on one machine in one afternoon. The build gate gave \texttt{2 passed, 2 skipped, 1587 deselected in
+223.72 s}; the container gate alone gave \texttt{1 passed in 533.95 s}; with both flags set all four
+gated tests ran, \texttt{4 passed, 1587 deselected in 768.00 s}. The three timings are three runs, not
+three claims about the same run. The container gate needs scratch space: the
 first attempt wrote its artifacts into \texttt{/tmp}, which on this machine is a 7.7\,GB tmpfs, and
 failed with \texttt{No space left on device}; pointing \texttt{TMPDIR} at a directory on the disk is
 what makes it pass. Chapter~\ref{ch:unproven} keeps the honest limits.

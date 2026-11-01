@@ -86,7 +86,10 @@ There is no widget and no display, and the queued signals still deliver, because
 event loop of the receiving thread. Without the \texttt{processEvents} pump nothing arrives: no
 \texttt{state\_changed}, no step recorded, no report. A Stop-on-Fail pause blocks the worker until
 somebody answers it, and in a headless run the script is the only somebody, which is why the runner
-answers every pause from \texttt{--choice}.
+answers every pause from \texttt{--choice}. A blocking Step Input is answered the same way, from
+\texttt{--input STEP NAME=VALUE}: \texttt{input\_asked} says which node is waiting, the Step Name is
+looked up in the schedule's tree, and \texttt{supply\_input} hands the value over. The script exits
+0 only when the session reached \texttt{FINISHED}.
 
 \cando{start a Test Run from a script, answer its Step Inputs, abort it, and read the record back from
 the store.}

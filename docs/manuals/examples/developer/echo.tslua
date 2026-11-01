@@ -6,8 +6,8 @@
 -- manual shows, and runs this schedule headless against that copy.
 --
 -- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
--- a read cut short by `size` being a truncation; and the trace lines a Device produces when
--- deviceTrace.enabled is on.
+-- a read cut short by `size` being a truncation; the trace lines a Device produces when
+-- deviceTrace.enabled is on; and a Step Input answered from the script with --input.
 return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to it, read it back")
   :setStopOnFail(true)
   :setSchedule({
@@ -39,5 +39,14 @@ return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to i
         ATE.report((r.partial and r.count == 4 and r.data == "ABCD") and Result.PASS or Result.FAIL,
                    "read " .. r.count .. " of 8 bytes", r.count, 4)
         ATE.close(dev)
+      end),
+
+    -- A Step Input blocks the worker until it is answered. runner.py answers it from
+    -- --input "Operator reading=42", which is how a headless run gets an Operator.
+    StepParams("Operator reading"):setStepNo("4.")
+      :setInputs({ [1] = { desc = "board current, mA", type = "INTEGER" } })
+      :setAction(function()
+        local mA = ATE.input(1)
+        ATE.report((mA == 42) and Result.PASS or Result.FAIL, "operator read " .. mA .. " mA", mA, 42)
       end),
   })

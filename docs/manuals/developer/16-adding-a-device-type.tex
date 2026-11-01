@@ -2,13 +2,15 @@
 
 This chapter is not a description of a Device Type. It is a change made to this codebase, and every
 line in it was executed: \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} copies \texttt{src/} into a temporary
-directory, puts the driver below at \texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}echo.py}, applies the three edits shown
-here character for character, and runs \texttt{docs/\allowbreak{}manuals/\allowbreak{}examples/\allowbreak{}developer/\allowbreak{}echo.tslua} headless
-against that copy. If the manual and the code ever part company, that test fails.
+directory, puts the driver below at \texttt{src/\allowbreak{}ate/\allowbreak{}devices/\allowbreak{}echo.py}, makes the three edits
+to \texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py} shown here character for character, and runs
+\texttt{docs/\allowbreak{}manuals/\allowbreak{}examples/\allowbreak{}developer/\allowbreak{}echo.tslua} headless against that copy. If the
+manual and the code ever part company, that test fails.
 
 A Device Type has three parts, and all three have to exist: the driver that opens it, the registry
 line that makes the name mean that driver, and the enum member that lets a schedule write the name
-down. Two of them are in the same file.
+down. The driver is a new file; the other two, plus the import that makes the driver visible, are
+three edits in \texttt{lua\_\allowbreak{}host.py}.
 
 \section{Step 1: the driver}
 
@@ -84,8 +86,8 @@ member}.
 \section{Step 4: run it}
 
 The schedule below is the one the test runs. It writes a terminator, leaves a Device open at the end
-of the run, and cuts a read with \texttt{size} --- three things a driver has to get right, and each
-of them shows up in the record.
+of the run, cuts a read with \texttt{size} and answers one Step Input from the command line --- four
+things a driver and the session have to get right, and each of them shows up in the record.
 
 \lstinputlisting[language=ATELua, caption={\texttt{docs/manuals/examples/developer/echo.tslua}}]{../examples/developer/echo.tslua}
 
@@ -94,13 +96,14 @@ chapter~\ref{ch:session} in \texttt{runner.py} and start it with the copy of \te
 \texttt{PYTHONPATH}:
 
 \begin{lstlisting}[language=ATEShell]
-python runner.py /tmp/station/config/config.json "Developer: echo Device"   # PYTHONPATH=<the copy of src>
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
 \end{lstlisting}
 
 \section{What the run proves}
 
-The test asserts the run ends \texttt{PASS} / \texttt{COMPLETED} with all three steps
-\texttt{PASS}, and then reads the traces the engine recorded:
+The test asserts the run ends \texttt{PASS} / \texttt{COMPLETED} with all four steps
+\texttt{PASS}, the Step Input recorded as \texttt{42}, and then reads the traces the engine
+recorded:
 
 \begingroup\small
 \begin{longtable}{p{5.4cm} p{7.6cm}}
