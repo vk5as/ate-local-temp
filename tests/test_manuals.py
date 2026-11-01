@@ -21,6 +21,7 @@ and 34c (developer, modules and seams) can add their own entries without touchin
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib
 import importlib.util
@@ -45,9 +46,11 @@ import pytest
 
 from ate.devices.registry import Driver
 from ate.engine.lua_host import _AteTable, _ENUMS, _RUN_FIELDS, _ScheduleParams, _StepParams
+from ate.engine.run_engine import RunEngine
+from ate.run_session.headless import HeadlessRunSession
 
 from examples.harness.peers import Peers
-from examples.harness.run_examples import dead_port, run_schedule, write_config
+from examples.harness.run_examples import bench_env, dead_port, run_schedule, write_config
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = ROOT / "docs/manuals/examples/test-writer"
@@ -103,12 +106,18 @@ ADMIN = Manual(
     markdown=MANUALS_DIR / "llm/admin.md",
 )
 
-#: Every manual this packet builds. 34c adds "developer" here, and a group of names for it in
-#: COVERAGE below.
-MANUALS: dict[str, Manual] = {"test-writer": TEST_WRITER, "admin": ADMIN}
+DEVELOPER = Manual(
+    name="developer",
+    tex_dir=MANUALS_DIR / "developer",
+    markdown=MANUALS_DIR / "llm/developer.md",
+)
+
+#: Every manual packet 34 built. Each has its own groups of code-derived names in COVERAGE below.
+MANUALS: dict[str, Manual] = {"test-writer": TEST_WRITER, "admin": ADMIN, "developer": DEVELOPER}
 
 #: The examples directory each manual is written against.
-MANUAL_EXAMPLES: dict[str, Path] = {"test-writer": EXAMPLES_DIR}
+DEV_EXAMPLES_DIR = MANUALS_DIR / "examples/developer"
+MANUAL_EXAMPLES: dict[str, Path] = {"test-writer": EXAMPLES_DIR, "developer": DEV_EXAMPLES_DIR}
 
 
 # --- Names the code defines ---------------------------------------------------------------
@@ -216,8 +225,69 @@ def cli_names() -> set[str]:
     return names - {"-h"}  # `--help` is documented; its short form is the same flag
 
 
-#: A group of code-derived names, and the manual each must appear in. 34c adds module and seam
-#: names for the developer manual. Same shape, same failure.
+def ate_modules() -> set[str]:
+    """Every module under ``src/ate``, as the file path a reader would open.
+
+    Walked from the package itself with :func:`pkgutil.walk_packages`, so a module added to the
+    source is a module the developer manuals must name. A package is named by the file that makes it
+    a package (``src/ate/devices/__init__.py``), which is how the manual's module table lists it.
+    """
+    import ate
+
+    names: set[str] = set()
+    for info in pkgutil.walk_packages(ate.__path__, "ate."):
+        if info.name.endswith(".__init__"):
+            continue
+        dotted = info.name[len("ate."):] if info.name != "ate" else ""
+        path = "src/ate/" + dotted.replace(".", "/")
+        if info.name == "ate":
+            names.add("src/ate/__init__.py")
+            continue
+        # A package is named by the file that makes it a package: `src/ate/devices/__init__.py`.
+        names.add(path + "/__init__.py" if info.ispkg else path + ".py")
+    names.add("src/ate/__init__.py")
+    return names
+
+
+def declared_signals(cls: type) -> set[str]:
+    """The signals a class declares itself, not the ones Qt's ``QObject`` already has.
+
+    ``vars(cls)`` is the class's own namespace, so ``finished``, ``started`` and ``destroyed`` -
+    which every ``QThread`` and ``QObject`` carries - are not counted as ATE's signals. Those are
+    real and used, but a manual that stops naming them is not behind the code.
+    """
+    from PySide6.QtCore import Signal
+
+    return {name for name, member in vars(cls).items() if isinstance(member, Signal)}
+
+
+def schema_tables() -> set[str]:
+    """Every table the Test Run record has, read from the schema's own metadata."""
+    from ate.storage.schema import metadata
+
+    return set(metadata.tables)
+
+
+def device_drivers() -> set[str]:
+    """Every driver class, and the Device Type name it serves.
+
+    Derived from the classes that subclass :class:`Driver`, so the Device Type a driver declares and
+    the class that implements it both have to appear in the manuals.
+    """
+    import ate.devices
+
+    names: set[str] = set()
+    for info in pkgutil.iter_modules(ate.devices.__path__):
+        module = importlib.import_module(f"ate.devices.{info.name}")
+        for member in vars(module).values():
+            if isinstance(member, type) and issubclass(member, Driver) and member is not Driver:
+                names.add(member.name)
+                names.add(member.__name__)
+    return names
+
+
+#: A group of code-derived names, and the manual each must appear in. 34c adds the developer manual's
+#: modules, signals, tables and drivers to the same table. Same shape, same failure.
 COVERAGE: list[tuple[str, str, Callable[[], set[str]]]] = [
     ("test-writer", "ATE table functions", ate_table_functions),
     ("test-writer", "enum tables and their members", enum_names),
@@ -226,6 +296,11 @@ COVERAGE: list[tuple[str, str, Callable[[], set[str]]]] = [
     ("test-writer", "ATE.run fields", run_fields),
     ("admin", "config keys the validator reads", config_keys),
     ("admin", "ate subcommands and flags", cli_names),
+    ("developer", "every module under src/ate", ate_modules),
+    ("developer", "RunEngine signals", lambda: declared_signals(RunEngine)),
+    ("developer", "HeadlessRunSession signals", lambda: declared_signals(HeadlessRunSession)),
+    ("developer", "every table in the Test Run record", schema_tables),
+    ("developer", "Device drivers and the Device Types they serve", device_drivers),
 ]
 
 
@@ -290,30 +365,41 @@ def test_the_agent_manual_names_every_key_and_command_on_its_own() -> None:
 
 # --- Every command the admin manual shows is run, or explained --------------------------
 
-#: A listing in the admin manual whose lines are commands an administrator types.
+#: A listing in a manual whose lines are commands a reader types: the LaTeX form and the Markdown form.
 SHELL_LISTING = re.compile(r"\\begin\{lstlisting\}\[language=ATEShell\](.*?)\\end\{lstlisting\}", re.S)
+MARKDOWN_SHELL = re.compile(r"```bash\n(.*?)```", re.S)
 
-#: A listing line is a command when it starts with one of these, or with an artifact name such as
-#: `ate-1.2.3-windows-x64-setup.exe`. Everything else in a listing is a message the machine printed.
-COMMAND_TOKENS = {"ate", "sudo", "apt-get", "pipx", "python", "./install.sh"}
+#: A listing line is a command when it starts with one of these, with an environment assignment such
+#: as ``QT_QPA_PLATFORM=offscreen``, or with an artifact name such as `ate-1.2.3-windows-x64-setup.exe`.
+#: Everything else in a listing is a message the machine printed.
+COMMAND_TOKENS = {"ate", "sudo", "apt-get", "pipx", "python", "pytest", "./install.sh"}
 
 
 def shell_commands(manual: Manual) -> list[str]:
-    """Every command line in a manual's ATEShell listings, comment stripped.
+    """Every command line in a manual's listings, LaTeX and Markdown, comment stripped.
 
     ``ate setup: running unprivileged ...`` looks like a command and is not: it is what setup
     printed. A token ending in a colon at the second position is the output of the command named
     first."""
-    commands: list[str] = []
+    lines: list[str] = []
     for tex in manual.tex_parts():
         for block in SHELL_LISTING.findall(tex.read_text(encoding="utf-8")):
-            for line in (line.split("#", 1)[0].strip() for line in block.splitlines()):
-                tokens = line.split()
-                if not tokens or (tokens[0] not in COMMAND_TOKENS and not tokens[0].startswith("ate-")):
-                    continue
-                if len(tokens) > 1 and tokens[1].endswith(":"):
-                    continue
-                commands.append(line)
+            lines.extend(block.splitlines())
+    if manual.markdown.exists():
+        for block in MARKDOWN_SHELL.findall(manual.markdown.read_text(encoding="utf-8")):
+            lines.extend(block.splitlines())
+    commands: list[str] = []
+    for line in (line.split("#", 1)[0].strip() for line in lines):
+        tokens = line.split()
+        # An environment assignment in front of the command is part of the command, not the command:
+        # `QT_QPA_PLATFORM=offscreen python -m pytest` is the pytest command with the platform pinned.
+        while tokens and "=" in tokens[0] and not tokens[0].startswith("ate-"):
+            tokens = tokens[1:]
+        if not tokens or (tokens[0] not in COMMAND_TOKENS and not tokens[0].startswith("ate-")):
+            continue
+        if len(tokens) > 1 and tokens[1].endswith(":"):
+            continue
+        commands.append(line)
     return commands
 
 
@@ -373,6 +459,35 @@ COMMANDS_NOT_RUN: dict[str, str] = {
     "ate _pdf report.html report.pdf --paper A4":
         "not for humans to run, as the manual says; it is started by the report writer, and its "
         "messages are checked against src/ate/report/pdf.py below",
+    # The Markdown manual writes its commands with placeholders (DIR, PATH, <file.atedef>) so an
+    # agent can adapt them; each is the same command as one executed above, or a command that only
+    # the packager or CI can run. Listing them keeps the accounting honest for both manuals.
+    "ate --config PATH":
+        "the placeholder form of `ate --config <file> db status`, which is run above",
+    "ate setup --root DIR":
+        "the placeholder form of the `--root` line above, which is run in a temporary Station",
+    "ate setup --data-dir DIR --config-dir DIR":
+        "run by tests/test_cli_setup.py, which points both directories at a temporary directory",
+    "ate setup --no-permissions":
+        "run, as part of the `--root` line above",
+    "ate db status [PATH]":
+        "both forms are run above: `ate db status` on a prepared database and `ate db status` on a "
+        "missing one",
+    "ate db migrate [PATH]":
+        "the placeholder form of `ate db migrate /tmp/station/data/ate.db --yes`, which is run above",
+    "ate definition update <file.atedef>":
+        "the placeholder form of the example Media Release's `release.atedef` update run above",
+    "ate _pdf <html> <pdf> --paper A4|Letter [--unsandboxed]":
+        "the same helper as above, written with placeholders; started by the report writer and "
+        "asserted in tests/test_pdf_sandbox_choice_30d.py",
+    "ate _selftest --scan DIR [--config PATH]":
+        "run above against the example release; the placeholder form is the same command",
+    "python docs/manuals/build.py admin":
+        "builds the admin manual's PDF in Docker with texlive. It is run by hand before anyone reads "
+        "the PDF; the suite checks the sources, not the rendered pages",
+    "QT_QPA_PLATFORM=offscreen python -m pytest tests/test_manuals.py -q":
+        "the suite cannot run itself from inside a test. It is the command CI runs (the 'Run tests' "
+        "step of .github/workflows/ci.yml)",
 }
 
 
@@ -1157,3 +1272,482 @@ def test_every_example_is_included_by_the_latex_manual() -> None:
         f"the LaTeX manual includes {sorted(str(p) for p in included - expected)} that are not examples, "
         f"and omits {sorted(str(p) for p in expected - included)}"
     )
+
+# --- Packet 34c: the developer manuals are held to the code ------------------------------
+
+#: A worked example the manual shows, and the file on disk it came from. The LaTeX manual includes
+#: each with \lstinputlisting and the Markdown manual quotes it in a fenced block; both are compared
+#: with the file below, so a listing cannot drift from the code it shows.
+DEV_EXAMPLE_FILES = sorted(
+    p.relative_to(ROOT).as_posix()
+    for p in DEV_EXAMPLES_DIR.rglob("*")
+    if p.suffix in (".tslua", ".py")
+)
+
+#: The three edits chapter 16 tells a developer to make to ``src/ate/engine/lua_host.py``. The test
+#: applies exactly these strings, so the text in the manual is the change that is proven.
+DEVICE_EDITS = {
+    "from ..devices.abort import DeviceAborted": (
+        "from ..devices.abort import DeviceAborted\n"
+        "from ..devices.echo import EchoDriver  # the developer manual's worked example"
+    ),
+    '        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader':
+        '        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader\n'
+        '        self._devices.register("ECHO", EchoDriver)  # the developer manual\'s worked example',
+    '    "DeviceType": {\n        "SERIAL": "SERIAL",': (
+        '    "DeviceType": {\n'
+        '        "ECHO": "ECHO",  # the developer manual\'s worked example\n'
+        '        "SERIAL": "SERIAL",'
+    ),
+}
+
+#: Paths a manual names that do not exist in the repository, with why that is allowed. A path in a
+#: worked example is created by the test that runs the example, not by the checkout.
+MANUAL_PATHS_NOT_ON_DISK = {
+    "src/ate/devices/echo.py": "the worked example's driver: tests/test_manuals.py copies "
+                               "docs/manuals/examples/developer/echo_driver.py into a temporary copy "
+                               "of src/ under exactly this name and runs it"
+}
+
+#: A command a developer is shown running, with the exit code and the output the manual claims.
+#: ``{station}``, ``{db}``, ``{dist}`` and ``{out}`` are filled from a fixture's temporary directory.
+DEV_COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
+    ("python packaging/windows/build_installer.py --dry-run --dist dist",
+     ["packaging/windows/build_installer.py", "--dry-run", "--dist", "{dist}"], 0, "iscc", "{repo}"),
+    ("python -m build --wheel --no-isolation -o dist",
+     ["-m", "build", "--wheel", "--no-isolation", "-o", "{dist}"], 0, "Successfully built", "{repo}"),
+    ("QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples",
+     ["-m", "examples.harness.run_examples"], 0, "ran 13 headless runs", "{repo}"),
+    ("python -c \"import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())\"",
+     ["-c", "import sqlite3; rows=sqlite3.connect('{db}').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"],
+     0, "", "{repo}"),
+    ("python -m ate db migrate /tmp/station/data/ate.db --yes",
+     ["-m", "ate", "db", "migrate", "{db}", "--yes"], 0, "schema version", "{repo}"),
+]
+
+#: Commands the developer manual shows that this machine cannot run, and what covers them instead.
+#: A command with no test and no reason is a bug in this file.
+DEV_COMMANDS_NOT_RUN: dict[str, str] = {
+    "QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider":
+        "the suite cannot run itself from inside a test. This is exactly the command CI runs (the "
+        "'Run tests' step of .github/workflows/ci.yml), and the counts quoted in chapter 1 come from "
+        "running it: 1571 passed, 5 skipped on this machine",
+    "ATE_BUILD_TESTS=1 pytest -m build":
+        "by design not part of a normal run: it builds a real PyInstaller bundle, which takes minutes. "
+        "It was run for this manual (1 passed, 46 deselected in 40.81 s). tests/test_pyinstaller_build_27a.py "
+        "is the test it runs, and it loads packaging/build_pyinstaller.py itself",
+    "ATE_DOCKER_TESTS=1 pytest -m build":
+        "needs Docker and a network inside a debian:stable container and takes minutes. It was attempted "
+        "while writing this manual and did not complete on this machine (the container ran out of "
+        "scratch space); chapter 19 says so plainly rather than claiming it passed",
+    "ATE_BUILD_TESTS=1 pytest -m build -q":
+        "the same gate as above, with the quiet flag; the -q is what the manual tells a developer to "
+        "type and the same command was run without it",
+    "ATE_DOCKER_TESTS=1 pytest -m build -q":
+        "same as above",
+    "python packaging/build_pyinstaller.py --smoke":
+        "builds a frozen bundle. tests/test_pyinstaller_build_27a.py (the ATE_BUILD_TESTS gate) calls "
+        "this same script's build_bundle() and verify_bundle()",
+    "python packaging/build_pyinstaller.py --verify dist/ate":
+        "needs a built bundle. tests/test_linux_packages_28b.py runs verify_bundle() against a real "
+        "bundle and against a deliberately incomplete one, so the gate itself is tested",
+    "python docs/manuals/build.py developer":
+        "builds this manual's PDF in Docker with texlive. It is run by hand before anyone reads the PDF; "
+        "the suite checks the sources, not the rendered pages",
+    "python runner.py /tmp/station/config/config.json \"Developer: echo Device\"":
+        "executed by test_adding_a_device_type_the_way_the_manual_says_works, which writes this runner "
+        "and calls it with these arguments against a temporary copy of src/ that has the ECHO driver in it",
+}
+
+
+def _fill_dev(placeholder: str, station: Path) -> str:
+    """The temporary directories a developer-manual command line refers to."""
+    return (
+        placeholder.replace("{repo}", str(ROOT))
+        .replace("{station}", str(station))
+        .replace("{db}", str(station / "data" / "ate.db"))
+        .replace("{dist}", str(station / "dist"))
+        .replace("{out}", str(station / "out"))
+    )
+
+
+def test_the_developer_manual_shows_no_command_that_is_never_run() -> None:
+    """Every command in the developer manual is run by the suite or explained.
+
+    The same rule as the admin manual, the same shape: add a line to a listing without adding it to one
+    of the two tables and this fails."""
+    shown = set(shell_commands(MANUALS["developer"]))
+    accounted = {line for line, *_ in DEV_COMMANDS_RUN} | set(DEV_COMMANDS_NOT_RUN)
+    unaccounted = sorted(shown - accounted)
+    assert not unaccounted, f"the developer manual shows commands no test runs or explains: {unaccounted}"
+    stale = sorted(({line for line, *_ in DEV_COMMANDS_RUN} | set(DEV_COMMANDS_NOT_RUN)) - shown)
+    assert not stale, f"reasons kept for commands the manual no longer prints: {stale}"
+
+
+@pytest.mark.parametrize("line, argv, expected, wanted, cwd", DEV_COMMANDS_RUN)
+def test_a_command_in_the_developer_manual_runs(line, argv, expected, wanted, cwd, station) -> None:
+    """Run one command the developer manual shows and check what it claims."""
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT / "src")}
+    proc = subprocess.run(
+        [sys.executable, *[_fill_dev(a, station) for a in argv]],
+        cwd=_fill_dev(cwd, station),
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env,
+    )
+    assert proc.returncode == expected, f"{line}: exit {proc.returncode}\n{proc.stderr[-500:]}"
+    if wanted:
+        assert wanted in proc.stdout + proc.stderr, f"{line}: output was {(proc.stdout + proc.stderr)[-300:]!r}"
+
+
+def test_the_failed_run_query_in_the_manual_reads_a_run_that_happened(station) -> None:
+    """The query chapter 15 gives is run against a real Test Run, not against an empty database.
+
+    ``examples/harness`` runs the example schedule into the fixture's Station database, then the exact
+    command line from the manual is executed as its own process."""
+    config = write_config(station / "data")  # the fixture's Station database, where {db} points
+    with bench_env(Peers()):
+        record = run_schedule(config, "Example basics", inputs={"Operator input": 1.5})
+    assert record["run"]["result"] == "PASS", record["run"]
+    line, argv, expected, wanted, cwd = next(
+        entry for entry in DEV_COMMANDS_RUN if entry[0].startswith("python -c \"import sqlite3")
+    )
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    proc = subprocess.run(
+        [sys.executable, *[_fill_dev(a, station) for a in argv]],
+        cwd=_fill_dev(cwd, station), capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == expected, proc.stderr[-500:]
+    rows = ast.literal_eval(proc.stdout.strip())
+    assert any(result == "PASS" for _number, result, _attempts in rows), rows
+    assert wanted in proc.stdout, proc.stdout
+
+
+def test_the_developer_coverage_check_can_fail() -> None:
+    """Prove the module, signal, table and driver checks bite, one each.
+
+    Each group is derived from the code, so a manual that quietly drops a name is caught. This test
+    removes one name from the manual's own text and shows the derivation reports it as missing."""
+    texts = MANUALS["developer"].texts()
+    for names, dropped in (
+        (ate_modules(), "src/ate/devices/stream.py"),
+        (declared_signals(RunEngine), "run_uuid_reported"),
+        (declared_signals(HeadlessRunSession), "report_written"),
+        (schema_tables(), "schedule_instance"),
+        (device_drivers(), "VisaDriver"),
+    ):
+        assert dropped in names, f"the derivation no longer contains {dropped}"
+        stripped = [(label, text.replace(dropped, "somethingElse")) for label, text in texts]
+        assert missing_from(stripped, names) == [dropped], f"removing {dropped} must show up as missing"
+        assert not missing_from(texts, names), f"the developer manual as written is missing {sorted(missing_from(texts, names))}"
+
+
+def test_the_developer_agent_manual_names_everything_on_its_own() -> None:
+    """An agent given only ``docs/manuals/llm/developer.md`` must not need the PDF."""
+    agent = [(label, text) for label, text in MANUALS["developer"].texts() if label.endswith(".md")]
+    names = (
+        ate_modules()
+        | declared_signals(RunEngine)
+        | declared_signals(HeadlessRunSession)
+        | schema_tables()
+        | device_drivers()
+    )
+    gone = missing_from(agent, names)
+    assert not gone, f"the developer agent manual alone is missing: {', '.join(gone)}"
+
+
+#: A dotted name in the manuals is a thing the code has. `ate db`, `ate _pdf` and `ate _selftest` are
+#: subcommands, not attributes, and `ate.spec` and `ate.iss` are file names, not symbols.
+_NOT_SYMBOLS = {"ate.db", "ate._pdf", "ate._selftest", "ate._version", "ate.spec", "ate.iss"}
+
+SRC_PATH = re.compile(r"src/[\w/._-]+\.(?:py|lua|j2|spec|sty|tex|md)")
+# A name ends at an identifier, not at a sentence's full stop: `ate.devices.` is read as `ate.devices`.
+QUALIFIED = re.compile(r"(?<![\w/.-])ate\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def _resolves(name: str) -> bool:
+    """Whether ``ate.a.b.c`` names a real module, class, function or constant."""
+    parts = name.split(".")
+    for cut in range(len(parts), 0, -1):
+        module = ".".join(parts[:cut])
+        try:
+            obj = importlib.import_module(module)
+        except ImportError:
+            continue
+        for attr in parts[cut:]:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                return False
+        return True
+    return False
+
+
+def test_every_path_and_dotted_name_in_the_developer_manuals_exists() -> None:
+    """Every ``src/...`` path and every ``ate.x.y`` in the developer manuals is real.
+
+    A path that does not exist, or a name the module does not have, is a manual that has drifted from
+    the code. Checked in both the LaTeX chapters and the Markdown manual; the only paths allowed to be
+    absent are the ones a worked example creates, listed with their reason."""
+    missing_paths: list[str] = []
+    missing_names: list[str] = []
+    for label, text in MANUALS["developer"].texts():
+        for path in set(SRC_PATH.findall(text)):
+            if path in MANUAL_PATHS_NOT_ON_DISK:
+                continue
+            if not (ROOT / path).exists():
+                missing_paths.append(f"{label}: {path}")
+        for name in set(QUALIFIED.findall(text)):
+            if name in _NOT_SYMBOLS or _resolves(name):
+                continue
+            missing_names.append(f"{label}: {name}")
+    assert not missing_paths, f"the developer manual names files that do not exist: {sorted(missing_paths)}"
+    assert not missing_names, f"the developer manual names things the code does not have: {sorted(missing_names)}"
+
+
+def test_the_worked_examples_are_quoted_exactly() -> None:
+    """The driver and schedule the manual shows are byte-for-byte the files the test runs."""
+    markdown = DEVELOPER.markdown.read_text(encoding="utf-8")
+    blocks = re.findall(r"```(?:python|lua):(\S+)\n(.*?)```", markdown, re.S)
+    quoted = {path: body for path, body in blocks}
+    expected = {
+        path: Path(path).read_text(encoding="utf-8") for path in DEV_EXAMPLE_FILES
+    }
+    assert set(quoted) == set(expected), (
+        f"developer.md quotes {sorted(set(quoted) - set(expected))} and omits {sorted(set(expected) - set(quoted))}"
+    )
+    for path, body in expected.items():
+        assert quoted[path] == body, f"{path}: the listing in developer.md differs from the file on disk"
+
+    tex = plain("\n".join(p.read_text(encoding="utf-8") for p in DEVELOPER.tex_parts()))
+    for path in expected:
+        assert path in tex, f"the LaTeX manual never includes {path}"
+
+
+#: The script a developer uses to drive one headless run: chapter 16 shows it, and the worked-example
+#: test below runs it against a temporary copy of the source.
+RUNNER = r"""
+import json, sys, time
+from PySide6.QtCore import QCoreApplication
+from ate.config import read_config
+from ate.report.pdf import PDF_SKIPPED
+from ate.run_session.headless import HeadlessRunSession, SessionState
+
+config, schedule = sys.argv[1], sys.argv[2]
+session = HeadlessRunSession(read_config(config), pdf_choice=lambda _html: PDF_SKIPPED)
+states = []
+session.state_changed.connect(states.append)
+# A Stop-on-Fail pause blocks until somebody answers, and a headless driver has to answer it: the
+# worked example answers CONTINUE so the run runs to its end and every step is recorded.
+session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose("CONTINUE"))
+session.set_operator("Manual worked example")
+session.set_project("Developer manual")
+session.set_uut_type("Example board")
+session.set_uut_serial("DEV-34C")
+session.select_schedule(schedule)
+session.start()
+
+app = QCoreApplication.instance() or QCoreApplication([])
+deadline = time.monotonic() + 25.0
+while SessionState.FINISHED not in states and time.monotonic() < deadline:
+    app.processEvents()
+    time.sleep(0.02)
+
+run = session.store.get_test_run(session.run_uuid)
+print(json.dumps({
+    "result": run["result"],
+    "end_reason": run["end_reason"],
+    "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+    "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
+    "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+}))
+session.close()
+"""
+
+
+def _copy_src(dest: Path) -> Path:
+    """A working copy of ``src/``, without the pycache the checkout may have accumulated."""
+    shutil.copytree(ROOT / "src", dest, ignore=shutil.ignore_patterns("__pycache__"))
+    return dest
+
+
+def _echo_release(tmp: Path) -> Path:
+    """The Media Release chapter 16 builds around the worked example, checksummed as ATE requires."""
+    release = tmp / "release"
+    release.mkdir()
+    shutil.copyfile(DEV_EXAMPLES_DIR / "echo.tslua", release / "echo.tslua")
+    definition = {
+        "format": 1,
+        "mediaNumber": "MR-DEV-34C",
+        "name": "Developer manual worked example",
+        "version": "1.0.0",
+        "files": [{"path": "echo.tslua", "sha256": hashlib.sha256((release / "echo.tslua").read_bytes()).hexdigest()}],
+    }
+    (release / "developer.atedef").write_text(json.dumps(definition), encoding="utf-8", newline="\n")
+    return release
+
+
+def _echo_config(tmp: Path, src: Path) -> Path:
+    """A config for one headless run of the worked example, with Device tracing on."""
+    config = tmp / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "station": {"name": "DEV-34C", "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+                "database": {"type": "sqlite", "path": str(tmp / "ate.db")},
+                "reports": {"directory": str(tmp / "reports")},
+                "testDefinitions": {"directories": [str(_echo_release(tmp))]},
+                "log": {"directory": str(tmp / "logs")},
+                "deviceTrace": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    (tmp / "runner.py").write_text(RUNNER, encoding="utf-8", newline="\n")
+    return config
+
+
+def _run_echo(tmp: Path, src: Path) -> dict[str, Any]:
+    """Run the worked example against ``src``, in its own process, and return its record."""
+    proc = subprocess.run(
+        [sys.executable, str(tmp / "runner.py"), str(_echo_config(tmp, src)), "Developer: echo Device"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(src)},
+    )
+    assert proc.returncode == 0, f"the worked example failed: {proc.stderr[-800:]}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_adding_a_device_type_the_way_the_manual_says_works(tmp_path) -> None:
+    """Chapter 16's four steps, applied to a copy of the source, really produce a Device Type.
+
+    The driver and the schedule are the manual's own files; the edits are the strings printed in the
+    manual. The run then opens the Device, writes to it, reads it back, cuts a read with ``size`` and
+    leaves one Device open when the run ends."""
+    src = _copy_src(tmp_path / "src")
+    (src / "ate/devices/echo.py").write_text(
+        (DEV_EXAMPLES_DIR / "echo_driver.py").read_text(encoding="utf-8"),
+        encoding="utf-8", newline="\n",
+    )
+    host = src / "ate/engine/lua_host.py"
+    text = host.read_text(encoding="utf-8")
+    for old, new in DEVICE_EDITS.items():
+        assert old in text, f"the manual's edit no longer applies: {old!r} is not in lua_host.py"
+        text = text.replace(old, new, 1)
+    host.write_text(text, encoding="utf-8", newline="\n")
+
+    record = _run_echo(tmp_path, src)
+    assert record["result"] == "PASS" and record["end_reason"] == "COMPLETED", record
+    assert record["steps"] == {"1.": "PASS", "2.": "PASS", "3.": "PASS"}, record["steps"]
+    # The trace lines are what the registry wrapped around the new driver, and the WARNING is the
+    # Device the schedule never closed being closed by the engine at run end.
+    assert any("open ECHO ok" in line for line in record["logs"]), record["logs"]
+    assert any('write ECHO manual-example 6 bytes "hello\\n"' in line for line in record["logs"]), record["logs"]
+    assert any('read ECHO sized 4 bytes "ABCD" partial' in line for line in record["logs"]), record["logs"]
+    assert any("left open at end of run" in line for line in record["logs"]), record["logs"]
+    assert any("truncated" in line for line in record["logs"]), record["logs"]
+
+    # A Device Type the registry has never heard of is refused, which is what the register line is for.
+    unknown = subprocess.run(
+        [sys.executable, "-c", "from ate.devices.registry import DeviceRegistry; DeviceRegistry().open_device('ECHOX', {})"],
+        capture_output=True, text=True, timeout=60, env={**os.environ, "PYTHONPATH": str(src)},
+    )
+    assert "unknown DeviceType 'ECHOX'" in unknown.stderr, unknown.stderr
+
+
+def test_a_device_type_registered_but_not_in_the_enum_is_nil(tmp_path) -> None:
+    """With no edit at all, ``DeviceType.ECHO`` is nil and the step records an ERROR.
+
+    This is the first failure a developer meets: the name does not exist, so the schedule passes nil
+    and :func:`_device_type_name` refuses it."""
+    src = _copy_src(tmp_path / "src")
+    record = _run_echo(tmp_path, src)
+    assert record["result"] == "FAIL", f"an unknown Device Type should fail the run, got {record}"
+    assert "deviceType must be a DeviceType enum member" in "\n".join(record["logs"]), record["logs"]
+
+
+def test_an_enum_member_without_a_register_line_is_refused_by_the_registry(tmp_path) -> None:
+    """The enum member gives the schedule a name; without the register line nothing can open it.
+
+    Chapter 16's warning, executed: adding only the enum entry fails the run with
+    ``unknown DeviceType 'ECHO'``, from :meth:`DeviceRegistry.open_device`."""
+    src = _copy_src(tmp_path / "src")
+    host = src / "ate/engine/lua_host.py"
+    host.write_text(
+        host.read_text(encoding="utf-8").replace(
+            '    "DeviceType": {\n        "SERIAL": "SERIAL",',
+            '    "DeviceType": {\n        "ECHO": "ECHO",  # the developer manual\'s worked example\n        "SERIAL": "SERIAL",',
+            1,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    record = _run_echo(tmp_path, src)
+    assert record["result"] == "FAIL", f"an unregistered Device Type should fail the run, got {record}"
+    assert "unknown DeviceType 'ECHO'" in "\n".join(record["logs"]), record["logs"]
+
+
+#: The version bump and the table chapter 17 shows, applied to a copy of schema.py.
+SCHEMA_EDITS = {
+    "SCHEMA_VERSION = 5": "SCHEMA_VERSION = 6",
+    "schedule_instance = Table(": (
+        "review_note = Table(\n"
+        '    "review_note",\n'
+        "    metadata,\n"
+        '    Column("run_uuid", Text, primary_key=True),\n'
+        '    Column("seq", Integer, primary_key=True),  # the composite key, as every other run table\n'
+        '    Column("text", Text, nullable=True),\n'
+        '    Column("at", Text, nullable=True),\n'
+        ")\n\n"
+        "schedule_instance = Table("
+    ),
+}
+
+
+def test_adding_a_schema_version_the_way_the_manual_says_works(tmp_path) -> None:
+    """Chapter 17, run for real: migrate a version 5 database with a copy of the code that declares a
+    sixth version and one more table, then prove the shipped code refuses what it cannot read."""
+    src = _copy_src(tmp_path / "src")
+    schema = src / "ate/storage/schema.py"
+    text = schema.read_text(encoding="utf-8")
+    for old, new in SCHEMA_EDITS.items():
+        assert old in text, f"the manual's edit no longer applies: {old!r} is not in schema.py"
+        text = text.replace(old, new, 1)
+    schema.write_text(text, encoding="utf-8", newline="\n")
+
+    db = tmp_path / "ate.db"
+
+    def migrate(python_src: Path) -> tuple[int, str]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "ate", "db", "migrate", str(db), "--yes"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": str(python_src)},
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    code, out = migrate(ROOT / "src")
+    assert code == 0 and "schema version 5" in out, out
+    conn = sqlite3.connect(db)
+    try:
+        before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+    assert "schedule_instance" in before, sorted(before)
+
+    code, out = migrate(src)
+    assert code == 0 and "schema version 6" in out, out
+    conn = sqlite3.connect(db)
+    try:
+        after = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "review_note" in after, sorted(after)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    finally:
+        conn.close()
+    # A migration adds; it never rewrites what is already there.
+    assert before <= after, sorted(before ^ after)
+
+    # The shipped code refuses a database it cannot read, which is why the version check exists.
+    code, out = migrate(ROOT / "src")
+    assert code == 1 and "this ATE is too old for" in out, out
