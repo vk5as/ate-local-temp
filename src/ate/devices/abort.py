@@ -93,6 +93,8 @@ def run_abortable(
         if call.outcome is not None:
             break
         if not call.thread.is_alive():
+            if call.outcome is not None:  # it finished between the check above and this one
+                break
             # The helper is gone and recorded nothing: there is no outcome to wait for and no abort
             # to raise, so waiting would be a wait on a thread that can never finish.
             raise RuntimeError(f"the Device call thread ended without an outcome: {call.thread.name}")
@@ -144,7 +146,8 @@ class AbortableCalls:
             # Deliberately unbounded: the call this waits for ends on its own timeout (see the packet's
             # table of what an abort cannot interrupt), and joining a bounded slice would mean either
             # waiting again or closing across a call still using the transport. The thread is a daemon,
-            # so it cannot keep the process alive: the close is late, never lost, never wrong.
+            # so it cannot keep the process alive: the close is late, and if the process exits first the OS
+            # releases the handle.
             thread.join()
             try:
                 close()
