@@ -219,9 +219,11 @@ def prepare_station(
             raise SetupError(f"cannot create the directory for the database {db_path}: {exc}") from exc
     print(f"database to migrate: {db_path} ({why})")
     if db_path.parent != data_dir:
-        print(f"the database is not under the data directory {data_dir}: the permission pass runs over {db_path.parent} too")
+        # The recursive pass over the data directory cannot reach a database somewhere else, so the
+        # directory it lives in gets its own pass (packet 35 review).
+        print(f"the permission pass runs over {db_path.parent}: the database is not under {data_dir}")
     else:
-        print(f"the database sits in the data directory {data_dir}: no separate permission pass")
+        print(f"no separate permission pass: the database is inside the data directory {data_dir}")
     report = _migrate_database(str(db_path))
     if report != 0:
         # create_all runs table by table, so a migration that fails may have created some of
