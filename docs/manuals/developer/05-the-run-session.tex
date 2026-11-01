@@ -1,0 +1,109 @@
+\chapter{The run session: what a layout binds to}\label{ch:session}
+
+\texttt{HeadlessRunSession} in \texttt{src/ate/run\_session/headless.py} is the object a screen talks
+to, and the object a headless run uses. It is a \texttt{QObject}: that is what lets a widget connect to
+its signals. It imports no widgets, and it writes no SQL. It holds the Operator's decisions, owns one
+engine at a time, and turns the worker's signals into its own.
+
+\section{The states}
+
+\texttt{SessionState} has four values, and the session keeps \texttt{\_state} in step with what it
+emits: \texttt{IDLE} (nothing running, fields not yet entered), \texttt{SELECTING} (a schedule is
+selected, the run has not started), \texttt{STARTED} (the worker is running), \texttt{FINISHED}. The
+engine's \texttt{RunStatus} is mapped onto these by \texttt{\_map\_run\_status}: \texttt{RUNNING}
+becomes \texttt{STARTED}.
+
+\texttt{STARTED} is announced on the calling thread before the worker starts, so a screen can paint the
+run view before the first signal arrives. The worker's queued signals then move the state.
+
+\section{The nine signals}
+
+\begin{itemize}
+  \item \texttt{state\_changed}, \texttt{input\_asked}, \texttt{step\_finished}, \texttt{failure\_prompt},
+    \texttt{prompt\_answered}, \texttt{action\_started}, \texttt{step\_started}: forwarded from the
+    engine, so a layout connects to the session and never to the engine.
+  \item \texttt{input\_answered} (node seq, Attempt no, index, value): the session's own, emitted when an
+    answer it accepted reached the worker. Its value type is \texttt{object}, because a Step Input can be
+    a number, a string or a list of labels.
+  \item \texttt{report\_written} (HTML path, PDF path): fired exactly once per finished run, with an
+    empty second path when there is no PDF --- because the render was skipped, or because it failed.
+\end{itemize}
+
+That last one is worth the space it takes. The report is written after \texttt{FINISHED} is announced,
+and the PDF is rendered by a \texttt{QProcess} the session owns (chapter~\ref{ch:pdf}). The sandbox
+question is asked \emph{after} the HTML is on disk, so a declined PDF still leaves the report and the
+signal still fires once. A session that never gets a \texttt{report\_written} is a session whose teardown
+was wrong.
+
+\section{Rules the session enforces}
+
+The session, not the screen, is the authority:
+
+\begin{itemize}
+  \item \texttt{start()} refuses to run with no schedule selected, and refuses a run with an empty
+    Project (spec 08/11). A screen that disables the Start button is being helpful; the session is what
+    makes it true.
+  \item Before a run starts, \texttt{close\_interrupted\_runs} closes every run row with no
+    \texttt{ended\_at} --- one left open by a crash or a power cut --- recording it
+    \texttt{INTERRUPTED}/\texttt{FAIL}, and logs how many. That is spec rule 98, and it is why a run
+    never stays open across launches.
+  \item Stop on Fail is decided in one place: the Operator's explicit choice wins, otherwise the
+    schedule's own default (captured when the schedule was selected, \texttt{True} when unset). Whatever
+    it resolves to is what the run row records.
+  \item \texttt{supply\_input} and \texttt{click\_poll} check the answer before the worker sees it: the
+    step and Attempt must be the ones running, the index must be declared by that step, the input must
+    actually be waiting, and the value must satisfy the declaration (packet 10a review). A bad value
+    raises \texttt{ValueError} and is never recorded. \texttt{index} here is the 1-based \texttt{n} of
+    \texttt{ATE.input(n)}; \texttt{OperatorInput} keys its channels from 0, and this is where the two
+    meet.
+  \item \texttt{pause\_pending()} is how a layout knows the run is paused. The layouts use the session,
+    not their own prompt bar, because the bar of the layout that is not showing says nothing.
+\end{itemize}
+
+\section{Closing, and why the order matters}
+
+\texttt{close()} ends the worker, writes the HTML report if it has not been written, marks the session
+closed so a still-queued \texttt{FINISHED} finds nothing to write, stops the PDF helper, closes the
+store, and closes the application log only if the session opened its own (a log handed in by the launch
+belongs to the launch). \texttt{\_\_del\_\_} does the helper stop, because a session dropped without
+\texttt{close()} leaves its \texttt{QProcess} to be destroyed by Qt mid-render, and the job's
+\texttt{finished} callback then fires against a session whose Qt side is gone (packet 25b review: this
+was the teardown crash).
+
+Do not close a store while a worker is still writing to it. \texttt{close()} calls
+\texttt{stop\_and\_wait()} first for exactly that reason; if the worker does not stop within 5 s it logs
+an error rather than pretending it did.
+
+\section{Driving a run with no display}
+
+This is the shape the suite and the harness use, and it is the shape to copy for a new headless test:
+
+\begin{lstlisting}[language=ATEPython]
+from ate.config import read_config
+from ate.run_session.headless import HeadlessRunSession, SessionState
+from PySide6.QtCore import QCoreApplication
+import time
+
+session = HeadlessRunSession(read_config(config_path))
+states: list[SessionState] = []
+session.state_changed.connect(states.append)
+session.set_operator("Ada Lovelace")
+session.set_project("Manual examples")
+session.set_uut_type("Example board")
+session.set_uut_serial("EX-MANUAL-1")
+session.select_schedule("Manual: first schedule")
+session.start()
+
+app = QCoreApplication.instance() or QCoreApplication([])
+while SessionState.STARTED not in states:      # pump the loop: queued signals need an event loop
+    app.processEvents()
+    time.sleep(0.01)
+\end{lstlisting}
+
+There is no widget and no display, and the queued signals still deliver, because delivery rides the
+event loop of the receiving thread. \texttt{tests/test_manuals.py} runs the manual's own examples this
+way, including an abort, and \texttt{examples/harness/run_examples.py} runs the shipped Media Release
+the same way with simulator peers.
+
+\cando{start a Test Run from a script, answer its Step Inputs, abort it, and read the record back from
+the store.}
