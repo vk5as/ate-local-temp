@@ -1,0 +1,84 @@
+\chapter{What this manual is, and what it has proven}\label{ch:intro}
+
+This manual is for the person who has to change the ATE application: a Python developer who may not
+have written a Test Schedule, and who may never have threaded a Qt application before. The rules here
+are not style rules. Each one exists because a run broke in a specific way, and the fix is a rule
+about where code may go and what it may call. A rule you can recite but not explain is a rule the next
+change breaks.
+
+Two files make this manual, and they say the same things:
+
+\begin{itemize}
+  \item this PDF, built from \texttt{docs/manuals/developer/} by \texttt{python docs/manuals/build.py developer};
+  \item \texttt{docs/manuals/llm/developer.md}, written for an agent rather than converted from this
+    text: it is shorter, it is in the order an agent works, and the checks below apply to it too.
+\end{itemize}
+
+\section{What is checked, and how}
+
+\texttt{tests/test_manuals.py} holds the manuals to the code. It does not read them for style; it
+derives lists of names from the code and fails when a manual stops naming one:
+
+\begin{itemize}
+  \item every module under \texttt{src/ate/}, derived with \texttt{pkgutil} from the package itself;
+  \item every Qt signal declared on \texttt{RunEngine} or \texttt{HeadlessRunSession}, read off the
+    classes;
+  \item every table in \texttt{ate.storage.schema}, read from the SQLAlchemy \texttt{metadata};
+  \item every Device driver class and the Device Type name it serves, taken from the classes that
+    subclass \texttt{ate.devices.registry.Driver}.
+\end{itemize}
+
+The same test extracts every \texttt{src/...} path and every dotted name in backticks from the two
+developer manuals and looks them up: a file that does not exist, or a module that does not have the
+attribute named, fails the suite. Commands in a shell listing are each either run by the test suite in
+a temporary Station or listed with the reason they cannot be run here. The two worked examples,
+adding a Device type (chapter~\ref{ch:device-type}) and adding a schema version
+(chapter~\ref{ch:schema-version}), are executed against a temporary copy of the source: the steps the
+manual gives are the steps the test performs.
+
+\section{How to run things}
+
+Nothing here needs a display. Every Qt test runs with the offscreen platform:
+
+\begin{lstlisting}[language=ATEShell]
+QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider
+\end{lstlisting}
+
+That is the command CI runs, and the one this manual was written against. Two gates are off by
+default because they take minutes or need Docker:
+
+\begin{lstlisting}[language=ATEShell]
+ATE_BUILD_TESTS=1 pytest -m build      # builds the real PyInstaller bundle
+ATE_DOCKER_TESTS=1 pytest -m build     # runs the debian:stable container smokes
+\end{lstlisting}
+
+Both are described in chapter~\ref{ch:tests}, and both were run for this manual.
+
+\section{What is proven here, and what is not}
+
+Proven on this machine, by the tests named in the chapters that state them:
+
+\begin{itemize}
+  \item the whole suite on Linux with the offscreen platform, repeated until it was green;
+  \item the threading behaviour of every signal the engine and the session emit, and the thread each
+    slot runs on (\texttt{tests/test_signal_threads_32a.py});
+  \item that an abort ends a Device call on every Device Type, and how long it takes
+    (\texttt{tests/test_device_abort_32b.py});
+  \item that a new Device driver and a new schema version work when added the way this manual says.
+\end{itemize}
+
+Not proven, and this manual says so wherever it matters:
+
+\begin{itemize}
+  \item \textbf{real hardware.} Every Device test here talks to a loopback peer in
+    \texttt{tests/_fixtures.py} or a pseudo-terminal. A GPIB instrument, a real serial port and a
+    real VISA stack have never been touched by the suite.
+  \item \textbf{real Windows sessions.} Windows behaviour is asserted by the same tests, but only
+    GitHub Actions has ever run them on Windows, and only as CI runs.
+  \item \textbf{the cause of the 32b stall.} One Windows CI run stalled a Test Run for tens of
+    seconds. The fixes are proven; the cause is a belief about the disk, not a measurement.
+    Chapter~\ref{ch:failed-run} says what a future failure would show.
+\end{itemize}
+
+\cando{tell which claim in this manual rests on a test you can run, and which rests on a machine that
+is not here.}

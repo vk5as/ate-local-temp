@@ -1,0 +1,90 @@
+% Changing the ATE application - the developer's manual (packet 34c).
+%
+% Build: python docs/manuals/build.py developer
+% (latexmk -lualatex inside texlive/texlive:latest; see docs/building-from-source.md.)
+%
+% Every fact here is checked against the code. tests/test_manuals.py derives the module list, the
+% Qt signals, the schema tables and the Device drivers from the code and fails if this manual or
+% docs/manuals/llm/developer.md stops naming them; every command in a listing is either run by the
+% suite or listed with the reason it is not; the two worked examples (a Device driver, a schema
+% version) are executed against a temporary copy of the source. Where a document disagrees with
+% the code, the code is followed and the disagreement is in the last chapter.
+
+\documentclass[a4paper,11pt]{report}
+
+\usepackage{manual}  % docs/manuals/common/manual.sty, on TEXINPUTS by the build script
+
+% The developer manual quotes shell commands as well as Lua, so it needs the shell listing style
+% in addition to the Lua one the shared preamble defines.
+\lstdefinelanguage{ATEShell}{
+  morekeywords={ate,python,pytest,latexmk,docker,git,apt,pip,venv,source,export,lua,cd,mkdir,cp,ls,latex,find,grep},
+  sensitive=true,
+  morecomment=[l]{\#},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+% Python listings: the same shape as the Lua one, with Python's keywords.
+\lstdefinelanguage{ATEPython}{
+  keywords={def,class,return,if,then,else,elif,end,for,while,import,from,as,with,not,and,or,None,True,False,lambda,try,except,finally,raise,pass,assert,in,is,global,yield,self},
+  sensitive=true,
+  morecomment=[l]{\#},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekey},
+  commentstyle=\itshape\color{codecomment},
+  stringstyle=\color{ategreen},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ategray},
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  numbers=none,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\title{%
+  \textbf{Changing the ATE Application}\\[6pt]
+  \large The developer's manual\\[10pt]
+  \normalsize ATE v1.0 \quad\textbullet\quad every name here is checked against the code by the test suite}
+\author{ATE}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\input{01-what-this-manual-is}
+\input{02-the-shape-of-the-code}
+\input{03-the-rule-the-code-protects}
+\input{04-the-run-engine-threads-and-signals}
+\input{05-the-run-session}
+\input{06-the-screens-layouts-and-dialogs}
+\input{07-storage-the-schema-and-batching}
+\input{08-the-lua-host-and-the-sandbox}
+\input{09-device-drivers-the-registry-and-abort}
+\input{10-reports-and-the-pdf-helper}
+\input{11-config-and-the-exception-log}
+\input{12-packaging-and-release-ci}
+\input{13-the-test-suite}
+\input{14-pyside6-traps}
+\input{15-reading-a-failed-run}
+\input{16-adding-a-device-type}
+\input{17-adding-a-schema-version}
+\input{18-docs-adrs-and-where-a-change-goes}
+\input{19-what-is-not-proven}
+
+\end{document}

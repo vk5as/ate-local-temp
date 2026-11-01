@@ -1,0 +1,44 @@
+\chapter{The rule the code protects: no widgets in the engine}\label{ch:rule}
+
+The spec's central architectural rule is that the engine and the run session never import widgets, so
+a Test Run can be driven, tested and run with no display at all. That rule is enforced by a test, not
+by review: \texttt{tests/test_architecture_rules.py} parses every \texttt{.py} under
+\texttt{src/ate/engine} and \texttt{src/ate/run_session} with \texttt{ast} and fails if any of them
+imports \texttt{QtWidgets}, \texttt{uic}, \texttt{QtUiTools} or any module whose name contains
+\texttt{widgets}.
+
+\section{Why the rule exists, twice over}
+
+It exists for two independent reasons, and both bite.
+
+\textbf{Testability.} There is no display on a CI runner. A Test Run has to be exercisable through
+\texttt{QT_QPA_PLATFORM=offscreen}, and the suite drives real runs through the session and the engine
+without ever constructing a widget. If the engine imported \texttt{QtWidgets}, every run test would
+drag a GUI in, and the headless examples in \texttt{examples/harness/run_examples.py} would need a
+window server.
+
+\textbf{Thread affinity.} A Qt widget belongs to the thread that created it. The worker is a
+\texttt{QThread}; the widgets live on the main thread. Code on the worker that touched a widget would
+be reaching across threads into an object Qt only guarantees to touch from one thread. The engine
+therefore does not know that screens exist: it emits signals, and the layout reacts.
+
+The rule is deliberately narrow. \texttt{src/ate/report/pdf.py} imports \texttt{QApplication} inside a
+function (line~350 of that file) because the PDF renderer runs a Qt WebEngine in a child process on the
+main thread, and \texttt{src/ate/dialogs.py} imports \texttt{QTimer} for the same reason it needs to
+arm a dialog: neither is on the worker, and neither is guarded. The guard covers the two packages that
+run on the worker, and it names them in \texttt{\_GUARDED\_DIRS}.
+
+The guard itself is tested. \texttt{test\_the\_guard\_still\_bites\_on\_a\_planted\_widget\_import}
+plants each forbidden form --- including the old \texttt{PyQt6.QtWidgets} name --- and asserts the scan
+reports it, and asserts that \texttt{from PySide6.QtCore import QThread, Signal} is clean. A guard
+whose pattern matches nothing protects nothing, and that is the failure this test would catch.
+
+\section{Signals are the only way across}
+
+The engine reaches the GUI only through queued signals, and the session forwards them. The consequence
+for whoever writes a new signal: the receiver runs on the thread that owns the receiver object, not on
+the thread that emitted. That is the whole of Qt's cross-thread story in one sentence, and chapter
+\ref{ch:engine} shows what it means for each of the engine's signals.
+
+\cando{explain why a widget import in \texttt{src/ate/engine} is a bug rather than a style choice, and
+name the two packages the guard scans.}

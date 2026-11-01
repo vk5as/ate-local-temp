@@ -1,0 +1,115 @@
+\chapter{The shape of the code}\label{ch:shape}
+
+ATE is one process, one \texttt{QApplication}, and one worker thread per Test Run. The source under
+\texttt{src/ate/} is small enough to read in an afternoon, and the structure is the thing that makes it
+safe to change: a change in one layer cannot reach another layer except through a signal or a store
+call.
+
+\section{Four layers, one direction}
+
+The dependency arrows go one way:
+
+\begin{itemize}
+  \item \texttt{ate.ui} knows \texttt{ate.run_session}. A layout connects to the session's signals and
+    calls its methods. It never reaches into the engine.
+  \item \texttt{ate.run_session} knows \texttt{ate.engine}. The session owns a \texttt{RunEngine},
+    forwards its signals, and writes nothing to the database itself.
+  \item \texttt{ate.engine} knows \texttt{ate.storage} and \texttt{ate.devices}. The worker writes rows
+    and opens Devices. It knows nothing about screens.
+  \item \texttt{ate.storage} is the only place SQL is written. \texttt{ate.catalog}, the configuration
+    reader and the report writer are reached from above, not from the engine.
+\end{itemize}
+
+Nothing points the other way. \texttt{ate/__init__.py} deliberately imports neither the engine nor the
+UI, so \texttt{import ate} stays cheap and widget-free: it exposes only \texttt{__version__} and
+\texttt{version}.
+
+\section{Every module}
+
+This table is the coverage list: \texttt{tests/test_manuals.py} walks the package with
+\texttt{pkgutil.walk_packages} and fails if a module in it is not named here or in
+\texttt{docs/manuals/llm/developer.md}.
+
+\begin{center}
+\small
+\begin{tabular}{p{4.6cm} p{7.4cm}}
+\toprule
+\textbf{File} & \textbf{What it holds} \\
+\midrule
+\texttt{src/ate/\_\_init\_\_.py} & the package's version only; imports no engine, no widgets \\
+\texttt{src/ate/\_version.py} & the version from the git tag, computed once so build time and run time agree \\
+\texttt{src/ate/\_\_main\_\_.py} & \texttt{python -m ate}, the entry the PDF helper subprocess uses \\
+\texttt{src/ate/cli.py} & the \texttt{ate} command: parsing, subcommands, \texttt{ate setup}, \texttt{ate db}, the hidden \texttt{ate \_pdf} and \texttt{ate \_selftest} \\
+\texttt{src/ate/app.py} & the application shell: reads config once, opens the chosen layout, installs the exception hook \\
+\texttt{src/ate/config.py} & the config file: read, validate, fill defaults, resolve \texttt{<data>} \\
+\texttt{src/ate/permissions.py} & the group, ownership and ACL treatment \texttt{ate setup} applies on Linux \\
+\texttt{src/ate/setup.py} & prepare a Station: directories, default config, database, permissions \\
+\texttt{src/ate/log.py} & the per-launch application log, \texttt{AppLog} \\
+\texttt{src/ate/errors.py} & \texttt{ATEError} and its subclasses; the one base every ATE failure has \\
+\texttt{src/ate/exception_log.py} & \texttt{UnhandledExceptionLog}: what a raising slot writes to the log \\
+\texttt{src/ate/catalog.py} & \texttt{.atedef} reading and validation, Media Release chains, schedule and module maps \\
+\texttt{src/ate/engine/\_\_init\_\_.py} & the engine package; the rule is that it imports no widgets \\
+\texttt{src/ate/engine/run_engine.py} & the \texttt{QThread} worker: steps the schedule, records the run, ends it \\
+\texttt{src/ate/engine/lua_host.py} & the Lua runtime, the sandbox, the \texttt{ATE} table, the schedule builders \\
+\texttt{src/ate/engine/operator_input.py} & \texttt{OperatorInput}: how \texttt{ATE.input(n)} waits for an answer \\
+\texttt{src/ate/engine/step_inputs.py} & parsing and validating a Step Input declaration \\
+\texttt{src/ate/lua/\_\_init\_\_.py} & the modules bundled with ATE, reachable as \texttt{require("ate.devices")} \\
+\texttt{src/ate/lua/devices.lua} & the Lua module a Test Schedule can \texttt{require} \\
+\texttt{src/ate/run_session/\_\_init\_\_.py} & the run session package; also widget-free \\
+\texttt{src/ate/run_session/headless.py} & \texttt{HeadlessRunSession}: the object a layout binds to, and what a headless run uses \\
+\texttt{src/ate/storage/\_\_init\_\_.py} & the storage package: the only place ATE talks SQL \\
+\texttt{src/ate/storage/schema.py} & every table in the Test Run record, as SQLAlchemy Core tables \\
+\texttt{src/ate/storage/store.py} & \texttt{RunStore}: writes, queries, batching, the schema check \\
+\texttt{src/ate/storage/\_uuid.py} & UUIDv7 run keys, without \texttt{uuid.uuid7} \\
+\texttt{src/ate/devices/\_\_init\_\_.py} & the Device drivers package \\
+\texttt{src/ate/devices/registry.py} & \texttt{Driver}, \texttt{validate\_params}, \texttt{DeviceRegistry} \\
+\texttt{src/ate/devices/stream.py} & the background reader shared by the buffered Device Types \\
+\texttt{src/ate/devices/tcp.py} & the TCP driver \\
+\texttt{src/ate/devices/udp.py} & the UDP driver \\
+\texttt{src/ate/devices/serial.py} & the SERIAL driver, through pyserial \\
+\texttt{src/ate/devices/visa.py} & the VISA driver, through pyvisa \\
+\texttt{src/ate/devices/abort.py} & how a Device call gives way to an abort \\
+\texttt{src/ate/devices/tracing.py} & one \texttt{DEBUG} line per Device operation, when tracing is on \\
+\texttt{src/ate/report/\_\_init\_\_.py} & the report package \\
+\texttt{src/ate/report/html.py} & the self-contained HTML Test Report \\
+\texttt{src/ate/report/pdf.py} & HTML to PDF in a separate process, and the sandbox decision \\
+\texttt{src/ate/report/pdf_job.py} & the \texttt{QProcess} that runs the helper, owned by a session \\
+\texttt{src/ate/report/log_export.py} & the Run log as CSV, JSON Lines or text \\
+\texttt{src/ate/history/\_\_init\_\_.py} & the history package \\
+\texttt{src/ate/history/session.py} & \texttt{HistorySession}: queries over past Test Runs, no widgets \\
+\texttt{src/ate/ui/\_\_init\_\_.py} & the widgets package; the only place QtWidgets is imported \\
+\texttt{src/ate/ui/run_widgets.py} & the widgets both Run screens share \\
+\texttt{src/ate/ui/staged_run_screen.py} & the \texttt{staged} layout \\
+\texttt{src/ate/ui/three_pane_run_screen.py} & the \texttt{threePane} layout \\
+\texttt{src/ate/ui/history_screen.py} & the History screen \\
+\texttt{src/ate/ui/export_log_dialog.py} & the Run log export dialog \\
+\texttt{src/ate/dialogs.py} & \texttt{dismiss_if_headless}: every modal that must answer itself \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Outside \texttt{src/} there is \texttt{packaging/} (PyInstaller, Inno Setup, the \texttt{.deb}, the wheel
+and the licence inventory, chapter~\ref{ch:packaging}), \texttt{examples/} (a Media Release and the
+harness that runs it, used by the test suite), and \texttt{docs/} (the ADRs, this manual and the agent
+manuals).
+
+\section{What a Test Run is made of, in the code}
+
+Four objects move one Test Run through the application, and knowing which one you are in is half of
+debugging it:
+
+\begin{itemize}
+  \item the \textbf{run session} (\texttt{HeadlessRunSession}) holds the Operator's choices: which
+    schedule, which Operator, whether Stop on Fail is on. It is a \texttt{QObject}, so widgets can bind
+    to it.
+  \item the \textbf{run engine} (\texttt{RunEngine}, a \texttt{QThread}) is the worker that walks the
+    expanded step tree and writes the record.
+  \item the \textbf{Lua host} (\texttt{LuaHost}) is the interpreter the schedule runs in, with the
+    sandbox and the \texttt{ATE} table.
+  \item the \textbf{store} (\texttt{RunStore}) is the only thing that touches the database.
+\end{itemize}
+
+A layout is a fifth object, above the session: \texttt{StagedRunScreen} or \texttt{ThreePaneRunScreen},
+chosen by \texttt{ui.layout} and switched in \texttt{App.set\_layout}.
+
+\cando{say which object owns a piece of state, and which layer a new line of code belongs in.}
