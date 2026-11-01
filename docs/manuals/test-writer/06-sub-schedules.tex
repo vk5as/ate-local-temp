@@ -1,0 +1,54 @@
+\chapter{Sub-schedules: building a schedule out of schedules}\label{ch:sub-schedules}
+
+A Test Schedule can pull another one in at a given position. That is \texttt{setInclude}, and
+it makes the step a \textbf{header row}: the header is not a Test Step, it has no result, and
+beneath it sit the steps of the included schedule.
+
+\example{../examples/test-writer/main.tslua}{main.tslua}
+
+The included file is a complete schedule in its own right --- it can be run on its own, and it
+is listed in the Test Definition with \texttt{"hidden": true} so the Operator never picks it
+directly.
+
+\example{../examples/test-writer/channel.tslua}{channel.tslua}
+
+\section{Parameters: keyvals}
+
+\texttt{:setInclude(file, keyvals)} passes a table to the included file. The file reads it as
+the chunk's argument:
+
+\begin{verbatim}
+local kv = ...
+local channel = kv.channel or 1
+\end{verbatim}
+
+ATE runs the chunk again for every include, so the same file included twice is two instances,
+each with its own \texttt{keyvals}. \texttt{keyvals} must be plain data: strings, numbers,
+booleans and nested tables of those. A top-level schedule, or an include with no keyvals,
+receives an empty table.
+
+\section{Step Numbers, and nesting}
+
+\texttt{:setPrefix("2.")} is prepended to every Step Number in the instance, exactly as
+written, with nothing added between: \texttt{"2."} plus \texttt{"1."} is \texttt{"2.1."}.
+Prefixes stack as includes nest, from the outside in, so \texttt{main.tslua} includes
+\texttt{channel.tslua} with prefix \texttt{"2."}, which includes \texttt{led.tslua} with prefix
+\texttt{"2."}, and the LED step ends up as \texttt{2.2.1.}.
+
+\example{../examples/test-writer/led.tslua}{led.tslua}
+
+A header is not numbered by the Sub-schedule's own name: it shows the header's own Step Name
+and, if given, its own Step Number, never the included schedule's \texttt{ScheduleParams}
+name. Only the included schedule's Actions and steps take part in the run; its document fields
+and its \texttt{setStopOnFail} are ignored, and \texttt{ATE.run} still describes the top-level
+schedule.
+
+\section{Enabling a whole Sub-schedule}
+
+\texttt{:setEnable(false)} on a header forces the default of every step beneath it. In the
+example, header 3 is disabled, so both channel 2's steps record \texttt{NOTRUN} and that
+instance's Pre-test and Post-test Actions are skipped: a Sub-schedule that runs no step has
+nothing to set up or clean up.
+
+\cando{split a long schedule into Sub-schedules, pass each instance its parameters, and
+number the steps so the report reads the way you want.}
