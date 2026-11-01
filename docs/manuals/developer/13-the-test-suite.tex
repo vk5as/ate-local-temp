@@ -65,6 +65,15 @@ Both are off by default, and both are marked \texttt{build}. The marker descript
 present. \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} asserts that the gate is written the way it says, so a
 container test cannot quietly start running on every CI job.
 
+The five skips in a default run are therefore
+\texttt{test\_\allowbreak{}pyinstaller\_\allowbreak{}build\_\allowbreak27a.py}'s frozen bundle,
+\texttt{test\_\allowbreak{}linux\_\allowbreak{}packages\_\allowbreak28b.py}'s \texttt{.deb} built from it,
+\texttt{test\_\allowbreak{}manuals.py}'s container permissions smoke,
+\texttt{test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py}'s three containers, and
+\texttt{test\_\allowbreak{}finished\_\allowbreak{}run\_\allowbreak{}layout\_\allowbreak30b.py}'s review screenshots, which need
+\texttt{ATE\_\allowbreak{}30B\_\allowbreak{}SHOTS}. Both gates were run for this manual; the numbers are in
+chapter~\ref{ch:packaging}.
+
 \section{Timing tests, and the rule that came out of 31e}
 
 Packet 31e was two tests that failed intermittently on Windows CI and passed on Linux. Reading the notes
