@@ -1,0 +1,82 @@
+\chapter{Logs, and where everything is written}\label{ch:logs}
+
+There are two logs, and confusing them is the most common way to look for a problem in the wrong
+place.
+
+\section{The application log}
+
+One file per launch of ATE, in \texttt{log.directory}, named after the launch's start time:
+
+\begin{lstlisting}[language=ATEShell]
+/var/lib/ate/logs/ate-app-2026-11-01T09-02-31.log
+\end{lstlisting}
+
+It is opened in append mode and never rotated and never deleted, so each launch keeps its own
+history and a Test Run is never split across files. One line per entry:
+
+\begin{lstlisting}[language=ATEShell]
+2026-11-01T09:02:31 INFO  ate: ATE 1.2.3 launched with config /etc/ate/config.json
+\end{lstlisting}
+
+Entries below \texttt{log.level} are dropped before they reach the file. The levels, in order, are
+\texttt{debug}, \texttt{info}, \texttt{warning}, \texttt{error}; a level name the code does not
+recognise is treated as \texttt{info}. What lands here is ATE's own activity: the launch, the
+database refusal, interrupted runs closed, Device buffer overflows, the PDF sandbox decision, and
+any exception that no code caught.
+
+\section{The Run log}
+
+Every line a Test Run produces --- what the schedule logged, what ATE logged about it, Device trace
+--- is a row in the database's \texttt{log\_line} table, not a file. Each row has a level
+(\texttt{DEBUG}, \texttt{INFO}, \texttt{WARNING}, \texttt{ERROR}), a source (\texttt{schedule},
+\texttt{ate} or \texttt{device}), and an owner: the run as a whole, a Pre-test or Post-test Action,
+or a step and Attempt. The Test Report prints only \texttt{INFO}, \texttt{WARNING} and \texttt{ERROR}
+lines: \texttt{DEBUG} lines, and all Device trace, stay in the database. To see them, export the Run
+log from History (CSV, JSON Lines or text) or query the database.
+
+Device trace comes from \texttt{deviceTrace.enabled}, and each traced operation is one \texttt{DEBUG}
+line, with the bytes shortened past \texttt{deviceTrace.maxBytes}. It is off by default for a
+reason: a schedule that reads an instrument in a tight loop produces a line per read.
+
+\section{When something inside ATE goes wrong}
+
+PySide6 does not end the process when a slot or a thread's \texttt{run} raises: it hands the
+exception to \texttt{sys.excepthook} and carries on, so a worker keeps recording while a screen
+quietly stops updating. ATE installs a hook that writes such an exception to this launch's
+application log, as \texttt{Unhandled exception on thread}, with the traceback, and tells the
+Operator in the status bar:
+
+\begin{lstlisting}[language=ATEShell]
+Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: /var/lib/ate/logs/ate-app-2026-11-01T09-02-31.log
+\end{lstlisting}
+
+If the log could not be written, the same line says \texttt{The details could not be written to the
+application log} instead of naming a path. The status bar line appears only from the first error
+onward and stays until ATE is closed, because the screen may be wrong from that point on. It is
+selectable text, so the path can be copied.
+
+What that hook does \emph{not} see: an exception leaving a plain \texttt{threading.Thread} goes to
+\texttt{threading.excepthook} instead, and the Device reader threads --- the only such threads ---
+catch their own. An exception inside a Test Run's worker is caught by the run engine first and
+reported through that run's own log and Test Report. So a Test Run failure is found in the Run log,
+and an application failure in the application log.
+
+\section{Device warnings worth reading}
+
+ATE reads every TCP, SERIAL and UDP Device in the background and buffers what arrives, up to
+\texttt{devices.receiveBufferBytes}. When the buffer overflows it drops the oldest bytes, records one
+WARNING in the Run log with source \texttt{device}, and the next read result carries
+\texttt{overflow = true}:
+
+\begin{lstlisting}[language=ATEShell]
+TCP 127.0.0.1:5025: receive buffer overflow - dropped 4096 oldest byte(s)
+\end{lstlisting}
+
+A Test Run that ends with Devices still open closes them and records one WARNING in the Run log per
+Device, naming it as \texttt{left open at end of run}. That is untidy, not dangerous. On an aborted
+run the closes are given three seconds in total; a close the operating system holds longer than that
+is left running on its own thread and logged as \texttt{was still closing when the aborted run ended}
+--- it does close, just later (chapter~\ref{ch:troubleshooting}).
+
+\cando{find the line that explains a launch refusal, and tell the application log apart from the Run
+log when someone asks "where is the log of this run?".}
