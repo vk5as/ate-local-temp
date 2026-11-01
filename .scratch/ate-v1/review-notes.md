@@ -822,3 +822,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Product change beyond the rename: an escaped slot exception no longer aborts, so `ate/exception_log.py` writes it to the per-launch log and shows one status-bar line. `RunEngine.run`'s guard still reports worker exceptions through the run's log and report.
 - `src` otherwise a pure rename. Shared `.venv` now has PySide6.
 - Left open: PySide6 notice prints the wheels' `/cgit/` URL; lupa reads "check upstream"; dependency licence files in the bundle unchecked; replacing Qt never tried; repo has no `LICENSE`; `ate _selftest` does not get the new hook; a broken abort in 13c busy-loop tests takes 133 s to fail.
+
+## 32b — Windows run hang (merged 2026-11-01, open until Windows CI is green)
+
+- A worker neither finished nor stopped on abort on Windows 3.14 (CI, once; rerun passed). Likely store commits stalling, not proven. Fixed along the way: an abort lost at a pause; abort cost growing with steps left; Device calls holding an abort for their full timeout (`devices/abort.py`). Stuck runs now dump stacks and write times.
+- Implementation and first rework by Opus, last rework by Strata (user cut Opus use). Reviews: round 1 Strata 1, Haiku 1; round 2 Strata 3, Haiku 3; round 3 Strata 0, Haiku 1. On that last one Strata argued the guard could not misfire and Haiku showed the read order lets it; Haiku was right, fixed by the orchestrator.
+- Left open: `insert_input_values` still sets `_log_seq` after the whole batch; a BaseException reaching `RunEngine.run` still ends without FINISHED (lupa's handling not checked); the close budget is shared across Devices; test table `wide` stays in process-global metadata; a Post-test Action on a Device with an abandoned call can exceed 10 s until a second abort (user told); SQLite `synchronous` decision is the user's.
