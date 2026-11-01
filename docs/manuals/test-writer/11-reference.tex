@@ -1,0 +1,79 @@
+\chapter{Reference}\label{ch:reference}
+
+\section{The \texttt{ATE} table}
+
+\begin{center}
+\begin{tabular}{@{}lp{7.5cm}@{}}
+\toprule
+Call & Returns / does \\
+\midrule
+\texttt{ATE.open(deviceType, params [, onError])} & opens a Device, returns an opaque handle \\
+\texttt{ATE.read(dev [, params] [, onError])} & \texttt{\{data, count, partial\}}, or
+  \texttt{err} on failure \\
+\texttt{ATE.write(dev, params [, onError])} & \texttt{\{ok, count\}}; \texttt{count} includes
+  the terminator \\
+\texttt{ATE.close(dev [, params] [, onError])} & \texttt{\{ok = true\}} \\
+\texttt{ATE.flush(dev)} & \texttt{\{ok = true, count = n\}} bytes discarded \\
+\texttt{ATE.sleep(seconds)} & pauses the step; an abort wakes it at once \\
+\texttt{ATE.input(n)} & the current step's $n$-th Step Input \\
+\texttt{ATE.report(passFail, msg, actual, expected)} & records the step's result; returns
+  \texttt{true} \\
+\texttt{ATE.log(level, \dots)} & writes a line to the Test Run's log \\
+\texttt{ATE.addEquipment(name, serial, connection, calDue, notes)} & declares Equipment for the
+  Test Report \\
+\texttt{ATE.run} & read-only table describing the current Test Run \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The enums}
+
+\begin{itemize}
+  \item \texttt{Result}: \texttt{PASS}, \texttt{FAIL}, \texttt{ERROR}, \texttt{SKIPPED},
+    \texttt{NOTRUN}, \texttt{FORCED\_NOTRUN}, \texttt{NOREPORT}.
+  \item \texttt{Log}: \texttt{DEBUG}, \texttt{INFO}, \texttt{WARNING}, \texttt{ERROR}.
+  \item \texttt{DeviceType}: \texttt{TCP}, \texttt{SERIAL}, \texttt{UDP}, \texttt{VISA}.
+  \item \texttt{Parity}: \texttt{NONE}, \texttt{EVEN}, \texttt{ODD}, \texttt{MARK},
+    \texttt{SPACE}.
+  \item \texttt{FlowControl}: \texttt{NONE}, \texttt{RTSCTS}, \texttt{XONXOFF},
+    \texttt{DSRDTR}.
+\end{itemize}
+
+\section{\texttt{ScheduleParams} and \texttt{StepParams}}
+
+\texttt{ScheduleParams(name, description)}: \texttt{setDocTitle}, \texttt{setDocId},
+\texttt{setDocRev}, \texttt{setPreTestAction}, \texttt{setPostTestAction},
+\texttt{setStopOnFail}, \texttt{setSchedule}.
+
+\texttt{StepParams(name)}: \texttt{setStepNo}, \texttt{setEnable}, \texttt{setInputs},
+\texttt{setAction}, \texttt{setInclude}, \texttt{setPrefix}.
+
+The builders in \texttt{ate.devices} have their own setters: \texttt{setHost},
+\texttt{setPort}, \texttt{setLocalPort}, \texttt{setResource}, \texttt{setBaud},
+\texttt{setDataBits}, \texttt{setStopBits}, \texttt{setParity}, \texttt{setFlowControl},
+\texttt{setTimeout}, \texttt{setReadTerm}, \texttt{setWriteTerm}, \texttt{setSize} and
+\texttt{Write(data)}.
+
+\section{What the Test Report shows, and where it goes}
+
+ATE writes the report when the run ends, without asking:
+
+\begin{verbatim}
+<UUT Type>/<UUT Type>_<serial>_<yyyymmdd-HHMMSS>_<PASS|FAIL>.html
+\end{verbatim}
+
+under \texttt{reports.directory}, and the same with \texttt{.pdf}. The sections are Cover,
+Steps, Equipment, Configuration and Run log. The Run log in the report carries INFO, WARNING
+and ERROR lines only; DEBUG lines and Device trace stay in the database.
+
+\section{Reading a run back}
+
+From the History screen, or from the database. Every Test Run has a UUIDv7 assigned at run
+start, and its rows are the run itself, its Media Releases, its files, its schedule instances,
+its nodes, its Actions, its Attempts, its Operator inputs, its Equipment and its log lines. The
+End Reason tells you how the run finished: \texttt{COMPLETED}, \texttt{PRETEST\_FAILED},
+\texttt{STOPPED\_ON\_FAIL}, \texttt{ABORTED}, or \texttt{INTERRUPTED} when ATE itself stopped
+before the run could.
+
+\cando{look up any part of a finished Test Run, and name the enum value or record field you are
+reading.}
