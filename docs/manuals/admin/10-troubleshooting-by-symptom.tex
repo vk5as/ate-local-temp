@@ -1,0 +1,206 @@
+\chapter{Troubleshooting by symptom}\label{ch:troubleshooting}
+
+Start from what the machine printed. The text below is the text ATE prints, copied from the code,
+so searching for it finds this chapter.
+
+\section{It will not start}
+
+\textbf{The config is not there.} ATE names the path it expected and offers to create a default
+config or abort:
+
+\begin{lstlisting}[language=ATEShell]
+No config file at /etc/ate/config.json
+\end{lstlisting}
+
+If it aborts instead --- for example because nobody was there to answer, or you chose Abort --- run
+\texttt{ate setup} (as root on Linux) or point ATE at a config with \texttt{--config}.
+
+\textbf{The config is there but wrong.} Every refusal names the file and the key:
+
+\begin{lstlisting}[language=ATEShell]
+unknown config key 'defnitions' in /etc/ate/config.json
+config file /etc/ate/config.json: 'log.level' must be a string, got 3
+config file /etc/ate/config.json: 'format' is required (expected 1)
+config file /etc/ate/config.json: unknown 'format' value 2 (expected 1)
+config file /etc/ate/config.json: 'database.type' must be 'sqlite', got 'postgres'
+config file /etc/ate/config.json: 'ui.layout' must be 'staged' or 'threePane', got 'wide'
+config file /etc/ate/config.json: 'devices.receiveBufferBytes' must be a positive integer, got 0
+config file /etc/ate/config.json: 'reports.directory' has unknown placeholder '<datat>'
+invalid JSON in config file /etc/ate/config.json: Expecting ',' delimiter: line 12
+\end{lstlisting}
+
+A key you did not write is not an error: missing keys are filled with their defaults. Only a key
+that is present and wrong, or a key that does not exist at all, is refused.
+
+\textbf{The config cannot be written.} A config with no \texttt{station.uuid} makes ATE generate one
+and try to write it back:
+
+\begin{lstlisting}[language=ATEShell]
+cannot write station.uuid to /etc/ate/config.json; add '3f6c...' by hand and restart
+\end{lstlisting}
+
+That is a permissions problem, not a bug: whoever launched ATE cannot write \texttt{config.json}. An
+admin adds the UUID, or runs ATE with the rights to write it.
+
+\textbf{The database is not the right version.} ATE stops and says what to run:
+
+\begin{lstlisting}[language=ATEShell]
+run `ate db migrate` to create or upgrade the database at /var/lib/ate/ate.db
+this ATE is too old for the database at /var/lib/ate/ate.db; update ATE
+\end{lstlisting}
+
+The first is fixed by migrating. The second means the database was built by a newer ATE than the one
+installed; there is no downgrade, so update ATE or restore a backup.
+
+\textbf{A directory is not writable.} ATE creates the log and reports directories at launch and
+refuses plainly if it cannot:
+
+\begin{lstlisting}[language=ATEShell]
+cannot create /var/lib/ate/logs: [Errno 13] Permission denied. Run 'ate setup' as admin, or point
+the config (log.directory, reports.directory) at a writable location. Config: /etc/ate/config.json
+\end{lstlisting}
+
+\section{\texttt{ate setup} did not do what you expected}
+
+\begin{lstlisting}[language=ATEShell]
+ate setup: running unprivileged; skipping group/ownership/ACL setup (packagers run this elevated)
+\end{lstlisting}
+
+This is expected when \texttt{ate setup} is not elevated: the directories, the config and the
+database are still created, and the ownership treatment is skipped. Finish with
+\texttt{sudo ate setup}. A real failure looks like \texttt{cannot create \dots}, \texttt{cannot write
+config to \dots}, \texttt{database migration failed at \dots} or \texttt{cannot apply permissions to
+\dots}, each with an exit code of 1.
+
+If ordinary users cannot write reports or the database after setup, they are not in the \texttt{ate}
+group on Linux, or the \texttt{icacls} grant did not apply on Windows. Setup makes the data tree
+group-writable and the config admin-only; it does not add anyone to the group.
+
+\section{A Test Run will not start, or warns}
+
+\textbf{Files do not match their checksums.} The Run screen lists each as \texttt{expected \dots,
+found \dots} before Start, and the run records:
+
+\begin{lstlisting}[language=ATEShell]
+checksum mismatch for lib/scpi.lua (expected 3f2a..., got 9b1c...)
+\end{lstlisting}
+
+The run still runs. Either the release was edited after it was shipped, or the checksums were never
+recorded: run \texttt{ate definition update} on the \texttt{.atedef}.
+
+\textbf{A schedule is missing from the picker.} Check the scan warnings. A directory that does not
+exist warns; a broken definition is listed with its error and the rest of the scan is unaffected. A
+schedule that raises while loading is broken on its own, not the whole release.
+
+\textbf{A Test Report is not where you expected.} Reports are written under \texttt{reports.directory}
+in a subdirectory named after the UUT Type, with the UUT Type, serial, local start time and result in
+the file name. A name already taken is never overwritten: a second report for the same run gets
+\texttt{-2}, then \texttt{-3}, and a name is considered taken if either the HTML or the PDF of that
+name exists.
+
+\section{There is no PDF}
+
+The HTML Test Report is always written. If there is no PDF beside it, look in the application log.
+
+\begin{lstlisting}[language=ATEShell]
+Test Report PDF skipped for 0182...: ATE is privileged and the choice was No, so nothing was
+rendered without Chromium's sandbox. HTML report: /var/lib/ate/reports/RailGun/..._PASS.html
+\end{lstlisting}
+
+ATE was run as root or an administrator, and the answer to "render without Chromium's sandbox?" was
+no (or nobody answered). Run ATE as an ordinary user, or run it with
+\texttt{--allow-unsandboxed-pdf} if giving up that isolation on this machine is acceptable to you.
+
+A PDF that opens but is empty is a font problem, not a rendering problem: Debian and its containers
+ship no fonts, and with none Chromium writes a valid PDF with no text in it. Install
+\texttt{fontconfig} and \texttt{fonts-dejavu-core}. \texttt{ate \_selftest --run} says this in so
+many words when it fails:
+
+\begin{lstlisting}[language=ATEShell]
+the PDF has no fonts: 1742 bytes with no text in it. Install fontconfig and a font (for example
+fonts-dejavu-core) so QtWebEngine has something to draw with
+\end{lstlisting}
+
+If the helper itself fails you get one of these in the log, and the HTML report is still there:
+
+\begin{lstlisting}[language=ATEShell]
+PDF helper exited with code 1: ate _pdf: refusing to render as root or an administrator without --unsandboxed
+PDF helper crashed or timed out after 60 s
+PDF helper wrote no PDF
+PDF helper exited with code 1: pdf helper error: paper must be 'A4' or 'Letter', got 'Legal'
+\end{lstlisting}
+
+The first appears only if you run \texttt{ate \_pdf} yourself: the parent always tells the helper
+whether the sandbox was declined or agreed. The last is a \texttt{reports.paperSize} typo --- the
+config does not check that key.
+
+\section{A window stopped updating}
+
+A status bar line appears, and stays:
+
+\begin{lstlisting}[language=ATEShell]
+Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: /var/lib/ate/logs/ate-app-2026-11-01T09-02-31.log
+\end{lstlisting}
+
+The traceback is in that file, under \texttt{Unhandled exception on thread}. A Test Run that was in
+progress keeps recording: the record is written by the worker, not the window, so trust the database
+even when the screen is frozen. The details line is missing when the write itself failed, which says
+the log directory is the thing to fix.
+
+\section{A run is slow, or an instrument is still busy}
+
+Two facts about Devices that an administrator needs, both established by the suite rather than
+guessed.
+
+\textbf{ATE takes no exclusive lock on a serial port on Linux.} Another program can open the same
+\texttt{tty} while a Test Run is using it. The suite tried to prove the opposite with
+\texttt{serial.Serial(exclusive=True)} and found the open succeeded even while the port was held, so
+sharing is the behaviour, and two schedules or two programs on one port are your problem to avoid.
+
+\textbf{An abort frees the worker, not the instrument.} When the Operator aborts a run, the worker
+stops waiting for a Device call in about 50 ms and moves on; the call itself keeps running on a
+daemon thread and holds its transport until it finishes. What can be left behind:
+
+\begin{itemize}
+  \item a connect or a DNS lookup (TCP, UDP, a \texttt{socket://} serial URL, VISA), bounded by the
+    timeout the schedule gave or the operating system's own limit;
+  \item \texttt{viRead} or \texttt{write\_raw} on anything other than pyvisa-py's SOCKET session ---
+    NI-VISA, GPIB, USB, VXI-11 --- for as long as the call's timeout says;
+  \item a pyserial write: the timeout does not say how much got out;
+  \item \texttt{ATE.close} on a stuck port, which the operating system can hold for a long time
+    (Linux can hold a \texttt{tty} close while output drains, up to 30 seconds by default).
+  \item At the end of an aborted run all such closes together are given at most three seconds, with
+    one WARNING naming each Device still closing.
+\end{itemize}
+
+A Post-test Action on the same Device waits for a call left behind (a second abort ends that wait),
+so a run's end can run past ten seconds. A new run that opens the same instrument while an abandoned
+call is still running may find it busy. Nothing about this is a fault to fix: it is what an abort
+means, and it is why the warning line \texttt{was still closing when the aborted run ended} is not a
+bug.
+
+Three things cannot be interrupted at all, whatever the Operator presses: a SQLite commit already in
+progress, one Lua C library call such as a \texttt{string.rep} or a large pattern match, and the
+VISA attribute calls on the worker.
+
+One stall has been seen and not explained. A Test Run on the Windows CI runner missed \texttt{FINISHED}
+and its abort took over ten seconds; the evidence points at store commits stalling on that runner's
+disk --- every commit in WAL mode is a synced commit at SQLite's \texttt{synchronous=FULL} --- but
+nothing measured the disk, so the cause is a belief, not a finding. If it ever happens again, the
+test report now prints each live worker's thread stacks, what it has recorded and the store's write
+times, which separates a slow disk from a fault nobody has found yet.
+
+\section{Runs closed as \texttt{INTERRUPTED}}
+
+At launch ATE closes any run with no end time --- a crash, a kill, a power cut --- as
+\texttt{INTERRUPTED} with result \texttt{FAIL}, and writes one line to the application log:
+
+\begin{lstlisting}[language=ATEShell]
+Closed 2 interrupted run(s) at launch.
+\end{lstlisting}
+
+That is the record saying what it knows: the run did not finish. It is not recoverable, and it is
+not a sign that ATE is broken.
+
+\cando{take a message an administrator sees and name the cause and the fix, and say when an abort
+leaves an instrument busy rather than releasing it.}
