@@ -14,7 +14,7 @@ Proven on this machine, by the tests named in this file:
 
 - the suite: 1591 tests on Linux with `QT_QPA_PLATFORM=offscreen` — 1586 pass, 5 are skipped (the
   PyInstaller gate, the Linux package gate, the two container gates, the review-screenshot test), in
-  336.28 s;
+  336.65 s;
 - that every signal the engine and the session emits is delivered on the main thread
   (`tests/test_signal_threads_32a.py`);
 - that an abort ends a Device call on every Device Type, and how long that takes

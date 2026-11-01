@@ -1331,7 +1331,7 @@ DEV_COMMANDS_NOT_RUN: dict[str, str] = {
     "QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider":
         "the suite cannot run itself from inside a test. This is exactly the command CI runs (the "
         "'Run tests' step of .github/workflows/ci.yml), and the counts quoted in chapter 1 come from "
-        "running it: 1586 passed, 5 skipped in 336.28 s on this machine",
+        "running it: 1586 passed, 5 skipped in 336.65 s on this machine",
     "ATE_BUILD_TESTS=1 pytest -m build":
         "by design not part of a normal run: it builds a real PyInstaller bundle, which takes minutes. "
         "It was run by hand for this manual (2 passed, 2 skipped, 1587 deselected in 223.72 s). "
