@@ -24,8 +24,8 @@ Proven on this machine, by the tests named in this file:
 
 Not proven, and not claimed: real hardware (every Device test talks to a loopback peer, a pseudo-terminal
 or pyvisa-py behind a `TCPIP0::127.0.0.1` resource); real Windows sessions, which only GitHub Actions has
-ever run; the Debian container smokes on this machine, which were attempted and did not complete; a
-Chromium-rendered PDF, stubbed by `conftest.py` except in the four tests that must prove a PDF has text.
+ever run; a Chromium-rendered PDF, stubbed by `conftest.py` except in the four tests that must prove a PDF
+has text. The container smokes did run here — see the gates section for the scratch-space catch.
 
 Where a spec and the code disagree, this file follows the code and the disagreement is listed at the end.
 
@@ -418,9 +418,11 @@ ATE_DOCKER_TESTS=1 pytest -m build -q     # the debian:stable container smokes
 ```
 
 Both gates are off by default and marked `build`. `tests/test_release_ci_28c.py` asserts the gate is
-written as documented. The build gate ran for this manual (1 passed, 46 deselected in 40.81 s). The
-container gate was attempted and did not complete on this machine: the container ran out of scratch
-space. CI runs it; this manual does not claim it passed here.
+written as documented. Both ran for this manual: the build gate gave 2 passed, 2 skipped, 1587 deselected
+in 223.72 s, and with `ATE_DOCKER_TESTS=1` as well all four gated tests passed in 768.00 s. The container
+gate needs scratch space on disk: the first attempt wrote its artifacts into `/tmp`, which here is a
+7.7 GB tmpfs, and died with `No space left on device`; with `TMPDIR` set to a directory on the disk it
+passes. CI runs it either way.
 
 ## The test suite
 
@@ -844,8 +846,9 @@ Run by `tests/test_manuals.py`: `python packaging/windows/build_installer.py --d
 Shown but not run here, with what covers them: the pytest command (the suite cannot run itself; it is the
 command CI runs, and the counts above come from running it); `ATE_BUILD_TESTS=1 pytest -m build` and its
 `-q` form (by design not part of a normal run: it builds a PyInstaller bundle, and it was run for this
-manual, 1 passed in 40.81 s); `ATE_DOCKER_TESTS=1 pytest -m build` in both forms (needs Docker and
-network in a `debian:stable` container; attempted here and did not complete);
+manual, 2 passed and 2 skipped in 223.72 s); `ATE_DOCKER_TESTS=1 pytest -m build` in both forms (needs
+Docker and network in a `debian:stable` container; run here with `TMPDIR` pointed at a directory on disk,
+1 passed in 533.95 s — on a machine whose `/tmp` is a small tmpfs it fails with `No space left on device`);
 `python packaging/build_pyinstaller.py --smoke` (the gate above calls the same script's
 `build_bundle()` and `verify_bundle()`); `python packaging/build_pyinstaller.py --verify dist/ate`
 (needs a built bundle; `tests/test_linux_packages_28b.py` runs `verify_bundle()` against a real bundle
@@ -882,10 +885,11 @@ python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
   Windows by us. The `icacls` paths, the Inno installer and the frozen Windows bundle are asserted by
   reading scripts and by `tests/test_release_ci_27c.py`, which checks the workflow's shape, never an
   installed program.
-- The Debian container smokes on this machine. `ATE_DOCKER_TESTS=1 pytest -m build` and
-  `packaging/linux/docker_smoke.py` were attempted and did not complete: the container ran out of scratch
-  space. `tests/test_release_ci_28c.py` asserts the gate and the smoke scripts' logic; the containers
-  themselves are CI's job.
+- Any container other than `debian:stable`. `ATE_DOCKER_TESTS=1 pytest -m build` and
+  `packaging/linux/docker_smoke.py` do pass here — 1 passed in 533.95 s with `TMPDIR` on a disk-backed
+  directory — but the first attempt on this machine's `/tmp` failed with `No space left on device`, and
+  nothing has ever been smoked on Fedora, Ubuntu or a SELinux-enforcing host.
+  `tests/test_release_ci_28c.py` asserts the gate and the smoke scripts' logic.
 - The cause of the packet 32b stall. One Windows CI run left a Test Run stalled for tens of seconds. The
   fixes and the diagnostic are proven; the disk being the culprit is a belief, not a measurement. The
   next stall can be read: long or in-flight writes point at the disk, normal writes with the worker's

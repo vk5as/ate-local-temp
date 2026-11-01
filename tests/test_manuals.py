@@ -1331,15 +1331,16 @@ DEV_COMMANDS_NOT_RUN: dict[str, str] = {
     "QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider":
         "the suite cannot run itself from inside a test. This is exactly the command CI runs (the "
         "'Run tests' step of .github/workflows/ci.yml), and the counts quoted in chapter 1 come from "
-        "running it: 1571 passed, 5 skipped on this machine",
+        "running it: 1586 passed, 5 skipped in 336.28 s on this machine",
     "ATE_BUILD_TESTS=1 pytest -m build":
         "by design not part of a normal run: it builds a real PyInstaller bundle, which takes minutes. "
-        "It was run for this manual (1 passed, 46 deselected in 40.81 s). tests/test_pyinstaller_build_27a.py "
-        "is the test it runs, and it loads packaging/build_pyinstaller.py itself",
+        "It was run by hand for this manual (2 passed, 2 skipped, 1587 deselected in 223.72 s). "
+        "tests/test_pyinstaller_build_27a.py is the test it runs, and it loads "
+        "packaging/build_pyinstaller.py itself",
     "ATE_DOCKER_TESTS=1 pytest -m build":
-        "needs Docker and a network inside a debian:stable container and takes minutes. It was attempted "
-        "while writing this manual and did not complete on this machine (the container ran out of "
-        "scratch space); chapter 19 says so plainly rather than claiming it passed",
+        "needs Docker and a network inside a debian:stable container and takes minutes. Run by hand for "
+        "this manual, with TMPDIR on a disk-backed directory: 1 passed in 533.95 s. With the machine's "
+        "/tmp (a 7.7 GB tmpfs) it fails with 'No space left on device'; chapter 19 says which is which",
     "ATE_BUILD_TESTS=1 pytest -m build -q":
         "the same gate as above, with the quiet flag; the -q is what the manual tells a developer to "
         "type and the same command was run without it",

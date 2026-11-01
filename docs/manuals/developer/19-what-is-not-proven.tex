@@ -18,12 +18,14 @@ happen''.
     us. The \texttt{icacls} permission paths, the Inno installer and the frozen Windows bundle are
     asserted by reading the scripts and by \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak27c.py}, which checks the
     workflow's shape, never by an install.
-  \item \textbf{The Debian container smokes, on this machine.}
-    \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} were
-    attempted while writing this manual and did not complete: the container ran out of scratch space.
-    \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} asserts the gate is written as documented and the smoke
-    scripts' logic; the containers themselves are CI's job. Nothing in this manual claims those
-    smokes passed here.
+  \item \textbf{The Debian container smokes, on \texttt{/tmp}.}
+    \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py}
+    ran here and passed --- \texttt{1 passed in 533.95 s}, and \texttt{docker smoke: all kinds ran in
+    debian:stable} by hand --- but only after \texttt{TMPDIR} was pointed at a directory on disk. The
+    first attempt, using the machine's \texttt{/tmp}, failed with \texttt{[Errno 28] No space left on
+    device}. \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} also asserts the gate is written as documented and
+    the smoke scripts' logic. Nothing outside \texttt{debian:stable} has been smoked: no Fedora, no
+    Ubuntu release, no container on a machine with SELinux enforced.
   \item \textbf{A real Chromium PDF.} \texttt{conftest.py} replaces the PDF helper with a stub for
     every test except the four that must prove a PDF has text. The sandbox decision, the flags and
     the failure messages are tested; the rendered page is not, except in those four.
@@ -76,7 +78,7 @@ left as it is, so that the difference is visible rather than smoothed over:
 Two numbers in this manual are snapshots: the suite's size and the elapsed time. Both were taken on
 one machine on one day, and both move with every packet. The names, the signals, the tables and the
 drivers are not snapshots --- the suite derives them from the code and fails if a manual stops naming
-them. If \texttt{1571} is no longer the number, the tests in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} do not
+them. If \texttt{1586} is no longer the number, the tests in \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} do not
 care; if a signal is gone from \texttt{RunEngine} and the manual still lists it, nothing notices, so
 the direction of the risk matters: the checks catch a manual falling behind, not a manual ahead of
 the code.

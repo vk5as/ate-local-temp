@@ -99,11 +99,14 @@ runs.
 \section{What has actually been run here}
 
 The frozen-build gate was run for this manual: \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} gave
-\texttt{1 passed, 46 deselected in 40.81 s}. The container gate was attempted
-(\texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build}, then \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} by hand)
-and did not complete here: the container ran out of scratch space in this environment. Chapter
-\ref{ch:unproven} says that plainly; the suite does not pretend those smokes passed. What has never
-been run on this machine is a Windows build, a Windows install, or an installer: those paths are
-checked by reading the scripts and by CI, not by us.
+\texttt{2 passed, 2 skipped, 1587 deselected in 223.72 s}. The container gate ran here too, once its
+scratch directory was moved off \texttt{/tmp}: \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1} with
+\texttt{TMPDIR} on the disk gave \texttt{1 passed in 533.95 s}, and
+\texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} run by hand printed
+\texttt{docker smoke: all kinds ran in debian:stable}. The first attempt of that gate died in this
+environment with \texttt{OSError: [Errno 28] No space left on device}, which is why the manual says
+where a gate ran and not merely that it can. What has never been run on this machine is a Windows
+build, a Windows install, or an installer: those paths are checked by reading the scripts and by CI,
+not by us.
 
 \cando{say which artifact carries which library, and name the test that proves a bundle is complete.}
