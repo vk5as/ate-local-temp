@@ -70,7 +70,7 @@ behind gets its own line, \texttt{open <device> aborted (ms)} or \texttt{close <
 
 \section{Abort, and what an abort cannot stop}
 
-Story 83 names two \emph{allowed} exceptions to the ten-second bound, and the suite measures both
+Spec story 83 names two \emph{allowed} exceptions to the ten-second bound, and the suite measures both
 rather than trying to fix them: a command a step runs with \texttt{os.execute}, which the abort
 cannot end, and a busy loop inside a coroutine, where the count hook never ticks
 (\texttt{tests/test\_\allowbreak{}manuals.py}: \texttt{test\_\allowbreak{}a\_\allowbreak{}command\_\allowbreak{}in\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}holds\_\allowbreak{}the\_\allowbreak{}abort\_\allowbreak{}until\_\allowbreak{}it\_\allowbreak{}finishes},

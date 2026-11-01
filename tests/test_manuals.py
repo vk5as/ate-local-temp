@@ -810,6 +810,18 @@ def test_every_message_the_manual_quotes_is_one_the_code_prints() -> None:
         assert source in code, f"{path} no longer prints {source!r}, which {quoted!r} came from"""
 
 
+def test_the_config_field_table_names_format_in_the_table_not_just_a_listing() -> None:
+    """The config's `format` key has to be in the table that explains the keys.
+
+    ``config_keys()`` counts ``format`` as covered if the name appears anywhere the manual sets
+    code, and every JSON listing has ``"format": 1`` in it, so a manual that never explained the
+    key would still pass. This pins it to the field table."""
+    tex = (MANUALS_DIR / "admin/04-the-config-file.tex").read_text(encoding="utf-8")
+    md = MANUALS["admin"].markdown.read_text(encoding="utf-8")
+    assert re.search(r"\\texttt\{format\}\s*&", tex), "the admin manual's config table has no row for format"
+    assert re.search(r"\|\s*`format`\s*\|", md), "the agent manual's config table has no row for format"
+
+
 def test_the_pdf_helper_timeout_is_the_sixty_seconds_the_manual_says() -> None:
     """The manual says 60 s; that number comes from PDF_TIMEOUT_MS, not from prose."""
     from ate.report.pdf_job import PDF_TIMEOUT_MS

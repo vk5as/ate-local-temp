@@ -53,9 +53,10 @@ bug to fix.
 
 \section{Backups}
 
-Nothing in ATE backs anything up. The wayfinding document says \texttt{ate db migrate} makes a
-timestamped copy first; it does not, and that is the code's behaviour, so \textbf{you} make the
-copy before you migrate. Migrate is not destructive --- it only adds tables and sets the version ---
+Nothing in ATE backs anything up. The design note the record format was written from
+(\texttt{.scratch/\allowbreak{}ate-v1-wayfinding/\allowbreak{}assets/\allowbreak{}test-run-record.md}) says
+\texttt{ate db migrate} makes a timestamped copy first; it does not, and that is the code's behaviour,
+so \textbf{you} make the copy before you migrate. Migrate is not destructive --- it only adds tables and sets the version ---
 but an upgrade you did not back up is an upgrade you cannot roll back.
 
 Back up three things:

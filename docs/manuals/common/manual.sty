@@ -85,6 +85,9 @@
   keywords={def,class,return,if,elif,else,for,while,import,from,as,with,not,and,or,None,True,False,lambda,try,except,finally,raise,pass,assert,in,is,global,yield,self},
   sensitive=true,
   morecomment=[l]{\#},
+  % A docstring is prose, not code. Read as a comment, so a keyword inside it ("is", "in",
+  % "not") is not set bold in the middle of a sentence the reader is meant to read.
+  morecomment=[s]{"""}{"""},
   basicstyle=\ttfamily\footnotesize,
   keywordstyle=\bfseries\color{codekey},
   commentstyle=\itshape\color{codecomment},

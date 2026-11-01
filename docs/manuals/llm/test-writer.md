@@ -3,8 +3,8 @@
 What an agent needs to write, check and ship a Test Schedule. Every name here is checked
 against the code (`src/ate/engine/lua_host.py`, `src/ate/devices/`, `src/ate/catalog.py`), and
 every example is a file under `docs/manuals/examples/test-writer/` that the test suite runs
-headless (`tests/test_manuals.py`). Facts that the wayfinding assets state differently from the
-code are listed at the end.
+headless (`tests/test_manuals.py`). Facts that the design specs under
+`.scratch/ate-v1-wayfinding/assets/` state differently from the code are listed at the end.
 
 ## The job, in order
 
@@ -1049,17 +1049,17 @@ an abort `ATE` calls raise `"aborted"`, a busy loop in the step's own code is st
 instruction-count hook (`debug.sethook(check_abort, "", 1000)`), and `pcall` and `xpcall`
 re-raise. ATE aims to stop in 0.5 s and the suite fails a run that takes longer than 10 s.
 
-That 10 s holds only for what the hook can reach. Story 83 names two exceptions as allowed rather
-than as bugs, both measured against the shipped code. They are not forbidden; they are the two
-cases where the abort has to wait, and a writer should know which steps they apply to.
+That 10 s holds only for what the hook can reach. Two exceptions are allowed rather than bugs, both
+shown by runs against the shipped code. They are not forbidden; they are the two cases where the
+abort has to wait, and a writer should know which steps they apply to.
 
 - **A command run by `os.execute` is allowed, and the abort waits for it.** `os.execute` is
-  available in a step. A step that ran `os.execute("sleep 20")` was aborted 19.5 s before it ended:
-  the run finished only when the command did. The step still reported `PASS`. ATE cannot end a
-  process it did not start.
-- **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop of
-  `120000000` iterations inside `coroutine.wrap` ran to completion after an abort: 2.67 s from the
-  abort to `FINISHED`, the step reporting `PASS` and the next step recording the abort. An unbounded
+  available in a step. ATE cannot end a process it did not start, so the run finishes when the
+  command does: a command holds the abort for as long as it runs, however long that is. The step
+  still reported `PASS` when it returned.
+- **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop in a
+  coroutine runs to completion after an abort and the run ends when the loop does, so a long enough
+  loop holds the abort the same way. An unbounded
   `while true do end` inside `coroutine.wrap` stopped only when the process was killed, its
   `test_run` row left open. The engine's own docstring advises against coroutines for this reason
   (`src/ate/engine/run_engine.py`, "Because a schedule must not use coroutines"): the exception is
@@ -1411,17 +1411,19 @@ the database.
 - Never write to `ATE.run`; it is read-only.
 - Never ship a schedule without running `ate definition update` on its `.atedef`.
 
-Two things are deliberately not on this list, because story 83 records them as allowed exceptions
-to the must-stop-within-10-s rule: a command a step runs with `os.execute`, and a busy loop inside
+Two things are deliberately not on this list, because the ten-second abort rule has two recorded
+exceptions: a command a step runs with `os.execute`, and a busy loop inside
 a coroutine. Both are measured, both are explained under Abort, and neither is a reason to refuse
 a schedule.
 
-## Where the assets and the code disagree
+## Where the design specs and the code disagree
 
-- The assets say a bad Device parameter "always raises". The code isolates it: the call returns
+The specs are the files under `.scratch/ate-v1-wayfinding/assets/`.
+
+- The specs say a bad Device parameter "always raises". The code isolates it: the call returns
   `false` and the message, and the traceback is logged at ERROR. See
   `tests/test_device_onerror.py::test_bad_param_never_calls_handler`.
-- The assets say only Post-test Actions are called with the run result. `_record_phase_action`
+- They say only Post-test Actions are called with the run result. `_record_phase_action`
   passes the standing result to Pre-test Actions too, always `"PASS"`.
-- The assets say the sandbox "has no `package` table". `package` exists; its `path` and `cpath`
+- They say the sandbox "has no `package` table". `package` exists; its `path` and `cpath`
   are empty strings.

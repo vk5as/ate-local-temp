@@ -85,7 +85,7 @@ and the code together, the rule that emerged is worth applying to every new timi
     point was counted as abort latency. \texttt{\_drive\_abort} now starts on the worker being inside
     \texttt{ATE.sleep}'s wait, or on \texttt{input\_asked} for a blocked input, and stops at
     \texttt{FINISHED}, before any read.
-  \item \textbf{Separate the requirement from the expectation.} Story 83 says an abort should stop within
+  \item \textbf{Separate the requirement from the expectation.} Spec story 83 says an abort should stop within
     0.5 s and must stop within 10 s. A test fails past 10 s and \textbf{warns} past 0.5 s, so a slow
     runner stays visible in CI's summary instead of being a false failure.
     \texttt{wait\_\allowbreak{}for\_\allowbreak{}aborted\_\allowbreak{}run} implements both, and prints the worker's timeline.

@@ -18,7 +18,8 @@ python packaging/build_pyinstaller.py --verify dist/ate   # check an existing bu
 \texttt{verify\_bundle()} is the gate a bundle must pass: it refuses a bundle that does not carry the
 licence files (\texttt{\_internal/licences}, four files generated at build time by
 \texttt{packaging/\allowbreak{}licence/\allowbreak{}notices.py --out build/\allowbreak{}licences}), the report template, the bundled Lua
-modules, the WebEngine binary and its 57 \texttt{.pak} files. The excludes list in \texttt{ate.spec}
+modules, the WebEngine binary and its \texttt{.pak} and \texttt{icudtl.dat} resources --- the gate
+checks that some are there, not how many. The excludes list in \texttt{ate.spec}
 has its own history: PySide6's \texttt{QtWebEngineWidgets} imports \texttt{PySide6.QtWebChannel} on its
 own, and keeping it excluded produced a bundle that looked fine and then died in
 \texttt{ate \_pdf} with ``could not import module 'PySide6.QtWebChannel'''. It is out of the list, and
@@ -74,8 +75,9 @@ administrator to use.
 
 \section{The CI that runs all of this}
 
-\texttt{.github/\allowbreak{}workflows/\allowbreak{}ci.yml} runs the suite on \texttt{ubuntu-latest} and
-\texttt{windows-latest}, each on CPython 3.13 and 3.14 --- four jobs, \texttt{fail-fast: false}, with
+\texttt{.github/\allowbreak{}workflows/\allowbreak{}ci.yml} runs the suite as a single job with a
+$2 \times 2$ matrix --- \texttt{ubuntu-latest} and \texttt{windows-latest}, each on CPython 3.13 and
+3.14 --- so four job runs, \texttt{fail-fast: false}, with
 \texttt{QT\_\allowbreak{}QPA\_\allowbreak{}PLATFORM=offscreen} and \texttt{PYTHONFAULTHANDLER=1} set at job level. Two things in it
 are load-bearing and were added because of failures, not taste:
 
@@ -90,8 +92,9 @@ are load-bearing and were added because of failures, not taste:
 \end{itemize}
 
 \texttt{.github/\allowbreak{}workflows/\allowbreak{}release.yml} runs on a tag or by hand: \texttt{windows-installer},
-\texttt{linux-build} and \texttt{linux-smoke} (matrix: \texttt{deb}, \texttt{tar}, \texttt{wheel}) --- five
-job runs. The smoke tests install each artifact in a fresh \texttt{debian:stable} container and run
+\texttt{linux-build} and \texttt{linux-smoke} (matrix: \texttt{deb}, \texttt{tar}, \texttt{wheel}) --- three
+job definitions, five job runs. The smoke tests install each artifact in a fresh \texttt{debian:stable}
+container and run
 \texttt{ate --version} and \texttt{ate \_selftest --run}. \texttt{packaging/\allowbreak{}linux/\allowbreak{}smoke\_\allowbreak{}linux.py} is the
 script that runs inside them, and \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} is the driver that a human
 runs.

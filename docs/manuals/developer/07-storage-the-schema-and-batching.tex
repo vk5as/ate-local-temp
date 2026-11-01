@@ -55,7 +55,7 @@ and it is confined to pragmas.
 
 The Core Engine is autocommit: each write commits immediately. That is what makes the record
 append-only and crash-safe --- an open run simply has no \texttt{ended\_at} yet --- and it is also the
-reason an abort over 400 unrun steps used to make 404 commits and take longer than story 83's 10 s with
+reason an abort over 400 unrun steps used to make 404 commits and take longer than spec story 83's 10 s with
 no stall at all (packet 32b). The answer was batching, not a different transaction model.
 
 SQLite limits the number of variables one statement may carry; the lowest default is 999

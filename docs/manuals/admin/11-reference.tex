@@ -81,8 +81,9 @@ Run log & in the database, table \texttt{log\_line} & the same \\
 \end{center}
 
 The log and report paths are what the config says; the defaults above are what \texttt{ate setup}
-writes. Relative paths in the config are resolved against the config file's directory, so a Station
-rooted somewhere else has its data next to its config.
+writes, and it writes them already resolved to absolute paths. A path left relative in the config is
+resolved against the config file's directory, so only a hand-written config with relative paths keeps
+its data next to the config.
 
 \section{What this manual cannot tell you}
 

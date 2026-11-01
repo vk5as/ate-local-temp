@@ -169,7 +169,8 @@ daemon thread and holds its transport until it finishes. What can be left behind
     NI-VISA, GPIB, USB, VXI-11 --- for as long as the call's timeout says;
   \item a pyserial write: the timeout does not say how much got out;
   \item \texttt{ATE.close} on a stuck port, which the operating system can hold for a long time
-    (Linux can hold a \texttt{tty} close while output drains, up to 30 seconds by default).
+    while the output drains: how long is the operating system's decision, not ATE's, and nothing
+    here measures it.
   \item At the end of an aborted run all such closes together are given at most three seconds, with
     one WARNING naming each Device still closing.
 \end{itemize}

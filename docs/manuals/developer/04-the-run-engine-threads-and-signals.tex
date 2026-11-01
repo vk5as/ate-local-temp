@@ -61,7 +61,7 @@ recorded \texttt{INTERRUPTED} and \texttt{FINISHED} is still announced.
     row each. A step's result is its last Attempt's; a step whose action raised records an
     \texttt{ERROR} Attempt; a step with no report records \texttt{NOREPORT};
   \item pause on a Stop-on-Fail failure until the Operator answers (section below);
-  \item run the Post-test Actions, which run even after an abort (story 84), each ending on a second
+  \item run the Post-test Actions, which run even after an abort (spec story 84), each ending on a second
     abort;
   \item record the Media Release chain and every file the run used, close open Devices, and write the
     run's result and End Reason.
@@ -143,7 +143,7 @@ Allowed, because the abort flag is checked inside it and it never touches a widg
 
 \begin{itemize}
   \item a Test Step or Action closure, synchronously. \texttt{run\_engine.py}'s docstring assumes
-    this: the sandbox does not remove coroutines, but story 83 records a busy loop in one as an
+    this: the sandbox does not remove coroutines, but spec story 83 records a busy loop in one as an
     exception to the abort bound, so \texttt{ATE.report} is attributed to a step by snapshotting the
     host's report log before the closure runs and diffing it afterwards;
   \item store writes. Each is its own commit (the Engine is autocommit), which is what makes the record

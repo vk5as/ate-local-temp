@@ -6,7 +6,8 @@ and the `ate` commands are derived from `src/ate/config.py` and `src/ate/cli.py`
 listed below is executed in a temporary Station, and each message this manual quotes is checked
 against the file that prints it. The message check is a hand-written list, `QUOTED_MESSAGES` in
 `tests/test_manuals.py`: it proves the messages it contains are still what the code prints, and it
-only covers the messages someone thought to put in it. Facts the wayfinding assets state differently from the code are listed at the end.
+only covers the messages someone thought to put in it. Facts the design specs under
+`.scratch/ate-v1-wayfinding/assets/` state differently from the code are listed at the end.
 
 The manual for a human is `docs/manuals/admin/main.tex` (eleven chapters, built to PDF by
 `docs/manuals/build.py admin`). This file is not a conversion of it: it is written for an agent, in
@@ -345,7 +346,7 @@ The build fails on an overfull box wider than 5 pt or an undefined reference.
 
 Proven by the suite: config parsing and every refusal it produces; database status, migration and
 migration refusal; `ate setup`'s directories, config and database; `ate definition update`; the PDF
-sandbox decision and its messages; the abort path that leaves a Device closing (packet 32b); the
+sandbox decision and its messages; the abort path that leaves a Device closing; the
 full test suite on Windows and Linux with Python 3.13 and 3.14, headless; the Windows installer
 compiled, silently installed, upgraded and uninstalled on a CI runner; the Linux artifacts smoke
 tested in `debian:stable`; `verify_bundle` refusing a bundle missing the licence files.
@@ -353,25 +354,28 @@ tested in `debian:stable`; `verify_bundle` refusing a bundle missing the licence
 Not proven: any real desktop session with a display a human watched; what a given Windows machine
 makes of an unsigned installer (there is no certificate); any real GPIB, USBTMC or RS-232 instrument
 — every Device test uses a loopback peer, a `socket://` URL, or pyvisa-py's backends, and NI-VISA is
-not shipped; the cause of the Windows CI stall (packet 32b), which is a hypothesis about the runner's
+not shipped; the cause of the Windows CI stall, which is a hypothesis about the runner's
 disk; whether the wheel carries the licence notices.
 
 One established fact worth repeating: ATE takes no exclusive lock on a serial port on Linux. The
 suite tried `serial.Serial(exclusive=True)` against a port ATE was holding and the open succeeded, so
 sharing is the behaviour.
 
-## Where the assets and the code disagree
+## Where the design specs and the code disagree
 
-- The wayfinding asset says `ate db migrate` makes a timestamped backup copy first. It does not.
-- The asset shows `reports.logo` as a path. The validator accepts only `null` (`'reports.logo' must
+The specs are the files under `.scratch/ate-v1-wayfinding/assets/`, named in each line below.
+
+- `test-run-record.md` says `ate db migrate` makes a timestamped backup copy first. It does not.
+- `app-config-format.md` shows `reports.logo` as a path. The validator accepts only `null` (`'reports.logo' must
   be a null, got 'x.png'`), even though `src/ate/report/html.py` can embed a logo.
 - `ui.theme` is stored and never read by the shipped code.
 - `reports.paperSize` is not validated by the config; the PDF helper is what rejects a bad value.
-- The asset's wording for a launch refusal differs from `DbLaunchResult.message`, which names the
+- `test-run-record.md`'s wording for a launch refusal differs from `DbLaunchResult.message`, which names the
   database path and adds `--config <path>` when a non-default config is in use.
 - GLOSSARY says "Automated Test Execution"; `src/ate/cli.py` says "Automated Test Equipment".
-- The packaging asset says unsigned installers "may trigger SmartScreen warnings". Nothing in this
+- `packaging.md` says unsigned installers "may trigger SmartScreen warnings". Nothing in this
   repository establishes that; the installer is unsigned, and it has only ever been installed
   headlessly on a CI runner.
-- The manual describes no appearance at all. Packet 33 is the appearance work, so anything about how
-  a screen looks is unverified here.
+- The manual describes no appearance at all. The appearance work is a separate packet of the project
+  (`.scratch/ate-v1/issues/33-appearance-review.md`), so anything about how a screen looks is
+  unverified here.
