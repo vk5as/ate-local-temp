@@ -16,6 +16,7 @@ import pytest
 from pyvisa import constants
 
 from ate.devices import visa
+from ate.devices.abort import _Call, run_abortable
 from ate.devices.tcp import TcpDriver, _TcpDevice
 from ate.devices.visa import VisaDriver
 from ate.engine.run_engine import RunEngine, RunStatus
@@ -363,3 +364,53 @@ def test_a_driver_used_directly_has_no_helper_thread():
     assert device.read({})[0] == b"x"
     assert calls == [threading.current_thread()]
     device.close()
+
+
+class _NeverAborts:
+    """An abort flag that stays clear: nothing here tests the abort path, only the waiting."""
+
+    aborted = False
+
+
+class _NotAnException(BaseException):
+    """What a helper thread can die on that `except Exception` misses."""
+
+
+def _run_off_thread(fn) -> tuple[bool, list[BaseException]]:
+    """Run ``fn`` on a daemon thread and return (it returned within 5 s, what it raised).
+
+    The worker's wait is what is being tested, so it cannot be allowed to hang the suite: a wait
+    that never ends fails with the reason instead of sitting until the run's 600 s timeout does."""
+    caught: list[BaseException] = []
+    ended = threading.Event()
+
+    def worker() -> None:
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001 - the test decides what it expected
+            caught.append(exc)
+        ended.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    return ended.wait(5.0), caught
+
+
+def test_a_helper_thread_dying_on_a_base_exception_reaches_the_worker():
+    """A BaseException in the helper must reach the worker, not leave it joining a dead thread.
+
+    `run_abortable` caught Exception and watched only for an abort, so a helper killed by anything
+    else recorded no outcome and the worker polled a finished thread until the call's own timeout."""
+    def boom() -> None:
+        raise _NotAnException("the helper died on something that is not an Exception")
+
+    returned, caught = _run_off_thread(lambda: run_abortable(boom, _NeverAborts()))
+    assert returned, "run_abortable never returned: the helper died on a BaseException with no outcome"
+    assert len(caught) == 1 and isinstance(caught[0], _NotAnException), caught
+
+
+def test_a_helper_thread_that_records_no_outcome_is_not_waited_on(monkeypatch):
+    """The wait also leaves when the helper is dead, however it got that way."""
+    monkeypatch.setattr(_Call, "_run", lambda self: None)  # a helper that ends without an outcome
+    returned, caught = _run_off_thread(lambda: run_abortable(lambda: 1, _NeverAborts()))
+    assert returned, "run_abortable kept joining a thread that had already ended"
+    assert len(caught) == 1 and "without an outcome" in str(caught[0]), caught

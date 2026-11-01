@@ -52,7 +52,9 @@ class _Call:
         value, error = None, None
         try:
             value = self.fn()
-        except Exception as exc:  # noqa: BLE001 - handed to the worker, or dropped if it has gone
+        except BaseException as exc:  # noqa: BLE001 - handed to the worker, or dropped if it has gone
+            # Not just Exception: a KeyboardInterrupt or SystemExit here would otherwise kill the
+            # thread with no outcome, and the worker watching for an abort alone would wait forever.
             error = exc
         with self.lock:
             self.outcome = (value, error)
@@ -90,6 +92,10 @@ def run_abortable(
         call.thread.join(POLL_SECONDS)
         if call.outcome is not None:
             break
+        if not call.thread.is_alive():
+            # The helper is gone and recorded nothing: there is no outcome to wait for and no abort
+            # to raise, so waiting would be a wait on a thread that can never finish.
+            raise RuntimeError(f"the Device call thread ended without an outcome: {call.thread.name}")
         if flag.aborted and call.abandon():
             if on_abandon is not None:
                 on_abandon(call.thread)
