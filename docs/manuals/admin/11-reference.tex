@@ -2,12 +2,12 @@
 
 \section{Every \texttt{ate} command}
 
-\begin{center}
-\footnotesize
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{9.6cm}@{}}
+\begingroup\footnotesize
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{9.6cm}@{}}
 \toprule
 Command & What it does \\
 \midrule
+\endhead
 \texttt{ate} & Opens the application. With an unusable config or database, refuses and exits 1. \\
 \texttt{ate --config PATH} & Read that config instead of the platform default. Works with every
   subcommand. \\
@@ -20,11 +20,10 @@ Command & What it does \\
   database. Exits 1 with the refusal if it is missing or outdated. \\
 \texttt{ate db migrate [PATH] [--yes|-y]} & Create or upgrade the database, after confirmation unless
   \texttt{--yes}. Refuses a database built by a newer ATE. \\
-\texttt{ate setup [--root DIR]} & Create the Station's directories, write a default config if none
-  exists, and migrate the database. \\
-\texttt{ate setup --data-dir DIR --config-dir DIR} & Override one of the two directories setup uses.
-  For packagers and tests. \\
-\texttt{ate setup --no-permissions} & Skip the group, ownership and ACL treatment explicitly. \\
+\texttt{ate setup} & Create the Station's directories, write a default config if none exists, and
+  migrate the database. \texttt{--root DIR} puts the Station under DIR;
+  \texttt{--data-dir}\allowbreak DIR and \texttt{--config-dir}\allowbreak DIR override one of the
+  two; \texttt{--no-permissions} skips the group, ownership and ACL treatment explicitly. \\
 \texttt{ate definition update <file.atedef>} & Recompute every listed file's SHA-256 in place,
   filling in missing ones. Rewrites only if something changed. \\
 \texttt{ate \_pdf <html> <pdf> --paper A4|Letter [--unsandboxed]} & Hidden helper ATE starts as a
@@ -38,8 +37,8 @@ Command & What it does \\
   \texttt{ate setup} wrote, refuses a database at the wrong schema version, and reports the schedules
   in a Test Definition directory and the broken ones. Writes nothing. \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{longtable}
+\endgroup
 
 The hidden commands are deliberately not in \texttt{ate --help}; they are what ATE and the packager
 call, not what an Operator types. An administrator can still run them, and each one prints what it

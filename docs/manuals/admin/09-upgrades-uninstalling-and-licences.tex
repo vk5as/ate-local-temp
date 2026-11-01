@@ -8,13 +8,16 @@ is:
 \begin{enumerate}
   \item \textbf{Back up the database and the config} (chapter~\ref{ch:database}). An upgrade never
     touches them, but a migration that turns out to be the wrong one has no built-in undo.
-  \item \textbf{Install the new artifact over the old one.} Nothing in the install step migrates the
-    database, and ATE's application refuses to start against a database older than itself, so
-    installing and then launching is the combination that produces a refusal.
-  \item \textbf{Migrate:} \texttt{ate db migrate}. \texttt{ate setup} also runs it, and it is
-    idempotent --- running it on an already-current database succeeds and changes nothing.
-  \item \textbf{Check:} \texttt{ate db status} prints the version, and \texttt{ate --version} prints
-    the ATE version. If they disagree, the migration did not run.
+  \item \textbf{Install the new artifact over the old one.} The Windows installer, \texttt{install.sh}
+    and the \texttt{.deb} postinst each run \texttt{ate setup} as their last step, and that runs the
+    migration, so an install through those three leaves the database current. A wheel installed with
+    \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema until you
+    migrate it, and ATE refuses to start against a database older than itself.
+  \item \textbf{Migrate, when the artifact did not.} \texttt{ate db migrate} is idempotent: run it on
+    an already-current database and it succeeds, prints the version, and changes nothing.
+  \item \textbf{Check with \texttt{ate db status}.} On this build it prints \texttt{5} and exits 0 ---
+    \texttt{5} is the schema version, not the ATE version, so do not compare the two. A missing or
+    older database exits 1 with the refusal to run, which is the migration not having happened.
   \item \textbf{Check the Media Releases.} A Media Release whose files no longer match its recorded
     checksums warns rather than failing; after updating a release, run \texttt{ate definition update}
     on its \texttt{.atedef} (chapter~\ref{ch:media-releases}).

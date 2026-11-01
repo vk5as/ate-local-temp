@@ -42,6 +42,23 @@ ate setup:
 \texttt{DIR/config}); \texttt{--data-dir} and \texttt{--config-dir} override one of them. Those
 three exist for packagers and for tests: an ordinary Station uses the platform defaults.
 
+\section{Moving or cloning a Station}
+
+A Station is nothing but its config file and its data directory, so moving one is copying both.
+Setup writes every path in the config out in full, not as \texttt{<data>}, so a config copied to a
+new machine or a new directory still names the old one: edit \texttt{database.path},
+\texttt{reports.directory}, \texttt{log.directory} and \texttt{testDefinitions.directories} to the
+new locations, or run \texttt{ate setup --root DIR} there and copy the database into what it made.
+Setup never overwrites a config that exists, so it will not rewrite paths for you.
+
+Cloning needs one extra edit. \texttt{station.uuid} is the Station's identity and it is recorded on
+every Test Run, and setup writes a config with a fresh one only when the file does not exist. A
+copied config carries the original uuid with it, and ATE never notices two Stations claiming the
+same one. Blank the value --- \texttt{"uuid": ""} --- on the copy, and the next launch generates and
+writes back a new uuid; deleting the key does the same. Two Stations on one database file is a
+separate mistake: nothing in the code prevents it, and the runs from both are indistinguishable
+except by that uuid.
+
 \section{Permissions, and who can run what}
 
 The privileged part of setup is the ownership and access rights, and it only happens when the

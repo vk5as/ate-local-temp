@@ -65,6 +65,16 @@ ate setup --no-permissions                   # skip the group/ownership/ACL trea
 It also runs the migration `ate db migrate` runs. Bare `ate setup` writes to the platform
 directories, which the test suite is not allowed to touch; the `--root` form is what is executed.
 
+Moving a Station is copying its config file and its data directory: setup writes every path in the
+config out in full, not as `<data>`, so a copied config still names the old locations. Edit
+`database.path`, `reports.directory`, `log.directory` and `testDefinitions.directories`, or run
+`ate setup --root DIR` at the new place and copy the database into what it made. Setup will not
+rewrite paths for you, because it never overwrites a config that exists.
+
+Cloning needs one more edit: the copied config carries the original `station.uuid`, and ATE never
+detects two Stations with the same one. Blank it (`"uuid": ""`) or delete the key on the copy; the
+next launch generates a fresh uuid and writes it back.
+
 ```bash
 ate db status [PATH]                         # print PRAGMA user_version, exit 0; read-only
 ate db migrate [PATH]                        # create or upgrade, after confirmation
@@ -148,6 +158,7 @@ purge.
 - A database built by a newer ATE exits 1 with: `this ATE is too old for the database at <path>; update ATE`. There is no downgrade.
 - Migrations are forward only and idempotent.
 - Nothing in ATE backs anything up. Copy `ate.db`, `ate.db-wal` and `ate.db-shm` together, or stop ATE first: a lone `ate.db` copy while a run is writing can lose the writes sitting in the WAL.
+- Restore is the same copy backwards: stop ATE, put the three files back where `database.path` points, start again. There is no undo of one run and no partial restore; the copy you made is the state you go back to.
 
 At launch the application also closes any run with no end time as `INTERRUPTED` with result `FAIL`
 and logs `Closed N interrupted run(s) at launch.`
@@ -259,9 +270,17 @@ device TCP 127.0.0.1:5025 was still closing when the aborted run ended
 
 ## Upgrades, uninstalling, licences
 
-Order: back up the database and the config; install the new artifact over the old; `ate db migrate`;
-check with `ate db status` and `ate --version`; then `ate definition update` on any Media Release
-whose files changed. Each artifact clears its own program files before writing new ones, so nothing
+Order: back up the database and the config; install the new artifact over the old; migrate if the
+artifact did not; check; then `ate definition update` on any Media Release whose files changed. The
+Windows installer, `install.sh` and the `.deb` postinst run `ate setup` at the end, and that runs the
+migration, so those three leave the database current. A `pip`/`pipx` wheel install runs nothing, so
+its database stays at the old schema and ATE refuses to start against it until you migrate.
+
+`ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
+version: the two numbers are unrelated, so comparing them means nothing. A missing or older database
+exits 1 with the refusal, which is the migration not having happened.
+
+Each artifact clears its own program files before writing new ones, so nothing
 from the previous build survives. Config and data live outside the install directory on every
 platform.
 

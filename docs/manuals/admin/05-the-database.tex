@@ -64,8 +64,7 @@ Back up three things:
   \item \textbf{The database.} \texttt{ate.db} and its companions \texttt{ate.db-wal} and
     \texttt{ate.db-shm}. ATE opens every connection in WAL mode, so a database that is in use has a
     \texttt{-wal} file holding recent writes; copying \texttt{ate.db} alone while a Test Run is
-    writing can lose those writes. Copy all three, or stop ATE first. Runs from different Stations
-    can be merged later by a plain copy, because nothing in the schema is database-wide.
+    writing can lose those writes. Copy all three, or stop ATE first.
   \item \textbf{The config.} \texttt{config.json}. It is small, it is not backed up by anything, and
     \texttt{apt purge} deletes it on Linux.
   \item \textbf{The reports.} Test Reports are generated from the database, so a report can always be
@@ -76,6 +75,13 @@ Back up three things:
 The data directory is small enough to copy whole: \texttt{ate.db}, \texttt{reports}, \texttt{logs}
 and \texttt{definitions}. Keeping \texttt{logs} is optional and is the only part of the data that
 records ATE's own activity rather than a Test Run.
+
+Restoring is the same copy, in the other direction. Stop ATE, put \texttt{ate.db}, \texttt{ate.db-wal}
+and \texttt{ate.db-shm} back where \texttt{database.path} points, and start again: the schema check at
+launch accepts a database whose version matches this ATE, and the runs it holds appear on the History
+screen as they did before. There is no partial restore and no undo of a single run: a run is a row in
+\texttt{test\_run} with its steps in \texttt{node}, and the only way back to an earlier state is the
+copy you made before the change.
 
 \cando{check a database's version, migrate it safely, and say what has to be copied before a
 migration and why a lone \texttt{ate.db} copy is not always enough.}

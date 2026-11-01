@@ -10,12 +10,12 @@ restarted; rescanning Test Definitions does not re-read it, and there is no per-
 Keys are camelCase and grouped in sections. A key that is missing is filled with its default; a key
 that is present is checked for type.
 
-\begin{center}
-\footnotesize
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{8.0cm}@{}}
+\begingroup\footnotesize
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{8.0cm}@{}}
 \toprule
 Key & Default & Meaning \\
 \midrule
+\endhead
 \texttt{format} & required & Must be exactly \texttt{1}. A missing or other \texttt{format} stops
   startup. \\
 \texttt{defaultProject} & \texttt{""} & Prefills the Project field on the Run screen. A Test Run
@@ -57,8 +57,8 @@ Key & Default & Meaning \\
 \texttt{ui.allowHistoryDuringRun} & \texttt{true} & Whether History can be browsed while a Test Run
   is in progress. \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{longtable}
+\endgroup
 
 \section{Paths in the config}
 
