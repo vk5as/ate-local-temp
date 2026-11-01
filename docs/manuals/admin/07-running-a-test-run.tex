@@ -1,0 +1,93 @@
+\chapter{Running the Station day to day}\label{ch:running}
+
+With the program installed, the Station prepared and the config set, day to day is: launch, run a
+Test Run, and know where the Test Report went. How the screens look is deliberately not described
+here --- the interface is still being worked on --- only what the application does.
+
+\section{Launching}
+
+\begin{lstlisting}[language=ATEShell]
+ate
+ate --config /tmp/station/config/config.json
+ate --allow-unsandboxed-pdf
+\end{lstlisting}
+
+With no subcommand, ATE opens the application. At launch, in order, it reads the config; creates the
+log and reports directories if they do not exist (refusing with the path if it cannot); opens this
+launch's application log; checks the database's schema version and refuses if it is not this ATE's;
+closes any Test Run left open by a previous crash; and decides, once, how PDFs will be handled for
+this launch.
+
+An invalid config or an unusable database is a dialog with one or two lines and an exit code of 1.
+There is no traceback, and nothing is migrated or repaired silently.
+
+\section{Reports, and the PDF sandbox question}
+
+A Test Report is written when a Test Run finishes, under \texttt{reports.directory}, in a
+subdirectory named after the UUT Type:
+
+\begin{lstlisting}[language=ATEShell]
+/var/lib/ate/reports/RailGun/RailGun_4471_20261101-091203_PASS.html
+\end{lstlisting}
+
+The HTML is always written. The PDF is not, and this is the part of ATE that surprises people.
+ATE never renders a PDF in its own process: it starts a hidden child, \texttt{ate \_pdf <html>
+<pdf> --paper A4}, and waits for it. Chromium's renderer sandbox will not start under root or an
+administrator, so a privileged ATE has to be told to give up that isolation, and ATE never does it
+by itself:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.2cm}>{\raggedright\arraybackslash}p{10.6cm}@{}}
+\toprule
+Situation & What happens \\
+\midrule
+Ordinary user & The PDF is rendered with the sandbox on. Nothing is asked. Giving
+  \texttt{--allow-unsandboxed-pdf} here does nothing, and ATE logs that it had no effect. \\
+Privileged, no flag & A dialog asks, per PDF: "Render PDF without sandbox?", with buttons
+  \texttt{Generate PDF without sandbox} and \texttt{Skip PDF}. \texttt{Skip PDF} is the default
+  button. Saying no leaves the HTML and writes no PDF. \\
+Privileged, \texttt{--allow-unsandboxed-pdf} & No dialog; the PDF is rendered unsandboxed and the
+  choice is logged as a WARNING. \\
+Privileged, headless & There is nobody to ask, so the PDF is skipped and the log says so --- unless
+  \texttt{--allow-unsandboxed-pdf} was given. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The flag is spelled \texttt{--allow-unsandboxed-pdf} and belongs to \texttt{ate}, so
+\texttt{ate --allow-unsandboxed-pdf \_selftest --run} is the same decision as putting it at the end.
+It applies to every Test Report PDF of that launch, including one regenerated from History.
+
+Two things a helper can fail on that are worth knowing:
+
+\begin{itemize}
+  \item It refuses to render as root or an administrator without \texttt{--unsandboxed}, because
+    that is exactly the choice ATE will not make for you. You only see this if you run
+    \texttt{ate \_pdf} yourself.
+  \item A PDF can be a perfectly valid PDF with nothing in it. Debian containers ship no fonts; with
+    no font, Chromium draws no glyphs and writes about 1.7 kilobytes of empty page. \texttt{ate
+    \_selftest --run} checks for text in the PDF precisely so this is caught as a packaging failure
+    rather than passed as a success. If a Test Report opens as a blank page, install fontconfig and
+    a font before blaming ATE.
+\end{itemize}
+
+An inherited \texttt{QTWEBENGINE\_DISABLE\_SANDBOX} or a \texttt{--no-sandbox} in
+\texttt{QTWEBENGINE\_CHROMIUM\_FLAGS} does not switch the sandbox off for ATE's PDFs: it is stripped
+from the helper's environment and logged as a WARNING, because nobody chose it. The only way to get
+an unsandboxed render is the flag or the dialog.
+
+\section{History, and the Run log}
+
+History is one flat table of Test Runs, newest first, sortable and filterable by UUT Type, serial
+substring, result, End Reason, date range and Project. Rows load page by page. It is read-only:
+Test Runs are never edited or deleted, so there is no "clean up the database" button, and archiving
+means copying the database file.
+
+For a finished run --- including one recorded as \texttt{INTERRUPTED} --- History can open its
+report, regenerate the HTML or the PDF with or without the Run log, and export the Run log as CSV,
+JSON Lines or text. Exporting is not available for a run that is still in progress. Browsing
+History while a run is running is allowed unless \texttt{ui.allowHistoryDuringRun} is set to false.
+
+\cando{run a Test Run, find the Test Report it wrote, and explain why a privileged Station wrote no
+PDF --- and what to do about it.}
