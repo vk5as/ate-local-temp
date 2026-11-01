@@ -8,8 +8,11 @@ actually runs.
 \section{The contract}
 
 \texttt{ate/\allowbreak{}devices/\allowbreak{}registry.py} defines \texttt{Driver}, an abstract base class with three class
-attributes and two methods. Only \texttt{open} is abstract: \texttt{close} has a default no-op for a
-driver with nothing to tear down, and the drivers that do have something override it.
+attributes and two methods. Only \texttt{open} is abstract. Teardown is not the driver's job: the handle
+\texttt{open} returns has its own \texttt{close}, and that is what the registry calls. \texttt{Driver.close}
+is declared with a no-op default, but nothing reaches it --- none of the four shipped drivers is
+teared down through the driver, and \texttt{VisaDriver.close} is the only override, dead code kept so the
+contract reads as written.
 
 \begin{lstlisting}[language=ATEPython]
 class Driver(ABC):
@@ -21,7 +24,7 @@ class Driver(ABC):
     def open(self, params: dict[str, Any]) -> Any: ...
 
     def close(self, device: Any) -> None:
-        """Release a device. The default is a no-op; TCP overrides it."""
+        """Release a device. The registry closes the handle, never through this method."""
 \end{lstlisting}
 
 \texttt{validate\_params} checks every declared field generically: an unknown field, a missing required
@@ -30,8 +33,13 @@ not numbers --- \texttt{isinstance(True, int)} is true in Python, so a driver th
 \texttt{(int, float)} must reject a boolean, and \texttt{\_matches} does that.
 
 The registry never knows how a driver connects. It only knows that \texttt{open} produced a handle, and
-it tracks that handle until \texttt{close} is called, so a Device left open at the end of a run can be
-closed and warned about (packet 16a).
+it tracks that handle until \texttt{close\_device} is called on it, so a Device left open at the end of a
+run can be closed and warned about (packet 16a). \texttt{close\_device} is the whole of the teardown
+contract: it calls the handle's own \texttt{close}, through \texttt{run\_abortable} when the close is one
+the abort is meant to end, and \texttt{ATE.close} and the run's end-of-run cleanup both go through it.
+\texttt{\_StreamDevice.close} (\texttt{stream.py}) stops the reader thread, closes the transport and joins
+the reader; \texttt{\_VisaDevice.close} (\texttt{visa.py}) closes the resource. Both are safe to call
+twice, so a Device closed by the schedule and then closed again by the run's cleanup is not an error.
 
 The four drivers that ship, and the Device Types they serve, are \texttt{TcpDriver} (TCP),
 \texttt{SerialDriver} (SERIAL), \texttt{UdpDriver} (UDP) and \texttt{VisaDriver} (VISA).

@@ -71,6 +71,7 @@ class _EchoDevice:
         return False, 0  # no cap on this buffer, so no bytes are ever dropped
 
     def close(self) -> None:
+        """Teardown the registry actually calls: ``close_device`` reaches the handle, not the driver."""
         self._buffer.clear()
 
 
@@ -90,5 +91,4 @@ class EchoDriver(Driver):
         validated = validate_params(self, params)
         return _EchoDevice(validated["label"])
 
-    def close(self, device: _EchoDevice) -> None:
-        device.close()
+    # No driver-level `close`: the registry closes the handle, so teardown lives on the handle.
