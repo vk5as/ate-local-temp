@@ -828,3 +828,11 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - A worker neither finished nor stopped on abort on Windows 3.14 (CI, once; rerun passed). Likely store commits stalling, not proven. Fixed along the way: an abort lost at a pause; abort cost growing with steps left; Device calls holding an abort for their full timeout (`devices/abort.py`). Stuck runs now dump stacks and write times.
 - Implementation and first rework by Opus, last rework by Strata (user cut Opus use). Reviews: round 1 Strata 1, Haiku 1; round 2 Strata 3, Haiku 3; round 3 Strata 0, Haiku 1. On that last one Strata argued the guard could not misfire and Haiku showed the read order lets it; Haiku was right, fixed by the orchestrator.
 - Left open: `insert_input_values` still sets `_log_seq` after the whole batch; a BaseException reaching `RunEngine.run` still ends without FINISHED (lupa's handling not checked); the close budget is shared across Devices; test table `wide` stays in process-global metadata; a Post-test Action on a Device with an abandoned call can exceed 10 s until a second abort (user told); SQLite `synchronous` decision is the user's.
+
+## 34 — six manuals (merged 2026-11-02)
+
+- Strata wrote all three pairs (34a 418 steps, 34b 320, 34c 522; 1-2 compactions each; a rework session failed on "Compaction produced no summary", work saved). Reviews: round 1 Opus 11 (asked for by the user), Haiku 6; round 2 Strata 2, Haiku 4; a final small fix round took a light review only.
+- Code changes from this work: VISA `get_resource_manager` rebuilds a closed shared handle; `registry.py` docstring; run-script harness reports refused inputs.
+- Findings carried to packet 35: backups on installer upgrades, custom `database.path`, `os.exit`, `user_version` stamping, the name.
+- User decision: `os.execute` and coroutine busy loops are documented exceptions to the abort limit.
+- Also found, not fixed: `Driver.close` and `VisaDriver.close` are dead code; `_location()` can report the wrong place for multi-line Actions.

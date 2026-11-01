@@ -6,7 +6,7 @@
 
 **Blocked by:** none (32b, 31e done)
 
-**Status:** in progress, split: 34a test-writer, 34b admin, 34c developer, one Strata session each; the Opus and Haiku review follows all three
+**Status:** resolved (Windows CI on this merge read separately)
 
 ## Manuals
 
