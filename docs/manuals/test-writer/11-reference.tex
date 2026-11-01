@@ -69,7 +69,9 @@ ATE writes the report when the run ends, without asking:
 \end{verbatim}
 \endgroup
 
-under \texttt{reports.directory}, and the same with \texttt{.pdf}. The sections are Cover,
+under \texttt{reports.directory}, and the same name with \texttt{.pdf} when the PDF is
+rendered: an elevated Station is asked before it writes one, and the answer defaults to Skip.
+The sections are Cover,
 Steps, Equipment, Configuration and Run log. The Run log in the report carries INFO, WARNING
 and ERROR lines only; DEBUG lines and Device trace stay in the database.
 

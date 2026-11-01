@@ -1032,7 +1032,8 @@ whose record you do not know.
 
 The report is written at run end to
 `<reports.directory>/<UUT Type>/<UUT Type>_<serial>_<yyyymmdd-HHMMSS>_<PASS|FAIL>.html`
-(and the same `.pdf`). Its sections are Cover, Steps, Equipment, Configuration, Run log. Only
+(the same name with `.pdf`, when the PDF is rendered: an elevated Station is asked first, and
+the default answer is Skip). Its sections are Cover, Steps, Equipment, Configuration, Run log. Only
 INFO, WARNING and ERROR lines appear in the report's Run log; DEBUG and Device trace stay in
 the database.
 

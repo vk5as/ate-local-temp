@@ -33,8 +33,9 @@ QT_QPA_PLATFORM=offscreen python examples/harness/run_examples.py
 \endgroup
 
 That harness runs the shipped example release; the manual's own examples are run by
-\texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML and a PDF report under
-\texttt{reports.directory} and a row in the database.
+\texttt{pytest tests/test\_manuals.py}. Either way, a run writes an HTML Test Report under
+\texttt{reports.directory}, and a PDF as well unless the Station is running elevated and the
+Operator declines the sandbox question.
 
 \section{What the run record shows}
 
