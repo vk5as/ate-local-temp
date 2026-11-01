@@ -38,9 +38,12 @@ QT_QPA_PLATFORM=offscreen python docs/manuals/examples/test-writer/run_your_sche
 A Step Input has to be answered or the run never ends, so each one is given with
 \texttt{--input}, keyed by the \textbf{Step Name}: \texttt{--input "Operator input=1.5"}. A
 Stop-on-Fail pause is answered with \texttt{--choice CONTINUE}, \texttt{RETRY} or
-\texttt{ABORT}, in order. A POLL input is clicked with \texttt{--poll "Step name=BUTTON"}.
+\texttt{ABORT}, in order. A POLL input is clicked with \texttt{--poll "Step name=BUTTON"}, which
+clicks that step's first POLL input; a step with more than one POLL input names the one it means,
+\texttt{--poll "Step name=2=STOP"}.
 The script prints the run row, every step's Result, the Actions, the Equipment count, the
-WARNING and ERROR log lines, and the Test Report paths.
+WARNING and ERROR log lines, and the Test Report paths. An answer the step's own declaration
+rejects is not recorded: the script exits 1 naming the value and the rule it broke.
 
 The shipped example release can also be run whole:
 

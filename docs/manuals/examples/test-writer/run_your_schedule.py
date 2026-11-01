@@ -14,7 +14,11 @@ schedule with inputs needs ``--input`` for each one, keyed by the Step Name:
 
 A Stop-on-Fail pause needs an answer too, given in order with ``--choice``. A schedule whose
 input is never answered does not fail: it hangs, and this script exits 1 saying
-``schedule never finished``.
+``schedule never finished``. An answer the step's own declaration rejects (a whole number
+given as ``42.0``) exits 1 too, naming the value and the rule it broke.
+
+``--poll`` clicks a POLL button by Step Name. A step with more than one POLL input needs the
+input number as well: ``--poll "Step name=2=STOP"`` clicks the second input's button.
 
 The Test Report PDF is stubbed out (``pdf_stub`` in the harness) so the run completes on a
 machine with no fonts and no Chromium sandbox; the HTML report is still written.
@@ -55,8 +59,9 @@ def main() -> int:
                         help="answer for one Step Input, keyed by the Step Name; repeat for each input")
     parser.add_argument("--choice", action="append", default=[], choices=("CONTINUE", "RETRY", "ABORT"),
                         help="answer to each Stop-on-Fail pause, in the order the pauses come up")
-    parser.add_argument("--poll", action="append", default=[], metavar="STEP NAME=BUTTON",
-                        help="click a POLL input's button, keyed by the Step Name; repeat per POLL")
+    parser.add_argument("--poll", action="append", default=[], metavar="STEP NAME[=N]=BUTTON",
+                        help="click a POLL input's button, keyed by the Step Name; add =N for the "
+                             "Nth POLL input of that step (default 1); repeat per POLL")
     parser.add_argument("--enable", action="append", default=[], metavar="STEP NAME=true|false",
                         help="turn a step on or off before the run starts")
     parser.add_argument("--operator", default="Script runner")
@@ -83,7 +88,17 @@ def main() -> int:
     polls = {}
     for item in args.poll:
         name, _, value = item.partition("=")
-        polls[name.strip()] = (1, value.strip())
+        number, _, button = value.partition("=")
+        if button:
+            try:
+                number = int(number)
+            except ValueError:
+                print(f"--poll {item!r}: the POLL input number must be an integer, "
+                      f"as in STEP NAME[=N]=BUTTON", file=sys.stderr)
+                return 1
+        else:
+            number, button = 1, value
+        polls[name.strip()] = (number, button.strip())
 
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)

@@ -83,12 +83,20 @@ def main() -> int:
     # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
     # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
     # the name is looked up in the schedule's tree before the value is supplied.
+    refused: list[str] = []
+
     def _supply(node_seq: int, attempt_no: int, index: int) -> None:
         name = names.get(node_seq)
-        if name in inputs:
-            session.supply_input(node_seq, attempt_no, index, inputs[name])
-        else:
+        if name not in inputs:
             print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+            return
+        try:
+            session.supply_input(node_seq, attempt_no, index, inputs[name])
+        except ValueError as exc:
+            # The step's declaration rejected the value. This slot runs in the worker thread, so an
+            # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
+            refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
+            print(f"ERROR: {refused[-1]}", file=sys.stderr)
 
     if inputs:
         session.input_asked.connect(_supply)
@@ -106,7 +114,7 @@ def main() -> int:
     app = QCoreApplication.instance() or QCoreApplication([])
     started = time.monotonic()
     deadline = started + 25.0
-    while SessionState.FINISHED not in states and time.monotonic() < deadline:
+    while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
         if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
             session.request_abort()
             args.abort_after = None  # request once, not every turn of the loop
@@ -121,6 +129,7 @@ def main() -> int:
         "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
         "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
         "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+        "refused_inputs": refused,
     }))
     session.close()
     return 0 if SessionState.FINISHED in states else 1

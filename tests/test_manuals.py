@@ -1461,6 +1461,99 @@ def test_the_manuals_script_says_so_when_an_input_is_never_answered(tmp_path: Pa
     assert "unanswered Step Input" in proc.stderr, proc.stderr[-400:]
 
 
+#: A release with an INTEGER input and a step whose loop reads its **second** POLL button: the two
+#: things chapter 2's script has to get right are what it says when a declaration rejects an answer,
+#: and which POLL input `--poll` means when a step declares more than one.
+POLL_AND_WHOLE_NUMBER_SCHEDULE = """-- scratch.tslua: an INTEGER input and a POLL step with two buttons.
+return ScheduleParams("Scratch: a whole number and two buttons", "refused answers and POLL indexes")
+  :setSchedule({
+    StepParams("Whole number"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "how many", type = "INTEGER", range = { min = 1, max = 10 } } })
+      :setAction(function()
+        ATE.report(Result.PASS, "the number is " .. ATE.input(1))
+      end),
+
+    StepParams("Two buttons"):setStepNo("2.")
+      :setInputs({ [1] = { desc = "the button nobody reads", type = "POLL", prompt = {"A", "B"}, orient = "HORIZ" },
+                   [2] = { desc = "the button the loop reads", type = "POLL", prompt = {"C", "STOP"}, orient = "HORIZ" } })
+      :setAction(function()
+        local clicked, reads = nil, 0
+        while reads < 12 do
+          reads = reads + 1
+          clicked = ATE.input(2)
+          if clicked then break end
+          ATE.sleep(0.1)
+        end
+        if clicked then
+          ATE.report(Result.PASS, "the second button said " .. clicked)
+        else
+          ATE.report(Result.FAIL, "the second button was never clicked")
+        end
+      end),
+  })
+"""
+
+
+def test_a_refused_answer_is_reported_and_not_traced_back(tmp_path: Path) -> None:
+    """``--input`` with a value the declaration rejects exits 1 naming the value and the rule.
+
+    The refusal is raised in the ``input_asked`` slot, in the worker thread, so the script has to
+    catch it there: uncaught it is a traceback and a run that only times out."""
+    proc = _run_manual_script([
+        "--release", str(scratch_release(tmp_path, POLL_AND_WHOLE_NUMBER_SCHEDULE, name="poll")),
+        "--schedule", "Scratch: a whole number and two buttons",
+        "--input", "Whole number=42.0",
+    ])
+    assert proc.returncode == 1, proc.stdout[-400:]
+    assert "refused" in proc.stderr and "Enter a whole number" in proc.stderr, proc.stderr[-400:]
+    assert "Traceback" not in proc.stderr, proc.stderr[-400:]
+
+
+def test_a_poll_can_name_which_input_of_the_step_it_clicks(tmp_path: Path) -> None:
+    """``--poll "Step name=N=BUTTON"`` clicks that step's Nth POLL input; a bare name is input 1."""
+    release = str(scratch_release(tmp_path, POLL_AND_WHOLE_NUMBER_SCHEDULE, name="poll"))
+    named = _run_manual_script([
+        "--release", release,
+        "--schedule", "Scratch: a whole number and two buttons",
+        "--input", "Whole number=7",
+        "--poll", "Two buttons=2=STOP",
+    ])
+    assert named.returncode == 0, named.stderr[-400:]
+    assert '"2.": "PASS"' in named.stdout, named.stdout
+
+    unnamed = _run_manual_script([
+        "--release", release,
+        "--schedule", "Scratch: a whole number and two buttons",
+        "--input", "Whole number=7",
+        "--poll", "Two buttons=B",
+    ])
+    assert unnamed.returncode == 0, unnamed.stderr[-400:]
+    assert '"2.": "FAIL"' in unnamed.stdout, unnamed.stdout
+
+    bad = _run_manual_script([
+        "--release", release,
+        "--schedule", "Scratch: a whole number and two buttons",
+        "--poll", "Two buttons=x=STOP",
+    ])
+    assert bad.returncode == 1, bad.stdout[-300:]
+    assert "must be an integer" in bad.stderr, bad.stderr[-300:]
+
+
+def test_the_developer_runner_reports_a_refused_input(tmp_path: Path) -> None:
+    """``runner.py`` catches the refusal in the answering slot instead of printing a traceback."""
+    src = _copy_src(tmp_path / "src")
+    config = _echo_config(tmp_path, src)
+    proc = subprocess.run(
+        [sys.executable, str(RUNNER), str(config), "Developer: echo Device",
+         "--input", "Operator reading=42.0"],
+        capture_output=True, text=True, timeout=180, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(src)},
+    )
+    assert proc.returncode == 1, proc.stdout[-400:]
+    assert "refused" in proc.stderr and "Enter a whole number" in proc.stderr, proc.stderr[-400:]
+    assert "Traceback" not in proc.stderr, proc.stderr[-400:]
+
+
 # --- The three things an abort does not stop, as the manual says ---------------------------
 
 #: The driver the abort tests run in their own process: a headless session on a scratch release,

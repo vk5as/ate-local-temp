@@ -321,12 +321,20 @@ def main() -> int:
     # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
     # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
     # the name is looked up in the schedule's tree before the value is supplied.
+    refused: list[str] = []
+
     def _supply(node_seq: int, attempt_no: int, index: int) -> None:
         name = names.get(node_seq)
-        if name in inputs:
-            session.supply_input(node_seq, attempt_no, index, inputs[name])
-        else:
+        if name not in inputs:
             print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+            return
+        try:
+            session.supply_input(node_seq, attempt_no, index, inputs[name])
+        except ValueError as exc:
+            # The step's declaration rejected the value. This slot runs in the worker thread, so an
+            # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
+            refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
+            print(f"ERROR: {refused[-1]}", file=sys.stderr)
 
     if inputs:
         session.input_asked.connect(_supply)
@@ -344,7 +352,7 @@ def main() -> int:
     app = QCoreApplication.instance() or QCoreApplication([])
     started = time.monotonic()
     deadline = started + 25.0
-    while SessionState.FINISHED not in states and time.monotonic() < deadline:
+    while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
         if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
             session.request_abort()
             args.abort_after = None  # request once, not every turn of the loop
@@ -359,6 +367,7 @@ def main() -> int:
         "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
         "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
         "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+        "refused_inputs": refused,
     }))
     session.close()
     return 0 if SessionState.FINISHED in states else 1
@@ -883,6 +892,1171 @@ return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to i
         ATE.report((mA == 42) and Result.PASS or Result.FAIL, "operator read " .. mA .. " mA", mA, 42)
       end),
   })
+```
+
+```bash
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
+```
+
+What the run records, asserted by the test: result `PASS`, `end_reason` `COMPLETED`, all four steps
+`PASS`, and these lines in the Run log:
+
+- `open ECHO ok (0.3 ms)` — the open line names the Device as `device_label` derives it from the open
+  params (type plus address); an `ECHO` has no address, so it is just `ECHO`. The calls after it carry
+  the handle's own `describe()`
+- `write ECHO manual-example 6 bytes "hello\n" (0.0 ms)`
+- `read ECHO sized 4 bytes "ABCD" partial (0.0 ms)`
+- `ATE.read: datagram truncated to 4 byte(s)`
+- `device ECHO left-open left open at end of run` (WARNING)
+
+The negative cases are tested too. A schedule that names an enum member that does not exist gets `nil`:
+`ATE.open(DeviceType.ECHO, ...)` raises `deviceType must be a DeviceType enum member, got NoneType`, the
+step records an ERROR Attempt, and the run fails. With the enum member present and no register line,
+`DeviceRegistry.open_device` raises `unknown DeviceType 'ECHO'`. A Device Type is real only when the
+driver, the register line and the enum member all exist.
+
+Then update: a test file named after the packet, the Device Type list in both test-writer manuals
+(`device_types()` and `device_drivers()` derive it from the classes that exist), and
+`docs/manuals/llm/test-writer.md`.
+
+## Worked example: adding a schema version
+
+Also run by `tests/test_manuals.py`, against a temporary copy of `src/`.
+
+Add the table to `src/ate/storage/schema.py` and bump the version. The comment explaining each bump is
+the convention: `input_value` made it 2, `media_release` and `run_file` made it 3, `schedule_instance`
+made it 4, `equipment` made it 5.
+
+```python
+SCHEMA_VERSION = 6
+```
+
+```python
+review_note = Table(
+    "review_note",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # the composite key, as every other run table
+    Column("text", Text, nullable=True),
+    Column("at", Text, nullable=True),
+)
+```
+
+Nothing else is needed: `RunStore._ensure_schema` calls `metadata.create_all`, which reflects each table
+through the backend's own catalog and never raises on a database that already has it, and sets
+`PRAGMA user_version`. Use the record's types: UUIDs as 36-character `Text`, times as ISO-8601 `Text`,
+booleans as `Integer` 0/1, structured values as JSON `Text`. No SQLite-only column: a Postgres backend
+is a connection change. The only raw SQL in the storage layer is the two pragmas, and they stay in
+`src/ate/storage/store.py`.
+
+Then:
+
+```bash
+python -m ate db migrate /tmp/station/data/ate.db --yes
+```
+
+prints `created or upgraded database at ... (schema version 6)`. The test runs it twice against the same
+file --- first with the shipped code, which reports version 5, then with the patched copy, which adds
+`review_note` on top --- and asserts the set of tables only grew. Pointed at the version 6 database, the
+shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is `check_database_at_launch`
+returning `TOO_OLD`.
+
+Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
+not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
+migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
+`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
+current, the launch check then passes, and the missing column appears later as an `OperationalError` on
+insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
+and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
+upgrade never fills a new column.
+
+A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
+table nothing queries is invisible on the page. Batching applies to a new row type as well
+(`_rows_per_statement` keeps an insert under `_SQL_MAX_VARIABLES = 999`), and `_log_seq` is what orders a
+new row against the rest of the run.
+
+## Documents, and where a change has to go
+
+| Where | What it is |
+|---|---|
+| `GLOSSARY.md` | the words: Test Run, Test Step, Attempt, Media Release, Device Type |
+| `docs/adr/0001-pyside6-instead-of-pyqt6.md` | a settled decision, with what was not tested |
+| `.scratch/ate-v1/spec.md` | the numbered rules the packets were written from: the requirement, not the behaviour |
+| `.scratch/ate-v1-wayfinding/assets/` | the format specs the code was built against |
+| `.scratch/ate-v1/issues/` | the packets, one file each |
+| `.scratch/ate-v1/review-notes.md` | the gaps a reviewer found and did not fix, including the flake history |
+| `docs/manuals/` | the three manuals and the three agent manuals |
+| `docs/building-from-source.md` | how to build, including these PDFs |
+
+A change is not finished when the code works:
+
+- a new config key goes to `src/ate/config.py`'s `_SCHEMA` and to both admin manuals;
+- a new `ate` subcommand or flag goes to `src/ate/cli.py` and the admin manual;
+- a new `ATE` function, enum or setter goes to `src/ate/engine/lua_host.py` and both test-writer manuals;
+- a new Device Type goes to the driver, the register line, the enum member and the test-writer manuals;
+- a new module under `src/ate/` goes to this file and to `docs/manuals/developer/`;
+- a new table goes to `src/ate/storage/schema.py`, the version bump, and both developer manuals;
+- a command a manual tells someone to run goes into `COMMANDS_RUN`/`COMMANDS_NOT_RUN` (admin) or
+  `DEV_COMMANDS_RUN`/`DEV_COMMANDS_NOT_RUN` (developer) with its exit code, the output it must produce,
+  or the reason it is not run.
+
+## Commands in this manual, and what covers them
+
+Run by `tests/test_manuals.py`: `python packaging/windows/build_installer.py --dry-run --dist dist`,
+`python -m build --wheel --no-isolation -o dist`,
+`QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples`, the `sqlite3` query above, and
+`python -m ate db migrate /tmp/station/data/ate.db --yes`.
+
+Shown but not run here, with what covers them: the pytest command (the suite cannot run itself; it is the
+command CI runs, and the counts above come from running it); `ATE_BUILD_TESTS=1 pytest -m build` and its
+`-q` form (by design not part of a normal run: it builds a PyInstaller bundle, and it was run for this
+manual, 2 passed and 2 skipped in 223.72 s); `ATE_DOCKER_TESTS=1 pytest -m build` in both forms (needs
+Docker and network in a `debian:stable` container; run here with `TMPDIR` pointed at a directory on disk,
+1 passed in 533.95 s — on a machine whose `/tmp` is a small tmpfs it fails with `No space left on device`);
+`python packaging/build_pyinstaller.py --smoke` (the gate above calls the same script's
+`build_bundle()` and `verify_bundle()`); `python packaging/build_pyinstaller.py --verify dist/ate`
+(needs a built bundle; `tests/test_linux_packages_28b.py` runs `verify_bundle()` against a real bundle
+and a deliberately incomplete one); and the `runner.py` line in the Device example, which the
+worked-example test runs against a temporary copy of `src/`.
+
+To build the PDF of the manual this file is the other half of:
+
+```bash
+python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
+```
+
+## Never
+
+- Never import `QtWidgets` in `src/ate/engine/` or `src/ate/run_session/`.
+- Never parent a `RunEngine` to a widget, and never `wait()` on the main thread without
+  `request_abort()` first.
+- Never widen a test timeout to make a failure go away; make the test able to fail instead.
+- Never compare a `log_line.at` stamp with a deadline measured at drain time.
+- Never add a config key, an `ATE` function, a Device Type, a module or a table without updating the
+  manual that lists it: the coverage test derives the list from the code and will fail.
+- Never claim a Device behaviour from a spec or an asset file without checking `src/ate/devices/`.
+- Never run `groupadd`, `chown`, `chmod` or `icacls` on the test machine for a permission claim; use
+  `RecordingPermissions` or the gated `debian:stable` container.
+- Never run a Test Schedule's file-loading functions (`dofile`, `loadfile`, `load`) in a sandbox test as
+  if they worked: they are set to nil, and a schedule that calls one gets an ERROR Attempt.
+
+## What this manual cannot state
+
+- Real hardware behaviour. Every Device test uses a loopback peer, a pseudo-terminal, or pyvisa-py
+  behind a socket. No GPIB instrument, real serial adapter or NI-VISA stack has been opened by this
+  suite.
+- Real Windows behaviour a human watched. The same tests run on `windows-latest` in CI, and the
+  release workflow installed the Windows installer there: at `v0.1.0-rc2` (run 41198438867)
+  `packaging/windows/ate.iss` was compiled and the installer silently installed, run, upgraded and
+  uninstalled on that runner, which is what the admin manual says. None of it happened on this
+  machine and nobody watched a window open. The `icacls` paths, the Inno installer and the frozen
+  Windows bundle are asserted here by reading scripts and by `tests/test_release_ci_27c.py`, which
+  checks the workflow's shape, never an installed program.
+- Any container other than `debian:stable`. `ATE_DOCKER_TESTS=1 pytest -m build` and
+  `packaging/linux/docker_smoke.py` do pass here — 1 passed in 533.95 s with `TMPDIR` on a disk-backed
+  directory — but the first attempt on this machine's `/tmp` failed with `No space left on device`, and
+  nothing has ever been smoked on Fedora, Ubuntu or a SELinux-enforcing host.
+  `tests/test_release_ci_28c.py` asserts the gate and the smoke scripts' logic.
+- The cause of the packet 32b stall. One Windows CI run left a Test Run stalled for tens of seconds. The
+  fixes and the diagnostic are proven; the disk being the culprit is a belief, not a measurement. The
+  next stall can be read: long or in-flight writes point at the disk, normal writes with the worker's
+  stack elsewhere point at something nobody has found.
+- Both Qt bindings. The PySide6/PyQt6 differences come from the packet 32a switch and its notes; they
+  were not measured side by side here.
+
+Where the documents and the code disagree, the code was followed and the document left as it is:
+
+- spec rule 20 says `ate db migrate` upgrades "after a timestamped backup". It makes none.
+- spec rule 08 says `log_line` rows are written "about once a second". They are inserted per step.
+- The 32a notes say the release workflow has "5 jobs". It defines three: `windows-installer`,
+  `linux-build`, and `linux-smoke` with a `deb`/`tar`/`wheel` matrix --- five job runs.
+- `_location()` finds a step's file and line by searching the schedule text for `:setAction(`, not from
+  the Lua call stack, so a multi-line Action, a helper module or a Sub-schedule can report the wrong
+  place.
+- The staged Run screen is a vertical stack, not the prototype layout in
+  `run-screen-prototype.html` the review notes refer to.
+
+Numbers in this manual are snapshots: the suite's size and its elapsed time move with every packet. The
+names, signals, tables and drivers are not snapshots --- the suite derives them from the code. The checks
+catch a manual falling behind the code, not a manual ahead of it.
+```
+
+Queued signals only deliver when the receiving thread's event loop runs. No loop, no signals.
+
+## Screens, layouts and dialogs
+
+`src/ate/ui/` is the only place `QtWidgets` is allowed. There are two Run layouts
+(`src/ate/ui/staged_run_screen.py` and `src/ate/ui/three_pane_run_screen.py`) sharing the widgets in
+`src/ate/ui/run_widgets.py`, plus `src/ate/ui/history_screen.py` and
+`src/ate/ui/export_log_dialog.py`. Both layouts bind to the session and never to the engine.
+
+Every modal in `src/ate/dialogs.py` has a `dismiss_if_headless` path: with no Operator there is nobody
+to answer, so a dialog that blocks a headless run must answer itself. That is why the launch layer
+injects dialogs in tests (`tests/test_gui_launch_30a.py` drives `launch()` with the dialogs injected,
+so no window is ever shown).
+
+## Storage
+
+`RunStore` (`src/ate/storage/store.py`) is the only storage interface in ATE; `src/ate/storage/schema.py`
+is the only place a table is defined. Every insert is its own commit (the engine is autocommit), which
+makes the record append-only and crash-safe.
+
+| Table | What it holds |
+|---|---|
+| `test_run` | the run row: station, operator, project, UUT, schedule, result, end_reason, times |
+| `node` | one row per runner node: header or step, step_number, kind, result, attempt_count |
+| `attempt` | one row per Attempt: result, msg, times, retry count |
+| `action` | one row per Pre-test or Post-test Action |
+| `log_line` | one row per Run log line: level, source, text, owner, `seq` |
+| `input_value` | one row per Step Input answer, the value as JSON text |
+| `equipment` | one row per Equipment item declared with `ATE.addEquipment` |
+| `media_release` | the Media Release chain the run resolved, with versions and checksums |
+| `run_file` | every file the run used, its sha256 and whether it mismatched |
+| `schedule_instance` | the top-level schedule and every Sub-schedule include of the run |
+
+Batching: `_SQL_MAX_VARIABLES = 999` is SQLite's parameter limit, and `_rows_per_statement` is
+`_SQL_MAX_VARIABLES // len(table.columns)`, so a multi-row insert is chunked to stay under it. A new
+table with more columns gets a smaller chunk automatically.
+
+`_log_seq` is the per-run counter that gives `log_line`, `action`, `input_value` and `equipment` their
+`seq`, so `(run_uuid, seq)` stays unique within a run and the report's order is the emission order. A
+new row type that is emitted inline with steps must take its `seq` from the same counter, or the report
+will order it wrong.
+
+The launch check, `check_database_at_launch`, compares `PRAGMA user_version` with `SCHEMA_VERSION` and
+returns `NEEDS_MIGRATE`, `TOO_OLD` or `OK`. `ate db status` prints the version; `ate db migrate` creates
+or upgrades.
+
+## The Lua host and the sandbox
+
+`src/ate/engine/lua_host.py` treats a Test Schedule as untrusted input. Each schedule load gets a fresh
+`lupa` runtime, created with `register_builtins=False`, and then `_lockdown` shadows the file-loading
+entry points before anything is registered:
+
+- `dofile`, `loadfile` and `load` are set to `nil` (the Lua standard library still provides them, so they
+  have to be shadowed explicitly);
+- `python` is set to nil, so the host's Python is not reachable from a schedule;
+- `require` is ATE's own, and `package.path` and `package.cpath` are emptied: only the whitelist from the
+  Test Definition and the modules in `src/ate/lua/` (as `require("ate.devices")`) can be loaded;
+- `debug` is reduced to `debug.traceback`. The full library reaches the instance loader through
+  `debug.getregistry`, strips read-only locks with `debug.setmetatable`, and can remove the abort hook;
+- each schedule instance, the top level and every include, gets its own global table built by a loader
+  that captured the stock `load` before the lockdown removed it.
+
+The abort hook is installed before the schedule runs: `debug.sethook(check_abort, "", 1000)`, and
+`pcall`/`xpcall` are wrapped to re-raise `aborted` so a schedule's own error handling cannot swallow an
+abort. `print` is redirected to `ATE.log(INFO, ...)`.
+
+`_AteTable` is what a schedule sees. Every function is wrapped by `_isolate`, which turns a raised ATE
+error into the `(false, message)` Device failure shape or an ERROR Attempt, naming the schedule file and
+line. `ATE.run` is a read-only table built from `_RUN_FIELDS`; writing to it raises `ATE.run: read-only`,
+and the engine fills it through `rawset` in `publish_run`. The enums (`Result`, `Log`, `DeviceType`,
+`Parity`, `FlowControl`) are declared by `_declare_enums` as read-only tables.
+
+`_context` is one of `load`, `pretest`, `posttest` or `step`, and a function that is only legal in one of
+them raises when called in another: a Device opened while the file is loading is a load error, not a
+runtime one.
+
+To add an `ATE.` function, four things have to be true or it is not really available:
+
+1. define it on `_AteTable` and `register` it, so the table exposes it;
+2. record what it did through the host — the `logs`, `reports` or `equipment` lists — never by writing to
+   the store directly, because the engine owns the rows and attributes them to the step or Action running;
+3. check the context if it is only legal in one phase;
+4. name it in both manuals: `ate_table_functions()` in `tests/test_manuals.py` reads the table off the
+   object, and a function the code has that a manual does not show in code fails the suite.
+
+`register` and `publish_run` are excluded from that rule: they build the table, they are not calls a
+schedule makes.
+
+`tests/test_lua_isolation.py` and `tests/test_lua_lockdown_calls.py` prove the sandbox;
+`docs/manuals/examples/test-writer/forbidden.tslua` is a schedule that tries to open a Device while the
+file is loading, which the host refuses.
+
+## Devices
+
+`DeviceRegistry` (one per run, created by the `LuaHost`) maps a Device Type name to a driver class and
+tracks every handle opened this run so leftovers are closed at run end.
+
+| Driver class | Device Type | How it reads and writes |
+|---|---|---|
+| `TcpDriver` | `TCP` | host/port socket with a background reader and the receive buffer cap |
+| `SerialDriver` | `SERIAL` | a pyserial port, on the same buffered stream as TCP |
+| `UdpDriver` | `UDP` | one datagram per message, drained by its own `_reader_loop` on the shared stream base; `size` truncates and the tail is discarded |
+| `VisaDriver` | `VISA` | `_VisaDevice`, not a `_StreamDevice`: read on demand, no background reader |
+
+A driver declares `name`, `fields` (each accepted open param as `(accepted types, required)`), and
+`read_fields`/`write_fields` (usually `READ_FIELDS` and `WRITE_FIELDS` from
+`src/ate/devices/stream.py`). `validate_params` rejects unknown, missing or mistyped fields before
+anything connects, and never accepts a boolean where a number is expected.
+
+`src/ate/devices/abort.py` wraps every Device call in `run_abortable`, which runs the call in slices of
+`POLL_SECONDS = 0.05` and checks the run's abort flag between them. A connect or a DNS lookup is the
+OS's to end: an abort leaves it behind and closes the handle it later produces.
+
+An abort frees the worker, not the instrument. The helper thread left behind is joined in slices, and
+all of an aborted run's leftover closes together get `_ABORT_CLOSE_SECONDS = 3.0`
+(`src/ate/engine/run_engine.py`), each with a WARNING naming the Device. A Post-test Action on the same
+Device waits for the call left behind, and a new run opening the same instrument while an abandoned call
+is still running may find it busy. That is the boundary of what an abort can do, not a bug to fix.
+
+`src/ate/devices/tracing.py` wraps every handle in `TracedDevice` when `deviceTrace.enabled` is set, and
+emits one DEBUG line per open, read, write and close through the host's `record_log`, so the engine
+attributes it to the Action that made it. Bytes are escaped and truncated at `deviceTrace.maxBytes`
+(default `DEFAULT_TRACE_MAX_BYTES = 256`). A line looks like
+`read TCP 127.0.0.1:5025 12 bytes "ACME,PSU,1\r\n" (4.1 ms)`.
+
+A partial read logs a WARNING, and the handle says which kind it is: `partial_read_is_truncation` is
+`True` for a Device Type with no stream and no deadline, so the line says `datagram truncated to N
+byte(s)`; for a stream it says `timed out after N byte(s)`. Getting that wrong is a lie about the
+Device, which is why the flag is on the handle rather than decided by the caller.
+
+## Reports and the PDF helper
+
+`src/ate/report/html.py` writes a self-contained HTML report named
+`<UUT Type>/<UUT Type>_<serial>_<local start yyyymmdd-HHMMSS>_<PASS|FAIL>.html`.
+`src/ate/report/pdf.py` renders it to PDF through a separate helper process (`ate _pdf`), started by
+`src/ate/report/pdf_job.py` in a `QProcess` the session owns. Chromium's sandbox is decided after the
+HTML is on disk; if the sandbox cannot be used and the Operator declines, the report still exists and
+`report_written` still fires with an empty PDF path. `--allow-unsandboxed-pdf` is privileged-only.
+`tests/test_pdf_sandbox_choice_30d.py` asserts the decision; the real render is stubbed by
+`conftest.py` except in the four tests that must prove a PDF has text.
+
+## Config and the exception log
+
+`src/ate/config.py` reads one file, once, at launch. There is no per-user override, no environment
+expansion in values, no `~` expansion; `<data>` expands to the platform data directory, and every other
+relative path is resolved against the **config file's own directory** (`Config.data_dir` is
+`self.path.parent`, so "the data directory" in the config sense is that directory; absolute paths are
+used as given, and forward slashes work on Windows). `_SCHEMA` is the list of every key the
+validator accepts, and `tests/test_manuals.py` derives the admin manual's key list from it, so a key
+added to the code and not shown in code in the admin manual fails the suite. `_platform_data_dir` is
+the seam the test suite redirects so no test writes to `/var/lib/ate` or `C:\ProgramData`.
+
+`src/ate/exception_log.py` installs the hook that an uncaught exception reaches. Under PySide6 an
+exception in a slot or in `QThread.run` does not end the process: it prints the traceback and carries on.
+So the engine guard and this hook are not style, they are the difference between a run recorded as
+`INTERRUPTED` and a run row left open with a screen waiting forever. The user-visible message is
+`Internal error: this window may have stopped updating. A Test Run in progress keeps recording. Details: <log path>`.
+
+## Packaging and release CI
+
+Four artifacts ship: a Windows installer (Inno Setup, `packaging/windows/ate.iss`), a Linux `.deb`, a
+tarball of the frozen bundle (`packaging/linux/install.sh` installs it), and a wheel. The first three
+come from a PyInstaller bundle; the wheel carries no Qt at all.
+
+```bash
+python packaging/build_pyinstaller.py --smoke
+python packaging/build_pyinstaller.py --verify dist/ate   # check an existing bundle: no build, no run
+python -m build --wheel --no-isolation -o dist
+python packaging/windows/build_installer.py --dry-run --dist dist
+```
+
+`verify_bundle()` is the gate: a bundle must carry the licence files generated by
+`packaging/licence/notices.py --out build/licences` (four files), the report template, the bundled Lua
+modules, the WebEngine binary and its 57 `.pak` files. `packaging/pyinstaller/ate.spec`'s excludes list
+has history: `QtWebEngineWidgets` imports `PySide6.QtWebChannel` itself, and excluding it produced a
+bundle that looked fine and then died in `ate _pdf`.
+`tests/test_pyinstaller_build_27a.py` runs the WebEngine import and compares what it pulls in with the
+excludes list, so the list cannot drift again.
+
+`.github/workflows/ci.yml` runs the suite on `ubuntu-latest` and `windows-latest`, Python 3.13 and 3.14:
+four jobs, `fail-fast: false`, with `QT_QPA_PLATFORM=offscreen` and `PYTHONFAULTHANDLER=1` at job level.
+Two settings are load-bearing because of failures, not taste: `timeout-minutes` is 30 on Linux and 40 on
+Windows (the first real run hung on Windows for an hour on a modal dialog with no Operator there), and a
+step checks that `PySide6-Addons`, `PySide6-Essentials` and `shiboken6` are the same version and match
+the Qt the runtime reports (two Qt builds in one process is how the first Windows run died with
+`0xc0000139`).
+
+`.github/workflows/release.yml` runs on a tag or by hand: `windows-installer`, `linux-build` and
+`linux-smoke` (matrix `deb`, `tar`, `wheel`) --- three job definitions, five job runs.
+
+```bash
+ATE_BUILD_TESTS=1 pytest -m build -q      # the real PyInstaller bundle, and the .deb built from it
+ATE_DOCKER_TESTS=1 pytest -m build -q     # the debian:stable container smokes
+```
+
+Both gates are off by default and marked `build`. `tests/test_release_ci_28c.py` asserts the gate is
+written as documented. Both ran for this manual on the machine that wrote it, with `TMPDIR` pointed at a
+directory on disk, and each number below is a separate run of a separate command: the build gate alone
+gave `2 passed, 2 skipped, 1587 deselected in 223.72 s`, the container gate alone gave
+`1 passed in 533.95 s`, and both flags together gave `4 passed, 1587 deselected in 768.00 s`. They
+belong to one machine in one afternoon and are not comparable with a CI job. The container gate needs
+scratch space on disk: the first attempt wrote its artifacts into `/tmp`, which here is a small tmpfs,
+and died with `No space left on device`. CI runs it either way.
+
+## The test suite
+
+`conftest.py` is not boilerplate; every fixture in it exists because of a failure.
+
+- One `QApplication` for the session: this Qt 6.11 build segfaults at interpreter shutdown when a live
+  `QApplication` is finalised alongside any `QCoreApplication`. The binding's `QApplication` does not
+  accept a `platform=` keyword, so offscreen comes from `QT_QPA_PLATFORM`.
+- Widget trees and workers are torn down per test (`_stop_workers`, `_destroy_widget_tree`). A
+  `StagedRunScreen` keeps a live worker and a one-second timer for its whole lifetime; if it survives
+  into the next test its queued signals fire into that test's widgets.
+- Every started engine is stopped after every test (`_stop_running_engines` wraps `RunEngine.start`
+  weakly, then aborts and joins). If it cannot, the test fails with "a RunEngine worker outlived its
+  test".
+- Files are closed strictly (`_release_files` closes every `RunStore`, `HeadlessRunSession` and `AppLog`
+  and asserts nothing under pytest's temp directory is still open). On Linux an open file can be
+  deleted; on Windows it cannot, so a Windows-only handle is caught here.
+- The data directory is redirected: the autouse fixture points `ate.config._platform_data_dir` at
+  pytest's basetemp.
+- Privilege is pinned: `ATE_ELEVATED=0` for the session, session-scoped on purpose, because a
+  module-scoped fixture that starts a run runs before any per-test fixture.
+- The PDF helper is a stub by default (`_fake_pdf_helper` replaces
+  `ate.report.pdf_job.pdf_helper_command`), except in the four tests that must prove a PDF has text.
+- `report_qt_fatal` keeps Qt's fatal message from dying inside pytest-qt's capture.
+
+`tests/_fixtures.py` holds the seams: `LoopbackPeer`, `UdpLoopbackPeer`, `scratch_directory`,
+`executable_stub`, `fake_pdf_helper`, `recording_pdf_helper`, `wait_for_disconnect`,
+`wait_for_aborted_run`, `watch_store_writes`, `describe_stuck_runs`, `SlowAbortWarning` and
+`assert_no_swallowed_exception`.
+
+Commands the suite runs and checks, all in a temporary Station:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider
+QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples
+python -m ate db migrate /tmp/station/data/ate.db --yes
+python -c "import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"
+```
+
+`python docs/manuals/build.py developer` builds this manual's PDF in Docker with texlive; it is run by
+hand, not by the suite, which checks the sources rather than the rendered pages.
+
+### The rule for a timing test (packet 31e)
+
+1. Start the clock on an event, not on a sleep. The old abort test timed from after `time.sleep(0.1)`
+   with no proof the action had begun. `_drive_abort` starts on the worker being inside `ATE.sleep`'s
+   wait, or on `input_asked`, and stops at `FINISHED`.
+2. Separate the requirement from the expectation. Story 83: an abort should stop within 0.5 s and must
+   stop within 10 s. A test fails past 10 s and warns past 0.5 s, so a slow runner stays visible instead
+   of being a false failure.
+3. A stamp means what the code did, not what the test expected. Bracket each `record_log` call on the
+   worker and require `at` to fall inside the bracket.
+4. Show that the bound can fail. Every bound here has a test that plants a stall and proves the test
+   catches it: a 1 s injected stall gives "abort took 1.011 s"; a busy loop of `1e10` iterations fails
+   the 10 s requirement.
+5. Do not widen a timeout. Packet 32b's checklist says it plainly: the 10 s wait stays and can still
+   fail, and when it does it says what the worker was doing.
+6. Run under load. The convention is ten repetitions of the changed files with six busy loops on three
+   cores. Several flakes only appear under contention.
+
+Name a new test after the packet that added it (`tests/test_device_abort_32b.py` is the style), put
+shared helpers in `tests/_fixtures.py`, and use `assert_no_swallowed_exception` if your test starts a Qt
+process: exit 0 no longer means nothing went wrong.
+
+## PySide6 traps, found the hard way
+
+ATE uses PySide6 because PyQt6's wheels are GPL and shipping a GPL binding under an MIT label is a
+licence gap (`docs/adr/0001-pyside6-instead-of-pyqt6.md`). Each of these is a trap when writing code or
+a test here.
+
+- An exception in a slot or in `QThread.run` does not end the process. PyQt6 aborted with SIGABRT;
+  PySide6 prints the traceback and carries on.
+- A child process's exit code is not a signal of correctness. Use `assert_no_swallowed_exception(stderr)`.
+- `Signal(int)` is a C `int`, as above. `Signal(str)` turns `5` and `None` into `''`.
+- Two Qt builds in one process: `PySide6-Addons` pins `PySide6-Essentials` and `shiboken6` to the same
+  version, and CI checks that the Qt the runtime reports matches. If it does not, WebEngine loads a
+  second Qt and Windows dies with `0xc0000139` the moment WebEngine is imported. Linux tolerates it
+  until it does not.
+- `QtWebEngineWidgets` imports `QtWebChannel`: the packaging bug that produced a bundle that looked
+  complete and failed at render time.
+- Deleted objects: PyQt6 says `wrapped C/C++ object of type Thing has been deleted`, PySide6 says
+  `libshiboken: Internal C++ object (Thing) already deleted.` Every catch here is `except RuntimeError`,
+  so both behave the same. `sip.isdeleted(x)` became `not shiboken6.isValid(x)`.
+- A second `QCoreApplication` raises in PySide6 and was tolerated by PyQt6. This is why the suite keeps
+  exactly one application, and why `conftest.py` destroys the widget tree before quitting: an orphaned
+  `QWidget` finalised at interpreter shutdown segfaults in this Qt 6.11 build either way.
+- API differences that only show in tests: `findChildren` takes one type, not a tuple; `QWidget.cursor()`
+  does not compare equal to a `Qt.CursorShape` enum, read `.shape()`; `QWIDGETSIZE_MAX` is not exported,
+  so tests use the literal `(1 << 24) - 1`.
+- Offscreen on Windows has no fonts: Qt's offscreen platform looks for fonts in Qt's own (empty) library
+  directory, so every character draws as the missing-glyph box. `conftest.py` sets `QT_QPA_FONTDIR` to
+  Windows' font directory before any Qt import, and every subprocess a test starts inherits it. A real
+  operator on the `windows` platform has no such problem.
+
+None of these were run "on both bindings": only PySide6 was tested here. The ADR records the comparison
+as a reviewer's probe where a claim rests on one.
+
+## Reading a failed Test Run
+
+Read the traces in this order; the order is what makes the cause visible.
+
+1. `test_run.result` is `PASS` or `FAIL`. `end_reason` is the story: `COMPLETED` (the schedule ran to its
+   end), `PRETEST_FAILED` (a Pre-test Action raised; every step NOTRUN), `STOPPED_ON_FAIL` (the Operator
+   answered `ABORT` at a prompt), `ABORTED` (a run-level `request_abort()`, wherever it landed),
+   `INTERRUPTED` (the worker ended on an exception it could not handle, or the process died with the run
+   open and launch closed it).
+2. A step's `result` is one of `PASS`, `FAIL`, `ERROR`, `SKIPPED`, `NOTRUN`, `FORCED_NOTRUN` or
+   `NOREPORT`. `NOREPORT` means the step ran and never called `ATE.report`: a schedule bug, recorded as a
+   WARNING rather than silently counted as a pass.
+3. The Run log is the `log_line` table (level, source `schedule`/`ate`/`device`, owner the Action or the
+   Attempt). The application log is the per-launch file at `<data>/logs/ate-app-<time>.log`, where an
+   unhandled exception's traceback goes. Different files, different questions: "what did this run do"
+   versus "what did the application do wrong".
+4. If a test fails with "a RunEngine worker outlived its test", read the `describe_stuck_runs` section:
+   the live workers, what each session thinks its state is, what the store recorded, the store's write
+   timings with any write still in flight, and every thread's stack from `faulthandler`. Long or
+   in-flight writes mean the disk; normal writes with the worker's stack elsewhere mean a fault the suite
+   has not found.
+
+Warnings after an abort: `left open at end of run` is a Device the schedule never closed;
+`was still closing when the aborted run ended` means the close outlived the run's 3 s bound
+(`_ABORT_CLOSE_SECONDS = 3.0`) and will finish later; `datagram truncated to N byte(s)` and
+`timed out after N byte(s)` are different read failures and the Device says which one it is.
+
+## Worked example: adding a Device Type
+
+Run by `tests/test_manuals.py`: it copies `src/` into a temporary directory, puts this file at
+`src/ate/devices/echo.py`, makes the three edits to `src/ate/engine/lua_host.py` shown below --- the
+import, the register line, the enum member --- and runs the schedule headless against that copy.
+
+```python:docs/manuals/examples/developer/echo_driver.py
+"""The ECHO Device driver: the developer manual's worked example of a Device Type.
+
+Nothing here touches a transport. ``open`` returns a handle that keeps the bytes a Test
+Schedule writes, and ``read`` hands them back, so a schedule can exercise open, write, read,
+flush and close against a Device Type that did not exist five minutes ago. That is enough to
+prove the steps the manual gives: declare the fields, name the Device Type, register the
+driver, add the enum member. ``tests/test_manuals.py`` copies this file into a temporary copy
+of ``src/ate``, applies the three edits the manual shows, and runs ``echo.tslua`` against it.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .registry import Driver, validate_params
+from .stream import READ_FIELDS, WRITE_FIELDS
+
+
+class _EchoDevice:
+    """The handle an ECHO Device is: the bytes written, in the order they were written.
+
+    ``driver`` is what the ATE wrappers validate a per-call read/write field against, and
+    ``describe`` is what makes a value a Device handle at all (packet 29d review)."""
+
+    #: A read cut short by `size` is a truncation, never a deadline catching a stream mid-bytes.
+    partial_read_is_truncation = True
+
+    def __init__(self, label: str) -> None:
+        self.driver = EchoDriver
+        self._label = label
+        self._buffer = bytearray()
+
+    def describe(self) -> str:
+        return f"ECHO {self._label}"
+
+    def read(self, params: dict[str, Any]) -> tuple[bytes, int, bool, str | None]:
+        term = params.get("readTerm")
+        if isinstance(term, str):
+            term = term.encode()
+        size = params.get("size")
+        data = bytes(self._buffer)
+        if term:
+            head, found, tail = data.partition(term)
+            self._buffer = bytearray(tail) if found else bytearray()
+            data = head if found else data
+        else:
+            self._buffer.clear()
+        if size is not None and len(data) > size:
+            self._buffer.extend(data[size:])
+            data = data[:size]
+            return data, len(data), True, None
+        return data, len(data), False, None
+
+    def write(self, params: dict[str, Any]) -> tuple[bool, int, str | None]:
+        payload = params["data"]
+        if isinstance(payload, str):
+            payload = payload.encode()
+        term = params.get("writeTerm") or b""
+        if isinstance(term, str):
+            term = term.encode()
+        self._buffer.extend(payload)
+        self._buffer.extend(term)
+        return True, len(payload) + len(term), None
+
+    def flush(self) -> tuple[bool, int, str | None]:
+        count = len(self._buffer)
+        self._buffer.clear()
+        return True, count, None
+
+    def take_overflow(self) -> tuple[bool, int]:
+        return False, 0  # no cap on this buffer, so no bytes are ever dropped
+
+    def close(self) -> None:
+        self._buffer.clear()
+
+
+class EchoDriver(Driver):
+    """A Device Type that answers with exactly what the Test Schedule wrote to it."""
+
+    name = "ECHO"
+    fields = {
+        "label": ((str,), True),            # named in every trace line and WARNING for this Device
+        "timeout": ((int, float), False),   # accepted so a schedule can pass one; nothing waits on it
+    }
+    read_fields = READ_FIELDS
+    write_fields = WRITE_FIELDS
+
+    def open(self, params: dict[str, Any]) -> _EchoDevice:
+        """Validate the params and return the handle. A bad field raises before anything else."""
+        validated = validate_params(self, params)
+        return _EchoDevice(validated["label"])
+
+    def close(self, device: _EchoDevice) -> None:
+        device.close()
+```
+
+Two of the three edits are in `src/ate/engine/lua_host.py`: import the new module in the style the
+other drivers use (`serial`, `udp` and `visa` are imported from their own modules, not through the
+package's `__init__`), and add the register line beside the others.
+
+```python
+from ..devices.abort import DeviceAborted
+from ..devices.echo import EchoDriver  # the developer manual's worked example
+```
+
+```python
+        self._devices.register("TCP", TcpDriver)
+        self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
+        self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
+        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader
+        self._devices.register("ECHO", EchoDriver)  # the developer manual's worked example
+```
+
+Add the enum member in `_ENUMS`, in the same file. The Device Type table is flat — the member's name
+maps to its label:
+
+```python
+    "DeviceType": {
+        "ECHO": "ECHO",  # the developer manual's worked example
+        "SERIAL": "SERIAL",
+        "TCP": "TCP",
+        "UDP": "UDP",
+        "VISA": "VISA",
+    },
+```
+
+Then run it. `runner.py` is the headless driver shown above; the schedule is:
+
+```lua:docs/manuals/examples/developer/echo.tslua
+-- echo.tslua: the ECHO Device Type from the developer manual, run for real.
+--
+-- The manual tells a developer to add a driver, register it and add the enum member. This
+-- schedule is what proves it worked: tests/test_manuals.py copies src/ate into a temporary
+-- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the three edits the
+-- manual shows, and runs this schedule headless against that copy.
+--
+-- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
+-- a read cut short by `size` being a truncation; the trace lines a Device produces when
+-- deviceTrace.enabled is on; and a Step Input answered from the script with --input.
+return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to it, read it back")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("Open and write"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "manual-example"})
+        local w = ATE.write(dev, {data = "hello", writeTerm = "\n"})
+        ATE.report((w.ok and w.count == 6) and Result.PASS or Result.FAIL,
+                   "wrote " .. w.count .. " bytes including the terminator", w.count, 6)
+        ATE.close(dev)
+      end),
+
+    -- A Device left open is closed by the engine at run end with one WARNING (packet 16a), so
+    -- step 2 opens one and deliberately does not close it.
+    StepParams("Leave a Device open"):setStepNo("2.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "left-open"})
+        ATE.write(dev, {data = "unbounded"})
+        ATE.report(Result.PASS, "the run will close this Device for me")
+      end),
+
+    -- `size` cuts a read short: partial is true, and for this Device Type the WARNING says
+    -- "truncated", not "timed out", because there is no stream and no deadline.
+    StepParams("Cut a read with size"):setStepNo("3.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "sized"})
+        ATE.write(dev, {data = "ABCDEFGH"})
+        local r = ATE.read(dev, {size = 4})
+        ATE.report((r.partial and r.count == 4 and r.data == "ABCD") and Result.PASS or Result.FAIL,
+                   "read " .. r.count .. " of 8 bytes", r.count, 4)
+        ATE.close(dev)
+      end),
+
+    -- A Step Input blocks the worker until it is answered. runner.py answers it from
+    -- --input "Operator reading=42", which is how a headless run gets an Operator.
+    StepParams("Operator reading"):setStepNo("4.")
+      :setInputs({ [1] = { desc = "board current, mA", type = "INTEGER" } })
+      :setAction(function()
+        local mA = ATE.input(1)
+        ATE.report((mA == 42) and Result.PASS or Result.FAIL, "operator read " .. mA .. " mA", mA, 42)
+      end),
+  })
+```
+
+```bash
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
+```
+
+What the run records, asserted by the test: result `PASS`, `end_reason` `COMPLETED`, all four steps
+`PASS`, and these lines in the Run log:
+
+- `open ECHO ok (0.3 ms)` — the open line names the Device as `device_label` derives it from the open
+  params (type plus address); an `ECHO` has no address, so it is just `ECHO`. The calls after it carry
+  the handle's own `describe()`
+- `write ECHO manual-example 6 bytes "hello\n" (0.0 ms)`
+- `read ECHO sized 4 bytes "ABCD" partial (0.0 ms)`
+- `ATE.read: datagram truncated to 4 byte(s)`
+- `device ECHO left-open left open at end of run` (WARNING)
+
+The negative cases are tested too. A schedule that names an enum member that does not exist gets `nil`:
+`ATE.open(DeviceType.ECHO, ...)` raises `deviceType must be a DeviceType enum member, got NoneType`, the
+step records an ERROR Attempt, and the run fails. With the enum member present and no register line,
+`DeviceRegistry.open_device` raises `unknown DeviceType 'ECHO'`. A Device Type is real only when the
+driver, the register line and the enum member all exist.
+
+Then update: a test file named after the packet, the Device Type list in both test-writer manuals
+(`device_types()` and `device_drivers()` derive it from the classes that exist), and
+`docs/manuals/llm/test-writer.md`.
+
+## Worked example: adding a schema version
+
+Also run by `tests/test_manuals.py`, against a temporary copy of `src/`.
+
+Add the table to `src/ate/storage/schema.py` and bump the version. The comment explaining each bump is
+the convention: `input_value` made it 2, `media_release` and `run_file` made it 3, `schedule_instance`
+made it 4, `equipment` made it 5.
+
+```python
+SCHEMA_VERSION = 6
+```
+
+```python
+review_note = Table(
+    "review_note",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # the composite key, as every other run table
+    Column("text", Text, nullable=True),
+    Column("at", Text, nullable=True),
+)
+```
+
+Nothing else is needed: `RunStore._ensure_schema` calls `metadata.create_all`, which reflects each table
+through the backend's own catalog and never raises on a database that already has it, and sets
+`PRAGMA user_version`. Use the record's types: UUIDs as 36-character `Text`, times as ISO-8601 `Text`,
+booleans as `Integer` 0/1, structured values as JSON `Text`. No SQLite-only column: a Postgres backend
+is a connection change. The only raw SQL in the storage layer is the two pragmas, and they stay in
+`src/ate/storage/store.py`.
+
+Then:
+
+```bash
+python -m ate db migrate /tmp/station/data/ate.db --yes
+```
+
+prints `created or upgraded database at ... (schema version 6)`. The test runs it twice against the same
+file --- first with the shipped code, which reports version 5, then with the patched copy, which adds
+`review_note` on top --- and asserts the set of tables only grew. Pointed at the version 6 database, the
+shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is `check_database_at_launch`
+returning `TOO_OLD`.
+
+Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
+not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
+migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
+`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
+current, the launch check then passes, and the missing column appears later as an `OperationalError` on
+insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
+and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
+upgrade never fills a new column.
+
+A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
+table nothing queries is invisible on the page. Batching applies to a new row type as well
+(`_rows_per_statement` keeps an insert under `_SQL_MAX_VARIABLES = 999`), and `_log_seq` is what orders a
+new row against the rest of the run.
+
+## Documents, and where a change has to go
+
+| Where | What it is |
+|---|---|
+| `GLOSSARY.md` | the words: Test Run, Test Step, Attempt, Media Release, Device Type |
+| `docs/adr/0001-pyside6-instead-of-pyqt6.md` | a settled decision, with what was not tested |
+| `.scratch/ate-v1/spec.md` | the numbered rules the packets were written from: the requirement, not the behaviour |
+| `.scratch/ate-v1-wayfinding/assets/` | the format specs the code was built against |
+| `.scratch/ate-v1/issues/` | the packets, one file each |
+| `.scratch/ate-v1/review-notes.md` | the gaps a reviewer found and did not fix, including the flake history |
+| `docs/manuals/` | the three manuals and the three agent manuals |
+| `docs/building-from-source.md` | how to build, including these PDFs |
+
+A change is not finished when the code works:
+
+- a new config key goes to `src/ate/config.py`'s `_SCHEMA` and to both admin manuals;
+- a new `ate` subcommand or flag goes to `src/ate/cli.py` and the admin manual;
+- a new `ATE` function, enum or setter goes to `src/ate/engine/lua_host.py` and both test-writer manuals;
+- a new Device Type goes to the driver, the register line, the enum member and the test-writer manuals;
+- a new module under `src/ate/` goes to this file and to `docs/manuals/developer/`;
+- a new table goes to `src/ate/storage/schema.py`, the version bump, and both developer manuals;
+- a command a manual tells someone to run goes into `COMMANDS_RUN`/`COMMANDS_NOT_RUN` (admin) or
+  `DEV_COMMANDS_RUN`/`DEV_COMMANDS_NOT_RUN` (developer) with its exit code, the output it must produce,
+  or the reason it is not run.
+
+## Commands in this manual, and what covers them
+
+Run by `tests/test_manuals.py`: `python packaging/windows/build_installer.py --dry-run --dist dist`,
+`python -m build --wheel --no-isolation -o dist`,
+`QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples`, the `sqlite3` query above, and
+`python -m ate db migrate /tmp/station/data/ate.db --yes`.
+
+Shown but not run here, with what covers them: the pytest command (the suite cannot run itself; it is the
+command CI runs, and the counts above come from running it); `ATE_BUILD_TESTS=1 pytest -m build` and its
+`-q` form (by design not part of a normal run: it builds a PyInstaller bundle, and it was run for this
+manual, 2 passed and 2 skipped in 223.72 s); `ATE_DOCKER_TESTS=1 pytest -m build` in both forms (needs
+Docker and network in a `debian:stable` container; run here with `TMPDIR` pointed at a directory on disk,
+1 passed in 533.95 s — on a machine whose `/tmp` is a small tmpfs it fails with `No space left on device`);
+`python packaging/build_pyinstaller.py --smoke` (the gate above calls the same script's
+`build_bundle()` and `verify_bundle()`); `python packaging/build_pyinstaller.py --verify dist/ate`
+(needs a built bundle; `tests/test_linux_packages_28b.py` runs `verify_bundle()` against a real bundle
+and a deliberately incomplete one); and the `runner.py` line in the Device example, which the
+worked-example test runs against a temporary copy of `src/`.
+
+To build the PDF of the manual this file is the other half of:
+
+```bash
+python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
+```
+
+## Never
+
+- Never import `QtWidgets` in `src/ate/engine/` or `src/ate/run_session/`.
+- Never parent a `RunEngine` to a widget, and never `wait()` on the main thread without
+  `request_abort()` first.
+- Never widen a test timeout to make a failure go away; make the test able to fail instead.
+- Never compare a `log_line.at` stamp with a deadline measured at drain time.
+- Never add a config key, an `ATE` function, a Device Type, a module or a table without updating the
+  manual that lists it: the coverage test derives the list from the code and will fail.
+- Never claim a Device behaviour from a spec or an asset file without checking `src/ate/devices/`.
+- Never run `groupadd`, `chown`, `chmod` or `icacls` on the test machine for a permission claim; use
+  `RecordingPermissions` or the gated `debian:stable` container.
+- Never run a Test Schedule's file-loading functions (`dofile`, `loadfile`, `load`) in a sandbox test as
+  if they worked: they are set to nil, and a schedule that calls one gets an ERROR Attempt.
+
+## What this manual cannot state
+
+- Real hardware behaviour. Every Device test uses a loopback peer, a pseudo-terminal, or pyvisa-py
+  behind a socket. No GPIB instrument, real serial adapter or NI-VISA stack has been opened by this
+  suite.
+- Real Windows behaviour a human watched. The same tests run on `windows-latest` in CI, and the
+  release workflow installed the Windows installer there: at `v0.1.0-rc2` (run 41198438867)
+  `packaging/windows/ate.iss` was compiled and the installer silently installed, run, upgraded and
+  uninstalled on that runner, which is what the admin manual says. None of it happened on this
+  machine and nobody watched a window open. The `icacls` paths, the Inno installer and the frozen
+  Windows bundle are asserted here by reading scripts and by `tests/test_release_ci_27c.py`, which
+  checks the workflow's shape, never an installed program.
+- Any container other than `debian:stable`. `ATE_DOCKER_TESTS=1 pytest -m build` and
+  `packaging/linux/docker_smoke.py` do pass here — 1 passed in 533.95 s with `TMPDIR` on a disk-backed
+  directory — but the first attempt on this machine's `/tmp` failed with `No space left on device`, and
+  nothing has ever been smoked on Fedora, Ubuntu or a SELinux-enforcing host.
+  `tests/test_release_ci_28c.py` asserts the gate and the smoke scripts' logic.
+- The cause of the packet 32b stall. One Windows CI run left a Test Run stalled for tens of seconds. The
+  fixes and the diagnostic are proven; the disk being the culprit is a belief, not a measurement. The
+  next stall can be read: long or in-flight writes point at the disk, normal writes with the worker's
+  stack elsewhere point at something nobody has found.
+- Both Qt bindings. The PySide6/PyQt6 differences come from the packet 32a switch and its notes; they
+  were not measured side by side here.
+
+Where the documents and the code disagree, the code was followed and the document left as it is:
+
+- spec rule 20 says `ate db migrate` upgrades "after a timestamped backup". It makes none.
+- spec rule 08 says `log_line` rows are written "about once a second". They are inserted per step.
+- The 32a notes say the release workflow has "5 jobs". It defines three: `windows-installer`,
+  `linux-build`, and `linux-smoke` with a `deb`/`tar`/`wheel` matrix --- five job runs.
+- `_location()` finds a step's file and line by searching the schedule text for `:setAction(`, not from
+  the Lua call stack, so a multi-line Action, a helper module or a Sub-schedule can report the wrong
+  place.
+- The staged Run screen is a vertical stack, not the prototype layout in
+  `run-screen-prototype.html` the review notes refer to.
+
+Numbers in this manual are snapshots: the suite's size and its elapsed time move with every packet. The
+names, signals, tables and drivers are not snapshots --- the suite derives them from the code. The checks
+catch a manual falling behind the code, not a manual ahead of it.
+```
+
+Two of the three edits are in `src/ate/engine/lua_host.py`: import the new module in the style the
+other drivers use (`serial`, `udp` and `visa` are imported from their own modules, not through the
+package's `__init__`), and add the register line beside the others.
+
+```python
+from ..devices.abort import DeviceAborted
+from ..devices.echo import EchoDriver  # the developer manual's worked example
+```
+
+```python
+        self._devices.register("TCP", TcpDriver)
+        self._devices.register("SERIAL", SerialDriver)  # packet 18a: pyserial ports, same API
+        self._devices.register("UDP", UdpDriver)  # packet 18b: datagrams, one datagram per message
+        self._devices.register("VISA", VisaDriver)  # packet 19: pyvisa resources, no background reader
+        self._devices.register("ECHO", EchoDriver)  # the developer manual's worked example
+```
+
+Add the enum member in `_ENUMS`, in the same file. The Device Type table is flat — the member's name
+maps to its label:
+
+```python
+    "DeviceType": {
+        "ECHO": "ECHO",  # the developer manual's worked example
+        "SERIAL": "SERIAL",
+        "TCP": "TCP",
+        "UDP": "UDP",
+        "VISA": "VISA",
+    },
+```
+
+Then run it. `runner.py` is the headless driver shown above; the schedule is:
+
+```lua:docs/manuals/examples/developer/echo.tslua
+-- echo.tslua: the ECHO Device Type from the developer manual, run for real.
+--
+-- The manual tells a developer to add a driver, register it and add the enum member. This
+-- schedule is what proves it worked: tests/test_manuals.py copies src/ate into a temporary
+-- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the three edits the
+-- manual shows, and runs this schedule headless against that copy.
+--
+-- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
+-- a read cut short by `size` being a truncation; the trace lines a Device produces when
+-- deviceTrace.enabled is on; and a Step Input answered from the script with --input.
+return ScheduleParams("Developer: echo Device", "open an ECHO Device, write to it, read it back")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("Open and write"):setStepNo("1.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "manual-example"})
+        local w = ATE.write(dev, {data = "hello", writeTerm = "\n"})
+        ATE.report((w.ok and w.count == 6) and Result.PASS or Result.FAIL,
+                   "wrote " .. w.count .. " bytes including the terminator", w.count, 6)
+        ATE.close(dev)
+      end),
+
+    -- A Device left open is closed by the engine at run end with one WARNING (packet 16a), so
+    -- step 2 opens one and deliberately does not close it.
+    StepParams("Leave a Device open"):setStepNo("2.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "left-open"})
+        ATE.write(dev, {data = "unbounded"})
+        ATE.report(Result.PASS, "the run will close this Device for me")
+      end),
+
+    -- `size` cuts a read short: partial is true, and for this Device Type the WARNING says
+    -- "truncated", not "timed out", because there is no stream and no deadline.
+    StepParams("Cut a read with size"):setStepNo("3.")
+      :setAction(function()
+        local dev = ATE.open(DeviceType.ECHO, {label = "sized"})
+        ATE.write(dev, {data = "ABCDEFGH"})
+        local r = ATE.read(dev, {size = 4})
+        ATE.report((r.partial and r.count == 4 and r.data == "ABCD") and Result.PASS or Result.FAIL,
+                   "read " .. r.count .. " of 8 bytes", r.count, 4)
+        ATE.close(dev)
+      end),
+
+    -- A Step Input blocks the worker until it is answered. runner.py answers it from
+    -- --input "Operator reading=42", which is how a headless run gets an Operator.
+    StepParams("Operator reading"):setStepNo("4.")
+      :setInputs({ [1] = { desc = "board current, mA", type = "INTEGER" } })
+      :setAction(function()
+        local mA = ATE.input(1)
+        ATE.report((mA == 42) and Result.PASS or Result.FAIL, "operator read " .. mA .. " mA", mA, 42)
+      end),
+  })
+```
+
+```bash
+python runner.py /tmp/station/config/config.json "Developer: echo Device" --input "Operator reading=42"   # PYTHONPATH=<the copy of src>
+```
+
+What the run records, asserted by the test: result `PASS`, `end_reason` `COMPLETED`, all four steps
+`PASS`, and these lines in the Run log:
+
+- `open ECHO ok (0.3 ms)` — the open line names the Device as `device_label` derives it from the open
+  params (type plus address); an `ECHO` has no address, so it is just `ECHO`. The calls after it carry
+  the handle's own `describe()`
+- `write ECHO manual-example 6 bytes "hello\n" (0.0 ms)`
+- `read ECHO sized 4 bytes "ABCD" partial (0.0 ms)`
+- `ATE.read: datagram truncated to 4 byte(s)`
+- `device ECHO left-open left open at end of run` (WARNING)
+
+The negative cases are tested too. A schedule that names an enum member that does not exist gets `nil`:
+`ATE.open(DeviceType.ECHO, ...)` raises `deviceType must be a DeviceType enum member, got NoneType`, the
+step records an ERROR Attempt, and the run fails. With the enum member present and no register line,
+`DeviceRegistry.open_device` raises `unknown DeviceType 'ECHO'`. A Device Type is real only when the
+driver, the register line and the enum member all exist.
+
+Then update: a test file named after the packet, the Device Type list in both test-writer manuals
+(`device_types()` and `device_drivers()` derive it from the classes that exist), and
+`docs/manuals/llm/test-writer.md`.
+
+## Worked example: adding a schema version
+
+Also run by `tests/test_manuals.py`, against a temporary copy of `src/`.
+
+Add the table to `src/ate/storage/schema.py` and bump the version. The comment explaining each bump is
+the convention: `input_value` made it 2, `media_release` and `run_file` made it 3, `schedule_instance`
+made it 4, `equipment` made it 5.
+
+```python
+SCHEMA_VERSION = 6
+```
+
+```python
+review_note = Table(
+    "review_note",
+    metadata,
+    Column("run_uuid", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),  # the composite key, as every other run table
+    Column("text", Text, nullable=True),
+    Column("at", Text, nullable=True),
+)
+```
+
+Nothing else is needed: `RunStore._ensure_schema` calls `metadata.create_all`, which reflects each table
+through the backend's own catalog and never raises on a database that already has it, and sets
+`PRAGMA user_version`. Use the record's types: UUIDs as 36-character `Text`, times as ISO-8601 `Text`,
+booleans as `Integer` 0/1, structured values as JSON `Text`. No SQLite-only column: a Postgres backend
+is a connection change. The only raw SQL in the storage layer is the two pragmas, and they stay in
+`src/ate/storage/store.py`.
+
+Then:
+
+```bash
+python -m ate db migrate /tmp/station/data/ate.db --yes
+```
+
+prints `created or upgraded database at ... (schema version 6)`. The test runs it twice against the same
+file --- first with the shipped code, which reports version 5, then with the patched copy, which adds
+`review_note` on top --- and asserts the set of tables only grew. Pointed at the version 6 database, the
+shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is `check_database_at_launch`
+returning `TOO_OLD`.
+
+Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
+not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
+migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
+`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
+current, the launch check then passes, and the missing column appears later as an `OperationalError` on
+insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
+and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
+upgrade never fills a new column.
+
+A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
+table nothing queries is invisible on the page. Batching applies to a new row type as well
+(`_rows_per_statement` keeps an insert under `_SQL_MAX_VARIABLES = 999`), and `_log_seq` is what orders a
+new row against the rest of the run.
+
+## Documents, and where a change has to go
+
+| Where | What it is |
+|---|---|
+| `GLOSSARY.md` | the words: Test Run, Test Step, Attempt, Media Release, Device Type |
+| `docs/adr/0001-pyside6-instead-of-pyqt6.md` | a settled decision, with what was not tested |
+| `.scratch/ate-v1/spec.md` | the numbered rules the packets were written from: the requirement, not the behaviour |
+| `.scratch/ate-v1-wayfinding/assets/` | the format specs the code was built against |
+| `.scratch/ate-v1/issues/` | the packets, one file each |
+| `.scratch/ate-v1/review-notes.md` | the gaps a reviewer found and did not fix, including the flake history |
+| `docs/manuals/` | the three manuals and the three agent manuals |
+| `docs/building-from-source.md` | how to build, including these PDFs |
+
+A change is not finished when the code works:
+
+- a new config key goes to `src/ate/config.py`'s `_SCHEMA` and to both admin manuals;
+- a new `ate` subcommand or flag goes to `src/ate/cli.py` and the admin manual;
+- a new `ATE` function, enum or setter goes to `src/ate/engine/lua_host.py` and both test-writer manuals;
+- a new Device Type goes to the driver, the register line, the enum member and the test-writer manuals;
+- a new module under `src/ate/` goes to this file and to `docs/manuals/developer/`;
+- a new table goes to `src/ate/storage/schema.py`, the version bump, and both developer manuals;
+- a command a manual tells someone to run goes into `COMMANDS_RUN`/`COMMANDS_NOT_RUN` (admin) or
+  `DEV_COMMANDS_RUN`/`DEV_COMMANDS_NOT_RUN` (developer) with its exit code, the output it must produce,
+  or the reason it is not run.
+
+## Commands in this manual, and what covers them
+
+Run by `tests/test_manuals.py`: `python packaging/windows/build_installer.py --dry-run --dist dist`,
+`python -m build --wheel --no-isolation -o dist`,
+`QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples`, the `sqlite3` query above, and
+`python -m ate db migrate /tmp/station/data/ate.db --yes`.
+
+Shown but not run here, with what covers them: the pytest command (the suite cannot run itself; it is the
+command CI runs, and the counts above come from running it); `ATE_BUILD_TESTS=1 pytest -m build` and its
+`-q` form (by design not part of a normal run: it builds a PyInstaller bundle, and it was run for this
+manual, 2 passed and 2 skipped in 223.72 s); `ATE_DOCKER_TESTS=1 pytest -m build` in both forms (needs
+Docker and network in a `debian:stable` container; run here with `TMPDIR` pointed at a directory on disk,
+1 passed in 533.95 s — on a machine whose `/tmp` is a small tmpfs it fails with `No space left on device`);
+`python packaging/build_pyinstaller.py --smoke` (the gate above calls the same script's
+`build_bundle()` and `verify_bundle()`); `python packaging/build_pyinstaller.py --verify dist/ate`
+(needs a built bundle; `tests/test_linux_packages_28b.py` runs `verify_bundle()` against a real bundle
+and a deliberately incomplete one); and the `runner.py` line in the Device example, which the
+worked-example test runs against a temporary copy of `src/`.
+
+To build the PDF of the manual this file is the other half of:
+
+```bash
+python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
+```
+
+## Never
+
+- Never import `QtWidgets` in `src/ate/engine/` or `src/ate/run_session/`.
+- Never parent a `RunEngine` to a widget, and never `wait()` on the main thread without
+  `request_abort()` first.
+- Never widen a test timeout to make a failure go away; make the test able to fail instead.
+- Never compare a `log_line.at` stamp with a deadline measured at drain time.
+- Never add a config key, an `ATE` function, a Device Type, a module or a table without updating the
+  manual that lists it: the coverage test derives the list from the code and will fail.
+- Never claim a Device behaviour from a spec or an asset file without checking `src/ate/devices/`.
+- Never run `groupadd`, `chown`, `chmod` or `icacls` on the test machine for a permission claim; use
+  `RecordingPermissions` or the gated `debian:stable` container.
+- Never run a Test Schedule's file-loading functions (`dofile`, `loadfile`, `load`) in a sandbox test as
+  if they worked: they are set to nil, and a schedule that calls one gets an ERROR Attempt.
+
+## What this manual cannot state
+
+- Real hardware behaviour. Every Device test uses a loopback peer, a pseudo-terminal, or pyvisa-py
+  behind a socket. No GPIB instrument, real serial adapter or NI-VISA stack has been opened by this
+  suite.
+- Real Windows behaviour a human watched. The same tests run on `windows-latest` in CI, and the
+  release workflow installed the Windows installer there: at `v0.1.0-rc2` (run 41198438867)
+  `packaging/windows/ate.iss` was compiled and the installer silently installed, run, upgraded and
+  uninstalled on that runner, which is what the admin manual says. None of it happened on this
+  machine and nobody watched a window open. The `icacls` paths, the Inno installer and the frozen
+  Windows bundle are asserted here by reading scripts and by `tests/test_release_ci_27c.py`, which
+  checks the workflow's shape, never an installed program.
+- Any container other than `debian:stable`. `ATE_DOCKER_TESTS=1 pytest -m build` and
+  `packaging/linux/docker_smoke.py` do pass here — 1 passed in 533.95 s with `TMPDIR` on a disk-backed
+  directory — but the first attempt on this machine's `/tmp` failed with `No space left on device`, and
+  nothing has ever been smoked on Fedora, Ubuntu or a SELinux-enforcing host.
+  `tests/test_release_ci_28c.py` asserts the gate and the smoke scripts' logic.
+- The cause of the packet 32b stall. One Windows CI run left a Test Run stalled for tens of seconds. The
+  fixes and the diagnostic are proven; the disk being the culprit is a belief, not a measurement. The
+  next stall can be read: long or in-flight writes point at the disk, normal writes with the worker's
+  stack elsewhere point at something nobody has found.
+- Both Qt bindings. The PySide6/PyQt6 differences come from the packet 32a switch and its notes; they
+  were not measured side by side here.
+
+Where the documents and the code disagree, the code was followed and the document left as it is:
+
+- spec rule 20 says `ate db migrate` upgrades "after a timestamped backup". It makes none.
+- spec rule 08 says `log_line` rows are written "about once a second". They are inserted per step.
+- The 32a notes say the release workflow has "5 jobs". It defines three: `windows-installer`,
+  `linux-build`, and `linux-smoke` with a `deb`/`tar`/`wheel` matrix --- five job runs.
+- `_location()` finds a step's file and line by searching the schedule text for `:setAction(`, not from
+  the Lua call stack, so a multi-line Action, a helper module or a Sub-schedule can report the wrong
+  place.
+- The staged Run screen is a vertical stack, not the prototype layout in
+  `run-screen-prototype.html` the review notes refer to.
+
+Numbers in this manual are snapshots: the suite's size and its elapsed time move with every packet. The
+names, signals, tables and drivers are not snapshots --- the suite derives them from the code. The checks
+catch a manual falling behind the code, not a manual ahead of it.
 ```
 
 ```bash
