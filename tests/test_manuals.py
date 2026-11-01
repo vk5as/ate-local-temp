@@ -278,6 +278,16 @@ def test_the_admin_coverage_check_can_fail() -> None:
     assert not missing_from(texts, keys), "the admin manual as written has every config key"
 
 
+def test_the_agent_manual_names_every_key_and_command_on_its_own() -> None:
+    """An agent working from ``docs/manuals/llm/admin.md`` alone must not need the PDF.
+
+    The coverage table counts a name as covered if it appears anywhere in the manual; this checks
+    the Markdown file by itself, because that is the file an agent is given."""
+    agent = [(label, text) for label, text in MANUALS["admin"].texts() if label.endswith(".md")]
+    gone = missing_from(agent, config_keys() | cli_names())
+    assert not gone, f"the agent manual alone is missing: {', '.join(gone)}"
+
+
 # --- Every command the admin manual shows is run, or explained --------------------------
 
 #: A listing in the admin manual whose lines are commands an administrator types.
