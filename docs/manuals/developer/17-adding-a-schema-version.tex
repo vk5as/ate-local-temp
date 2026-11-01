@@ -65,11 +65,15 @@ backup, despite spec rule 20 (see chapter~\ref{ch:unproven}).
 
 \section{Adding a column instead of a table}
 
-\texttt{create\_all} does not alter a table that already exists, so adding a column to
-\texttt{node} with a version bump leaves existing databases without it. That is not what v1 does,
-and nothing in the code silently \texttt{ALTER}s a table. If a change of that shape is ever needed,
-it has to be written and tested as an explicit migration, and the manual and this chapter have to
-say so; the version number is only a guard, not a migration.
+\texttt{create\_\allowbreak{}all} does not alter a table that already exists, so adding a column to
+\texttt{node} with a version bump leaves existing databases without it. Worse: \texttt{RunStore.\_ensure\_\allowbreak{}schema}
+(\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}store.py}) stamps \texttt{PRAGMA user\_\allowbreak{}version} unconditionally, so the
+first time any code opens that database it is declared current --- the version check then passes, and
+the missing column only shows up later, as an \texttt{OperationalError} on the insert or a \texttt{NULL}
+where a value should have been. Nothing in \texttt{src/ate} writes an \texttt{ALTER} or an
+\texttt{add\_column}, and every insert names its columns explicitly (\texttt{insert\_test\_run} builds its
+row field by field), so a new column is never filled by an upgrade. A change of that shape has to be
+written and tested as an explicit migration; the version number is a guard, not a migration.
 
 \section{Where a new field reaches the report}
 

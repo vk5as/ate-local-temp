@@ -2,7 +2,7 @@
 --
 -- The manual tells a developer to add a driver, register it and add the enum member. This
 -- schedule is what proves it worked: tests/test_manuals.py copies src/ate into a temporary
--- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the two lines the
+-- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the three edits the
 -- manual shows, and runs this schedule headless against that copy.
 --
 -- Demonstrates: a Device Type the application does not ship; the fields a driver declares;

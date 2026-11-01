@@ -76,34 +76,17 @@ an error rather than pretending it did.
 
 \section{Driving a run with no display}
 
-This is the shape the suite and the harness use, and it is the shape to copy for a new headless test:
+This is the shape the suite and the harness use, and it is the shape to copy for a new headless test.
+The runner below is \texttt{docs/manuals/examples/developer/runner.py}, the file the manual's worked
+example in chapter~\ref{ch:device-type} runs; \texttt{tests/test_manuals.py} runs it as a subprocess.
 
-\begin{lstlisting}[language=ATEPython]
-from ate.config import read_config
-from ate.run_session.headless import HeadlessRunSession, SessionState
-from PySide6.QtCore import QCoreApplication
-import time
-
-session = HeadlessRunSession(read_config(config_path))
-states: list[SessionState] = []
-session.state_changed.connect(states.append)
-session.set_operator("Ada Lovelace")
-session.set_project("Manual examples")
-session.set_uut_type("Example board")
-session.set_uut_serial("EX-MANUAL-1")
-session.select_schedule("Manual: first schedule")
-session.start()
-
-app = QCoreApplication.instance() or QCoreApplication([])
-while SessionState.STARTED not in states:      # pump the loop: queued signals need an event loop
-    app.processEvents()
-    time.sleep(0.01)
-\end{lstlisting}
+\lstinputlisting[language=ATEPython, caption={\texttt{docs/manuals/examples/developer/runner.py}}]{../examples/developer/runner.py}
 
 There is no widget and no display, and the queued signals still deliver, because delivery rides the
-event loop of the receiving thread. \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} runs the manual's own examples this
-way, including an abort, and \texttt{examples/\allowbreak{}harness/\allowbreak{}run\_\allowbreak{}examples.py} runs the shipped Media Release
-the same way with simulator peers.
+event loop of the receiving thread. Without the \texttt{processEvents} pump nothing arrives: no
+\texttt{state\_changed}, no step recorded, no report. A Stop-on-Fail pause blocks the worker until
+somebody answers it, and in a headless run the script is the only somebody, which is why the runner
+answers every pause from \texttt{--choice}.
 
 \cando{start a Test Run from a script, answer its Step Inputs, abort it, and read the record back from
 the store.}

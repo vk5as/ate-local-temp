@@ -1879,45 +1879,10 @@ def test_the_worked_examples_are_quoted_exactly() -> None:
         assert path in tex, f"the LaTeX manual never includes {path}"
 
 
-#: The script a developer uses to drive one headless run: chapter 16 shows it, and the worked-example
-#: test below runs it against a temporary copy of the source.
-RUNNER = r"""
-import json, sys, time
-from PySide6.QtCore import QCoreApplication
-from ate.config import read_config
-from ate.report.pdf import PDF_SKIPPED
-from ate.run_session.headless import HeadlessRunSession, SessionState
-
-config, schedule = sys.argv[1], sys.argv[2]
-session = HeadlessRunSession(read_config(config), pdf_choice=lambda _html: PDF_SKIPPED)
-states = []
-session.state_changed.connect(states.append)
-# A Stop-on-Fail pause blocks until somebody answers, and a headless driver has to answer it: the
-# worked example answers CONTINUE so the run runs to its end and every step is recorded.
-session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose("CONTINUE"))
-session.set_operator("Manual worked example")
-session.set_project("Developer manual")
-session.set_uut_type("Example board")
-session.set_uut_serial("DEV-34C")
-session.select_schedule(schedule)
-session.start()
-
-app = QCoreApplication.instance() or QCoreApplication([])
-deadline = time.monotonic() + 25.0
-while SessionState.FINISHED not in states and time.monotonic() < deadline:
-    app.processEvents()
-    time.sleep(0.02)
-
-run = session.store.get_test_run(session.run_uuid)
-print(json.dumps({
-    "result": run["result"],
-    "end_reason": run["end_reason"],
-    "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
-    "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
-    "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
-}))
-session.close()
-"""
+#: The script a developer uses to drive one headless run. It is a file in the repository, quoted
+#: by both forms of the manual, and the worked-example test below runs that file itself rather
+#: than a copy of it written out here.
+RUNNER = DEV_EXAMPLES_DIR / "runner.py"
 
 
 def _copy_src(dest: Path) -> Path:
@@ -1960,14 +1925,13 @@ def _echo_config(tmp: Path, src: Path) -> Path:
         encoding="utf-8",
         newline="\n",
     )
-    (tmp / "runner.py").write_text(RUNNER, encoding="utf-8", newline="\n")
     return config
 
 
 def _run_echo(tmp: Path, src: Path) -> dict[str, Any]:
     """Run the worked example against ``src``, in its own process, and return its record."""
     proc = subprocess.run(
-        [sys.executable, str(tmp / "runner.py"), str(_echo_config(tmp, src)), "Developer: echo Device"],
+        [sys.executable, str(RUNNER), str(_echo_config(tmp, src)), "Developer: echo Device"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=180,
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(src)},
     )

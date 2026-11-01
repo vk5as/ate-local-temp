@@ -5,7 +5,7 @@ Schedule writes, and ``read`` hands them back, so a schedule can exercise open, 
 flush and close against a Device Type that did not exist five minutes ago. That is enough to
 prove the steps the manual gives: declare the fields, name the Device Type, register the
 driver, add the enum member. ``tests/test_manuals.py`` copies this file into a temporary copy
-of ``src/ate``, applies the two edits the manual shows, and runs ``echo.tslua`` against it.
+of ``src/ate``, applies the three edits the manual shows, and runs ``echo.tslua`` against it.
 """
 
 from __future__ import annotations

@@ -98,16 +98,14 @@ runs.
 
 \section{What has actually been run here}
 
-The frozen-build gate was run for this manual: \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} gave
-\texttt{2 passed, 2 skipped, 1587 deselected in 223.72 s}. The container gate ran here too, once its
-scratch directory was moved off \texttt{/tmp}: \texttt{ATE\_\allowbreak{}DOCKER\_\allowbreak{}TESTS=1 pytest -m build} with
-\texttt{TMPDIR} on the disk runs the two container tests --- the three-artifact smoke in
-\texttt{533.95 s} and the permissions smoke in \texttt{11.84 s} --- and with both flags set all four gated
-tests pass in \texttt{768.00 s}. \texttt{packaging/\allowbreak{}linux/\allowbreak{}docker\_\allowbreak{}smoke.py} run by hand printed
-\texttt{docker smoke: all kinds ran in debian:stable}. The first attempt of that gate died in this
-environment with \texttt{OSError: [Errno 28] No space left on device}, which is why the manual says
-where a gate ran and not merely that it can. What has never been run on this machine is a Windows
-build, a Windows install, or an installer: those paths are checked by reading the scripts and by CI,
-not by us.
+Both gates were run for this manual, on the machine that wrote it, with \texttt{TMPDIR} pointed at a
+directory on disk rather than \texttt{/tmp}. \texttt{ATE\_\allowbreak{}BUILD\_\allowbreak{}TESTS=1 pytest -m build} takes a few minutes
+because it builds a frozen bundle; \texttt{ATE\_\allowbreak{}DOCKER\allowbreak{}TESTS=1 pytest -m build} takes several, because it builds the tarball
+and the \texttt{.deb} and installs each in a fresh \texttt{debian:stable} container. Both pass. The first
+attempt at the container gate in this environment died with \texttt{OSError: [Errno 28] No space left on
+device} on a small \texttt{/tmp}, which is why the manual says where a gate ran and not merely that it
+can. Timings are not quoted: they belong to one machine and one afternoon. What has never been run on
+this machine is a Windows build, a Windows install, or an installer: those paths are checked by reading
+the scripts and by CI, not by us.
 
 \cando{say which artifact carries which library, and name the test that proves a bundle is complete.}

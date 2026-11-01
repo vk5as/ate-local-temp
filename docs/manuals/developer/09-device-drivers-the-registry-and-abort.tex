@@ -8,7 +8,8 @@ actually runs.
 \section{The contract}
 
 \texttt{ate/\allowbreak{}devices/\allowbreak{}registry.py} defines \texttt{Driver}, an abstract base class with three class
-attributes and two methods:
+attributes and two methods. Only \texttt{open} is abstract: \texttt{close} has a default no-op for a
+driver with nothing to tear down, and the drivers that do have something override it.
 
 \begin{lstlisting}[language=ATEPython]
 class Driver(ABC):
@@ -18,8 +19,9 @@ class Driver(ABC):
 
     @abstractmethod
     def open(self, params: dict[str, Any]) -> Any: ...
-    @abstractmethod
-    def close(self, device: Any) -> None: ...
+
+    def close(self, device: Any) -> None:
+        """Release a device. The default is a no-op; TCP overrides it."""
 \end{lstlisting}
 
 \texttt{validate\_params} checks every declared field generically: an unknown field, a missing required

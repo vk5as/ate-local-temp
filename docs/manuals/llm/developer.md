@@ -61,10 +61,10 @@ blocking input and records the thread each slot ran on.
 | `src/ate/devices/abort.py` | how a Device call gives way to a run abort (`POLL_SECONDS = 0.05`) |
 | `src/ate/devices/registry.py` | `Driver`, `validate_params`, `DeviceRegistry`: open, close, snapshot |
 | `src/ate/devices/serial.py` | the SERIAL driver: pyserial ports on the same buffered stream |
-| `src/ate/devices/stream.py` | the buffered stream TCP, SERIAL and VISA share; `READ_FIELDS`, `WRITE_FIELDS` |
+| `src/ate/devices/stream.py` | the buffered stream TCP, SERIAL and UDP share; `READ_FIELDS`, `WRITE_FIELDS` |
 | `src/ate/devices/tcp.py` | the TCP driver, with the background reader and the receive buffer cap |
 | `src/ate/devices/tracing.py` | one DEBUG line per Device operation (`DEFAULT_TRACE_MAX_BYTES = 256`) |
-| `src/ate/devices/udp.py` | the UDP driver: one datagram per message, no reader |
+| `src/ate/devices/udp.py` | the UDP driver: a reader too, but a queue of whole datagrams instead of a byte buffer |
 | `src/ate/devices/visa.py` | the VISA driver: read on demand, no reader |
 | `src/ate/dialogs.py` | every modal ATE opens, and `dismiss_if_headless` for the ones with no Operator |
 | `src/ate/engine/__init__.py` | the run engine package: flow control and the Lua host |
@@ -222,28 +222,104 @@ dropped without `close()` leaves its `QProcess` to be destroyed by Qt mid-render
 while a worker is writing to it: `close()` calls `stop_and_wait()` first, and if the worker does not
 stop within 5 s it logs an error rather than pretending.
 
-Driving a run with no display is the shape the suite and `examples/harness/run_examples.py` use:
+Driving a run with no display is the shape the suite and `examples/harness/run_examples.py` use. The
+developer manual's own runner, kept beside the examples, is that shape written out in full — it is
+the script `tests/test_manuals.py` runs for the worked example in chapter 16:
 
-```python
-from ate.config import read_config
-from ate.run_session.headless import HeadlessRunSession, SessionState
-from PySide6.QtCore import QCoreApplication
+```python:docs/manuals/examples/developer/runner.py
+#!/usr/bin/env python3
+"""Drive one Test Run with no display, and print its record as JSON.
+
+    QT_QPA_PLATFORM=offscreen python docs/manuals/examples/developer/runner.py <config.json> "<schedule name>"
+
+A headless run is a ``HeadlessRunSession`` and an event loop: the session's signals are queued, so
+they only arrive while some thread pumps events. Nothing here imports a widget. The PDF helper is
+replaced with a skip so the run finishes on a machine with no browser to render it; the HTML Test
+Report is still written.
+
+Answers are given from the script: ``--input STEP NAME=VALUE`` for every Step Input the schedule
+declares, ``--choice`` for each Stop-on-Fail pause in the order the pauses come. A run nobody
+answers never ends, so a schedule with inputs needs these flags or this script waits out its
+25-second deadline and reports the run as it stands.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
 import time
+from pathlib import Path
 
-session = HeadlessRunSession(read_config(config_path))
-states = []
-session.state_changed.connect(states.append)
-session.set_operator("Ada Lovelace")
-session.set_project("Manual examples")
-session.set_uut_type("Example board")
-session.set_uut_serial("EX-MANUAL-1")
-session.select_schedule("Manual: first schedule")
-session.start()
+_ROOT = Path(__file__).resolve().parents[4]  # docs/manuals/examples/developer -> the repository
+try:
+    import ate  # noqa: F401  # already importable: run from the repository root, or with PYTHONPATH
+except ImportError:
+    for _path in (_ROOT / "src", _ROOT):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
 
-app = QCoreApplication.instance() or QCoreApplication([])
-while SessionState.STARTED not in states:
-    app.processEvents()
-    time.sleep(0.01)
+from PySide6.QtCore import QCoreApplication  # noqa: E402
+from ate.config import read_config  # noqa: E402
+from ate.report.pdf import PDF_SKIPPED  # noqa: E402
+from ate.run_session.headless import HeadlessRunSession, SessionState  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="runner.py", description=__doc__)
+    parser.add_argument("config", help="the config.json of the Station to run against")
+    parser.add_argument("schedule", help="the Test Schedule name, as the Test Definition lists it")
+    parser.add_argument("--input", action="append", default=[], metavar="STEP NAME=VALUE")
+    parser.add_argument("--choice", action="append", default=[], choices=("CONTINUE", "RETRY", "ABORT"))
+    parser.add_argument("--abort-after", type=float, default=None, help="request an abort this many seconds in")
+    args = parser.parse_args()
+
+    inputs = {}
+    for item in args.input:
+        name, _, value = item.partition("=")
+        value = value.strip()
+        try:
+            inputs[name.strip()] = int(value)
+        except ValueError:
+            inputs[name.strip()] = float(value) if value.replace(".", "", 1).replace("-", "", 1).isdigit() else value
+
+    session = HeadlessRunSession(read_config(Path(args.config)), pdf_choice=lambda _html: PDF_SKIPPED)
+    states: list[SessionState] = []
+    session.state_changed.connect(states.append)
+    # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
+    # somebody here, so every pause gets the scripted answer in order.
+    answers = list(args.choice)
+    session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose(answers.pop(0) if answers else "CONTINUE"))
+    session.set_operator("runner.py")
+    session.set_project("Developer manual worked example")
+    session.set_uut_type("Example board")
+    session.set_uut_serial("DEV-34C")
+    session.select_schedule(args.schedule)
+    session.start()
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    started = time.monotonic()
+    deadline = started + 25.0
+    while SessionState.FINISHED not in states and time.monotonic() < deadline:
+        if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
+            session.request_abort()
+            args.abort_after = None  # request once, not every turn of the loop
+        app.processEvents()
+        time.sleep(0.02)
+
+    run = session.store.get_test_run(session.run_uuid)
+    print(json.dumps({
+        "result": run["result"],
+        "end_reason": run["end_reason"],
+        "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+        "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
+        "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+    }))
+    session.close()
+    return 0 if SessionState.FINISHED in states else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 ```
 
 Queued signals only deliver when the receiving thread's event loop runs. No loop, no signals.
@@ -318,6 +394,22 @@ line. `ATE.run` is a read-only table built from `_RUN_FIELDS`; writing to it rai
 and the engine fills it through `rawset` in `publish_run`. The enums (`Result`, `Log`, `DeviceType`,
 `Parity`, `FlowControl`) are declared by `_declare_enums` as read-only tables.
 
+`_context` is one of `load`, `pretest`, `posttest` or `step`, and a function that is only legal in one of
+them raises when called in another: a Device opened while the file is loading is a load error, not a
+runtime one.
+
+To add an `ATE.` function, four things have to be true or it is not really available:
+
+1. define it on `_AteTable` and `register` it, so the table exposes it;
+2. record what it did through the host — the `logs`, `reports` or `equipment` lists — never by writing to
+   the store directly, because the engine owns the rows and attributes them to the step or Action running;
+3. check the context if it is only legal in one phase;
+4. name it in both manuals: `ate_table_functions()` in `tests/test_manuals.py` reads the table off the
+   object, and a function the code has that a manual does not show in code fails the suite.
+
+`register` and `publish_run` are excluded from that rule: they build the table, they are not calls a
+schedule makes.
+
 `tests/test_lua_isolation.py` and `tests/test_lua_lockdown_calls.py` prove the sandbox;
 `docs/manuals/examples/test-writer/forbidden.tslua` is a schedule that tries to open a Device while the
 file is loading, which the host refuses.
@@ -368,11 +460,12 @@ HTML is on disk; if the sandbox cannot be used and the Operator declines, the re
 ## Config and the exception log
 
 `src/ate/config.py` reads one file, once, at launch. There is no per-user override, no environment
-expansion in values, no `~` expansion; relative paths resolve against the data directory.
-`_SCHEMA` is the list of every key the validator accepts, and `tests/test_manuals.py` derives the admin
-manual's key list from it, so a key added to the code and not to the admin manual fails the suite.
-`_platform_data_dir` is the seam the test suite redirects so no test writes to `/var/lib/ate` or
-`C:\ProgramData`.
+expansion in values, no `~` expansion; `<data>` expands to the platform data directory, and any other
+relative path resolves against the **config file's directory**, not the data directory (absolute paths
+are used as given, and forward slashes work on Windows). `_SCHEMA` is the list of every key the
+validator accepts, and `tests/test_manuals.py` derives the admin manual's key list from it, so a key
+added to the code and not shown in code in the admin manual fails the suite. `_platform_data_dir` is
+the seam the test suite redirects so no test writes to `/var/lib/ate` or `C:\ProgramData`.
 
 `src/ate/exception_log.py` installs the hook that an uncaught exception reaches. Under PySide6 an
 exception in a slot or in `QThread.run` does not end the process: it prints the traceback and carries on.
@@ -418,11 +511,11 @@ ATE_DOCKER_TESTS=1 pytest -m build -q     # the debian:stable container smokes
 ```
 
 Both gates are off by default and marked `build`. `tests/test_release_ci_28c.py` asserts the gate is
-written as documented. Both ran for this manual: the build gate gave 2 passed, 2 skipped, 1587 deselected
-in 223.72 s, and with `ATE_DOCKER_TESTS=1` as well all four gated tests passed in 768.00 s. The container
-gate needs scratch space on disk: the first attempt wrote its artifacts into `/tmp`, which here is a
-7.7 GB tmpfs, and died with `No space left on device`; with `TMPDIR` set to a directory on the disk it
-passes. CI runs it either way.
+written as documented. Both ran for this manual on the machine that wrote it, with `TMPDIR` pointed at a
+directory on disk: the build gate takes a few minutes, the container gate several. Timings are not
+quoted because they belong to one machine. The container gate needs scratch space on disk: the first
+attempt wrote its artifacts into `/tmp`, which here is a small tmpfs, and died with `No space left on
+device`. CI runs it either way.
 ## The test suite
 
 `conftest.py` is not boilerplate; every fixture in it exists because of a failure.
@@ -560,7 +653,7 @@ Schedule writes, and ``read`` hands them back, so a schedule can exercise open, 
 flush and close against a Device Type that did not exist five minutes ago. That is enough to
 prove the steps the manual gives: declare the fields, name the Device Type, register the
 driver, add the enum member. ``tests/test_manuals.py`` copies this file into a temporary copy
-of ``src/ate``, applies the two edits the manual shows, and runs ``echo.tslua`` against it.
+of ``src/ate``, applies the three edits the manual shows, and runs ``echo.tslua`` against it.
 """
 
 from __future__ import annotations
@@ -649,21 +742,13 @@ class EchoDriver(Driver):
         device.close()
 ```
 
-Register the driver in `LuaHost.__init__`, beside the others:
-
-```python
-from ..devices.echo import EchoDriver  # the developer manual's worked example
-```
-
-Import it the way the other drivers are imported — from its own module, not from the package's
-`__init__`:
+Register the driver, and import it the way the other drivers are imported — from its own module, not
+from the package's `__init__`. Both go in `src/ate/engine/lua_host.py`:
 
 ```python
 from ..devices.abort import DeviceAborted
 from ..devices.echo import EchoDriver  # the developer manual's worked example
 ```
-
-Register it in `LuaHost.__init__`, beside the others:
 
 ```python
         self._devices.register("TCP", TcpDriver)
@@ -693,7 +778,7 @@ Then run it. `runner.py` is the headless driver shown above; the schedule is:
 --
 -- The manual tells a developer to add a driver, register it and add the enum member. This
 -- schedule is what proves it worked: tests/test_manuals.py copies src/ate into a temporary
--- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the two lines the
+-- directory, puts echo_driver.py in it as src/ate/devices/echo.py, applies the three edits the
 -- manual shows, and runs this schedule headless against that copy.
 --
 -- Demonstrates: a Device Type the application does not ship; the fields a driver declares;
@@ -803,7 +888,12 @@ returning `TOO_OLD`.
 
 Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
 not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
-migration, written and tested as one.
+migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
+`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
+current, the launch check then passes, and the missing column appears later as an `OperationalError` on
+insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
+and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
+upgrade never fills a new column.
 
 A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
 table nothing queries is invisible on the page. Batching applies to a new row type as well
