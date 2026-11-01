@@ -132,7 +132,7 @@ The Run screen comes in two layouts, staged (default) and three-pane, both built
 80. As an Operator, I want every step listed with its inputs always visible, each input enabled only while it's needed, so that I always know what's coming and what's being asked.
 81. As an Operator, I want the run to pause on a failure with Stop on Fail and offer Continue, Retry or Abort, so that I can fix a probe and retry without restarting the run.
 82. As an Operator, I want Retry to rerun the step from the start with inputs cleared and every Attempt recorded, so that the record shows what happened.
-83. As an Operator, I want to abort the whole run at any time and have it stop, even in a busy Lua loop: it should stop within 0.5 s and must stop within 10 s (user, 2026-11-01), so that I can stop a test promptly.
+83. As an Operator, I want to abort the whole run at any time and have it stop, even in a busy Lua loop: it should stop within 0.5 s and must stop within 10 s (user, 2026-11-01), except while a command run by `os.execute` or a busy loop inside a coroutine is running (user, 2026-11-02), so that I can stop a test promptly.
 84. As an Operator, I want Post-test Actions to run even after an abort (and a second abort to end only the current one), so that supplies are still powered down safely.
 85. As an Operator, I want a Pre-test Action failure to end the run automatically, with every step `NOTRUN` and the log explaining why, so that a broken setup never produces misleading results.
 86. As an Operator, I want a status bar showing Pre-test/Post-test progress, total run time and time in the current action or step, so that I can judge whether something has hung.
