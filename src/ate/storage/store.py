@@ -187,6 +187,12 @@ def _norm_date(value) -> str:
 _ROWS_PER_STATEMENT = 80
 
 
+def _row_chunks(rows: list[Any]):
+    """``rows`` in pieces of at most :data:`_ROWS_PER_STATEMENT`, so each is one statement."""
+    for start in range(0, len(rows), _ROWS_PER_STATEMENT):
+        yield rows[start : start + _ROWS_PER_STATEMENT]
+
+
 class RunStore:
     """Records Test Runs and their children in a single SQLite database.
 
@@ -359,8 +365,8 @@ class RunStore:
 
     def _insert_rows(self, table: Any, rows: list[dict[str, Any]]) -> None:
         """Insert ``rows`` in as few commits as SQLite allows, at most :data:`_ROWS_PER_STATEMENT` each."""
-        for start in range(0, len(rows), _ROWS_PER_STATEMENT):
-            self._run(table.insert().values(rows[start : start + _ROWS_PER_STATEMENT]))
+        for chunk in _row_chunks(rows):
+            self._run(table.insert().values(chunk))
 
     @staticmethod
     def _node_values(run_uuid: str, seq: int, fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -715,8 +721,14 @@ class RunStore:
         rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no, at=line.get("at")) for line in lines]
         for i, row in enumerate(rows):
             row["seq"] = next_seq + i  # unique within this batch
-        self._insert_rows(log_line, rows)  # a failing step's lines cost a commit, not one each (packet 32b)
-        self._log_seq[run_uuid] = next_seq + len(rows)  # keep later batches monotonic
+        # One commit per chunk (packet 32b), and the run's log counter moves with the chunks that
+        # actually landed, inside the loop: a later chunk that fails would otherwise leave the
+        # counter behind rows already in the table, and the next batch would collide on (run_uuid, seq).
+        landed = next_seq
+        for chunk in _row_chunks(rows):
+            self._run(log_line.insert().values(chunk))
+            landed += len(chunk)
+            self._log_seq[run_uuid] = landed
 
     def log_lines(self, run_uuid: str) -> list[dict]:
         """Return this run's recorded log lines as dicts (empty when the run is unknown)."""

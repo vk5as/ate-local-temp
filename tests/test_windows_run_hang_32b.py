@@ -242,6 +242,39 @@ def test_a_big_batch_of_log_lines_is_one_commit_a_batch_and_keeps_its_order():
         assert max(len(stmt.compile().params) for stmt in writes) <= _SQLITE_MINIMUM_VARIABLE_LIMIT
 
 
+def test_a_log_batch_failing_part_way_through_keeps_the_log_counter_true(monkeypatch):
+    """The seq counter moves with the chunks that committed, not with the batch that failed.
+
+    A batch is several statements: when the second of three fails, 80 rows are in the table and a
+    counter still at the batch's start makes the next write collide on (run_uuid, seq)."""
+    with scratch_directory() as td:
+        store = RunStore(Path(td) / "ate.db")
+        run_uuid = store.insert_test_run({"operator": "o", "project": "p"})["run_uuid"]
+        chunk = store_module._ROWS_PER_STATEMENT
+        lines = [{"level": "INFO", "source": "ate", "text": f"line {i}"} for i in range(chunk * 3)]
+        real_run, chunks = store._run, 0
+
+        def fail_the_second_chunk(stmt):
+            nonlocal chunks
+            if getattr(stmt, "is_dml", False):
+                chunks += 1
+                if chunks == 2:
+                    raise RuntimeError("the second chunk of the batch failed")
+            return real_run(stmt)
+
+        monkeypatch.setattr(store, "_run", fail_the_second_chunk)
+        with pytest.raises(RuntimeError, match="second chunk"):
+            store.insert_log_lines(run_uuid, 0, lines)
+        monkeypatch.undo()
+        assert chunks >= 2, "the batch never got to a second chunk, so nothing was left behind"
+
+        store.insert_log_lines(run_uuid, 0, [{"level": "WARNING", "source": "ate", "text": "after the failure"}])
+        recorded = store.log_lines(run_uuid)
+        assert [line["text"] for line in recorded] == [f"line {i}" for i in range(chunk)] + ["after the failure"]
+        seqs = [line["seq"] for line in recorded]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), f"seqs reused after a half-written batch: {seqs}"
+
+
 def test_a_failed_pretest_action_costs_a_few_commits_however_many_steps_there_are(qapp):
     """Every step is written NOTRUN; a commit each was 406 commits on a 400-step schedule."""
     with scratch_directory() as td:
