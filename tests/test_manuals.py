@@ -1370,6 +1370,262 @@ def test_every_example_is_included_by_the_latex_manual() -> None:
         f"and omits {sorted(str(p) for p in expected - included)}"
     )
 
+# --- The script the test-writer manual hands a reader actually runs ----------------------
+
+#: A Media Release the manuals never quote, built for this test: an input keyed by Step Name, a
+#: step that fails once and passes on Retry, and a step the Operator turns off. The script in
+#: chapter 2 has to work on a release nobody has ever seen, otherwise it is a decoration.
+SCRATCH_SCHEDULE = """-- scratch.tslua: somebody else's schedule, run by the manual's script.
+local tries = 0
+
+return ScheduleParams("Scratch: a release of my own", "inputs, a Retry and a disabled step")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("Check the rail"):setStepNo("1.")
+      :setInputs({ [1] = { desc = "rail voltage, V", type = "FLOAT", range = { min = 0.5, max = 2.5 } } })
+      :setAction(function()
+        ATE.report(Result.PASS, "the rail is at " .. ATE.input(1) .. " V")
+      end),
+
+    StepParams("A check that needs a retry"):setStepNo("2.")
+      :setAction(function()
+        tries = tries + 1
+        if tries == 1 then
+          ATE.report(Result.FAIL, "the first attempt chatter")
+        else
+          ATE.report(Result.PASS, "the second attempt is clean")
+        end
+      end),
+
+    StepParams("Not run today"):setStepNo("3.")
+      :setAction(function()
+        ATE.report(Result.PASS, "this step ran only because the Operator left it on")
+      end),
+  })
+"""
+
+
+def scratch_release(directory: Path, body: str = SCRATCH_SCHEDULE, name: str = "my") -> Path:
+    """A one-file Media Release in ``directory``, with a Test Definition listing it."""
+    release = directory / f"{name}-release"
+    release.mkdir()
+    (release / "scratch.tslua").write_text(body, encoding="utf-8", newline="\n")
+    definition = {
+        "format": 1,
+        "mediaNumber": f"MR-{name.upper()}",
+        "name": "A release of my own",
+        "version": "1.0.0",
+        "files": [{"path": "scratch.tslua", "sha256": hashlib.sha256(body.encode()).hexdigest()}],
+    }
+    (release / f"{name}.atedef").write_text(json.dumps(definition, indent=2), encoding="utf-8", newline="\n")
+    return release
+
+
+def _run_manual_script(args: list[str]) -> subprocess.CompletedProcess:
+    """Run ``run_your_schedule.py`` exactly as the manual tells a reader to run it."""
+    return subprocess.run(
+        [sys.executable, str(EXAMPLES_DIR / "run_your_schedule.py"), *args],
+        capture_output=True, text=True, timeout=180, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+
+
+def test_the_manuals_script_runs_a_release_the_manuals_never_quote(tmp_path: Path) -> None:
+    """Chapter 2's script answers an input, takes a Retry, and turns a step off."""
+    proc = _run_manual_script([
+        "--release", str(scratch_release(tmp_path)),
+        "--schedule", "Scratch: a release of my own",
+        "--input", "Check the rail=1.25",
+        "--choice", "RETRY",
+        "--enable", "Not run today=false",
+    ])
+    assert proc.returncode == 0, proc.stderr[-600:]
+    assert "result=PASS  end_reason=COMPLETED" in proc.stdout, proc.stdout
+    assert '"1."' in proc.stdout and "PASS" in proc.stdout, proc.stdout
+    assert "NOTRUN" in proc.stdout, "the disabled step is not in the printed step results"
+    assert "report:" in proc.stdout, proc.stdout
+
+
+def test_the_manuals_script_says_so_when_an_input_is_never_answered(tmp_path: Path) -> None:
+    """The manual warns that an unanswered Step Input hangs the worker; the script proves it.
+
+    No ``--input`` is given, so the step blocks in ``ATE.input`` and the script exits 1 saying the
+    schedule never finished, exactly as the manual tells the reader to expect."""
+    proc = _run_manual_script([
+        "--release", str(scratch_release(tmp_path)),
+        "--schedule", "Scratch: a release of my own",
+        "--choice", "RETRY",
+    ])
+    assert proc.returncode == 1, proc.stdout[-400:]
+    assert "never finished" in proc.stderr, proc.stderr[-400:]
+    assert "unanswered Step Input" in proc.stderr, proc.stderr[-400:]
+
+
+# --- The three things an abort does not stop, as the manual says ---------------------------
+
+#: The driver the abort tests run in their own process: a headless session on a scratch release,
+#: an Abort asked for a moment after the run starts, the step results printed. A schedule that
+#: never returns cannot be watched from inside pytest, so these tests run it as a subprocess they
+#: can kill, and read the database the killed process left behind.
+ABORT_DRIVER = r"""
+import sys, time
+from pathlib import Path
+
+root, release, work, schedule, abort_after = sys.argv[1:6]
+for path in (Path(root) / "src", Path(root)):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from PySide6.QtCore import QCoreApplication
+from ate.config import read_config
+from ate.run_session.headless import HeadlessRunSession, SessionState
+from examples.harness.peers import Peers
+from examples.harness.run_examples import bench_env, pdf_stub, write_config
+
+config = write_config(Path(work), Path(release))
+peers = Peers()
+peers.start()
+session = HeadlessRunSession(read_config(config))
+states = []
+session.state_changed.connect(states.append)
+session.set_operator("Abort probe")
+session.set_project("Abort probe")
+session.set_uut_type("Probe board")
+session.set_uut_serial("PROBE-1")
+session.select_schedule(schedule)
+with bench_env(peers), pdf_stub():
+    session.start()
+    app = QCoreApplication.instance() or QCoreApplication([])
+    t0 = time.monotonic()
+    while SessionState.STARTED not in states and time.monotonic() - t0 < 10:
+        app.processEvents()
+        time.sleep(0.01)
+    time.sleep(float(abort_after))
+    t0 = time.monotonic()
+    session.request_abort()
+    while SessionState.FINISHED not in states and time.monotonic() - t0 < 60:
+        app.processEvents()
+        time.sleep(0.02)
+    run = session.store.get_test_run(session.run_uuid)
+    steps = {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"}
+    print(f"elapsed={time.monotonic() - t0:.2f} run={run['result']}/{run['end_reason']} steps={steps}")
+session.close()
+peers.stop()
+"""
+
+#: The loop the manual measures: 120 million iterations, the same work written plainly and written
+#: inside a coroutine. A plain loop is cut off by the count hook; a coroutine is not hooked.
+LOOP = "local acc = 0 for i = 1, 120000000 do acc = acc + i end ATE.report(Result.PASS, 'the loop finished on its own')"
+COROUTINE_LOOP = ("local run = coroutine.wrap(function() " + LOOP + " end) run() "
+                  "ATE.report(Result.PASS, 'the coroutine finished on its own')")
+
+#: One long step and one after it: the abort's effect is visible in which of the two ran.
+ABORT_SCHEDULE = """-- probe.tslua: what an abort can and cannot interrupt.
+return ScheduleParams("Abort probe", "one long step, then a step after it")
+  :setSchedule({
+    StepParams("The long step"):setStepNo("1.")
+      :setAction(function()
+        %s
+      end),
+    StepParams("Afterwards"):setStepNo("2.")
+      :setAction(function() ATE.report(Result.PASS, "the step after it ran") end),
+  })
+"""
+
+
+def _run_abort_probe(tmp_path: Path, action: str, *, abort_after: float = 0.4, timeout: int = 90) -> subprocess.CompletedProcess:
+    """Run one schedule through the driver above and return the process."""
+    release = scratch_release(tmp_path, ABORT_SCHEDULE % action, name="abort")
+    work = tmp_path / "station"
+    work.mkdir()
+    driver = tmp_path / "abort_driver.py"
+    driver.write_text(ABORT_DRIVER, encoding="utf-8", newline="\n")
+    return subprocess.run(
+        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", str(abort_after)],
+        capture_output=True, text=True, timeout=timeout, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+
+
+def _open_run_row(database: Path) -> dict[str, object]:
+    """The newest Test Run row in a database a probe left behind, read in its own process.
+
+    The pytest process must not hold that file: the driver subprocess died with the handle still
+    open, and a handle here would trip conftest's leak check on Windows."""
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sqlite3,sys; row=sqlite3.connect(sys.argv[1]).execute("
+         "'SELECT result, end_reason, ended_at FROM test_run ORDER BY started_at DESC LIMIT 1').fetchone(); "
+         "print(row)", str(database)],
+        capture_output=True, text=True, timeout=30, cwd=str(ROOT),
+    )
+    row = eval(proc.stdout.strip()) if proc.stdout.strip() else None
+    return dict(zip(("result", "end_reason", "ended_at"), row)) if row else {}
+
+
+def test_a_plain_busy_loop_gives_way_to_an_abort(tmp_path: Path) -> None:
+    """The manual's ten seconds hold for a step that is only computing: the hook reaches it."""
+    proc = _run_abort_probe(tmp_path, LOOP)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
+    assert elapsed < 1.0, f"a plain loop took {elapsed} s to stop after an abort: {proc.stdout}"
+    assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
+    assert "'1.': 'ERROR'" in proc.stdout and "'2.': 'NOTRUN'" in proc.stdout, proc.stdout
+
+
+def test_a_coroutine_loop_runs_to_completion_after_an_abort(tmp_path: Path) -> None:
+    """The count hook does not reach a coroutine, so the step finishes its work and the abort is
+    recorded on the next step - the limit the manual tells a test writer to avoid."""
+    proc = _run_abort_probe(tmp_path, COROUTINE_LOOP)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
+    assert elapsed > 0.5, f"the coroutine was cut off in {elapsed} s; the manual says it is not: {proc.stdout}"
+    assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
+    assert "'1.': 'PASS'" in proc.stdout and "'2.': 'ERROR'" in proc.stdout, proc.stdout
+
+
+def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
+    """``while true do end`` in a coroutine outruns every timeout the driver has."""
+    release = scratch_release(tmp_path, ABORT_SCHEDULE % "local run = coroutine.wrap(function() while true do end end) run()", name="abort")
+    work = tmp_path / "station"
+    work.mkdir()
+    driver = tmp_path / "abort_driver.py"
+    driver.write_text(ABORT_DRIVER, encoding="utf-8", newline="\n")
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", "0.4"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+        row = _open_run_row(work / "ate.db")
+        assert row and row["ended_at"] is None, f"the run row should still be open: {row}"
+        return
+    raise AssertionError(f"the unbounded coroutine loop ended after {proc.returncode}: {proc.stdout}")
+
+
+def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
+    """``os.execute`` is outside the hook: the run ends when the command does, not when the
+    Operator asks."""
+    proc = _run_abort_probe(tmp_path, 'os.execute("sleep 3") ATE.report(Result.PASS, "the command finished")')
+    assert proc.returncode == 0, proc.stderr[-400:]
+    elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
+    assert elapsed > 2.5, f"the abort ended the run in {elapsed} s while a 3 s command was running: {proc.stdout}"
+    assert "'1.': 'PASS'" in proc.stdout, proc.stdout
+
+
+def test_os_exit_in_a_step_ends_the_process_with_that_status(tmp_path: Path) -> None:
+    """``os.exit(7)`` kills ATE where it stands: the process ends with 7 and the run row is left
+    open, with no result and no end time - the third limit the manual lists."""
+    proc = _run_abort_probe(tmp_path, "os.exit(7)", abort_after=0.2)
+    assert proc.returncode == 7, f"os.exit(7) gave exit {proc.returncode}: {proc.stdout} {proc.stderr[-300:]}"
+    row = _open_run_row(tmp_path / "station" / "ate.db")
+    assert row and row["ended_at"] is None and row["result"] is None, f"the run row is not open: {row}"
+
+
 # --- Packet 34c: the developer manuals are held to the code ------------------------------
 
 #: A worked example the manual shows, and the file on disk it came from. The LaTeX manual includes
