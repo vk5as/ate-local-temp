@@ -23,12 +23,15 @@ What is pinned:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
 import re
 import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -965,7 +968,11 @@ return ScheduleParams("os.exit probe")
 
 
 def test_os_exit_is_nil_in_the_sandbox_while_os_execute_and_getenv_stay() -> None:
-    """The lockdown removes ``os.exit`` the way it removes ``dofile``, ``loadfile`` and ``load``."""
+    """The lockdown removes ``os.exit`` the way it removes ``dofile``, ``loadfile`` and ``load``.
+
+    lupa's ``os`` is a small table --- ``clock``, ``date``, ``difftime``, ``execute``, ``exit``,
+    ``getenv``, ``remove``, ``rename``, ``setlocale``, ``time``, ``tmpname`` --- and ``abort`` is not
+    in it, which is why the manual could not say a schedule would "never need" it (packet 35)."""
     with scratch_directory() as td:
         path = Path(td) / "schedule.tslua"
         path.write_text('return ScheduleParams("probe") :setSchedule({})', encoding="utf-8", newline="\n")
@@ -975,6 +982,7 @@ def test_os_exit_is_nil_in_the_sandbox_while_os_execute_and_getenv_stay() -> Non
         assert os_table["exit"] is None, "os.exit must be nil in a schedule"
         assert os_table["execute"] is not None, "os.execute stays available"
         assert os_table["getenv"] is not None, "os.getenv stays available"
+        assert os_table["abort"] is None, "lupa has no os.abort to remove"
         assert env["dofile"] is None and env["load"] is None
 
 
@@ -1024,3 +1032,131 @@ def test_the_two_shipped_paper_sizes_read(tmp_path: Path) -> None:
         config = _config_written(tmp_path, f'{{"format": 1, "reports": {{"paperSize": "{size}"}}}}')
         assert read_config(config).reports_paper_size == size
     assert read_config(_config_written(tmp_path, '{"format": 1}')).reports_paper_size == "A4"
+
+
+def test_the_registry_closes_the_handle_and_never_calls_a_driver_close() -> None:
+    """``Driver.close`` says it is never reached. This is the proof, not the assertion.
+
+    The docstring named a driver that overrides it as the exception; the sentence was written so a
+    reader could not tell which path really runs. A driver that records every call its ``close``
+    gets settles it (packet 35 review)."""
+    from ate.devices.registry import DeviceRegistry, Driver
+
+    calls: list[str] = []
+
+    class _RecordingDriver(Driver):
+        name = "RECORD"
+
+        def open(self, params: dict) -> object:
+            class _Handle:
+                def close(self) -> None:
+                    calls.append("handle")
+
+            return _Handle()
+
+        def close(self, device: object) -> None:
+            calls.append("driver")
+
+    registry = DeviceRegistry()
+    registry.register("RECORD", _RecordingDriver)
+    handle = registry.open_device("RECORD", {})
+    assert registry.close_device(handle) is True
+    assert calls == ["handle"], f"the registry tore down the driver too: {calls}"
+
+    doc = Driver.close.__doc__ or ""
+    assert "No shipped driver overrides it" not in doc, (
+        "the docstring still says no driver overrides close while naming one that does"
+    )
+    assert "never" in doc and "handle" in doc, "the docstring stopped naming the teardown it is not"
+
+
+# --- the harness closes what it opens, before the temporary directory is removed (packet 35) ---
+
+#: Windows cannot delete a file it still has open: `WinError 32`. Every headless run the harness
+#: starts opens its own application log inside the scratch directory, so a session left open makes
+#: `tempfile.TemporaryDirectory` fail on the way out - which is what the CI runners did. The spy
+#: records the sessions `run_schedule` creates, since the record it returns does not carry them.
+
+
+def _spy_sessions(run_examples) -> list:
+    """Replace the harness's session class with one that records every session it opens."""
+    opened: list = []
+    real = run_examples.HeadlessRunSession
+
+    class _Spy(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+    run_examples.HeadlessRunSession = _Spy
+    return opened, real
+
+
+def _logs_are_closed(work: Path, sessions: list) -> None:
+    """Every application log a session opened in ``work`` is closed, not merely written."""
+    logs = sorted((work / "logs").glob("ate-app-*.log"))
+    assert logs, "the run wrote no application log"
+    for session in sessions:
+        log = getattr(session, "_app_log", None)
+        assert log is not None, "the session ran without its own application log"
+        assert log._fh.closed, f"{log.path} is still open when the record came back"
+
+
+def test_a_headless_run_closes_its_session_before_returning(tmp_path: Path) -> None:
+    """The run the manuals' script drives releases its session, log handle included."""
+    from examples.harness import run_examples
+
+    opened, real = _spy_sessions(run_examples)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            config = run_examples.write_config(work)
+            peers = run_examples.Peers()
+            peers.start()
+            try:
+                with run_examples.bench_env(peers):
+                    record = run_examples.run_schedule(config, "Example basics", inputs={"Operator input": 1.5})
+            finally:
+                peers.stop()
+            assert record["run"]["result"] == "PASS", record["run"]
+            _logs_are_closed(work, opened)
+    finally:
+        run_examples.HeadlessRunSession = real
+
+
+def test_a_run_that_times_out_still_closes_its_session(tmp_path: Path) -> None:
+    """The refusal to wait forever is a raise, and a raise must not leave the log open."""
+    from examples.harness import run_examples
+
+    opened, real = _spy_sessions(run_examples)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp)
+            config = run_examples.write_config(scratch, scratch)
+            schedule = scratch / "hang.tslua"
+            body = (
+                'return ScheduleParams("Scratch: hang", "a step nobody answers")\n'
+                "  :setSchedule({StepParams('Wait'):setStepNo('1.')\n"
+                "    :setInputs({[1] = {desc = 'value', type = 'FLOAT'}})\n"
+                "    :setAction(function() ATE.input(1) end)})\n"
+            )
+            schedule.write_text(body, encoding="utf-8", newline="\n")
+            (scratch / "hang.atedef").write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "mediaNumber": "MR-HANG",
+                        "name": "A run that never ends",
+                        "version": "1.0.0",
+                        "files": [{"path": "hang.tslua", "sha256": hashlib.sha256(body.encode()).hexdigest()}],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            with pytest.raises(TimeoutError):
+                run_examples.run_schedule(config, "Scratch: hang", release_dir=Path(tmp))
+            _logs_are_closed(Path(tmp), opened)
+    finally:
+        run_examples.HeadlessRunSession = real
