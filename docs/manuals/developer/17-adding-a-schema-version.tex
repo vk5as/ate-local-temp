@@ -64,8 +64,8 @@ in a worker.
 
 Spec rule 20 asked for a timestamped backup before an upgrade. It is no longer something the
 Administrator has to do by hand: \texttt{ate db migrate} and \texttt{ate setup} both go through
-\texttt{src/ate/storage/backup.py}, which copies the database beside itself before a migration runs
-(chapter~\ref{ch:database} says what an Administrator still has to back up).
+\texttt{src/ate/storage/backup.py}, which copies the database beside itself before a migration runs.
+The admin manual's database chapter says what an Administrator still has to back up themselves.
 
 \section{Adding a column instead of a table}
 
@@ -77,8 +77,9 @@ version but already holds every table this ATE declares gets no stamp and no sil
 raises \texttt{SchemaVersionError} naming the version it holds, e.g.
 
 \begin{verbatim}
-the database at /var/lib/ate/ate.db stores schema version 5 but is missing nothing to
-migrate: no step from version 5 to 6 ran, so it is not stamped as version 6
+the database at /var/lib/ate/ate.db stores schema version 5 but is
+missing nothing to migrate: no step from version 5 to 6 ran, so it is
+not stamped as version 6
 \end{verbatim}
 
 The test runs exactly that: the shipped code, with only the number changed, migrates the version 5

@@ -16,8 +16,9 @@ is:
     migrates the database the Station's config names: it reads \texttt{config.json} and takes
     \texttt{database.path} from it, so a Station with a custom path is migrated at that path. It
     prints which file it chose and why. Only when the config cannot be read --- it does not exist
-    yet, or setup is not elevated and the config is admin-only --- does setup fall back to
-    \texttt{\textless data\textgreater/ate.db}, which is why step 4 still matters. A wheel
+    yet, or setup is not elevated and the config is admin-only --- or when it names no
+    \texttt{database.path} does setup fall back to \texttt{\textless data\textgreater/ate.db}, which
+    is why step 4 still matters. A wheel
     installed with \texttt{pip} or \texttt{pipx} runs nothing: its database stays at the old schema
     until you migrate it, and ATE refuses to start against a database older than itself.
   \item \textbf{Migrate, when the artifact did not.}

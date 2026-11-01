@@ -43,9 +43,12 @@ ate setup:
 The database setup migrates is the one the config names, not \texttt{<data>/ate.db} by assumption: it
 reads \texttt{config.json} and takes \texttt{database.path} from it, and prints both the path and the
 reason it chose it. A Station whose config points the database somewhere else is migrated where the
-config says, which is what an installer needs to do (chapter~\ref{ch:upgrades}). If no config can be
-read --- it does not exist yet, or it is admin-only and setup is not elevated --- setup falls back to
-\texttt{<data>/ate.db} and says so in the same line. Setup never migrates a database it did not print.
+config says, which is what an installer needs to do (chapter~\ref{ch:upgrades}). Setup falls back to
+the data directory it just prepared in two cases: the config cannot be read --- it does not exist
+yet, or it is admin-only and setup is not elevated --- or it names no \texttt{database.path}, in
+which case the default's \texttt{<data>} placeholder means the platform directory rather than the
+Station setup was asked to make. Either fallback is printed. Setup never migrates a database it did
+not print.
 
 \texttt{--root DIR} puts the Station under \texttt{DIR} (\texttt{DIR/data} and
 \texttt{DIR/config}); \texttt{--data-dir} and \texttt{--config-dir} override one of them. Those
@@ -110,8 +113,8 @@ ate db status
 from a checkout). \texttt{ate db status} prints the database's schema version and exits 0; a
 missing or outdated database makes it print the refusal and exit 1. If the Station's config is not
 the platform default, name it with \texttt{--config}, either before the subcommand
-(\texttt{ate --config /tmp/station/config/config.json db status}) or after it
-(\texttt{ate db status --config /tmp/station/config/config.json}).
+(\texttt{ate --config PATH db status}) or after it (\texttt{ate db status --config PATH}): either
+reads that config.
 
 \cando{prepare a Station from nothing, read what setup said, and tell which rights an Operator
 needs in order to run a Test Run.}

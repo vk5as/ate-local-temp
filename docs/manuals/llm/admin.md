@@ -69,11 +69,11 @@ ate setup --no-permissions                   # skip the group/ownership/ACL trea
 It also runs the migration `ate db migrate` runs — the same routine, `migrate_database` in
 `src/ate/storage/backup.py` — and it migrates the database the config names: it reads
 `config.json`, takes `database.path` from it, and prints the path and the reason
-(`database to migrate: /var/lib/ate/ate.db (database.path in /etc/ate/config.json)`). When the
-config cannot be read (it does not exist yet, or setup is not elevated and the config is
-admin-only), setup uses `<data>/ate.db` and says so in the same line. Bare `ate setup` writes to the
-platform directories, which the test suite is not allowed to touch; the `--root` form is what is
-executed.
+(`database to migrate: /var/lib/ate/ate.db (database.path in /etc/ate/config.json)`). Setup falls
+back to the data directory it just prepared when the config cannot be read (it does not exist yet,
+or setup is not elevated and the config is admin-only) or when the config names no `database.path`.
+Bare `ate setup` writes to the platform directories, which the test suite is not allowed to touch;
+the `--root` form is what is executed.
 
 Moving a Station is copying its config file and its data directory: setup writes every path in the
 config out in full, not as `<data>`, so a copied config still names the old locations. Edit

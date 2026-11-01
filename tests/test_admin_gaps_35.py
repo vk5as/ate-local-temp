@@ -214,7 +214,7 @@ def test_two_copies_in_the_same_second_do_not_overwrite(tmp_path: Path, monkeypa
     first.unlink()
 
     # A file sitting at that exact name is left alone; the next copy takes the next name.
-    (tmp_path / "ate.db.backup-20261102-120000").write_text("someone's own backup", encoding="utf-8")
+    (tmp_path / "ate.db.backup-20261102-120000").write_text("someone's own backup", encoding="utf-8", newline="\n")
     second = backup_for_migration(path)
     assert second.name == "ate.db.backup-20261102-120000-2", second.name
     assert (tmp_path / "ate.db.backup-20261102-120000").read_text(encoding="utf-8") == "someone's own backup"
@@ -374,6 +374,7 @@ def test_ate_setup_migrates_the_database_the_config_names(tmp_path: Path, capsys
         '{"format": 1, "station": {"name": "Station 35"}, '
         f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
         encoding="utf-8",
+        newline="\n",
     )
 
     code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
@@ -390,7 +391,7 @@ def test_ate_setup_falls_back_to_the_default_when_the_config_cannot_be_read(tmp_
     config = station / "config" / "config.json"
     config.parent.mkdir(parents=True)
     (station / "data").mkdir(parents=True)
-    config.write_text("{ this is not json", encoding="utf-8")
+    config.write_text("{ this is not json", encoding="utf-8", newline="\n")
 
     code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
     assert code == 0, err
@@ -417,6 +418,31 @@ def test_ate_setup_backs_up_an_older_database_it_upgrades(tmp_path: Path, capsys
 
 
 # --- --config after the subcommand ------------------------------------------------------
+
+
+def test_a_config_that_names_no_database_migrates_the_station_it_prepared(tmp_path: Path, capsys) -> None:
+    """A config with no ``database.path`` is not a statement about where a database is.
+
+    The default is ``<data>/ate.db``, and ``<data>`` is the platform data directory, not the data
+    directory ``--root`` pointed setup at. Migrating the platform one would create a database no
+    one opens and leave the Station's own unprepared, so setup migrates the directory it made."""
+    from ate.config import _platform_data_dir
+
+    station = tmp_path / "station"
+    config = station / "config" / "config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "keep-me"}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    code, out, err = _cli(["setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    own = station / "data" / "ate.db"
+    assert str(own) in out, out
+    assert own.exists() and _version(own) == SCHEMA_VERSION
+    assert not (_platform_data_dir() / "ate.db").exists(), "setup wrote a database in the platform data directory"
 
 
 def test_config_after_a_subcommand_selects_the_config(tmp_path: Path, capsys) -> None:
@@ -449,7 +475,7 @@ def test_config_flag_with_no_value_is_a_one_line_error(tmp_path: Path, capsys) -
 def test_a_path_that_is_not_a_database_fails_in_one_line(tmp_path: Path) -> None:
     """Not a traceback and not an unhandled sqlite3.DatabaseError: one line, exit 1."""
     not_a_db = tmp_path / "not-a-database.db"
-    not_a_db.write_text("this is a text file, not a database", encoding="utf-8")
+    not_a_db.write_text("this is a text file, not a database", encoding="utf-8", newline="\n")
 
     code, out, err = _cli_subprocess(["db", "status", str(not_a_db)])
     assert code == 1

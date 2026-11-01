@@ -703,7 +703,7 @@ def test_the_config_flag_works_before_or_after_the_subcommand(station) -> None:
     assert code == 0 and out.strip() == str(SCHEMA_VERSION), f"expected the config to be read, got {err[-300:]}"
 
     not_a_db = station / "data" / "not-a-database.db"
-    not_a_db.write_text("this is a text file, not a database", encoding="utf-8")
+    not_a_db.write_text("this is a text file, not a database", encoding="utf-8", newline="\n")
     code, out, err = run_ate(["db", "status", str(not_a_db)], station)
     assert code == 1 and "is not a SQLite database" in err, f"a text file is not a database: {err[-300:]}"
     assert "Traceback" not in err, err

@@ -5,7 +5,8 @@ One admin command prepares a Station regardless of how it was installed: the Win
 ``pipx install`` (see ``assets/packaging.md``). It creates the data directories (with their
 ``reports`` and ``logs`` subdirectories) and the config directory, writes a default
 ``config.json`` with a fresh ``station.uuid`` only when none exists — never overwriting one —
-and runs the same migration ``ate db migrate`` performs against the configured database path.
+and runs the same migration ``ate db migrate`` performs against the database the config names --
+its ``database.path``, or the data directory setup prepared when the config names none.
 
 The privileged filesystem operations (creating directories, writing files) need root on some
 platforms, so :func:`prepare_station` raises :class:`SetupError` with a message rather than failing
@@ -22,6 +23,7 @@ a migration runs.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -104,19 +106,29 @@ def _station_database_path(config_dir: Path, data_dir: Path) -> tuple[Path, str]
     The config is the Station's own statement of where its database is. An installer running
     ``ate setup`` on a Station that already exists must migrate the database that config names;
     migrating ``<data_dir>/ate.db`` instead would upgrade a file the Operator never opens and
-    leave the real one at the old schema, which the next launch refuses.
+    leave the real one at the old schema, which the next launch refuses (packet 35).
 
-    The installer cannot always read the config: ``/etc/ate/config.json`` is admin-only, and a
-    Station may not have one yet. When it can be read, its ``database.path`` wins; otherwise the
-    default beside the data directory is used. Either way the caller prints the choice and the
-    reason, so an Administrator is never left guessing which file was touched."""
+    A config that names no ``database.path`` is not a statement about where a database lives:
+    the default is ``<data>/ate.db``, and ``<data>`` is the platform data directory, which is not
+    the data directory setup was asked to prepare (``--root DIR``). In that case the Station's
+    own data directory is used. The installer also cannot always read the config:
+    ``/etc/ate/config.json`` is admin-only, and a Station may not have one yet. Either way the
+    caller prints the chosen path and the reason, so an Administrator is never left guessing
+    which file was touched."""
     config_file = config_dir / "config.json"
     try:
-        from .config import ConfigError, read_config
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return data_dir / "ate.db", f"no readable config at {config_file} ({exc})"
+    if not isinstance(raw, dict) or "path" not in (raw.get("database") or {}):
+        return data_dir / "ate.db", f"{config_file} names no database.path"
+
+    try:
+        from .config import read_config
 
         config = read_config(str(config_file))
-    except (ConfigError, OSError) as exc:
-        return data_dir / "ate.db", f"no readable config at {config_file} ({exc})"
+    except ATEError as exc:
+        return data_dir / "ate.db", f"config {config_file} is not usable ({exc})"
     return config.database_path, f"database.path in {config_file}"
 
 
@@ -140,11 +152,11 @@ def prepare_station(data_dir: Path, config_dir: Path, *, permissions=None) -> di
     Creates ``data_dir`` with ``reports``, ``logs`` and ``definitions`` under it and ``config_dir``,
     writes a default ``config.json`` (with a fresh ``station.uuid``) only when none exists — never
     overwriting one — and runs the shared migration against the database the config names, or
-    ``<data_dir>/ate.db`` when there is no readable config to read a path from. It prints which
-    database it migrated and why (packet 35). Returns a report describing what was created versus
-    already present; raises :class:`SetupError` if anything could not be created or written (for
-    example, an unwritable target), if a backup could not be written, or if applying permissions
-    failed.
+    ``<data_dir>/ate.db`` when the config cannot be read or names no ``database.path``. It prints
+    which database it migrated and why (packet 35). Returns a report describing what was created
+    versus already present; raises :class:`SetupError` if anything could not be created or written
+    (for example, an unwritable target), if a backup could not be written, or if applying
+    permissions failed.
 
     ``definitions`` is created because the default config lists ``<data>/definitions`` as a Test
     Definition directory, and a directory that does not exist is a warning on the Run screen at
