@@ -12,7 +12,7 @@ that is present is checked for type.
 
 \begin{center}
 \footnotesize
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.7cm}>{\raggedright\arraybackslash}p{2.1cm}>{\raggedright\arraybackslash}p{10.4cm}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{8.0cm}@{}}
 \toprule
 Key & Default & Meaning \\
 \midrule
@@ -25,13 +25,13 @@ Key & Default & Meaning \\
 \texttt{station.uuid} & generated & The Station's stable identity. If it is missing or empty, ATE
   generates one and writes it back into the file, keeping the other keys and their order. Never copy
   one Station's UUID to another: ATE does not detect a cloned one. \\
-\texttt{testDefinitions.directories} & \texttt{["<data>/definitions"]} & Directories searched
+\texttt{testDefinitions.}\allowbreak\texttt{directories} & \texttt{<data>/}\allowbreak\texttt{definitions} & Directories searched
   recursively for \texttt{.atedef} files. One that does not exist is a warning, not a failure. \\
 \texttt{database.type} & \texttt{sqlite} & v1 accepts only \texttt{sqlite}; anything else stops
   startup. \\
 \texttt{database.path} & \texttt{<data>/ate.db} & The SQLite file. Created and upgraded by
   \texttt{ate db migrate} (chapter~\ref{ch:database}). \\
-\texttt{database.storeMismatchedFiles} & \texttt{ask} & \texttt{ask}, \texttt{always} or
+\texttt{database.}\allowbreak\texttt{storeMismatchedFiles} & \texttt{ask} & \texttt{ask}, \texttt{always} or
   \texttt{never}: whether the raw bytes of a Lua file whose checksum no longer matches are stored
   with the Test Run (chapter~\ref{ch:media-releases}). \\
 \texttt{reports.directory} & \texttt{<data>/reports} & Where Test Reports are written. \\
@@ -45,7 +45,7 @@ Key & Default & Meaning \\
   (chapter~\ref{ch:logs}). \\
 \texttt{log.level} & \texttt{info} & Floor for the application log: \texttt{debug}, \texttt{info},
   \texttt{warning} or \texttt{error}. Anything else is treated as \texttt{info}. \\
-\texttt{devices.receiveBufferBytes} & 16777216 & Per-Device receive buffer cap, in bytes. Must be
+\texttt{devices.}\allowbreak\texttt{receiveBufferBytes} & 16777216 & Per-Device receive buffer cap, in bytes. Must be
   positive; overflow drops the oldest bytes. \\
 \texttt{deviceTrace.enabled} & \texttt{false} & One \texttt{DEBUG} log line per Device operation, in
   the Run log. \\
@@ -84,8 +84,8 @@ and launch, or abort. If it cannot write the file --- an Operator without admin 
 startup is refused with the path. If a config exists but has no \texttt{station.uuid} and the write
 back fails, ATE prints the generated UUID for an admin to add by hand and stops.
 
-For automation there are two environment variables that move the defaults,
-\texttt{ATE\_DEFAULT\_CONFIG} and \texttt{ATE\_DATA\_DIR}. They exist so the test suite can exercise
+Two environment variables move the platform defaults, \texttt{ATE\_}\allowbreak\texttt{DEFAULT\_CONFIG}
+and \texttt{ATE\_}\allowbreak\texttt{DATA\_DIR}. They exist so the test suite can exercise
 "no config at the platform location" without writing to \texttt{/etc/ate}; nothing else in ATE
 reads them. Do not use them on a Station.
 

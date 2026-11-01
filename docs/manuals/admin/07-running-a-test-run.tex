@@ -47,7 +47,7 @@ Ordinary user & The PDF is rendered with the sandbox on. Nothing is asked. Givin
 Privileged, no flag & A dialog asks, per PDF: "Render PDF without sandbox?", with buttons
   \texttt{Generate PDF without sandbox} and \texttt{Skip PDF}. \texttt{Skip PDF} is the default
   button. Saying no leaves the HTML and writes no PDF. \\
-Privileged, \texttt{--allow-unsandboxed-pdf} & No dialog; the PDF is rendered unsandboxed and the
+Privileged, \texttt{--allow-}\allowbreak\texttt{unsandboxed-pdf} & No dialog; the PDF is rendered unsandboxed and the
   choice is logged as a WARNING. \\
 Privileged, headless & There is nobody to ask, so the PDF is skipped and the log says so --- unless
   \texttt{--allow-unsandboxed-pdf} was given. \\
@@ -55,7 +55,7 @@ Privileged, headless & There is nobody to ask, so the PDF is skipped and the log
 \end{tabular}
 \end{center}
 
-The flag is spelled \texttt{--allow-unsandboxed-pdf} and belongs to \texttt{ate}, so
+The flag belongs to \texttt{ate}, so it may come before a hidden subcommand:
 \texttt{ate --allow-unsandboxed-pdf \_selftest --run} is the same decision as putting it at the end.
 It applies to every Test Report PDF of that launch, including one regenerated from History.
 
@@ -72,10 +72,11 @@ Two things a helper can fail on that are worth knowing:
     a font before blaming ATE.
 \end{itemize}
 
-An inherited \texttt{QTWEBENGINE\_DISABLE\_SANDBOX} or a \texttt{--no-sandbox} in
-\texttt{QTWEBENGINE\_CHROMIUM\_FLAGS} does not switch the sandbox off for ATE's PDFs: it is stripped
-from the helper's environment and logged as a WARNING, because nobody chose it. The only way to get
-an unsandboxed render is the flag or the dialog.
+Environment inherited from another program cannot switch the sandbox off for ATE's PDFs. A
+\texttt{QTWEBENGINE\_}\allowbreak\texttt{DISABLE\_SANDBOX}, or a \texttt{--no-sandbox} in a
+\texttt{QTWEBENGINE\_}\allowbreak\texttt{CHROMIUM\_FLAGS}, is stripped from the helper's environment
+and logged as a WARNING, because nobody chose it. The only way to get an unsandboxed render is the
+flag or the dialog.
 
 \section{History, and the Run log}
 
