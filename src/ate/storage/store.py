@@ -182,6 +182,26 @@ def _norm_date(value) -> str:
     return str(value)
 
 
+#: SQLite's lowest default for the variables one statement may carry (before 3.32); newer builds
+#: accept far more, so the batch is sized against this and stays safe on both.
+_SQL_MAX_VARIABLES = 999
+
+
+def _rows_per_statement(table: Any) -> int:
+    """How many rows one multi-row INSERT of ``table`` may carry.
+
+    The limit is on variables, not rows, so it depends on how many columns the table has: a batch
+    sized for `node`'s twelve (80) would break the day a table gained a thirteenth column (packet 32b)."""
+    return max(1, _SQL_MAX_VARIABLES // len(table.columns))
+
+
+def _row_chunks(table: Any, rows: list[Any]):
+    """``rows`` in pieces small enough for one statement each, per :func:`_rows_per_statement`."""
+    per = _rows_per_statement(table)
+    for start in range(0, len(rows), per):
+        yield rows[start : start + per]
+
+
 class RunStore:
     """Records Test Runs and their children in a single SQLite database.
 
@@ -343,22 +363,36 @@ class RunStore:
 
     def insert_node(self, run_uuid: str, seq: int, **fields: Any) -> None:
         """Insert one expanded-tree row keyed by ``(run_uuid, node_seq)``."""
-        self._run(
-            node.insert().values(
-                run_uuid=run_uuid,
-                node_seq=seq,
-                parent_node_seq=fields.get("parent_node_seq"),
-                instance_seq=fields.get("instance_seq"),
-                kind=fields.get("kind"),
-                step_number=fields.get("step_number"),
-                step_name=fields.get("step_name"),
-                default_enabled=_as_int(fields.get("default_enabled")),
-                enabled=_as_int(fields.get("enabled")),
-                inputs=json.dumps(fields.get("inputs", {})) if fields.get("inputs") is not None else None,
-                result=fields.get("result"),
-                attempt_count=fields.get("attempt_count", 0),
-            )
-        )
+        self._run(node.insert().values(**self._node_values(run_uuid, seq, fields)))
+
+    def insert_nodes(self, run_uuid: str, rows: list[dict[str, Any]]) -> None:
+        """Insert many expanded-tree rows, each carrying its ``node_seq``, in as few commits as SQLite allows.
+
+        Every statement here is its own synced commit, so an abort writing the steps it never ran pays
+        for one, not one per step (packet 32b)."""
+        self._insert_rows(node, [self._node_values(run_uuid, row["node_seq"], row) for row in rows])
+
+    def _insert_rows(self, table: Any, rows: list[dict[str, Any]]) -> None:
+        """Insert ``rows`` in as few commits as SQLite allows, each statement inside its variable limit."""
+        for chunk in _row_chunks(table, rows):
+            self._run(table.insert().values(chunk))
+
+    @staticmethod
+    def _node_values(run_uuid: str, seq: int, fields: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "run_uuid": run_uuid,
+            "node_seq": seq,
+            "parent_node_seq": fields.get("parent_node_seq"),
+            "instance_seq": fields.get("instance_seq"),
+            "kind": fields.get("kind"),
+            "step_number": fields.get("step_number"),
+            "step_name": fields.get("step_name"),
+            "default_enabled": _as_int(fields.get("default_enabled")),
+            "enabled": _as_int(fields.get("enabled")),
+            "inputs": json.dumps(fields.get("inputs", {})) if fields.get("inputs") is not None else None,
+            "result": fields.get("result"),
+            "attempt_count": fields.get("attempt_count", 0),
+        }
 
     # -- attempt ------------------------------------------------------------
 
@@ -696,8 +730,14 @@ class RunStore:
         rows = [self._log_line_row(run_uuid, seq, line["level"], line["source"], line["text"], action_seq=action_seq, node_seq=node_seq, attempt_no=attempt_no, at=line.get("at")) for line in lines]
         for i, row in enumerate(rows):
             row["seq"] = next_seq + i  # unique within this batch
-            self._run(log_line.insert().values(**row))
-        self._log_seq[run_uuid] = next_seq + len(rows)  # keep later batches monotonic
+        # One commit per chunk (packet 32b), and the run's log counter moves with the chunks that
+        # actually landed, inside the loop: a later chunk that fails would otherwise leave the
+        # counter behind rows already in the table, and the next batch would collide on (run_uuid, seq).
+        landed = next_seq
+        for chunk in _row_chunks(log_line, rows):
+            self._run(log_line.insert().values(chunk))
+            landed += len(chunk)
+            self._log_seq[run_uuid] = landed
 
     def log_lines(self, run_uuid: str) -> list[dict]:
         """Return this run's recorded log lines as dicts (empty when the run is unknown)."""

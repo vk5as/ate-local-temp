@@ -23,11 +23,12 @@ import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from ate.engine.operator_input import OperatorInput
-from ate.engine.run_engine import RunEngine, RunStatus
+from ate.engine.run_engine import RunEngine, RunStatus, _live_engines
+from ate.storage.store import RunStore
 
 # -- files a test leaves behind --------------------------------------------------------------------
 
@@ -682,7 +683,9 @@ class LoopbackPeer:
                 conn.sendall(self._payload)  # buffered by TCP; a read grabs it as soon as it connects
             except OSError:
                 pass  # connection already gone; nothing to send
-        while self._running:
+        # To the connection's end, not to stop(): a thread starved until after stop() must still record
+        # what the device sent, and recv blocks until the end either way.
+        while True:
             try:
                 chunk = conn.recv(4096)
             except OSError:
@@ -1289,3 +1292,107 @@ def assert_no_swallowed_exception(stderr: str) -> None:
     line as well."""
     assert "Traceback" not in stderr, f"a slot raised in the child:\n{stderr[-2000:]}"
     assert "Error calling Python override" not in stderr, f"a Qt override raised in the child:\n{stderr[-2000:]}"
+
+
+class _StoreWrites:
+    """How the store's writes have gone in this process: each is a synced commit, and the one thing a
+    worker with its abort flag set can still be inside for a long time (packet 32b)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.count = 0
+        self.total_s = 0.0
+        self.slowest_s = 0.0
+        self.recent: list[float] = []  # the last few durations: a stall looks different from a slow disk
+        self.in_flight: dict[str, float] = {}  # thread name -> when its write began
+
+    def timed(self, run):
+        def _run(store, stmt):
+            if not getattr(stmt, "is_dml", False):
+                return run(store, stmt)
+            name, began = threading.current_thread().name, time.monotonic()
+            with self.lock:
+                self.in_flight[name] = began
+            try:
+                return run(store, stmt)
+            finally:
+                took = time.monotonic() - began
+                with self.lock:
+                    self.in_flight.pop(name, None)
+                    self.count += 1
+                    self.total_s += took
+                    self.slowest_s = max(self.slowest_s, took)
+                    self.recent = [*self.recent[-9:], took]
+
+        return _run
+
+    def describe(self) -> str:
+        now = time.monotonic()
+        with self.lock:
+            mean = self.total_s / self.count * 1000 if self.count else 0.0
+            recent = ", ".join(f"{took * 1000:.0f}" for took in self.recent)
+            flight = ", ".join(f"{name} for {now - began:.3f} s" for name, began in self.in_flight.items()) or "none"
+            return (
+                f"store writes: {self.count} in this process, mean {mean:.1f} ms, slowest {self.slowest_s * 1000:.0f} ms, "
+                f"last ten [{recent}] ms; in flight: {flight}"
+            )
+
+
+store_writes = _StoreWrites()
+
+
+def watch_store_writes() -> None:
+    """Time every store write from here on; :func:`describe_stuck_runs` reports it."""
+    RunStore._run = store_writes.timed(RunStore._run)
+
+
+def _describe_engine(engine: RunEngine, sessions: Sequence) -> str:
+    try:
+        lines = [
+            f"RunEngine schedule={engine.schedule_name or engine._schedule_path.name} running={engine.isRunning()} "
+            f"finished={engine.isFinished()} aborted={engine.aborted} pause_pending={engine.pause_pending()} "
+            f"pauses={sorted(engine._pending)} stopped_on_fail={engine._stopped_on_fail} step={engine._ask_step} "
+            f"attempt={engine._ask_attempt} run_uuid={engine._run_uuid}"
+        ]
+    except Exception as exc:  # noqa: BLE001 - its C++ side already gone, or anything else: say so and go on
+        return f"RunEngine: {exc}"
+    for session in sessions:
+        if getattr(session, "_engine", None) is engine:
+            lines.append(f"session state={session.state.value} run_uuid={session.run_uuid} closed={session._closed}")
+    try:  # the worker may hold nothing here: this reads through its own pooled connection
+        run_uuid = engine._run_uuid
+        if run_uuid is not None:
+            nodes, attempts = engine._store.nodes(run_uuid), engine._store.attempts(run_uuid)
+            run = engine._store.get_test_run(run_uuid) or {}
+            lines.append(f"recorded: {len(nodes)} nodes, {len(attempts)} attempts, end_reason={run.get('end_reason')}")
+    except Exception as exc:  # noqa: BLE001 - a report must not hide what it reports on
+        lines.append(f"store unreadable: {exc!r}")
+    return "\n".join(lines)
+
+
+def describe_stuck_runs(sessions: Sequence = ()) -> str:
+    """Every live worker's state, the store's write times and all thread stacks, for a failure message.
+
+    What a worker that outlives its test, or a wait for FINISHED that expires, has to say for itself:
+    `store writes` tells a slow or stalled disk from a worker blocked elsewhere, and two reports a few
+    seconds apart show whether it was still making progress."""
+    def attempt(part: str, read: Callable[[], str]) -> str:
+        try:  # the report goes into an error message, which it must never replace with its own
+            return read()
+        except Exception as exc:  # noqa: BLE001
+            return f"{part} unavailable: {exc!r}"
+
+    def stacks() -> str:
+        with tempfile.TemporaryFile("w+", encoding="utf-8") as stream:
+            faulthandler.dump_traceback(file=stream, all_threads=True)
+            stream.seek(0)
+            return stream.read()
+
+    def states() -> str:
+        described = [_describe_engine(engine, sessions) for engine in list(_live_engines)]
+        return "\n".join(described or ["no RunEngine worker alive"])
+
+    return "\n".join(
+        [attempt("engine states", states), attempt("store writes", store_writes.describe), "all thread stacks:",
+         attempt("stacks", stacks)]
+    )

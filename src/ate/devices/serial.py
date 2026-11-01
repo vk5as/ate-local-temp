@@ -22,6 +22,7 @@ from typing import Any
 
 import serial
 
+from .abort import AbortableCalls, DeviceAborted
 from .registry import DEFAULT_RECEIVE_BUFFER_BYTES, Driver, validate_params
 from .stream import (
     POLL_SECONDS,
@@ -68,6 +69,12 @@ class _SerialDevice(_StreamDevice):
                  receive_buffer_bytes: int = DEFAULT_RECEIVE_BUFFER_BYTES) -> None:
         super().__init__(params, SerialDriver, receive_buffer_bytes)
         self.ser = ser
+        self._calls = AbortableCalls()
+
+    def bind_abort(self, flag: Any) -> None:
+        """Let a whole-run abort end this port's waits, its writes included (packet 32b)."""
+        super().bind_abort(flag)
+        self._calls.flag = flag
 
     def describe(self) -> str:
         """A one-line description of this device for log lines (the port as the schedule gave it)."""
@@ -101,18 +108,29 @@ class _SerialDevice(_StreamDevice):
     def _send(self, chunk: bytes, seconds: float) -> int:
         """Write at most one ``WRITE_CHUNK`` of the payload, with the time left as pyserial's write
         timeout. A port that will not take it in time raises SerialTimeoutException - that fails
-        only this call - and any other error means the port is gone."""
+        only this call - and any other error means the port is gone.
+
+        The write cannot be cut into shorter timeouts: a timeout says nothing of how much went out, and
+        a piece at 9600 baud takes seconds. So it runs off the worker, and an abort leaves it behind
+        (packet 32b), asking the port to end it where pyserial can."""
+        self._calls.wait_for_left_behind()
         self.ser.write_timeout = seconds
         try:
-            return self.ser.write(chunk[:WRITE_CHUNK])
+            return self._calls.run(lambda: self.ser.write(chunk[:WRITE_CHUNK]))
+        except DeviceAborted:
+            cancel = getattr(self.ser, "cancel_write", None)  # a real port has it; socket:// has not
+            if cancel is not None:
+                cancel()
+            raise
         except serial.SerialTimeoutException as exc:
             raise _SendTimeout(str(exc)) from exc
         except (serial.SerialException, OSError) as exc:
             raise _TransportClosed(str(exc)) from exc
 
     def _close_transport(self) -> None:
-        """Close the port."""
-        self.ser.close()
+        """Close the port, after any write an abort left behind."""
+        if not self._calls.close_after(self.ser.close):
+            self.ser.close()
 
 
 class SerialDriver(Driver):

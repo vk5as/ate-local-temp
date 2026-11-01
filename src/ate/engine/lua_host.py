@@ -70,6 +70,7 @@ from ..devices import DeviceRegistry, TcpDriver
 from ..devices.serial import SerialDriver  # packet 18a: the SERIAL driver, registered like TCP
 from ..devices.udp import UdpDriver  # packet 18b: UDP datagrams, registered like the other streams
 from ..devices.visa import VisaDriver  # packet 19: VISA instruments, read on demand (no reader)
+from ..devices.abort import DeviceAborted
 from ..devices.registry import DEFAULT_RECEIVE_BUFFER_BYTES, validate_params  # packet 16b: ATE.read/ATE.write validate per-call overrides
 from ..devices.tracing import DEFAULT_TRACE_MAX_BYTES  # packet 17c: the default deviceTrace.maxBytes
 from ..errors import ATEError
@@ -509,11 +510,15 @@ class _AteTable:
                 raise NotAllowedError(
                     f"{self._host._location()} ATE.{name}: only legal after the schedule has loaded"
                 )
+            if self._host._abort_flag.aborted:  # as ATE.sleep: no call starts once the run is aborting
+                raise RuntimeError("aborted")
             # Packet 17b: drain before (a failure since the last call) and after (one this call met,
             # e.g. during a read that waited out its timeout), so each WARNING lands at once.
             self._host.drain_device_warnings()
             try:
                 return fn(*args)
+            except DeviceAborted:  # the same error ATE.sleep and the count hook raise (packet 32b)
+                raise RuntimeError("aborted") from None
             except Exception as exc:  # noqa: BLE001 - isolated; never reaches Lua
                 recorded = "".join(traceback.format_exception(exc))  # the full Python traceback
                 loc = self._host._location()
@@ -1172,6 +1177,7 @@ class _LuaHost:
             trace_enabled=device_trace_enabled,  # packet 17c: each operation logs one DEBUG line
             trace_max_bytes=device_trace_max_bytes,
             emit=self.record_log,  # through the run's own log, so the engine owns it like ATE.log
+            abort_flag=self._abort_flag,  # packet 32b: an abort ends a Device call as it ends ATE.sleep
         )
         # Packet 17b: the run engine's callable that records pending device warnings; None until a run.
         self.device_warning_sink: Optional[Callable[[], None]] = None

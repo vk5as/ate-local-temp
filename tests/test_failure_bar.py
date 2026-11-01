@@ -303,9 +303,9 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
 def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     """The header Abort button answers a pending prompt with ABORT instead of stalling the paused worker.
 
-    request_abort() only sets a step-boundary flag, which the worker (blocked in the pause) never
-    reaches — so with a prompt up, the header's Abort must take the same path as the bar's own
-    Abort button: answer the pending prompt and end the run STOPPED_ON_FAIL."""
+    With a prompt up the header's Abort takes the same path as the bar's own Abort button: it answers
+    the prompt, so the Operator's choice is recorded and the run ends STOPPED_ON_FAIL. A run-level
+    abort that reaches the pause with no answer ends ABORTED (packet 32b)."""
     env = write_ate_env(tmp_path)
     # Fake the PDF helper so no QProcess outlives the session (suite pattern).
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))

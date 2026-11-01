@@ -40,6 +40,7 @@ from typing import Any, Callable
 import pyvisa
 from pyvisa import constants, errors
 
+from .abort import AbortableCalls, DeviceAborted, POLL_SECONDS, check_abort, wait_slice
 from .registry import Driver, validate_params
 from .stream import READ_FIELDS, SEND_CHUNK, WRITE_FIELDS, transport_error_text
 
@@ -171,12 +172,22 @@ def _cut(data: bytes | bytearray, want: int, term_byte: bytes) -> bytes:
     return data if end < 0 else data[:end + 1]
 
 
-def _wait_readable(sock: socket.socket, seconds: float) -> bool:
-    """Block until ``sock`` has something to read (or hung up), for at most ``seconds``."""
-    return bool(select.select([sock], [], [], seconds)[0])
+def _wait_readable(sock: socket.socket, seconds: float, flag: Any = None) -> bool:
+    """Block until ``sock`` has something to read (or hung up), for at most ``seconds``.
+
+    An abort ends the wait (packet 32b). Slicing it sends nothing to the instrument: ``select`` only
+    looks at the local socket, so this is still one read as far as the instrument can tell."""
+    deadline = time.monotonic() + seconds
+    while True:
+        check_abort(flag)
+        remaining = deadline - time.monotonic()
+        if select.select([sock], [], [], wait_slice(flag, remaining))[0]:
+            return True
+        if flag is None or remaining <= POLL_SECONDS:
+            return False
 
 
-def _socket_read(session: Any, want: int, term_byte: bytes, seconds: float) -> tuple[bytes, object]:
+def _socket_read(session: Any, want: int, term_byte: bytes, seconds: float, flag: Any = None) -> tuple[bytes, object]:
     """One read on a pyvisa-py SOCKET session's socket: ``(chunk, status)``, raising ``_ReadTimeout``
     when nothing arrives within ``seconds``.
 
@@ -191,7 +202,7 @@ def _socket_read(session: Any, want: int, term_byte: bytes, seconds: float) -> t
         del pending[:len(chunk)]
         return chunk, _MORE
     sock = session.interface
-    if not _wait_readable(sock, seconds):
+    if not _wait_readable(sock, seconds, flag):
         raise _ReadTimeout()
     peeked = sock.recv(want, socket.MSG_PEEK)
     if not peeked:
@@ -199,7 +210,7 @@ def _socket_read(session: Any, want: int, term_byte: bytes, seconds: float) -> t
     return sock.recv(len(_cut(peeked, want, term_byte))), _MORE
 
 
-def _socket_write(sock: socket.socket, payload: bytes, seconds: float) -> tuple[bool, int, str | None]:
+def _socket_write(sock: socket.socket, payload: bytes, seconds: float, flag: Any = None) -> tuple[bool, int, str | None]:
     """Send ``payload`` on ``sock`` within ``seconds``: ``(ok, count, err_or_None)``, ``count`` the
     bytes that went out. The socket's own timeout bounds each send and is put back afterwards."""
     deadline = time.monotonic() + seconds
@@ -208,14 +219,16 @@ def _socket_write(sock: socket.socket, payload: bytes, seconds: float) -> tuple[
     previous = sock.gettimeout()
     try:
         while sent < len(payload):
+            check_abort(flag)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False, sent, "timeout"
-            sock.settimeout(remaining)
+            sock.settimeout(wait_slice(flag, remaining))
             try:
                 sent += sock.send(view[sent:sent + SEND_CHUNK])
             except TimeoutError:
-                return False, sent, "timeout"
+                if flag is None:
+                    return False, sent, "timeout"
     finally:
         sock.settimeout(previous)
     return True, sent, None
@@ -236,6 +249,11 @@ class _VisaDevice:
         self.params = params
         self.driver = driver
         self._closed = False
+        self._calls = AbortableCalls()  # viRead and write_raw: C calls only their own timeout can end
+
+    def bind_abort(self, flag: Any) -> None:
+        """Let a whole-run abort end this Device's calls (packet 32b)."""
+        self._calls.flag = flag
 
     def describe(self) -> str:
         """A one-line description of this device for log lines (the resource as the schedule gave it)."""
@@ -264,6 +282,9 @@ class _VisaDevice:
         term = self._term(params, "readTerm")
         deadline = time.monotonic() + self._timeout(params)
         session = _socket_session(self.resource)
+        # A read an abort left behind still holds this session: its terminator must not be set, and
+        # no read issued, until it has ended (packet 32b, as `_visa_read` and `write` already do).
+        self._calls.wait_for_left_behind()
         exact = session is not None or self._set_termchar(term)
         # A raw socket has no END: pyvisa-py's "success" (and NI-VISA's with SUPPRESS_END off) only
         # means a TCP segment ended, which says nothing about where the reply ends.
@@ -290,9 +311,11 @@ class _VisaDevice:
                 want = 1  # the backend cannot stop at the terminator, so take one byte at a time
             try:
                 if session is not None:
-                    chunk, status = _socket_read(session, want, term[-1:], remaining)
+                    chunk, status = _socket_read(session, want, term[-1:], remaining, self._calls.flag)
                 else:
                     chunk, status = self._visa_read(want, remaining)
+            except DeviceAborted:
+                raise
             except _ReadTimeout:
                 break
             except errors.VisaIOError as exc:
@@ -315,10 +338,15 @@ class _VisaDevice:
         a full count (so ``size`` would read on past the limit) and throws away everything it had if
         a later read fails. ``status`` is ``_END`` when the backend reported END.
         """
+        self._calls.wait_for_left_behind()
         self.resource.timeout = _milliseconds(seconds)
-        with self.resource.ignore_warning(constants.StatusCode.success_max_count_read,
-                                          constants.StatusCode.success_device_not_present):
-            chunk, status = self.resource.visalib.read(self.resource.session, want)
+
+        def read() -> tuple[Any, Any]:
+            with self.resource.ignore_warning(constants.StatusCode.success_max_count_read,
+                                              constants.StatusCode.success_device_not_present):
+                return self.resource.visalib.read(self.resource.session, want)
+
+        chunk, status = self._calls.run(read)
         return bytes(chunk), _END if status == constants.StatusCode.success else _MORE
 
     def _set_termchar(self, term: bytes) -> bool:
@@ -367,12 +395,15 @@ class _VisaDevice:
         session = _socket_session(self.resource)
         if session is not None:
             try:
-                return _socket_write(session.interface, payload, seconds)
+                return _socket_write(session.interface, payload, seconds, self._calls.flag)
             except OSError as exc:
                 return False, 0, transport_error_text(exc)
+        self._calls.wait_for_left_behind()
         self.resource.timeout = _milliseconds(seconds)
         try:
-            count = self.resource.write_raw(payload)
+            count = self._calls.run(lambda: self.resource.write_raw(payload))
+        except DeviceAborted:
+            raise
         except errors.VisaIOError as exc:
             if exc.error_code == constants.StatusCode.error_timeout:
                 return False, 0, "timeout"
@@ -388,6 +419,8 @@ class _VisaDevice:
         if self._closed:
             return
         self._closed = True
+        if self._calls.close_after(self.resource.close):
+            return  # a call an abort left behind still holds the session: it closes when that ends
         try:
             self.resource.close()
         except (errors.VisaIOError, OSError):

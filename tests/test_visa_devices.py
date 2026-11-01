@@ -33,7 +33,7 @@ from ate.devices.visa import VisaDriver, get_resource_manager
 from ate.engine.run_engine import RunEngine
 from ate.storage.store import RunStore
 
-from ._fixtures import LoopbackPeer, _drive
+from ._fixtures import LoopbackPeer, _drive, wait_for_disconnect
 from .test_device_builders import _builder_fields
 from .test_tcp_read_write import _run_with_peer, _step_message
 from tests._fixtures import scratch_directory
@@ -173,6 +173,7 @@ def test_open_every_field_then_write_and_read_through_pyvisa(app: QCoreApplicati
         peer.stop()
 
     assert _step_message(store, ru) == "w 6 5 SEAM1 false nil", "the reply comes back with the terminator stripped"
+    assert wait_for_disconnect(peer)  # the peer records what it got when the connection ends
     assert peer.received[peer.connections[-1]] == b"*IDN?\n", "the peer got the command with its terminator"
 
 
@@ -262,6 +263,7 @@ def test_the_visa_builder_open_write_and_read(app: QCoreApplication) -> None:
         peer.stop()
 
     assert _step_message(store, ru) == "BUILDER 7"
+    assert wait_for_disconnect(peer)  # the peer records what it got when the connection ends
     assert peer.received[peer.connections[-1]] == b"*IDN?", "setWriteTerm(\"\") writes without a terminator"
 
 

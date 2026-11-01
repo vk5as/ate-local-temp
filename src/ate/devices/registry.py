@@ -20,6 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, ClassVar, Mapping, Optional
 
+from .abort import DeviceAborted, run_abortable
 from .tracing import DEFAULT_TRACE_MAX_BYTES, DeviceTracer, device_label, elapsed_ms, handle_label, TracedDevice
 
 
@@ -111,8 +112,10 @@ class DeviceRegistry:
         trace_enabled: bool = False,
         trace_max_bytes: int = DEFAULT_TRACE_MAX_BYTES,
         emit: Optional[Callable[..., Any]] = None,  # packet 17c: the host's record_log for trace lines
+        abort_flag: Any = None,  # packet 32b: the run's abort flag, which every Device call gives way to
     ) -> None:
         self._drivers: dict[str, type[Driver]] = {}
+        self._abort_flag = abort_flag
         # id(handle) -> handle still open this run.
         self._open: dict[int, Any] = {}
         # Handles the schedule closed this run. Kept (not freed here) so the host can still drain
@@ -137,15 +140,25 @@ class DeviceRegistry:
         Packet 17c: with tracing on the open is timed and logged at DEBUG — a refused connect too,
         before the OSError goes on to the caller's ``onError`` — and the handle comes back wrapped in
         a :class:`TracedDevice` so its reads and writes are traced too. Off, this is the plain open:
-        one `if` and no wrapper."""
+        one `if` and no wrapper. Packet 32b: an open the abort left behind is traced as `aborted`
+        before :class:`DeviceAborted` carries on."""
         if name not in self._drivers:
             raise ValueError(f"unknown DeviceType '{name}'")
         driver_cls = self._drivers[name]
 
-        def connect() -> Any:
+        def opened() -> Any:
             if driver_cls.accepts_receive_buffer_bytes:  # 17a: the buffer-cap rides on the driver's open
                 return driver_cls().open(dict(params), self._receive_buffer_bytes)
             return driver_cls().open(dict(params))
+
+        def connect() -> Any:
+            # Packet 32b: a connect or a DNS lookup is the OS's to end, so an abort leaves it behind
+            # and the handle it may still produce is closed when it does.
+            handle = run_abortable(opened, self._abort_flag, discard=lambda late: late.close())
+            bind = getattr(handle, "bind_abort", None)
+            if bind is not None:
+                bind(self._abort_flag)
+            return handle
 
         tracer = self._tracer
         if tracer is None:
@@ -157,6 +170,9 @@ class DeviceRegistry:
         started = time.perf_counter()
         try:
             handle = connect()
+        except DeviceAborted:  # 32b: an open the abort left behind is traced, though it is still running
+            tracer.aborted("open", label, elapsed_ms(started))
+            raise
         except OSError as exc:
             tracer.open(label, False, str(exc), elapsed_ms(started))
             raise
@@ -165,14 +181,17 @@ class DeviceRegistry:
         self._open[id(handle)] = handle
         return handle
 
-    def close_device(self, handle: Any) -> bool:
+    def close_device(self, handle: Any, *, abortable: bool = True) -> bool:
         """Stop tracking ``handle`` and release it. Returns True if it was open (a real close), or
         False if it had already been closed — a double close is then a no-op that still succeeds.
         A closed handle is kept on the registry (``closed_handles``) so its failure warning can
         still be drained after the handle left ``snapshot()`` (packet 17b).
 
         Packet 17c: a real close is traced with the time its teardown took; a no-op second close
-        traces nothing, since nothing happened."""
+        traces nothing, since nothing happened.
+
+        ``abortable`` is False for the run's own closes at its end, which are not the schedule's call
+        for an abort to end; the run engine bounds those itself."""
         key = id(handle)
         device = self._open.pop(key, None)
         if device is None:
@@ -180,7 +199,14 @@ class DeviceRegistry:
         label = getattr(device, "label", None) or handle_label(device, "device")
         started = time.perf_counter()
         try:
-            device.close()  # the handle's own teardown (TCP closes its socket); safe to call twice
+            # The handle's own teardown (TCP closes its socket); safe to call twice. A port can hold its
+            # close while output drains, and an abort does not wait for that (packet 32b).
+            run_abortable(device.close, self._abort_flag if abortable else None)
+        except DeviceAborted:
+            if self._tracer is not None:  # 32b: a close the abort left behind is traced like any other
+                self._tracer.aborted("close", label, elapsed_ms(started))
+            self._closed[key] = device
+            raise
         except OSError as exc:  # 17c: a close that failed is still traced, then the error carries on
             if self._tracer is not None:
                 self._tracer.close(label, elapsed_ms(started), err=str(exc))

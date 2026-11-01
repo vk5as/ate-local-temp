@@ -44,7 +44,7 @@ import pytest  # noqa: E402
 from PySide6.QtCore import QObject, QThread, qInstallMessageHandler  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from ate.engine.run_engine import stop_live_engines  # noqa: E402
+from ate.engine.run_engine import _live_engines, stop_live_engines  # noqa: E402
 from ate.log import AppLog  # noqa: E402
 from ate.run_session.headless import HeadlessRunSession  # noqa: E402
 from ate.storage.store import RunStore  # noqa: E402
@@ -75,6 +75,31 @@ def _remember_opened(cls: type) -> None:
 _remember_opened(HeadlessRunSession)
 _remember_opened(RunStore)
 _remember_opened(AppLog)
+_fixtures.watch_store_writes()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A test that failed with a worker still running reports it, whatever its own wait helper said.
+
+    Taken as the call ends, before teardown aborts the worker: a wait for FINISHED that expired is
+    described as it stood (packet 32b)."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call" or not report.failed:
+        return
+    try:  # the failure being reported is the test's own: nothing here may replace it
+        if any(_still_running(engine) for engine in list(_live_engines)):
+            report.sections.append(("RunEngine worker still running", _fixtures.describe_stuck_runs(_opened)))
+    except Exception as exc:  # noqa: BLE001
+        report.sections.append(("RunEngine worker still running", f"could not describe the stuck run: {exc!r}"))
+
+
+def _still_running(engine) -> bool:
+    try:
+        return engine.isRunning()
+    except RuntimeError:  # its C++ side is already gone
+        return False
 
 
 def _release_since(opened_mark: int, scratch_mark: int) -> None:
@@ -82,7 +107,7 @@ def _release_since(opened_mark: int, scratch_mark: int) -> None:
     made after them. The order is the point: the deletion is strict, so it proves the closes."""
     stuck = stop_live_engines()
     if stuck:
-        raise RuntimeError(f"{len(stuck)} RunEngine worker(s) did not stop")
+        raise RuntimeError(f"{len(stuck)} RunEngine worker(s) did not stop\n{_fixtures.describe_stuck_runs(_opened)}")
     for item in reversed(_opened[opened_mark:]):
         item.close()
     del _opened[opened_mark:]
@@ -368,5 +393,7 @@ def _stop_running_engines(monkeypatch, _release_files):
         except RuntimeError:  # its C++ side is already gone
             continue
         if not joined:
-            raise RuntimeError("a RunEngine worker outlived its test: abort did not stop it")
+            raise RuntimeError(
+                f"a RunEngine worker outlived its test: abort did not stop it\n{_fixtures.describe_stuck_runs(_opened)}"
+            )
     _started_engines.clear()

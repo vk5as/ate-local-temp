@@ -84,6 +84,9 @@ def stop_live_engines(timeout_ms: int = 5000) -> list["RunEngine"]:
     return [engine for engine in list(_live_engines) if not engine.stop_and_wait(timeout_ms)]
 
 
+#: How long all an aborted run's leftover Device closes may take together (see _close_open_devices).
+_ABORT_CLOSE_SECONDS = 3.0
+
 atexit.register(stop_live_engines)  # a worker running as the interpreter exits is destroyed running
 
 
@@ -207,7 +210,7 @@ class RunEngine(QThread):
         # Packet 20: the first index into the host's ``equipment`` not yet written to the store;
         # advanced by every drain, so each `ATE.addEquipment` call is recorded in call order.
         self._equipment_cursor = 0
-        # Set when a Stop-on-Fail pause is aborted (packet 12b); ends the run STOPPED_ON_FAIL.
+        # Set when a Stop-on-Fail pause is answered ABORT (packet 12b); ends the run STOPPED_ON_FAIL.
         self._stopped_on_fail = False
         # Packet 10a review: which step/Attempt is running right now, and which of its POLL inputs
         # are open. An answered blocking input, or a POLL whose step has ended, is no longer live,
@@ -232,11 +235,9 @@ class RunEngine(QThread):
         _live_engines.discard(self)
 
     def stop_and_wait(self, timeout_ms: int = 5000) -> bool:
-        """Abort the run, answering any pause it is parked in, and wait for the worker to end."""
+        """Abort the run, a pause included, and wait for the worker to end."""
         if not self.isRunning():
             return True
-        if self.pause_pending():  # a worker parked in a pause only wakes on a choice
-            self.choose("ABORT")
         self.request_abort()
         return self.wait(timeout_ms)
 
@@ -248,10 +249,13 @@ class RunEngine(QThread):
     def request_abort(self) -> None:
         """Request a whole-run abort (settable from the operator/main thread).
 
-        The running worker observes it at its next step boundary and stops between steps, recording
-        the step about to run as an ERROR "Aborted by Operator" attempt, marking every remaining
-        step NOTRUN, and closing with End Reason ABORTED / result FAIL (spec rule 83). A busy loop
-        or blocking call in flight is interrupted too (packets 13b/13c) via the shared flag."""
+        The End Reason is ABORTED and the result FAIL wherever it lands (spec rule 83). Between steps,
+        the step about to run records an ERROR "Aborted by Operator" attempt and every remaining step
+        NOTRUN; a busy loop or blocking call in flight is interrupted too (packets 13b/13c, 32b) via
+        the shared flag, and its step ends the same way. At a Stop-on-Fail pause the failed step
+        finished before the abort, so it keeps its FAIL or ERROR and gets no such Attempt, and with no
+        choice made its ``prompt_choice`` stays NULL (packet 32b). Only the prompt's own Abort choice
+        ends STOPPED_ON_FAIL (packet 12b)."""
         self._abort_flag.request()
 
     @property
@@ -289,12 +293,17 @@ class RunEngine(QThread):
         """True while this step's POLL button is live — that is, while its Attempt runs."""
         return (node_seq, attempt_no, index) in self._poll_open
 
-    def _pause_for_operator(self, run_uuid: str, node_seq: int, attempt_no: int) -> str:
+    def _pause_for_operator(self, run_uuid: str, node_seq: int, attempt_no: int) -> Optional[str]:
         """Stop-on-Fail pause for a failed Attempt: announce the pending choice and block until answered.
 
         The failing Attempt is already recorded; once :meth:`choose` returns a value we stamp its
         ``prompt_choice`` column (packet 12b checkbox 4). Blocks with no timeout — the worker waits
-        here while the operator/main thread supplies CONTINUE, RETRY or ABORT through choose()."""
+        here while the operator/main thread supplies CONTINUE, RETRY or ABORT through choose().
+
+        A run-level abort ends the pause too, and returns None: nobody chose anything, so nothing is
+        stamped (packet 32b)."""
+        if self.aborted:  # no prompt to ask a question the abort has already answered
+            return None
         ch = queue.Queue()
         with self._pause_lock:
             self._pending[(node_seq, attempt_no)] = ch
@@ -304,21 +313,30 @@ class RunEngine(QThread):
         # carrying this Attempt's number so a retried failure is announced as Attempt 2, 3, ...
         self.failure_prompt.emit(node_seq, attempt_no)
         # Blocks until choose() puts a value and wakes us; meanwhile a device failure (run-level: the
-        # Attempt's action has ended) is still logged at once (packet 17b).
+        # Attempt's action has ended) is still logged at once (packet 17b). A run-level abort ends the
+        # wait as well: the Abort button answers only a pause it sees, so an abort that landed just
+        # before the worker got here would otherwise wait for a choice already made (packet 32b).
+        choice: Optional[str] = None
         while True:
             self._drain_device_warnings()
             try:
                 choice = ch.get(timeout=0.05)
                 break
             except queue.Empty:
-                continue
+                if self.aborted:
+                    with self._pause_lock:
+                        taken = self._pending.pop((node_seq, attempt_no), None)
+                    if taken is not None:
+                        break  # otherwise a choice took the pause just first, and the next get has it
         self._drain_device_warnings()
         # Stamp the chosen CONTINUE/RETRY/ABORT onto this Attempt now that we hold it (packet 12b checkbox 4).
-        self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=choice)
+        if choice is not None:
+            self._store.update_attempt(run_uuid, node_seq, attempt_no, prompt_choice=choice)
         with self._pause_lock:
             self._pending.pop((node_seq, attempt_no), None)
-        # The pause is over: every layout clears its prompt UI from this, not from its own button.
-        self.prompt_answered.emit(node_seq, attempt_no, choice)
+        # The pause is over: every layout clears its prompt UI from this, not from its own button. An
+        # empty choice says an abort ended it.
+        self.prompt_answered.emit(node_seq, attempt_no, choice or "")
         return choice
 
     def pause_pending(self) -> bool:
@@ -334,7 +352,11 @@ class RunEngine(QThread):
 
         Records ``choice`` (CONTINUE / RETRY / ABORT) onto the pending pause channel; the blocked
         worker wakes and records it as that Attempt's prompt_choice. Returns the (node_seq,
-        attempt_no) this answered, or None when no pause was waiting."""
+        attempt_no) this answered, or None when no pause was waiting. A choice made after a run-level
+        abort also gets None: the abort has already ended the pause, however soon the worker sees it,
+        so the order of the two decides and not the worker's 50 ms poll (packet 32b)."""
+        if self.aborted:
+            return None
         with self._pause_lock:
             entry = next(iter(self._pending), None)
             ch = self._pending.pop(entry) if entry is not None else None
@@ -398,6 +420,11 @@ class RunEngine(QThread):
         typed = self._host._map_input(decl, raw)
         return self._host.to_text(typed) or ""
 
+    @staticmethod
+    def _node_row(seq: int, node: Any, **fields: Any) -> dict[str, Any]:
+        """One row for :meth:`RunStore.insert_nodes`, stamped with its place in the expanded tree."""
+        return {"node_seq": seq, "parent_node_seq": node.parent, "instance_seq": node.instance, **fields}
+
     def _insert_node(self, run_uuid: str, seq: int, node: Any, **fields: Any) -> None:
         """Write one node row, stamped with its place in the expanded tree (packet 15b).
 
@@ -444,24 +471,47 @@ class RunEngine(QThread):
                 result="ERROR",
                 attempt_count=attempt_no,
             )
-        for seq in range(aborted_seq + 1, len(steps)):
-            later = steps[seq]
-            if later.is_header:  # a header never ran, so it records no Attempt and no Result
-                self._record_header(run_uuid, seq, later)
+        self._record_unrun(run_uuid, steps, aborted_seq + 1, len(steps))
+
+    def _record_unrun(self, run_uuid: str, steps: list[Any], start: int, stop: int) -> None:
+        """Record tree rows ``start`` up to ``stop`` as never run: a header as itself, a step NOTRUN.
+
+        One batch, not a commit per row: each commit is a sync, and this runs while an Operator waits
+        for an abort or a failed Pre-test Action, so its cost must not grow with the steps left (packet
+        32b, story 83)."""
+        rows: list[dict[str, Any]] = []
+        for seq in range(start, stop):
+            node = steps[seq]
+            if node.is_header:  # a header never ran, so it records no Attempt and no Result
+                rows.append(self._node_row(seq, node, **self._header_fields(seq, node)))
                 continue
-            default_enabled, enabled = self._enabled(seq, later)
-            self._insert_node(
-                run_uuid,
-                seq,
-                later,
-                kind="step",
-                step_number=later.step_no or "",
-                step_name=later.name,
-                default_enabled=default_enabled,
-                enabled=enabled,
-                result="NOTRUN",
-                attempt_count=0,
+            default_enabled, enabled = self._enabled(seq, node)
+            rows.append(
+                self._node_row(
+                    seq,
+                    node,
+                    kind="step",
+                    step_number=node.step_no or "",
+                    step_name=node.name,
+                    default_enabled=default_enabled,
+                    enabled=enabled,
+                    result="NOTRUN",
+                    attempt_count=0,
+                )
             )
+        self._store.insert_nodes(run_uuid, rows)
+
+    def _record_abort_at_boundary(self, run_uuid: str, steps: list[Any], seq: int) -> None:
+        """An abort seen before tree row ``seq``: the next step that would have run takes the ERROR.
+
+        Headers and disabled steps before it are recorded as they would have been, in the same batch
+        as everything else; with no such step left, nothing takes it."""
+        for target in range(seq, len(steps)):
+            if not steps[target].is_header and self._enabled(target, steps[target])[1]:
+                self._record_unrun(run_uuid, steps, seq, target)
+                self._record_abort(run_uuid, steps, target)
+                return
+        self._record_unrun(run_uuid, steps, seq, len(steps))
 
     def _record_header(self, run_uuid: str, seq: int, node: Any) -> None:
         """Record one header row of the expanded tree: a row that never runs (packets 15a, 15b).
@@ -472,19 +522,20 @@ class RunEngine(QThread):
         Packet 15d: `default_enabled` is the header's own default after any enclosing header's
         :setEnable() forced it, and `enabled` is whether any Test Step beneath it is enabled —
         the header row itself is never toggled as a whole."""
+        self._insert_node(run_uuid, seq, node, **self._header_fields(seq, node))
+
+    def _header_fields(self, seq: int, node: Any) -> dict[str, Any]:
+        """A header row's node fields; see :meth:`_record_header`."""
         default_enabled, enabled = self._enabled(seq, node)
-        self._insert_node(
-            run_uuid,
-            seq,
-            node,
-            kind="header",
-            step_number=node.step_no or None,
-            step_name=node.name,
-            default_enabled=default_enabled,
-            enabled=enabled,
-            result=None,
-            attempt_count=0,
-        )
+        return {
+            "kind": "header",
+            "step_number": node.step_no or None,
+            "step_name": node.name,
+            "default_enabled": default_enabled,
+            "enabled": enabled,
+            "result": None,
+            "attempt_count": 0,
+        }
 
     @staticmethod
     def _phase_actions(schedule: Any, phase: str) -> list[Callable[..., Any]]:
@@ -661,24 +712,7 @@ class RunEngine(QThread):
         No step ran yet, so every actionable step is recorded NOTRUN with no Attempt; the failing
         Pre-test's own ERROR row and traceback already exist from ``_record_phase_action``. A single
         log line names the failure and explains why every step is NOTRUN."""
-        for seq in range(len(steps)):
-            step = steps[seq]
-            if step.is_header:
-                self._record_header(run_uuid, seq, step)
-                continue
-            default_enabled, enabled = self._enabled(seq, step)
-            self._insert_node(
-                run_uuid,
-                seq,
-                step,
-                kind="step",
-                step_number=step.step_no or "",
-                step_name=step.name,
-                default_enabled=default_enabled,
-                enabled=enabled,
-                result="NOTRUN",
-                attempt_count=0,
-            )
+        self._record_unrun(run_uuid, steps, 0, len(steps))
         # The explanation line itself is written inside the failed Action's window
         # (_record_phase_action), so every reader groups it with that Pre-test Action.
 
@@ -752,22 +786,47 @@ class RunEngine(QThread):
 
         return [seq for seq in range(len(host.instances)) if subtree_enabled(seq) or not subtree_steps(seq)]
 
-    def _close_open_devices(self, host: "LuaHost", run_uuid: str) -> None:
+    def _close_open_devices(self, host: "LuaHost", run_uuid: str, *, bounded: bool = False) -> None:
         """Close every Device still open at run end and log one WARNING per device (packet 16a).
 
         Each leftover handle is closed defensively (its own teardown swallows errors), then a single
         ``WARNING`` line naming the device is recorded with source "ate" so it attaches to the run as
         a whole rather than to any step. An empty registry is a no-op, so runs that close their
-        devices normally are unaffected."""
+        devices normally are unaffected.
+
+        ``bounded`` is an aborted run's end: the flag is clear by now, and a close the OS holds (a
+        serial port draining its output, say) must not hold the worker past story 83's limit, so all
+        the closes together get :data:`_ABORT_CLOSE_SECONDS`.
+
+        Which means the promise "every Device is closed before FINISHED" holds only for an
+        unexpected end, where this runs unbounded. For an aborted run a close that outlives
+        :data:`_ABORT_CLOSE_SECONDS` is left on its daemon thread and finishes after FINISHED; that
+        Device is named by its one WARNING, and it does close."""
         registry = getattr(host, "_devices", None)
         if registry is None:
             return
         warnings: list[str] = []
-        for device in registry.snapshot():
+        deadline = time.monotonic() + _ABORT_CLOSE_SECONDS
+
+        def close(device: Any) -> None:
             try:
-                registry.close_device(device)  # the registry's close, so 17c traces it; safe to repeat
+                # The registry's close, so 17c traces it; safe to repeat.
+                registry.close_device(device, abortable=False)
             except Exception:  # noqa: BLE001 - teardown at run end must never abort the run
                 pass
+
+        for device in registry.snapshot():
+            if bounded:
+                closer = threading.Thread(target=close, args=(device,), daemon=True, name="ate-device-close")
+                closer.start()
+                closer.join(max(0.0, deadline - time.monotonic()))
+                if closer.is_alive():
+                    if hasattr(device, "describe"):
+                        # One line for this Device: it is closing, not simply left open.
+                        warnings.append(f"device {device.describe()} was still closing when the aborted run ended")
+                    continue
+            else:
+                close(device)
             if hasattr(device, "describe"):
                 warnings.append(f"device {device.describe()} left open at end of run")
         self._store.insert_log_lines(
@@ -793,7 +852,9 @@ class RunEngine(QThread):
         ATE stopped before the run could end, which is what INTERRUPTED records; the Post-test
         Actions do not run, as they would not after a crash. The exception may have come from the
         store itself, so each step is attempted on its own, and FINISHED is always announced: the
-        screen must not wait on a worker that has gone."""
+        screen must not wait on a worker that has gone. Every Device the run left open is closed
+        before that announcement, since this end is not bounded (packet 31c); an aborted run bounds
+        its closes instead, so there one can still be closing after FINISHED."""
         def attempt(step: Callable[[], Any]) -> None:
             try:
                 step()
@@ -964,6 +1025,14 @@ class RunEngine(QThread):
                 # Already recorded every step NOTRUN above; stop before running any.
                 break
 
+            # Whole-run abort checked at the step boundary — this packet covers stopping cleanly
+            # between steps; interrupting a running (blocking or busy) step comes in 13b/13c. If
+            # set, record the next step that would run as ERROR and every later step NOTRUN, then stop.
+            if self.aborted:
+                aborted = True
+                self._record_abort_at_boundary(run_uuid, steps, seq)
+                break
+
             # An include step is a header row: it records its place in the tree and never runs. Its
             # Sub-schedule was expanded at load (packet 15b), so its steps are separate nodes that
             # follow it in this same list.
@@ -987,14 +1056,6 @@ class RunEngine(QThread):
                     attempt_count=0,
                 )
                 continue
-            # Whole-run abort checked at the step boundary — this packet covers stopping cleanly
-            # between steps; interrupting a running (blocking or busy) step comes in 13b/13c. If
-            # set, record the step about to run as ERROR and mark every later step NOTRUN, then stop.
-            if self.aborted:
-                aborted = True
-                self._record_abort(run_uuid, steps, seq)
-                break
-
             # Tell the host which step is running so an isolated ATE error can be attributed to
             # the schedule line where that step's action began (criterion 03), and put the host in
             # the "step" phase so a step may legally call any ATE function — including ATE.report
@@ -1013,6 +1074,7 @@ class RunEngine(QThread):
             # written once, after its last Attempt, with that Attempt's result.
             last_result = "NOREPORT"
             attempt_count = 0
+            aborted_at_pause = False  # a run-level abort ended this step's pause (packet 32b)
             # 14d review: POLL is the only non-blocking type, so these are the indices whose
             # ``ATE.input(n)`` can wait. reset() below keeps any answer already given for them.
             blocking = [index - 1 for index, decl in enumerate(validated, start=1) if decl.type != "POLL"]
@@ -1150,6 +1212,12 @@ class RunEngine(QThread):
                 # FAIL). Continue on fail (stop_on_fail False) never pauses.
                 if last_result in ("FAIL", "ERROR") and self.stop_on_fail:
                     choice = self._pause_for_operator(run_uuid, seq, attempt_count)
+                    if choice is None:
+                        # The step finished before the abort, so it keeps this Attempt's result, and
+                        # the End Reason is ABORTED whether or not the prompt had gone up (packet 32b).
+                        aborted_at_pause = True
+                        self._record_abort(run_uuid, steps, seq, record_attempt=False)
+                        break
                     if choice == "RETRY":
                         continue  # rerun this step's action as a new Attempt from the start
                     if choice == "ABORT":
@@ -1187,6 +1255,7 @@ class RunEngine(QThread):
                 if last_result == "FAIL" or last_result == "ERROR":
                     failed = True
                     pass_fail = "FAIL"  # flip the standing result so Post-test Actions see it
+            aborted = aborted or aborted_at_pause
             if aborted or self._stopped_on_fail:
                 break
 
@@ -1229,14 +1298,14 @@ class RunEngine(QThread):
         # run-level lines with no owning step. Done before the result is computed so a leftover
         # device's socket is released even when the run fails; sockets are closed defensively in case
         # teardown runs after an abort.
-        self._close_open_devices(host, run_uuid)
+        self._close_open_devices(host, run_uuid, bounded=aborted or posttest_aborted)
         # Packet 17b: once more after the close, so a failure that raced the teardown isn't lost.
         self._drain_device_warnings()
         host.device_warning_sink = self._device_sink = None
 
         # A Pre-test failure aborts before any step runs (packet 14b); a Stop-on-Fail pause that was
-        # aborted ends STOPPED_ON_FAIL; a whole-run operator abort — whether between steps or already
-        # set when the Post-test Actions began — ends ABORTED; a normal finish is FAIL on any FAIL/
+        # answered ABORT ends STOPPED_ON_FAIL; a whole-run operator abort — between steps, at a pause or
+        # already set when the Post-test Actions began — ends ABORTED; a normal finish is FAIL on any FAIL/
         # ERROR, otherwise PASS.
         if pretest_failed:
             run_result = "FAIL"
