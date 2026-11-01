@@ -26,11 +26,11 @@ User request, 2026-11-01. Strata also writes a Markdown manual for each of the s
 
 ## Rules
 
-- [ ] Facts come from the code and `.scratch/ate-v1-wayfinding/assets/`. Read the code when they disagree, and list the disagreements in the final reply rather than guessing. Nothing is described that the code does not do. Mark limits plainly, such as Windows checks that have only run headless.
-- [ ] Every command, config key and API name is checked against the code. Every Lua example runs headless through ATE in a test or a script kept beside the manual.
-- [ ] A test fails if a config key or `ATE` function in the code is missing from the relevant manual, so the manuals can't silently fall behind.
-- [ ] Each manual builds without errors or undefined references, with `latexmk -lualatex`. The toolchain is not on this machine, and installing system packages isn't allowed: build in Docker (`texlive/texlive`) or say what else was used. The PDFs are not committed; say how to build them in `docs/building-from-source.md`.
-- [ ] Screenshots, if any, come from the real application and are said to come from offscreen grabs. The interface may change after the appearance work (33), so keep them few.
+- [x] Facts come from the code and `.scratch/ate-v1-wayfinding/assets/`. Read the code when they disagree, and list the disagreements in the final reply rather than guessing. Nothing is described that the code does not do. Mark limits plainly, such as Windows checks that have only run headless.
+- [x] Every command, config key and API name is checked against the code. Every Lua example runs headless through ATE in a test or a script kept beside the manual.
+- [x] A test fails if a config key or `ATE` function in the code is missing from the relevant manual, so the manuals can't silently fall behind.
+- [x] Each manual builds without errors or undefined references, with `latexmk -lualatex`. The toolchain is not on this machine, and installing system packages isn't allowed: build in Docker (`texlive/texlive`) or say what else was used. The PDFs are not committed; say how to build them in `docs/building-from-source.md`.
+- [x] Screenshots, if any, come from the real application and are said to come from offscreen grabs. The interface may change after the appearance work (33), so keep them few. The three manuals ship none.
 
 ## Review
 
