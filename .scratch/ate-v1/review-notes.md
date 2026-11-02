@@ -849,3 +849,8 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Strata implemented and reworked four times; reviews Strata 4, 3, 0 and Haiku 8, 5, 5. Haiku found the issues that mattered in rounds 2 and 3 (recursive permission pass over a shared directory; an active writer starving the copy). Final round had a light review only.
 - Delivered: backup before every migration (`.partial`, verified, renamed; bounded by lack of progress), shared by `ate db migrate` and `ate setup`; setup migrates the configured database; NO_MIGRATION status; `os.exit` removed; `--config` anywhere; `allow_abbrev=False`; `paperSize` validated; the name; Windows fixes for the manuals' tests; abort flake made deterministic.
 - Left: `_discard_partial` doesn't delete `.partial-journal` (manual says it's safe to delete); the restart test uses a writer thread, not a second process; a migration registry is needed before the next schema version.
+
+## 35b — CI fixes after 35 (merged 2026-11-02, Windows CI pending)
+
+- CI on `b4df8b1` failed all four jobs (29 failures). Real product bug: on Windows `ate setup` took its config directory from `%PROGRAMDATA%` and ignored `ATE_DEFAULT_CONFIG`, so tests reached the real `C:\ProgramData\ATE`. Rest were tests: hand-built JSON with Windows paths, POSIX-only commands, a restart test depending on thread timing.
+- Reviews: Strata 5, Haiku 3 must-fixes, mostly tests that could not fail and skips with wrong reasons. Fixed: `os.execute` on Windows runs via `system()`, and cmd's `/c` quote stripping explained the 0.02 s exit; abort-during-write tests run everywhere with the small receive buffer on the accepted socket; conftest guard against touching real Station directories.
