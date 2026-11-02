@@ -11,6 +11,7 @@ ate db status
 ate db migrate
 ate db migrate --yes
 ate --config /tmp/station/config/config.json db status
+ate db status --config /tmp/station/config/config.json
 ate db migrate /tmp/station/data/ate.db --yes
 \end{lstlisting}
 
@@ -25,14 +26,37 @@ Create or upgrade database at /var/lib/ate/ate.db? [y/N]
 Answering anything other than \texttt{y} prints \texttt{aborted} and exits 1. With \texttt{--yes}
 there is no prompt, which is what scripts and \texttt{ate setup} use. Neither command needs a
 config: give it a path, or let it use the configured database from the platform config.
-\texttt{--config} belongs to \texttt{ate}, so it comes \emph{before} \texttt{db}:
-\texttt{ate --config PATH db status}. Written after the subcommand it is read as a database path,
-and the command fails saying \texttt{file is not a database} --- it is not a database. A path given
-after \texttt{db migrate} wins over the configured one.
+\texttt{--config} belongs to \texttt{ate}, and it may sit \emph{before} the subcommand
+(\texttt{ate --config PATH db status}) or \emph{after} it (\texttt{ate db status --config PATH}):
+either reads that config. Written after the subcommand it is no longer read as a database path,
+which is the trap this build closes. A path given after \texttt{db migrate} still wins over the
+configured one. A path that is not a database is refused in one line with exit 1, never with a
+traceback:
+
+\begin{lstlisting}[language=ATEShell]
+the file at /tmp/station/data/notes.db is not a SQLite database
+cannot open the database at /var/lib/ate/ate.db: unable to open database file
+\end{lstlisting}
+
+The first is a file that is not a database at all; the second is a real database this process cannot
+open. They are different faults, and the fix is different: replace the file, or fix the permissions
+and the ownership of the directory it sits in.
 
 Migrations are forward only. A database built by a \emph{newer} ATE is refused rather than
 downgraded; a missing, empty or older one is exactly what migrate is for. The version is SQLite's
-\texttt{PRAGMA user\_version}, and the current one is 5.
+\texttt{PRAGMA user\_version}, and the current one is 5. A database that stores an older version but
+already holds every table this ATE declares is also refused, naming the version it stores and saying
+plainly that no migration exists:
+
+\begin{lstlisting}[language=ATEShell]
+the database at /var/lib/ate/ate.db stores schema version 4 and already holds every table this ATE
+declares: this ATE has no migration from version 4 to 5, so it is not stamped as version 5, and
+`ate db migrate` on it changes nothing
+\end{lstlisting}
+
+Nothing would be created, so stamping it as current would be a claim with no migration behind it.
+Running \texttt{ate db migrate} on it says the same thing and exits 1: it is not a step you can
+repeat to fix the Station, and it is not a database this ATE can use.
 
 \section{What the app itself does at launch}
 
@@ -53,36 +77,104 @@ bug to fix.
 
 \section{Backups}
 
-Nothing in ATE backs anything up. The design note the record format was written from
-(\texttt{.scratch/\allowbreak{}ate-v1-wayfinding/\allowbreak{}assets/\allowbreak{}test-run-record.md}) says
-\texttt{ate db migrate} makes a timestamped copy first; it does not, and that is the code's behaviour,
-so \textbf{you} make the copy before you migrate. Migrate is not destructive --- it only adds tables and sets the version ---
-but an upgrade you did not back up is an upgrade you cannot roll back.
+A migration takes its own copy before it changes anything. \texttt{ate db migrate} and
+\texttt{ate setup} write a copy beside the database, named
+\texttt{ate.db.backup-<YYYYMMDD-HHMMSS>} in UTC, and print where it went:
 
-Back up three things:
+\begin{lstlisting}[language=ATEShell]
+backed up /var/lib/ate/ate.db to /var/lib/ate/ate.db.backup-20261101-093312
+created or upgraded database at /var/lib/ate/ate.db (schema version 5)
+\end{lstlisting}
+
+Four rules decide when a copy is made, and the code, this manual and the developer manual say the
+same thing:
 
 \begin{itemize}
-  \item \textbf{The database.} \texttt{ate.db} and its companions \texttt{ate.db-wal} and
-    \texttt{ate.db-shm}. ATE opens every connection in WAL mode, so a database that is in use has a
-    \texttt{-wal} file holding recent writes; copying \texttt{ate.db} alone while a Test Run is
-    writing can lose those writes. Copy all three, or stop ATE first.
+  \item \textbf{A new database makes no copy} --- there is nothing to back up.
+  \item \textbf{A file with no tables in it makes no copy}: a zero-byte file, or a database that
+    holds nothing at all. There is no data in it to lose.
+  \item \textbf{A copy is made whenever this build has a table to create}, and only then. That
+    includes a database already stamped at the current version which is missing a table: the
+    version says nothing about whether the data is complete, and creating a table changes a real
+    database.
+  \item \textbf{A copy is never overwritten}. If that name is already taken, the next copy gets a
+    counter: \texttt{\dots-2}, \texttt{\dots-3}.
+\end{itemize}
+
+The copy is taken with SQLite's backup API rather than \texttt{cp}, so it includes the writes that
+are still sitting in \texttt{ate.db-wal}: a database with a Test Run in flight is copied whole and
+consistent, which a file-by-file copy of \texttt{ate.db} alone would not be.
+
+It is written first as \texttt{ate.db.backup-\dots.partial}, checked (\texttt{integrity\_\allowbreak{}check},
+the same tables as the source, the same version), and only then renamed to the name above. A copy
+interrupted halfway is therefore never left beside the database under a name that reads like a
+backup: an empty SQLite file passes \texttt{integrity\_\allowbreak{}check}, which is why the table set and the
+version are compared as well. A copy that stops moving is given up on after ten seconds without
+progress, where progress is the pages left to copy reaching a new low. Another connection writing to
+the database makes SQLite start the copy again from the top of the file, so the pages left jump back
+up: that is not progress, and a copy beside a Test Run writer is refused rather than run for as long
+as the writer runs. The bound is on lack of progress, not on total time: a database held by another
+process is refused inside that time rather than waited out, which is what an installer needs, while a
+large database that keeps copying is never refused however long the copy takes. If the check
+cannot read the database --- another process took the lock while the copy was being written --- the
+migration is refused and the \texttt{.partial} is deleted with it: nothing is left beside the
+database, and the line printed names both the database and the copy.
+
+The cleanup that removes a half-written copy runs when ATE stops the copy. A copy killed outright
+--- \texttt{Ctrl-C} in the middle of an installer, \texttt{SIGKILL}, a machine that stops --- leaves
+\texttt{ate.db.backup-\dots.partial} beside the database, because nothing can delete a file at the
+moment the process dies, and with it
+\texttt{ate.db.backup-\dots.partial-journal}: the copy is an ordinary SQLite database while it is
+being written, so it has a journal of its own. Neither file is a backup and nothing ever reads them:
+the next migration names around them, and the permission pass treats them like the copies beside the
+database. Both are safe to delete, and they are the only things a migration leaves that are not a
+copy.
+
+If the copy cannot be made --- the data directory is not writable, or another process is holding
+the database --- the migration is refused and nothing is changed:
+
+\begin{lstlisting}[language=ATEShell]
+refusing to migrate: cannot back up /var/lib/ate/ate.db to
+/var/lib/ate/ate.db.backup-20261101-093312: it made no progress for 10.0 s: another process
+is writing to the database and the copy keeps restarting --- finish the Test Run or close
+the other ATE and run the migration again
+nothing in the database was changed
+\end{lstlisting}
+
+A migration that starts and then fails leaves its copy where it is and prints the path; that copy is
+how the upgrade is rolled back.
+
+Copies are not removed automatically. They accumulate beside the database until the Administrator
+deletes the ones they no longer need.
+
+\section{What you still back up yourself}
+
+The migration covers the database on the day it changes. It is not a backup policy, and it covers
+nothing else:
+
+\begin{itemize}
   \item \textbf{The config.} \texttt{config.json}. It is small, it is not backed up by anything, and
     \texttt{apt purge} deletes it on Linux.
   \item \textbf{The reports.} Test Reports are generated from the database, so a report can always be
     regenerated --- but only from a database that still exists. Treat the \texttt{reports} directory
     as the deliverables and the database as the archive; keep both.
+  \item \textbf{The whole data directory, now and then.} The migration copy is only made when a
+    migration runs. A database that never migrates never gets one.
 \end{itemize}
 
 The data directory is small enough to copy whole: \texttt{ate.db}, \texttt{reports}, \texttt{logs}
 and \texttt{definitions}. Keeping \texttt{logs} is optional and is the only part of the data that
 records ATE's own activity rather than a Test Run.
 
-Restoring is the same copy, in the other direction. Stop ATE, put \texttt{ate.db}, \texttt{ate.db-wal}
-and \texttt{ate.db-shm} back where \texttt{database.path} points, and start again: the schema check at
-launch accepts a database whose version matches this ATE, and the runs it holds appear on the History
-screen as they did before. There is no partial restore and no undo of a single run: a run is a row in
-\texttt{test\_run} with its steps in \texttt{node}, and the only way back to an earlier state is the
-copy you made before the change.
+Restoring is the same copy, in the other direction. Stop ATE, put the copy at the path
+\texttt{database.path} points to, and start again: the migration's copy is a single file --- the
+backup API folds \texttt{-wal} into it and the copy is set back to the plain journal before it is
+renamed --- so there is nothing else to move. A copy made by hand with \texttt{cp} must have its
+\texttt{-wal} and \texttt{-shm} companions copied with it, or the most recent writes are not in it.
+The schema check at launch accepts a database whose version matches this ATE, and the
+runs it holds appear on the History screen as they did before. There is no partial restore and no
+undo of a single run: a run is a row in \texttt{test\_run} with its steps in \texttt{node}, and the
+only way back to an earlier state is the copy taken before the change.
 
-\cando{check a database's version, migrate it safely, and say what has to be copied before a
-migration and why a lone \texttt{ate.db} copy is not always enough.}
+\cando{check a database's version, migrate it safely, and say when ATE makes the copy, when it
+does not, and what it still leaves to the Administrator.}

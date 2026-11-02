@@ -131,8 +131,10 @@ PDF helper exited with code 1: pdf helper error: paper must be 'A4' or 'Letter',
 \end{lstlisting}
 
 The first appears only if you run \texttt{ate \_pdf} yourself: the parent always tells the helper
-whether the sandbox was declined or agreed. The last is a \texttt{reports.paperSize} typo --- the
-config does not check that key.
+whether the sandbox was declined or agreed. The last used to be a \texttt{reports.paperSize} typo
+reaching the helper; this build's config refuses a bad value at startup with
+\texttt{'reports.paperSize' must be 'A4' or 'Letter'}, so the helper only sees it when \texttt{ate
+\_pdf} is run by hand with a bad \texttt{--paper}.
 
 \section{A window stopped updating}
 

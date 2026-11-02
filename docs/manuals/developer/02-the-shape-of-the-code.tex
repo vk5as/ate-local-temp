@@ -58,6 +58,7 @@ This table is the coverage list: \texttt{tests/\allowbreak{}test\_\allowbreak{}m
 \texttt{src/\allowbreak{}ate/\allowbreak{}run\_\allowbreak{}session/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the run session package; also widget-free \\
 \texttt{src/\allowbreak{}ate/\allowbreak{}run\_\allowbreak{}session/\allowbreak{}headless.py} & \texttt{HeadlessRunSession}: the object a layout binds to, and what a headless run uses \\
 \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak\_\allowbreak\_\allowbreak{}init\_\allowbreak\_\allowbreak.py} & the storage package: the only place ATE talks SQL \\
+\texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}backup.py} & the copy taken before a migration, and the one migration routine \texttt{ate db migrate} and \texttt{ate setup} share \\
 \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}schema.py} & every table in the Test Run record, as SQLAlchemy Core tables \\
 \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak{}store.py} & \texttt{RunStore}: writes, queries, batching, the schema check \\
 \texttt{src/\allowbreak{}ate/\allowbreak{}storage/\allowbreak\_\allowbreak{}uuid.py} & UUIDv7 run keys, without \texttt{uuid.uuid7} \\

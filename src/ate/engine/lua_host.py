@@ -1218,10 +1218,19 @@ class _LuaHost:
         nil value", which xpcall/run_engine turns into an ERROR Attempt (criterion 02). The
         standard library still provides dofile/loadfile/load, so they must be shadowed explicitly.
         python is excluded by register_builtins=False but is set here too so it reads back as nil
-        and cannot reach the host's Python."""
+        and cannot reach the host's Python.
+
+        Packet 35: ``os.exit`` goes the same way. Measured before the fix, ``os.exit(7)`` in a
+        step ended the whole ATE process with status 7, leaving the run row open with no result
+        and nothing recorded. Nil makes the call an ordinary Lua error, which the run engine
+        isolates as an ERROR step and the run carries on without. ``os.execute`` and
+        ``os.getenv`` stay: schedules read the environment through them, and a command they run
+        is one of the two documented exceptions to the abort's 10 s bound."""
         for name in ("dofile", "loadfile", "load"):
             env[name] = None
         env["python"] = None
+        if env["os"] is not None:
+            env["os"]["exit"] = None
         # Packet 06a: when this host has a module map, install ATE's replacement ``require`` and close
         # off every other file on disk (empty package paths) so nothing outside the whitelist is reachable.
         self._install_require(env)  # always: stock require/package.path must never be reachable

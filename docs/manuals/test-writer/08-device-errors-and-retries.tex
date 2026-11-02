@@ -76,17 +76,21 @@ affected before promising a stop.
     when the command does: a command holds the abort for as long as it runs, however long that is.
     The step still reported \texttt{PASS} when it returned.
   \item \textbf{A busy loop inside a coroutine.} The count hook does not reach a coroutine, so a
-    loop in one runs to completion after an abort and the run ends when the loop does: a long
-    enough loop holds the abort the same way. An unbounded \texttt{while true do end} inside
+    loop in one may run on after an abort and the run ends only when the loop does: a long enough
+    loop holds the abort for as long as it takes. An unbounded \texttt{while true do end} inside
     \texttt{coroutine.wrap} stopped at all only when the process was killed, with its
     \texttt{test\_run} row left open. This is why the engine's own docstring advises a schedule
     not to use coroutines: the exception is real, but it is not easy to stop.
 \end{itemize}
 
-\texttt{os.exit} is not an exception, and stays a never. \texttt{os.exit(7)} called in a step exits
-the whole ATE process with status 7: the run row is left with no \texttt{ended\_at} and no result,
-the next launch closes it as \texttt{INTERRUPTED}/\texttt{FAIL}, no Post-test Action runs and no
-report is written. Nothing is recorded.
+\texttt{os.exit} is not in the sandbox, and stays a never. \texttt{\_lockdown} sets it to
+\texttt{nil} alongside \texttt{dofile}, \texttt{loadfile} and \texttt{load}, so
+\texttt{os.exit(7)} called in a step is an ordinary Lua error: the step reports \texttt{ERROR}, the
+run is recorded and closed, Post-test Actions still run, and ATE keeps going. Before this build the
+same call exited the whole process with status 7 and left the run row with no \texttt{ended\_at} and
+no result (\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}:
+\texttt{test\_\allowbreak{}os\_\allowbreak{}exit\_\allowbreak{}in\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}is\_\allowbreak{}not\_\allowbreak{}in\_\allowbreak{}the\_\allowbreak{}sandbox\_\allowbreak{}and\_\allowbreak{}ends\_\allowbreak{}the\_\allowbreak{}step\_\allowbreak{}with\_\allowbreak{}an\_\allowbreak{}error}). \texttt{os.execute} and
+\texttt{os.getenv} are still there.
 
 A plain loop in a step, \texttt{ATE.sleep} and \texttt{ATE.input} all do stop inside the ten
 seconds.

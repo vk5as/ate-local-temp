@@ -89,7 +89,7 @@
     },
     {
       "path": "sandbox.tslua",
-      "sha256": "e40b7d8eafd167b5d52f844957962b505f53009d791a38bb2729413462aaee99"
+      "sha256": "c9f5d83334cfe892cc9f5a5bec7f34ea7c93b9b61845200c83bebd6ee7ce54c2"
     },
     {
       "path": "forbidden.tslua",

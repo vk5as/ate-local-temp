@@ -442,15 +442,21 @@ def test_db_help_and_config_flag_parse(capsys, tmp_path):
 
 
 def test_subcommands_still_tolerate_extra_arguments(capsys, tmp_path):
-    """The base CLI used parse_known_args: stray tokens after db/setup were ignored (30a review)."""
+    """The base CLI used parse_known_args: stray tokens after db/setup were ignored (30a review).
+
+    Packet 35 narrowed it for ``setup``: a leftover word is still ignored, but an unknown ``-``
+    flag is a usage error, because ``ate setup --conig /path/config.json`` used to be dropped
+    silently and the Station was prepared from the default config instead."""
     db = tmp_path / "ate.db"
     code = main(["db", "status", str(db), "extra", "--junk"])
     err = capsys.readouterr().err
     assert code == 1 and "unrecognized" not in err, f"argparse rejected stray args: {code} {err!r}"
     code = main(["db", "migrate", str(db), "--yes", "stray"])
     assert code == 0, capsys.readouterr().err
-    code = main(["setup", "--root", str(tmp_path / "station"), "--bogus"])
+    code = main(["setup", "--root", str(tmp_path / "station"), "stray", "--no-permissions"])
     assert code == 0, capsys.readouterr().err
+    code = main(["setup", "--root", str(tmp_path / "station"), "--bogus", "--no-permissions"])
+    assert code == 1 and "unknown argument" in capsys.readouterr().err, code
 
 
 def test_unknown_command_exits_one_with_the_old_hint(capsys):

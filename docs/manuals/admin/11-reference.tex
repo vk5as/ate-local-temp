@@ -9,22 +9,27 @@ Command & What it does \\
 \midrule
 \endhead
 \texttt{ate} & Opens the application. With an unusable config or database, refuses and exits 1. \\
-\texttt{ate --config PATH} & Read that config instead of the platform default. Works with every
-  subcommand. \\
+\texttt{ate --config PATH} & Read that config instead of the platform default. It may sit before the
+  subcommand (\texttt{ate --config X db status}) or after it (\texttt{ate db status --config X}). \\
 \texttt{ate -V}, \texttt{ate --version} & Print the version and exit 0. \\
 \texttt{ate --help} & Print usage at any level and exit 0. \\
 \texttt{ate --allow-unsandboxed-pdf} & When ATE is root or an administrator, render Test Report PDFs
   without Chromium's sandbox instead of asking (or skipping them). Has no effect for an ordinary
   user, and says so. \\
 \texttt{ate db status [PATH]} & Print the database's schema version. Read-only: it never creates a
-  database. Exits 1 with the refusal if it is missing or outdated. \\
+  database. Exits 1 with the refusal if it is missing, outdated, unreadable or not a database. \\
 \texttt{ate db migrate [PATH] [--yes|-y]} & Create or upgrade the database, after confirmation unless
-  \texttt{--yes}. Refuses a database built by a newer ATE. \\
+  \texttt{--yes}. Copies the database beside itself first, when a migration will run. Refuses a
+  database built by a newer ATE, and refuses to migrate when the copy cannot be written. \\
 \texttt{ate setup} & Create the Station's directories, write a default config if none exists, and
-  migrate the database. \\
+  migrate the database named by the config. \\
 \texttt{--root DIR} & Prepare DIR as the Station root: DIR/data and DIR/config. \\
 \texttt{--data-dir DIR} & Use DIR for the data directory instead of the root's \texttt{data/}. \\
 \texttt{--config-dir DIR} & Use DIR for the config directory instead of the root's \texttt{config/}. \\
+\texttt{--config FILE} & Read that file as the config, and write the default into it if it is not
+  there, instead of \texttt{<config-dir>/config.json}. It may sit before \texttt{setup}
+  (\texttt{ate --config X setup}) or after it (\texttt{ate setup --config X}); two different values
+  on one command are refused. \\
 \texttt{--no-permissions} & Skip the group, ownership and ACL treatment explicitly (packagers and
   test runs). \\
 \texttt{ate definition update <file.atedef>} & Recompute every listed file's SHA-256 in place,

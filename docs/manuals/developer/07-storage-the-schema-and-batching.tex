@@ -1,8 +1,9 @@
 \chapter{Storage: the schema, batching, and the log counter}\label{ch:storage}
 
-\texttt{src/ate/storage/} is the only place ATE writes SQL. Two files: \texttt{schema.py} declares every
-table as a SQLAlchemy Core table, and \texttt{store.py} implements \texttt{RunStore}, the only interface
-the rest of the application uses. Nothing outside these two files contains a table name or a query.
+\texttt{src/ate/storage/} is the only place ATE writes SQL. Three files: \texttt{schema.py} declares
+every table as a SQLAlchemy Core table, \texttt{store.py} implements \texttt{RunStore}, the only
+interface the rest of the application uses, and \texttt{backup.py} holds the one routine that backs a
+database up and then migrates it. Nothing outside these files contains a table name or a query.
 
 \section{The record, and the version}
 
@@ -47,9 +48,27 @@ launch. The application never migrates; \texttt{ate db migrate} does, and the hi
 \texttt{--config <path>} when the Station is not reading the platform default (packet 30c).
 
 \texttt{RunStore.\_\allowbreak{}ensure\_\allowbreak{}schema} is idempotent: \texttt{metadata.create\_all} reflects each table through
-the backend's own catalog, so reopening a populated database never fails, and then the two pragmas ---
-WAL and the version --- are set on the store's own stdlib connection. That is the only raw SQL in ATE,
-and it is confined to pragmas.
+the backend's own catalog, so reopening a populated database never fails. The version stamp is what
+packet 35 changed: \texttt{PRAGMA user\_version} is raised only when the build's
+\texttt{missing\_tables(path)} was non-empty --- when a table was really created. A database that stores
+an older version but already holds every table this ATE declares has had no migration to earn the stamp,
+so opening it raises \texttt{SchemaVersionError} naming that version instead of quietly declaring it
+current. WAL and the version are the two pragmas set on the store's own stdlib connection: the only raw
+SQL in ATE, and it is confined to pragmas.
+
+\texttt{src/ate/storage/backup.py} is the one routine \texttt{ate db migrate} and \texttt{ate setup}
+both call, so an upgrade through an installer and an upgrade by hand take the same copy.
+\texttt{backup\_for\_migration} decides honestly whether a copy is needed, and the rule is the one the
+admin manual states: no copy for a file that does not exist and none for one that holds no tables at
+all, a copy whenever \texttt{missing\_tables(path)} is non-empty --- including a database already
+stamped at this build's version that is missing a table, because that migration changes real data.
+The copy is written to \texttt{<name>.partial}, checked with \texttt{integrity\_check}, the table set and
+the version against the source, and only then renamed to \texttt{<db>.backup-<YYYYMMDD-HHMMSS>} beside
+the file, never over an existing name. Every step of it runs inside \texttt{BACKUP\_LOCK\_TIMEOUT\_S},
+so a database locked by another process is refused in one line rather than hanging the installer. The
+backup API is used rather than \texttt{cp} because it folds \texttt{-wal} into the
+copy: a database with a Test Run in flight is copied whole. \texttt{migrate\_database} then refuses if
+the copy cannot be written, and reports the copy's path when a migration fails after it.
 
 \section{One commit per row, and why that is a design decision}
 

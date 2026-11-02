@@ -89,6 +89,7 @@ blocking input and records the thread each slot ran on.
 | `src/ate/setup.py` | `ate setup`: directories, config and permissions for every install format |
 | `src/ate/storage/__init__.py` | the storage package: the only place ATE talks SQL |
 | `src/ate/storage/_uuid.py` | UUIDv7 run keys without `uuid.uuid7` |
+| `src/ate/storage/backup.py` | `backup_for_migration` and `migrate_database`: the copy taken before a migration, and the migration both `ate db migrate` and `ate setup` call |
 | `src/ate/storage/schema.py` | the Test Run record tables and `SCHEMA_VERSION` |
 | `src/ate/storage/store.py` | `RunStore`: every write, the batching, `_log_seq`, the launch check |
 | `src/ate/ui/__init__.py` | layouts and screens: the only place `QtWidgets` is allowed |
@@ -167,7 +168,8 @@ fix them: a command a step runs with `os.execute`, which the abort cannot end, a
 inside a coroutine, where the count hook never ticks
 (`tests/test_manuals.py`: `test_a_command_in_a_step_holds_the_abort_until_it_finishes`,
 `test_a_coroutine_loop_runs_to_completion_after_an_abort`). Neither is forbidden in a schedule.
-`os.exit` is not an exception: it ends the process with the run row left open and nothing recorded.
+`os.exit` is nil in a schedule, so it is not an exception at all: calling it in a step raises and the
+step is recorded as an ERROR Attempt.
 
 Three things cannot be interrupted: a SQLite commit already in progress, one Lua C call such as a
 pattern match on a huge string, and `set_visa_attribute` or `resource.timeout` on the worker.
@@ -316,60 +318,64 @@ def main() -> int:
     config = read_config(Path(args.config))
     names = _step_names(config, args.schedule)
     session = HeadlessRunSession(config, pdf_choice=lambda _html: PDF_SKIPPED)
-    states: list[SessionState] = []
-    session.state_changed.connect(states.append)
-    # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
-    # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
-    # the name is looked up in the schedule's tree before the value is supplied.
-    refused: list[str] = []
+    try:
+        states: list[SessionState] = []
+        session.state_changed.connect(states.append)
+        # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
+        # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
+        # the name is looked up in the schedule's tree before the value is supplied.
+        refused: list[str] = []
 
-    def _supply(node_seq: int, attempt_no: int, index: int) -> None:
-        name = names.get(node_seq)
-        if name not in inputs:
-            print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
-            return
-        try:
-            session.supply_input(node_seq, attempt_no, index, inputs[name])
-        except ValueError as exc:
-            # The step's declaration rejected the value. This slot runs in the worker thread, so an
-            # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
-            refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
-            print(f"ERROR: {refused[-1]}", file=sys.stderr)
+        def _supply(node_seq: int, attempt_no: int, index: int) -> None:
+            name = names.get(node_seq)
+            if name not in inputs:
+                print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+                return
+            try:
+                session.supply_input(node_seq, attempt_no, index, inputs[name])
+            except ValueError as exc:
+                # The step's declaration rejected the value. This slot runs in the worker thread, so an
+                # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
+                refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
+                print(f"ERROR: {refused[-1]}", file=sys.stderr)
 
-    if inputs:
-        session.input_asked.connect(_supply)
-    # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
-    # somebody here, so every pause gets the scripted answer in order.
-    answers = list(args.choice)
-    session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose(answers.pop(0) if answers else "CONTINUE"))
-    session.set_operator("runner.py")
-    session.set_project("Developer manual worked example")
-    session.set_uut_type("Example board")
-    session.set_uut_serial("DEV-34C")
-    session.select_schedule(args.schedule)
-    session.start()
+        if inputs:
+            session.input_asked.connect(_supply)
+        # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
+        # somebody here, so every pause gets the scripted answer in order.
+        answers = list(args.choice)
+        session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose(answers.pop(0) if answers else "CONTINUE"))
+        session.set_operator("runner.py")
+        session.set_project("Developer manual worked example")
+        session.set_uut_type("Example board")
+        session.set_uut_serial("DEV-34C")
+        session.select_schedule(args.schedule)
+        session.start()
 
-    app = QCoreApplication.instance() or QCoreApplication([])
-    started = time.monotonic()
-    deadline = started + 25.0
-    while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
-        if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
-            session.request_abort()
-            args.abort_after = None  # request once, not every turn of the loop
-        app.processEvents()
-        time.sleep(0.02)
+        app = QCoreApplication.instance() or QCoreApplication([])
+        started = time.monotonic()
+        deadline = started + 25.0
+        while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
+            if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
+                session.request_abort()
+                args.abort_after = None  # request once, not every turn of the loop
+            app.processEvents()
+            time.sleep(0.02)
 
-    run = session.store.get_test_run(session.run_uuid)
-    print(json.dumps({
-        "result": run["result"],
-        "end_reason": run["end_reason"],
-        "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
-        "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
-        "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
-        "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
-        "refused_inputs": refused,
-    }))
-    session.close()
+        run = session.store.get_test_run(session.run_uuid)
+        print(json.dumps({
+            "result": run["result"],
+            "end_reason": run["end_reason"],
+            "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+            "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
+            "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
+            "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+            "refused_inputs": refused,
+        }))
+    finally:
+        # Closed whatever the run did, as the harness does: a session left open keeps the database
+        # and the app log handle open, and the scratch directory it wrote into cannot be removed.
+        session.close()
     return 0 if SessionState.FINISHED in states else 1
 
 
@@ -420,18 +426,22 @@ new row type that is emitted inline with steps must take its `seq` from the same
 will order it wrong.
 
 The launch check, `check_database_at_launch`, compares `PRAGMA user_version` with `SCHEMA_VERSION` and
-returns `NEEDS_MIGRATE`, `TOO_OLD` or `OK`. `ate db status` prints the version; `ate db migrate` creates
-or upgrades.
+returns `NEEDS_MIGRATE`, `TOO_OLD`, `NOT_A_DATABASE`, `NOT_READABLE` or `OK`. `ate db status` prints the
+version; `ate db migrate` creates or upgrades, after the copy.
 
 ## The Lua host and the sandbox
 
-`src/ate/engine/lua_host.py` treats a Test Schedule as untrusted input. Each schedule load gets a fresh
+`src/ate/engine/lua_host.py` treats a Test Schedule as code it has to account for, not as an enemy to
+defend against: a schedule is the Station's own trusted code. Each schedule load gets a fresh
 `lupa` runtime, created with `register_builtins=False`, and then `_lockdown` shadows the file-loading
 entry points before anything is registered:
 
 - `dofile`, `loadfile` and `load` are set to `nil` (the Lua standard library still provides them, so they
   have to be shadowed explicitly);
 - `python` is set to nil, so the host's Python is not reachable from a schedule;
+- `os.exit` is set to nil (packet 35): a step that calls it gets an error, not an exit. `os.execute`
+  and `os.getenv` stay; lupa's `os` is only `clock`, `date`, `difftime`, `execute`, `exit`, `getenv`,
+  `remove`, `rename`, `setlocale`, `time`, `tmpname`, so `os.abort` was never there to remove;
 - `require` is ATE's own, and `package.path` and `package.cpath` are emptied: only the whitelist from the
   Test Definition and the modules in `src/ate/lua/` (as `require("ate.devices")`) can be loaded;
 - `debug` is reduced to `debug.traceback`. The full library reaches the instance loader through
@@ -442,6 +452,11 @@ entry points before anything is registered:
 The abort hook is installed before the schedule runs: `debug.sethook(check_abort, "", 1000)`, and
 `pcall`/`xpcall` are wrapped to re-raise `aborted` so a schedule's own error handling cannot swallow an
 abort. `print` is redirected to `ATE.log(INFO, ...)`.
+
+None of this is a defence against the person who wrote the schedule. `os.execute`, `os.remove` and
+`os.rename` are reachable from a step: `os.execute("kill -9 $PPID")` ends ATE with the run row left
+open, and `os.remove` on the database takes the record away under a running run. The lockdown buys
+traceability, not protection.
 
 `_AteTable` is what a schedule sees. Every function is wrapped by `_isolate`, which turns a raised ATE
 error into the `(false, message)` Device failure shape or an ERROR Attempt, naming the schedule file and
@@ -625,8 +640,12 @@ Commands the suite runs and checks, all in a temporary Station:
 QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider
 QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples
 python -m ate db migrate /tmp/station/data/ate.db --yes
-python -c "import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"
+python -c "import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())" /tmp/station/data/ate.db
 ```
+
+The database path is an argument, not a string inside the `-c` code: on Windows it arrives with
+backslashes, and a Windows path pasted into a string literal is a `SyntaxError` about a truncated
+`\U` escape before SQLite is ever opened.
 
 `python docs/manuals/build.py developer` builds this manual's PDF in Docker with texlive; it is run by
 hand, not by the suite, which checks the sources rather than the rendered pages.
@@ -953,10 +972,10 @@ review_note = Table(
 
 Nothing else is needed: `RunStore._ensure_schema` calls `metadata.create_all`, which reflects each table
 through the backend's own catalog and never raises on a database that already has it, and sets
-`PRAGMA user_version`. Use the record's types: UUIDs as 36-character `Text`, times as ISO-8601 `Text`,
-booleans as `Integer` 0/1, structured values as JSON `Text`. No SQLite-only column: a Postgres backend
-is a connection change. The only raw SQL in the storage layer is the two pragmas, and they stay in
-`src/ate/storage/store.py`.
+`PRAGMA user_version` only when `missing_tables` found something to create. Use the record's types:
+UUIDs as 36-character `Text`, times as ISO-8601 `Text`, booleans as `Integer` 0/1, structured values as
+JSON `Text`. No SQLite-only column: a Postgres backend is a connection change. The only raw SQL in the
+storage layer is the two pragmas, and they stay in `src/ate/storage/store.py`.
 
 Then:
 
@@ -964,20 +983,43 @@ Then:
 python -m ate db migrate /tmp/station/data/ate.db --yes
 ```
 
-prints `created or upgraded database at ... (schema version 6)`. The test runs it twice against the same
-file --- first with the shipped code, which reports version 5, then with the patched copy, which adds
-`review_note` on top --- and asserts the set of tables only grew. Pointed at the version 6 database, the
-shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is `check_database_at_launch`
-returning `TOO_OLD`.
+prints `backed up ... to ....backup-<YYYYMMDD-HHMMSS>` and `created or upgraded database at ...
+(schema version 6)`. The test runs it against the same file more than once --- first with the shipped
+code, which creates the version 5 record and makes no copy because there was no database to copy, then
+with the patched copy, which copies the version 5 database beside itself and adds `review_note` on
+top --- and asserts the set of tables only grew and that the copy still says version 5. Pointed at the
+version 6 database, the shipped code exits 1 with `this ATE is too old for ...; update ATE`: that is
+`check_database_at_launch` returning `TOO_OLD`.
 
-Note what is not true: `ate db migrate` makes no backup, whatever the spec says. And `create_all` does
-not alter a table that already exists, so adding a column is not a version bump --- it needs an explicit
-migration, written and tested as one. The trap is that `RunStore._ensure_schema` sets
-`PRAGMA user_version = SCHEMA_VERSION` unconditionally: the first open of an old database stamps it as
-current, the launch check then passes, and the missing column appears later as an `OperationalError` on
-insert or a `NULL` where a value should be. There is no `ALTER` or `add_column` anywhere in `src/ate`,
-and every insert names its columns by hand (`insert_test_run` builds its row field by field), so an
-upgrade never fills a new column.
+`src/ate/storage/backup.py` is where the copy comes from, and `migrate_database` is the routine both
+`ate db migrate` and `ate setup` call, so an installer upgrade and a hand-run upgrade take the same
+copy. A copy is taken exactly when this build has a table to create: none for a file that does not
+exist, none for one that holds no tables at all, one whenever `missing_tables(path)` is non-empty --
+including a database already stamped at this version that is missing a table. SQLite's
+`Connection.backup` writes `<db>.backup-<YYYYMMDD-HHMMSS>` beside the file and never over an existing
+name; the copy is written as `<name>.partial`, checked (`integrity_check`, the same tables, the same
+version) and only then renamed. The copy is given up on when it stops moving for
+`BACKUP_LOCK_TIMEOUT_S = 10.0` seconds: a database held by another process is refused inside that
+time rather than waited out, and a database that keeps copying is never refused for taking a long
+time. If the copy cannot be written the migration is refused: the command names the path and the
+reason, exits 1, and changes nothing.
+
+Spec rule 20's timestamped backup is no longer the Administrator's job (see
+`.scratch/ate-v1-wayfinding/assets/test-run-record.md`).
+
+And `create_all` does not alter a table that already exists, so adding a column is not a version bump ---
+it needs an explicit migration, written and tested as one. Packet 35 removed the silent version of that
+mistake where nothing is created at all: `RunStore._ensure_schema` stamps `PRAGMA user_version` only
+when a table was created, so a database storing an older version that already has every table gets its
+own launch status, `NO_MIGRATION`, and `db status`, `db migrate` and the launch dialog refuse it with
+one line, e.g. `the database at ... stores schema version 5 and already holds every table this ATE
+declares: this ATE has no migration from version 5 to 6, so it is not stamped as version 6, and
+`ate db migrate` on it changes nothing`. There is
+no `ALTER` or `add_column` anywhere in `src/ate`, and every insert names its columns by hand
+(`insert_test_run` builds its row field by field), so an upgrade never fills a new column. What the
+guard cannot see is a bump that adds a column *next to* a new table: the new table makes
+`missing_tables` non-empty, so the stamp is raised and the column is never added. A real migration
+registry -- steps from N to N+1, run in order, each tested -- is needed before the next schema version.
 
 A new table is not a new report: `src/ate/report/html.py` reads through the store's query methods, so a
 table nothing queries is invisible on the page. Batching applies to a new row type as well
@@ -1075,7 +1117,6 @@ python docs/manuals/build.py developer   # Docker, texlive/texlive:latest
 
 Where the documents and the code disagree, the code was followed and the document left as it is:
 
-- spec rule 20 says `ate db migrate` upgrades "after a timestamped backup". It makes none.
 - spec rule 08 says `log_line` rows are written "about once a second". They are inserted per step.
 - The 32a notes say the release workflow has "5 jobs". It defines three: `windows-installer`,
   `linux-build`, and `linux-smoke` with a `deb`/`tar`/`wheel` matrix --- five job runs.

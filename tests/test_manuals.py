@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import hashlib
 import importlib
 import importlib.util
@@ -508,6 +509,8 @@ COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
     ("ate --config /tmp/station/config/config.json db status",
      ["--config", "{config}", "db", "status"], 0, "", "{station}"),
     ("ate db status", ["db", "status"], 0, "", "{station}"),
+    ("ate db status --config /tmp/station/config/config.json",
+     ["db", "status", "--config", "{config}"], 0, "", "{station}"),
     ("ate db migrate --yes", ["db", "migrate", "--yes"], 0, "created or upgraded database at", "{station}"),
     ("ate db migrate /tmp/station/data/ate.db --yes",
      ["db", "migrate", "{db}", "--yes"], 0, "schema version 5", "{station}"),
@@ -538,6 +541,13 @@ COMMANDS_NOT_RUN: dict[str, str] = {
     "sudo ate setup":
         "needs root. The permissions it applies are checked through the seams named below, never "
         "by running groupadd or chown on this machine",
+    "sudo /opt/ate/ate setup":
+        "needs root and the installed bundle. tests/test_linux_packages_28b.py runs the real "
+        "postinst in a temporary root and shows it calls this same setup and exits 1 when that "
+        "call fails, which is the state the recovery below is for",
+    "sudo dpkg --configure -a":
+        "only means anything on a machine with a half-configured ATE package; the failure it "
+        "recovers from is the postinst test named just above",
     "ate setup":
         "writes to the platform config and data directories. conftest pins the platform data "
         "directory for every test; the --root form above is the one that is executed",
@@ -561,6 +571,17 @@ COMMANDS_NOT_RUN: dict[str, str] = {
         "the placeholder form of the `--root` line above, which is run in a temporary Station",
     "ate setup --data-dir DIR --config-dir DIR":
         "run by tests/test_cli_setup.py, which points both directories at a temporary directory",
+    "ate setup --config /etc/ate/config.json":
+        "names the platform config, and setup without --root would then write the database that "
+        "config names under the platform data directory. conftest pins that directory, and setup's "
+        "own layout takes both of them from ate.config: tests/test_cli_setup.py asserts a setup with "
+        "no --root lands where the config reader says the Station is, so nothing here touches the "
+        "real /etc/ate. The flag itself is run against a temporary Station by "
+        "tests/test_admin_gaps_35.py, which asserts setup reads the config named before or after the "
+        "subcommand",
+    "ate setup --config FILE":
+        "the placeholder form of the line above; tests/test_admin_gaps_35.py runs both sides of the "
+        "subcommand, and refuses a --config with no path after it",
     "ate setup --no-permissions":
         "run, as part of the `--root` line above",
     "ate db status [PATH]":
@@ -687,14 +708,61 @@ def test_db_status_prints_the_schema_version_the_manual_gives(station) -> None:
     assert code == 1 and "run `ate db migrate`" in err, f"a missing database should refuse: {err}"
 
 
-def test_the_config_flag_belongs_to_ate_not_to_db(station) -> None:
-    """The manual warns that `--config` must come before `db`, and the code proves it.
+def test_the_config_flag_works_before_or_after_the_subcommand(station) -> None:
+    """The manual says `--config` may sit before or after the subcommand, and the code proves it.
 
-    After the subcommand the path is read as a token, so `ate db status --config X` opens X as the
-    database. The manual tells an admin this, so the suite has to show it is true."""
-    code, out, err = run_ate(["db", "status", "--config", str(station / "config" / "config.json")], station)
-    assert code == 1 and "file is not a database" in err, f"expected the documented trap, got {err[-300:]}"
-    assert "ate --config PATH db status" in "\n".join(text for _label, text in MANUALS["admin"].texts())
+    Packet 35: written after the subcommand the token used to be read as a database path, so
+    `ate db status --config X` opened X as the database and died on an unhandled
+    `sqlite3.DatabaseError`. Both positions now read the config, and a path that is not a
+    database is refused in one line."""
+    from ate.storage.schema import SCHEMA_VERSION
+
+    config = station / "config" / "config.json"
+    code, out, err = run_ate(["db", "status", "--config", str(config)], station)
+    assert code == 0 and out.strip() == str(SCHEMA_VERSION), f"expected the config to be read, got {err[-300:]}"
+
+    not_a_db = station / "data" / "not-a-database.db"
+    not_a_db.write_text("this is a text file, not a database", encoding="utf-8", newline="\n")
+    code, out, err = run_ate(["db", "status", str(not_a_db)], station)
+    assert code == 1 and "is not a SQLite database" in err, f"a text file is not a database: {err[-300:]}"
+    assert "Traceback" not in err, err
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "ate db status --config PATH" in manual, "the manual no longer shows the flag after the subcommand"
+
+
+def test_both_forms_of_the_admin_manual_say_a_killed_copy_leaves_a_partial_to_delete() -> None:
+    """A `.partial` beside the database is the one thing a migration leaves that is not a copy.
+
+    Nothing can delete a half-written file at the instant the process dies, so a kill in the
+    middle of a migration leaves it there, along with the journal the half-written copy grew while
+    it was being written. An admin who finds one has to be told it is not a backup and is safe to
+    delete; the LaTeX chapter and the agent manual both have to say it (packet 35 review, rounds 2
+    and 3)."""
+    chapter = next(text for path, text in MANUALS["admin"].texts() if path.endswith("05-the-database.tex"))
+    markdown = MANUALS["admin"].markdown.read_text(encoding="utf-8")
+    for label, text in (("the LaTeX database chapter", chapter), ("the agent manual", markdown)):
+        text = " ".join(text.split())  # LaTeX breaks a sentence across source lines
+        assert ".partial" in text, f"{label} never names the file a killed copy leaves behind"
+        assert ".partial-journal" in text, f"{label} never names the journal the half-written copy grows"
+        assert "killed" in text, f"{label} does not say a killed copy can leave it behind"
+        assert "safe to delete" in text, f"{label} does not say the leftover .partial is safe to delete"
+
+
+def test_an_unprivileged_ate_setup_on_a_prepared_station_exits_zero(station) -> None:
+    """The manual says `install.sh` run by an ordinary user exits 1; it does not.
+
+    Skipping the group and ownership pass is not a failure: setup still creates the directories,
+    the config and the database, so on a Station a root run has already prepared an unprivileged
+    `ate setup` succeeds and `install.sh` exits 0. It exits 1 only when setup itself fails
+    (packet 35 review, round 2)."""
+    code, out, err = run_ate(["setup", "--root", str(station)], station)
+    assert code == 0, f"unprivileged setup on a prepared Station exited {code}: {out}\n{err}"
+    assert "running unprivileged; skipping group/ownership/ACL setup" in out + err, out + err
+
+    manual = " ".join("\n".join(text for _label, text in MANUALS["admin"].texts()).split())
+    assert "exits 0" in manual, "the manual still claims an ordinary user's setup cannot succeed"
+    assert "exits 1 telling you to finish" not in manual, manual
 
 
 def test_migrate_refuses_a_database_from_a_newer_ate(station) -> None:
@@ -766,11 +834,19 @@ QUOTED_MESSAGES: list[tuple[str, str, str]] = [
     ("'database.type' must be 'sqlite', got 'postgres'", "'database.type' must be 'sqlite'", "src/ate/config.py"),
     ("'ui.layout' must be 'staged' or 'threePane', got 'wide'", "'ui.layout' must be 'staged' or 'threePane'", "src/ate/config.py"),
     ("'devices.receiveBufferBytes' must be a positive integer", "'devices.receiveBufferBytes' must be a positive integer", "src/ate/config.py"),
+    ("'reports.paperSize' must be 'A4' or 'Letter'", "'reports.paperSize' must be 'A4' or 'Letter'", "src/ate/config.py"),
     ("has unknown placeholder '<datat>'", "has unknown placeholder {token!r}", "src/ate/config.py"),
     ("invalid JSON in config file", "invalid JSON in config file", "src/ate/config.py"),
     ("cannot write station.uuid to /etc/ate/config.json", "cannot write station.uuid to", "src/ate/config.py"),
     ("run `ate db migrate` to create or upgrade the database", "run `{hint}` to create or upgrade the database", "src/ate/storage/store.py"),
     ("this ATE is too old for the database", "this ATE is too old for", "src/ate/storage/store.py"),
+    ("cannot open the database at /var/lib/ate/ate.db", "cannot open the database at {self.path}", "src/ate/storage/store.py"),
+    ("is not a SQLite database", "is not a SQLite database", "src/ate/storage/store.py"),
+    ("this ATE has no migration from version 4 to 5", "no migration from version {stored} to {SCHEMA_VERSION}", "src/ate/storage/store.py"),
+    ("backed up /var/lib/ate/ate.db to", "backed up {path} to", "src/ate/storage/backup.py"),
+    ("refusing to migrate: cannot back up /var/lib/ate/ate.db to", "cannot back up {path} to", "src/ate/storage/backup.py"),
+    ("it made no progress for 10.0 s", "it made no progress for", "src/ate/storage/backup.py"),
+    ("nothing in the database was changed", "nothing in the database was changed", "src/ate/storage/backup.py"),
     ("Run 'ate setup' as admin, or point", "Run 'ate setup' as admin, or point the", "src/ate/app.py"),
     ("running unprivileged; skipping group/ownership/ACL setup", "running unprivileged; skipping group/ownership/ACL setup", "src/ate/cli.py"),
     ("checksum mismatch for lib/scpi.lua (expected", "checksum mismatch for {rel_path} (expected", "src/ate/engine/run_engine.py"),
@@ -1312,7 +1388,11 @@ def test_a_checksum_mismatch_is_recorded_and_warned(bench) -> None:
 
 
 def test_the_test_definition_lists_every_example_file() -> None:
-    """Every Lua file beside the manual's ``.atedef`` is listed by it, and only those files."""
+    """Every Lua file beside the manual's ``.atedef`` is listed by it, and only those files.
+
+    The checksums are checked at the same time: an example edited for the manual without running
+    `ate definition update` is a release whose files do not match their recorded hashes, and the
+    suite would run it as if it were valid (packet 35 review)."""
     atedef = json.loads((EXAMPLES_DIR / "manual.atedef").read_text(encoding="utf-8"))
     listed = {entry["path"] for entry in atedef["files"]}
     on_disk = {
@@ -1321,6 +1401,12 @@ def test_the_test_definition_lists_every_example_file() -> None:
         if p.suffix in (".tslua", ".lua")
     }
     assert listed == on_disk, f"Test Definition and directory disagree: {listed ^ on_disk}"
+    stale = [
+        entry["path"]
+        for entry in atedef["files"]
+        if hashlib.sha256((EXAMPLES_DIR / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]
+    ]
+    assert not stale, f"manual.atedef records hashes for files that changed: {stale}"
     hidden = {entry["path"] for entry in atedef["files"] if entry.get("hidden")}
     assert hidden == {"channel.tslua", "led.tslua"}, "only the Sub-schedules are hidden"
     for entry in atedef["files"]:
@@ -1576,6 +1662,47 @@ def test_the_developer_runner_reports_a_refused_input(tmp_path: Path) -> None:
     assert "Traceback" not in proc.stderr, proc.stderr[-400:]
 
 
+def _load_manual_runner():
+    """The manual's own ``runner.py`` as a module, so a test can drive it and patch its session."""
+    spec = importlib.util.spec_from_file_location("manual_runner", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_developer_runner_closes_its_session_when_the_run_fails(tmp_path: Path, monkeypatch) -> None:
+    """A run that raises after the session opens still closes it, and the app log with it.
+
+    ``session.close()`` sat at the end of ``main``, outside any ``finally``: the happy path closed
+    the session, and anything that went wrong in between left the database handle and the app log
+    open. The harness closes in a ``finally``; the manual's runner now does the same, and this is
+    the case where it matters."""
+    from ate.run_session.headless import HeadlessRunSession
+
+    runner = _load_manual_runner()
+    config = _echo_config(tmp_path, tmp_path / "src")
+    opened: dict[str, object] = {}
+
+    class SessionThatCannotStart(HeadlessRunSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened["session"] = self
+
+        def start(self) -> None:
+            raise RuntimeError("the worker refused to start")
+
+    monkeypatch.setattr(runner, "HeadlessRunSession", SessionThatCannotStart)
+    monkeypatch.setattr(sys, "argv", ["runner.py", str(config), "Developer: echo Device"])
+
+    with pytest.raises(RuntimeError, match="refused to start"):
+        runner.main()
+
+    session = opened["session"]
+    app_log = session._app_log
+    assert app_log is not None and app_log.path.exists(), "the session never opened its app log"
+    assert app_log._fh.closed, f"the runner left {app_log.path} open after the run failed"
+
+
 # --- The three things an abort does not stop, as the manual says ---------------------------
 
 #: The driver the abort tests run in their own process: a headless session on a scratch release,
@@ -1622,8 +1749,10 @@ with bench_env(peers), pdf_stub():
         app.processEvents()
         time.sleep(0.02)
     run = session.store.get_test_run(session.run_uuid)
-    steps = {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"}
-    print(f"elapsed={time.monotonic() - t0:.2f} run={run['result']}/{run['end_reason']} steps={steps}")
+    nodes = [n for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"]
+    steps = {n["step_number"]: n["result"] for n in nodes}
+    logs = [line["text"] for line in session.store.log_lines(session.run_uuid)]
+    print(f"elapsed={time.monotonic() - t0:.2f} run={run['result']}/{run['end_reason']} steps={steps} logs={logs}")
 session.close()
 peers.stop()
 """
@@ -1632,7 +1761,24 @@ peers.stop()
 #: inside a coroutine. A plain loop is cut off by the count hook; a coroutine is not hooked.
 LOOP = "local acc = 0 for i = 1, 120000000 do acc = acc + i end ATE.report(Result.PASS, 'the loop finished on its own')"
 COROUTINE_LOOP = ("local run = coroutine.wrap(function() " + LOOP + " end) run() "
+                  "ATE.log(Log.INFO, 'the coroutine finished on its own') "
                   "ATE.report(Result.PASS, 'the coroutine finished on its own')")
+
+
+@functools.lru_cache(maxsize=1)
+def _loop_seconds() -> float:
+    """How long the manual's loop takes on this machine, with the same lupa the engine uses.
+
+    The abort has to be judged against the loop's own length, not against a fixed number of
+    seconds. The CI runner did 120 million iterations in well under a second, so ``elapsed > 0.5``
+    failed on a machine that behaved exactly as the manual says (packet 35 review)."""
+    from lupa import LuaRuntime
+
+    runtime = LuaRuntime(register_eval=False, register_builtins=False)
+    started = time.perf_counter()
+    runtime.execute("local acc = 0 for i = 1, 120000000 do acc = acc + i end return acc")
+    return time.perf_counter() - started
+
 
 #: One long step and one after it: the abort's effect is visible in which of the two ran.
 ABORT_SCHEDULE = """-- probe.tslua: what an abort can and cannot interrupt.
@@ -1683,20 +1829,34 @@ def test_a_plain_busy_loop_gives_way_to_an_abort(tmp_path: Path) -> None:
     proc = _run_abort_probe(tmp_path, LOOP)
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed < 1.0, f"a plain loop took {elapsed} s to stop after an abort: {proc.stdout}"
+    loop = _loop_seconds()
+    assert elapsed < min(loop, 1.0), (
+        f"a plain loop took {elapsed} s to stop after an abort, while the loop itself takes "
+        f"{loop:.2f} s on this machine: {proc.stdout}"
+    )
     assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
     assert "'1.': 'ERROR'" in proc.stdout and "'2.': 'NOTRUN'" in proc.stdout, proc.stdout
 
 
 def test_a_coroutine_loop_runs_to_completion_after_an_abort(tmp_path: Path) -> None:
     """The count hook does not reach a coroutine, so the step finishes its work and the abort is
-    recorded on the next step - the limit the manual tells a test writer to avoid."""
+    recorded on the next step - the limit the manual tells a test writer to avoid.
+
+    The bound is the loop's own length on this machine, not a fixed number of seconds: a runner
+    fast enough to do 120 million iterations in a third of a second is not a runner that was cut
+    off (packet 35 review)."""
     proc = _run_abort_probe(tmp_path, COROUTINE_LOOP)
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed > 0.5, f"the coroutine was cut off in {elapsed} s; the manual says it is not: {proc.stdout}"
+    loop = _loop_seconds()
+    assert elapsed > loop / 2, (
+        f"the run ended {elapsed} s after the abort, while the loop alone takes {loop:.2f} s here: "
+        f"the step either finished its coroutine or was cut off, and the manual promises neither: {proc.stdout}"
+    )
+    assert elapsed < loop + 5.0, f"the run never ended: {elapsed} s for a {loop:.2f} s loop: {proc.stdout}"
     assert "run=FAIL/ABORTED" in proc.stdout, proc.stdout
     assert "'1.': 'PASS'" in proc.stdout and "'2.': 'ERROR'" in proc.stdout, proc.stdout
+    assert "the coroutine finished on its own" in proc.stdout, proc.stdout
 
 
 def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
@@ -1724,21 +1884,182 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
 
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
     """``os.execute`` is outside the hook: the run ends when the command does, not when the
-    Operator asks."""
-    proc = _run_abort_probe(tmp_path, 'os.execute("sleep 3") ATE.report(Result.PASS, "the command finished")')
+    Operator asks.
+
+    The command is timed here rather than assumed: ``sleep`` is not a Windows command, and the CI
+    runner that passed this test had a ``sleep`` only because a Git tool happened to be on its PATH.
+    The wait is measured, so the assertion is about the hold and not about a shell that may or may
+    not have the command (packet 35 review)."""
+    command = f'"{sys.executable}" -c "import time; time.sleep(3)"'
+    started = time.perf_counter()
+    held = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+    held_seconds = time.perf_counter() - started
+    assert held.returncode == 0 and held_seconds >= 2.0, (
+        f"the timing command itself took {held_seconds:.2f} s and exited {held.returncode}: {held.stderr[-200:]}"
+    )
+    proc = _run_abort_probe(
+        tmp_path,
+        f'local ok, how, code = os.execute({command!r}) '
+        f'ATE.log(Log.INFO, "the step ran a command that exited " .. tostring(code)) '
+        f"ATE.report(Result.PASS, 'the command finished')",
+    )
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed > 2.5, f"the abort ended the run in {elapsed} s while a 3 s command was running: {proc.stdout}"
+    assert elapsed >= held_seconds - 0.5, (
+        f"the abort ended the run in {elapsed} s while the same command takes {held_seconds:.2f} s "
+        f"outside ATE: {proc.stdout}"
+    )
     assert "'1.': 'PASS'" in proc.stdout, proc.stdout
+    assert "the step ran a command that exited 0" in proc.stdout, proc.stdout
 
 
-def test_os_exit_in_a_step_ends_the_process_with_that_status(tmp_path: Path) -> None:
-    """``os.exit(7)`` kills ATE where it stands: the process ends with 7 and the run row is left
-    open, with no result and no end time - the third limit the manual lists."""
+def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error(tmp_path: Path) -> None:
+    """``os.exit`` is nil in a schedule: the step ERRORs, the run is recorded, ATE keeps going.
+
+    Measured before packet 35, ``os.exit(7)`` in a step ended the whole process with status 7 and
+    left the run row open with nothing recorded. The lockdown removes it the way it removes
+    ``dofile``, ``loadfile`` and ``load``, so the call is an ordinary Lua error."""
     proc = _run_abort_probe(tmp_path, "os.exit(7)", abort_after=0.2)
-    assert proc.returncode == 7, f"os.exit(7) gave exit {proc.returncode}: {proc.stdout} {proc.stderr[-300:]}"
+    assert proc.returncode == 0, f"os.exit ended the process: {proc.stdout} {proc.stderr[-300:]}"
+    assert "'1.': 'ERROR'" in proc.stdout, proc.stdout
     row = _open_run_row(tmp_path / "station" / "ate.db")
-    assert row and row["ended_at"] is None and row["result"] is None, f"the run row is not open: {row}"
+    assert row and row["ended_at"] is not None and row["result"] is not None, f"the run row is not closed: {row}"
+
+
+#: The command the manual names as the way a schedule ends ATE from inside a step.
+KILL_COMMAND = "kill -9 $PPID"
+
+
+def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tmp_path: Path) -> None:
+    """lupa's `os` has no `abort`, and the manual used to say it stayed "unneeded".
+
+    Two things were wrong with that sentence: it names a function the runtime does not have, and it
+    implied the sandbox kept a schedule from hurting the Station. A step can run a command and can
+    delete a file; a Test Schedule is the Station's own code. The probe runs the command the manual
+    now quotes, and the process dies with the run row still open."""
+    proc = _run_abort_probe(tmp_path, f'os.execute("{KILL_COMMAND}") ATE.report(Result.PASS, "never reached")')
+    assert proc.returncode != 0, f"the step was expected to end the process, it returned {proc.returncode}: {proc.stdout[-300:]}"
+    row = _open_run_row(tmp_path / "station" / "ate.db")
+    assert row and row["ended_at"] is None, f"the process ended without closing its run row: {row}"
+
+    # Every manual, in both of its forms, has to say the same thing about a Test Schedule. The reader
+    # who reads one form and not the other should not come away believing the sandbox keeps a
+    # schedule from doing harm (packet 35 review, round 3).
+    for name in ("developer", "test-writer"):
+        for path, text in MANUALS[name].texts():
+            if "sandbox" not in Path(path).name.lower() and not path.endswith(".md"):
+                continue
+            where = f"the {name} manual's {Path(path).name}"
+            assert re.search(r"the\s+Station\Ss\s+own\s+(trusted\s+)?code", text), f"{where} never says a Test Schedule is ATE's own code"
+            assert "trust" in text.lower(), f"{where} calls a schedule the Station's own code but never says it is trusted"
+            assert "untrusted" not in text.lower(), f"{where} calls a Test Schedule untrusted input again"
+            assert "no schedule has ever needed" not in text, f"{where} still claims os.abort is there and unused"
+            assert "traceability" in text.lower(), f"{where} stopped saying what the sandbox is for"
+
+    manual = "\n".join(text for _label, text in MANUALS["developer"].texts())
+    assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
+
+
+# --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------
+
+#: The two ways an install can leave a Station half-prepared, and the recovery the manual gives.
+#: Neither is a ATE bug: the Windows installer runs setup with its window hidden, and the .deb's
+#: postinst exits 1 when setup fails, which leaves the package half-configured.
+
+def test_the_manual_recovers_from_an_install_that_left_the_station_unprepared() -> None:
+    """The packaging files say what they do, and the admin manual tells the Operator what to do about it.
+
+    A reader who has just installed ATE and finds no database needs the two commands, in order, and
+    neither of them is obvious from the installer's own message."""
+    iss = (ROOT / "packaging" / "windows" / "ate.iss").read_text(encoding="utf-8")
+    postinst = (ROOT / "packaging" / "linux" / "deb" / "postinst").read_text(encoding="utf-8")
+    assert "SW_HIDE" in iss, "the installer no longer runs 'ate setup' with a hidden window"
+    assert "'ate setup' failed" in postinst and "exit 1" in postinst, "postinst no longer fails with setup"
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "dpkg --configure -a" in manual, "the manual never tells an Operator to finish a half-configured package"
+    assert "sudo /opt/ate/ate setup" in manual, "the manual never names the setup command to re-run"
+    assert "hidden" in manual, "the manual stopped saying the Windows setup step has no output to read"
+
+
+def test_the_manual_gives_the_exit_codes_install_sh_actually_returns(tmp_path: Path) -> None:
+    """The admin manual's exit codes for ``install.sh`` are the ones the script returns.
+
+    It said ``install.sh`` exits 1 only when setup cannot do its job. It also exits 1 when there is
+    nothing to install and 2 when the command line is wrong, and an Operator wrapping it in a script
+    has to branch on the difference (packet 35 review, round 3). Each case is run for real against a
+    temporary prefix; nothing outside ``tmp_path`` is written."""
+    if os.name != "posix":
+        pytest.skip("install.sh is a POSIX shell script")
+
+    here = tmp_path / "tarball"
+    here.mkdir()
+    shutil.copyfile(ROOT / "packaging" / "linux" / "install.sh", here / "install.sh")
+
+    def run(*args: str) -> int:
+        proc = subprocess.run(
+            ["/bin/sh", str(here / "install.sh"), *args],
+            capture_output=True, text=True, cwd=str(here), timeout=60,
+        )
+        return proc.returncode
+
+    assert run("--prefix") == 2, "install.sh did not exit 2 on --prefix with no value"
+    assert run("--what") == 2, "install.sh did not exit 2 on an argument it does not know"
+    assert run("--prefix", "/") == 2, "install.sh did not exit 2 on a prefix of /"
+    assert run("--prefix", str(tmp_path / "opt")) == 1, "install.sh did not exit 1 with no bundle beside it"
+    assert run("--uninstall", "--prefix", str(tmp_path / "empty")) == 1, "install.sh did not exit 1 when there is nothing to uninstall"
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "exits 2" in manual, "the manual never says a wrong command line exits 2"
+    assert re.search(r"bundle\s+beside the script", manual), "the manual never says a missing bundle is an exit 1"
+    assert "exits 1 only when setup cannot" not in manual, "the manual still claims setup is the only exit 1"
+
+
+def test_every_test_the_manuals_cite_is_a_test_the_suite_has() -> None:
+    """A manual that names a test names one the suite has.
+
+    The sandbox chapter pointed at ``test_a_schedule_is_the_station_s_own_code_and_can_end_the_process``:
+    no test is called that, and a developer who goes looking for it finds nothing (packet 35 review,
+    round 3). A name the code itself uses --- the ``test_run`` table, the ``test_definition_dirs``
+    config key --- is not a citation, so it is allowed; everything else spelled like a test has to
+    be a file under ``tests/`` or a function defined in one."""
+    defined = {
+        name
+        for path in (ROOT / "tests").rglob("*.py")
+        for name in re.findall(r"^def (test_[A-Za-z0-9_]+)", path.read_text(encoding="utf-8"), re.M)
+    }
+    files = {path.stem for path in (ROOT / "tests").glob("*.py")}
+    code = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.py"))
+
+    drift: list[str] = []
+    for label, text in (item for manual in MANUALS.values() for item in manual.texts()):
+        for stem in set(re.findall(r"tests/([A-Za-z0-9_]+)\.py", text)):
+            if not (ROOT / "tests" / f"{stem}.py").exists():
+                drift.append(f"{label}: there is no tests/{stem}.py")
+        for name in set(re.findall(r"\btest_[A-Za-z0-9_]+", text)):
+            if name not in defined and name not in files and name not in code:
+                drift.append(f"{label}: there is no test named {name}")
+    assert not drift, f"the manuals cite tests that do not exist: {sorted(drift)}"
+
+
+def test_a_command_the_manual_shows_does_not_put_a_path_inside_the_code() -> None:
+    """A Windows path inside `python -c "..."` is an escape sequence, not a path.
+
+    The suite substitutes a real temporary path into every command the developer manual shows, and
+    the CI runner died on `SyntaxError: unicodeescape` because the database path sat inside the
+    quoted code (packet 35 review). Any command the suite runs through `-c` takes its paths as
+    arguments, where backslashes are just characters."""
+    for line, argv, *_expected in DEV_COMMANDS_RUN:
+        if argv[:1] != ["-c"]:
+            continue
+        code = argv[1]
+        assert "\\" not in code, f"{line}: the -c code carries a path, which is a Windows escape trap"
+        assert not any(placeholder in code for placeholder in ("{db}", "{config}", "{station}", "{data}")), (
+            f"{line}: a path belongs in the arguments, not inside the code"
+        )
+        assert any("{db}" in arg or "{config}" in arg for arg in argv[2:]), (
+            f"{line}: no argument names the file the code reads"
+        )
 
 
 # --- Packet 34c: the developer manuals are held to the code ------------------------------
@@ -1786,8 +2107,8 @@ DEV_COMMANDS_RUN: list[tuple[str, list[str], int, str, str]] = [
      ["-m", "build", "--wheel", "--no-isolation", "-o", "{dist}"], 0, "Successfully built", "{repo}"),
     ("QT_QPA_PLATFORM=offscreen python -m examples.harness.run_examples",
      ["-m", "examples.harness.run_examples"], 0, "ran 13 headless runs", "{repo}"),
-    ("python -c \"import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())\"",
-     ["-c", "import sqlite3; rows=sqlite3.connect('{db}').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"],
+    ("python -c \"import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())\" /tmp/station/data/ate.db",
+     ["-c", "import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())", "{db}"],
      0, "", "{repo}"),
     ("python -m ate db migrate /tmp/station/data/ate.db --yes",
      ["-m", "ate", "db", "migrate", "{db}", "--yes"], 0, "schema version", "{repo}"),
@@ -2177,9 +2498,41 @@ def test_adding_a_schema_version_the_way_the_manual_says_works(tmp_path) -> None
     finally:
         conn.close()
     assert "schedule_instance" in before, sorted(before)
+    # A database that did not exist has nothing to copy: the first migration makes no backup.
+    assert not [p for p in tmp_path.iterdir() if ".backup-" in p.name], sorted(tmp_path.iterdir())
+
+    # Chapter 17's warning, executed: a version bump with no table to create is refused, not stamped.
+    bump_only = tmp_path / "bump-only"
+    bump_src = _copy_src(bump_only)
+    bump_schema = bump_src / "ate/storage/schema.py"
+    bump_schema.write_text(
+        bump_schema.read_text(encoding="utf-8").replace("SCHEMA_VERSION = 5", "SCHEMA_VERSION = 6", 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+    code, out = migrate(bump_src)
+    assert code == 1 and "this ATE has no migration from version 5 to 6" in out, out
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    finally:
+        conn.close()
+    assert not [p for p in tmp_path.iterdir() if ".backup-" in p.name], "nothing to migrate makes no copy"
 
     code, out = migrate(src)
     assert code == 0 and "schema version 6" in out, out
+    # The upgrade of an existing database copies it first, and says where the copy is.
+    copies = [p for p in tmp_path.iterdir() if ".backup-" in p.name]
+    assert len(copies) == 1, sorted(tmp_path.iterdir())
+    assert str(copies[0]) in out, out
+    conn = sqlite3.connect(copies[0])
+    try:
+        copied_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        copied_tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+    assert copied_version == 5 and "review_note" not in copied_tables, sorted(copied_tables)
+
     conn = sqlite3.connect(db)
     try:
         after = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

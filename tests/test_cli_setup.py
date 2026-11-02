@@ -15,9 +15,12 @@ import sqlite3
 import subprocess
 import sys
 import types
+from pathlib import Path
+
 import pytest
 
 from ate.cli import main, _is_root
+from ate import config as ate_config
 from ate import setup as ate_setup
 from ate.permissions import ATE_GROUP, LinuxPermissions, RecordingPermissions, WindowsPermissions
 from ate.setup import SKIP_PERMISSIONS, prepare_station
@@ -140,6 +143,37 @@ def test_setup_unwritable_target_fails_with_nonzero_exit(tmp_path, capsys):
     assert "failed" in captured.err.lower()
 
 
+def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path, monkeypatch, capsys) -> None:
+    """Setup with no ``--root`` builds the Station where the config reader says it is, so the test
+    seams move it (packet 35 review, round 3).
+
+    ``default_layout`` used to write ``/etc/ate`` and ``/var/lib/ate`` as literals. The admin manual
+    shows ``ate setup --config /etc/ate/config.json``, and the suite's accounting for that command
+    claimed conftest pins the platform directories for every test: it pins the data directory, and
+    setup did not read it. A bare setup run where the suite is root (the Debian container) would
+    then create the machine's own config directory. Both directories now come from
+    :mod:`ate.config`, the same place the ``<data>`` placeholder and the platform config path come
+    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach."""
+    monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(tmp_path / "etc" / "ate" / "config.json"))
+    monkeypatch.setattr(ate_config, "_platform_data_dir", lambda: tmp_path / "var" / "lib" / "ate")
+
+    layout = ate_setup.default_layout()
+    assert layout.config_file == ate_config._platform_default(), (
+        f"setup writes the config at {layout.config_file}, which no launch reads"
+    )
+    assert layout.data_dir == ate_config._platform_data_dir(), (
+        f"setup prepares {layout.data_dir}, while the config's <data> placeholder means {ate_config._platform_data_dir()}"
+    )
+
+    for path in (layout.data_dir, layout.config_dir, layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
+        assert not str(path).startswith(("/etc/ate", "/var/lib/ate")), f"setup would write into the machine's own Station: {path}"
+
+    rc, captured = main(["setup", "--no-permissions"]), capsys.readouterr()
+    assert rc == 0, captured.err[-300:]
+    for path in (layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
+        assert path.exists(), f"setup did not create {path}: {captured.out}"
+
+
 def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     """prepare_station drives the permissions seam: data tree group-writable, config admin-only."""
     root = tmp_path / "station"
@@ -169,6 +203,119 @@ def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     assert str(root / "config" / "config.json") in perms.admin_only_paths
     assert str(root / "config") in perms.admin_only_paths
     assert str(root / "config" / "config.json") not in perms.group_writable_paths
+
+
+def test_the_permission_pass_names_the_database_and_its_copies_exactly(tmp_path, monkeypatch, capsys):
+    """``database.path`` outside the data directory: the pass is a list of names, not a glob.
+
+    The recursive pass over ``data_dir`` never reaches a database that lives elsewhere, so the
+    copies written beside it stay unreadable to ordinary users. ``<name>*`` was the wrong answer
+    to that: it catches whatever merely starts with the database's name — another application's
+    ``station.db2.cfg`` beside a custom ``database.path`` — and it chgrp'd the directory the
+    database sits in, which on a shared directory is a licence to change everything in it.
+    SQLite still needs that directory writable, because its journal is written beside the
+    database, so setup says plainly that the Administrator has to make it so (packet 35 review,
+    round 3)."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "_stamp", lambda: "20260101-000000")
+
+    root = tmp_path / "station"
+    data = root / "data"
+    config_dir = root / "config"
+    elsewhere = tmp_path / "elsewhere"
+    db = elsewhere / "station.db"
+    config_dir.mkdir(parents=True)
+    data.mkdir(parents=True)
+    elsewhere.mkdir(parents=True)
+    for name, body in (
+        ("station.db-wal", ""),  # left by a Test Run that is still open
+        ("station.db-shm", ""),
+        ("station.db.backup-20260101-000000", "an earlier copy, blocking the name"),
+        ("station.db.backup-20251231-000000.partial", "a copy a kill stopped halfway"),
+        ("station.db.backup-20251231-000000.partial-journal", "that copy's own journal"),
+        ("station.db2.cfg", "another application's config, sharing the database's name"),
+        ("not-mine.conf", "another application's file"),
+    ):
+        (elsewhere / name).write_text(body, encoding="utf-8", newline="\n")
+
+    # A database this setup is about to migrate, so the migration writes its own copy beside it.
+    store = RunStore(db)
+    store.insert_test_run({"uut_serial": "OLD-1", "schedule_name": "before the upgrade"})
+    store.close()
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE equipment")
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+    conn.close()
+    (config_dir / "config.json").write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    perms = RecordingPermissions()
+    monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
+    prepare_station(data, config_dir, permissions=perms)
+
+    # The pass, entry by entry, in the order the pass makes it: the data directory recursively,
+    # then the database and the files SQLite and the backup writer write, none of them recursive.
+    assert [(c["path"], c["recursive"]) for c in perms.calls if c["op"] == "set_group_writable"] == [
+        (str(data), True),
+        (str(db), False),
+        (str(elsewhere / "station.db-wal"), False),
+        (str(elsewhere / "station.db-shm"), False),
+        (str(elsewhere / "station.db.backup-20251231-000000.partial"), False),
+        (str(elsewhere / "station.db.backup-20251231-000000.partial-journal"), False),
+        (str(elsewhere / "station.db.backup-20260101-000000"), False),
+        (str(elsewhere / "station.db.backup-20260101-000000-2"), False),
+    ], perms.calls
+
+    # The directory the database lives in gets nothing: not its group, not its mode.
+    assert str(elsewhere) not in perms.group_writable_paths, perms.calls
+    assert str(elsewhere / "station.db2.cfg") not in perms.group_writable_paths, perms.calls
+    assert str(elsewhere / "not-mine.conf") not in perms.group_writable_paths, perms.calls
+
+    out = capsys.readouterr().out
+    assert f"{elsewhere} is not touched" in out, out
+    assert "group-writable" in out, out
+    assert "no separate permission pass" not in out, out
+
+
+def test_a_skipped_permission_pass_prints_nothing_about_a_pass(tmp_path, capsys):
+    """Nothing is printed about a permission pass that did not run.
+
+    Before this, setup said which directory the pass would run over before it knew whether it ran
+    at all: an unprivileged ``ate setup`` reported a pass it then skipped."""
+    root = tmp_path / "station"
+    elsewhere = tmp_path / "elsewhere"
+    db = elsewhere / "station.db"
+    elsewhere.mkdir(parents=True)
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "config.json").write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    prepare_station(root / "data", root / "config", permissions=SKIP_PERMISSIONS)
+    out = capsys.readouterr().out
+    assert "permission pass" not in out, out
+    assert "database to migrate" in out, out
+
+
+def test_a_database_inside_the_data_directory_needs_no_extra_pass(tmp_path, monkeypatch, capsys):
+    """When the database is under the data directory, setup says so instead of passing twice."""
+    root = tmp_path / "station"
+    perms = RecordingPermissions()
+    monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
+    prepare_station(root / "data", root / "config", permissions=perms)
+
+    assert perms.group_writable_paths == [str(root / "data")], perms.calls
+    out = capsys.readouterr().out
+    assert "no separate permission pass" in out, out
 
 
 def test_prepare_station_second_run_is_idempotent_with_fake(tmp_path):

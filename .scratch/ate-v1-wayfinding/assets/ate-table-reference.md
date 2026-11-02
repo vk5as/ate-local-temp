@@ -57,7 +57,7 @@ Every field is optional; an absent field uses the Device's `open` configuration.
 - `write`: `data` (required), `writeTerm`, `timeout`. `writeTerm` is appended to `data`. A write that can't send everything within `timeout` fails with `err = "timeout"`.
 - `close`: no fields, and `params` may be omitted.
 
-A field the Device Type doesn't know (a typo such as `buad`), a missing required field, or a value of the wrong type is a schedule bug, not a Device failure. It always raises, names the field, and never goes through `onError`.
+A field the Device Type doesn't know (a typo such as `buad`), a missing required field, or a value of the wrong type is a schedule bug, not a Device failure, so it never goes through `onError`. Called at the top level of a schedule file it raises and the schedule fails to load. In a step or an Action it is isolated the way any other ATE call is: the call returns the failure and the message, naming the field, and the error is logged at ERROR rather than aborting the run.
 
 ### Buffering incoming data
 

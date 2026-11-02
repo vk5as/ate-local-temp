@@ -54,11 +54,6 @@ These were found while writing the manuals. In every case the code was followed 
 left as it is, so that the difference is visible rather than smoothed over:
 
 \begin{itemize}
-  \item \textbf{Spec rule 20 says \texttt{ate db migrate} upgrades ``after a timestamped backup''.}
-    It makes no backup. \texttt{cli.\_cmd\_db} calls \texttt{RunStore}, which creates the missing
-    tables and sets \texttt{PRAGMA user\_version}, and prints
-    \texttt{created or upgraded database at \dots}. The admin manual tells an administrator to back
-    up first, and says so in the same breath as the command.
   \item \textbf{Spec rule 08 says \texttt{log\_line} rows are written ``about once a second''.}
     They are inserted per step, not on a timer. The review notes recorded this in packet 08 and it
     has never been corrected in the spec.

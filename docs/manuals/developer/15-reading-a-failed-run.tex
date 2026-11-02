@@ -61,10 +61,15 @@ read failures, and the Device says which one it is.
 The fastest way to see what a run recorded, from a Station's database:
 
 \begin{lstlisting}[language=ATEShell]
-python -c "import sqlite3; rows=sqlite3.connect('/tmp/station/data/ate.db').execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())"
+python -c "import sqlite3, sys; rows=sqlite3.connect(sys.argv[1]).execute('SELECT step_number,result,attempt_count FROM node ORDER BY node_seq'); print(rows.fetchall())" /tmp/station/data/ate.db
 \end{lstlisting}
 
-Read-only, no ATE involved. The same query against \texttt{log\_line} ordered by \texttt{seq} is the Run log
+Read-only, no ATE involved. The database is passed as an argument rather than written inside the
+string: on Windows the path has backslashes, and a path pasted into a string literal in
+\texttt{-c} code is read as an escape sequence --- \texttt{C:\textbackslash Users\textbackslash ...}
+is a \texttt{SyntaxError} before the query ever runs.
+
+The same query against \texttt{log\_line} ordered by \texttt{seq} is the Run log
 in emission order, which is the order the report shows.
 
 \cando{go from a failed run to the row, the log line and the thread that produced it.}

@@ -62,12 +62,14 @@ class Driver(ABC):
         """Validate ``params`` and connect; return an opaque device handle."""
 
     def close(self, device: Any) -> None:
-        """Release a previously opened device.
+        """Release a device this registry opened.
 
-        Nothing calls this method: the registry tears down the handle, not the driver —
-        ``DeviceRegistry.close_device`` calls the handle's own ``close()``. No shipped driver
-        overrides it; ``VisaDriver.close`` is the one that does and is never reached. A driver that
-        needs teardown puts it on the handle ``open`` returns."""
+        This method is never reached. ``DeviceRegistry.close_device`` tears down the handle that
+        ``open`` returned, not the driver: it calls the handle's own ``close()``. Every shipped
+        driver puts its teardown on that handle, and ``VisaDriver.close`` is the one driver that
+        overrides this method --- it is dead code kept only so a driver written against the base
+        class knows where teardown belongs. tests/test_admin_gaps_35.py proves the registry never
+        calls it."""
 
 
 def validate_params(

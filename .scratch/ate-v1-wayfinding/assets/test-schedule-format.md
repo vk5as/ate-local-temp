@@ -17,7 +17,7 @@ Created with `ScheduleParams(name, description)`; `name` is required.
 | `:setDocTitle(s)` | string | Title of the Test Report |
 | `:setDocId(s)` | string | Document identifier shown on the Test Report |
 | `:setDocRev(s)` | string | Revision of the Test Schedule |
-| `:setPreTestAction(fn)` | function | Runs once before the first Test Step (setup, calibration). With Sub-schedules, every Pre-test Action runs before the first step, depth first, parent first |
+| `:setPreTestAction(fn)` | function | Runs once before the first Test Step (setup, calibration). With Sub-schedules, every Pre-test Action runs before the first step, depth first, parent first. Like a Post-test Action it is called as `fn(passFail)`: at that point the standing result is always `PASS` |
 | `:setPostTestAction(fn)` | function | Runs once after the steps, in the reverse of the Pre-test order; called as `fn(passFail)` with the Test Run's overall result. Runs even after a stop, a Pre-test failure or an abort |
 | `:setStopOnFail(b)` | boolean | Default for the Test Run's stop-on-fail setting, which the Operator can change before the run starts. Defaults to `true` when not set |
 | `:setSchedule(list)` | array of step objects | The Test Steps, in execution order (required) |
@@ -102,7 +102,7 @@ Test Schedules share code through ordinary Lua modules loaded with the standard 
 - ATE computes the checksum of each file it loads and compares it with the Test Definition. A mismatch logs a warning but still loads the file. The Test Run records the expected and computed checksum of every file used.
 - As in normal Lua, a module runs once per Test Run, and later calls return the cached value.
 - The `ate.` namespace is reserved: `require("ate.devices")` resolves to a module bundled with ATE, never to the Test Definition, and a Test Definition may not list files under `ate.`. The Test Run records the ATE version and the checksum of every bundled module it used.
-- `dofile`, `loadfile` and `load` are removed, so nothing can run Lua source that skipped the checksum check. Lua is trusted, so this is about traceability, not security; `io` and `os` remain.
+- `dofile`, `loadfile` and `load` are removed, so nothing can run Lua source that skipped the checksum check. `os.exit` is nil too: a step that calls it gets an error, not an exit. Lua is trusted, so this is about traceability, not security; `io` and `os` remain. `package` exists, but `package.path` and `package.cpath` are empty strings.
 
 This is unrelated to the step setter `:setInclude(file, keyvals)`, which pulls in a Sub-schedule. ATE has no function named `include`.
 

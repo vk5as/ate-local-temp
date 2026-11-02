@@ -593,34 +593,42 @@ def test_a_pdf_helper_whose_owner_is_gone_reports_nothing(qapp, monkeypatch, tmp
 def test_abort_between_steps_through_session_records_error_notrun_and_aborted(qapp, tmp_path) -> None:
     """Packet 13a checkbox 3 (seam-1): call ``session.request_abort()`` during a blocking run.
 
-    Drives the Abortable schedule entirely through :class:`HeadlessRunSession` — select, start, answer
-    step 1's input so it completes cleanly, then request an abort between steps. The operator controller
-    is reached only via the engine returned by ``start()``; no widgets or staged screen are involved."""
+    Drives the schedule entirely through :class:`HeadlessRunSession` — select, start, answer step 1's
+    input, then wait for the worker to be provably parked in step 2's blocking input before asking for
+    the abort. The operator controller is reached only via the engine returned by ``start()``; no
+    widgets or staged screen are involved.
+
+    Packet 35 review, round 2: the abort used to be requested the moment step 1's input was answered,
+    which left the worker free to run step 2 before the abort was seen — about one run in ten on a
+    loaded machine recorded step 2 PASS and step 3 ERROR. Waiting for step 2's own `input_asked`
+    (the same trick 30b and 31a used) pins the abort to a known step instead of widening a timing."""
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
 
-    answered = threading.Event()
+    parked_in_step_2 = threading.Event()
 
     def _on_ask(node_seq, attempt_no, index):
-        op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly before aborting
-        answered.set()
+        if node_seq == 0:
+            op.supply_input(index - 1, 5)  # answer step 1's input so it completes cleanly
+        else:
+            parked_in_step_2.set()  # the worker is waiting inside step 2's ATE.input
 
     session.input_asked.connect(_on_ask)
 
     session.set_operator("Ada")
-    session.select_schedule("Abortable schedule")
+    session.select_schedule("Abortable two-input schedule")
     engine = session.start()
     op = engine.operator_input  # the worker's operator controller; valid while running
 
-    # Pump until step 1 announces and answers its input — at which point the worker is blocked on it.
-    # Do not wait for FINISHED here: a bare pump would let the worker race through steps 2 & 3 first.
-    answered_deadline = time.monotonic() + 10.0  # a time bound, not a pump count
-    while not answered.is_set() and time.monotonic() < answered_deadline:
+    # Pump until the worker is inside step 2, blocked on its input. Do not wait for FINISHED here:
+    # a bare pump would let the worker race through steps 2 & 3 before the abort is asked.
+    parked_deadline = time.monotonic() + 10.0  # a time bound, not a pump count
+    while not parked_in_step_2.is_set() and time.monotonic() < parked_deadline:
         qapp.processEvents()
-    assert answered.is_set(), "step 1 never announced its input within 10 s"
+    assert parked_in_step_2.is_set(), "step 2 never reached its blocking input within 10 s"
 
-    # Abort between steps; then let the worker record ERROR / NOTRUN / ABORTED. request_abort runs on
-    # this thread before any post-answer pump, so it wins the step boundary deterministically.
+    # The worker cannot move: it is parked in step 2. Request the abort here, then let it record
+    # ERROR / NOTRUN / ABORTED.
     session.request_abort()
     assert _wait_finished(session)
 

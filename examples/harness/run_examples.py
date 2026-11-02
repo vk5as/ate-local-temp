@@ -224,131 +224,140 @@ def run_schedule(
     uut_type: str = "Example board",
     uut_serial: str = "EX-0001",
 ) -> dict[str, Any]:
-    """Run one schedule headless and return its record: run row, nodes, attempts, actions, schedule instances, logs, inputs, Equipment, reports."""
+    """Run one schedule headless and return its record: run row, nodes, attempts, actions, schedule instances, logs, inputs, Equipment, reports.
+
+    Packet 35: the session is closed before the record is handed back. A session opened without an
+    ``app_log`` opens its own application log, and on Windows a file that is still open cannot be
+    deleted: a caller running this inside ``tempfile.TemporaryDirectory`` gets ``WinError 32`` when
+    the directory is cleaned up (the CI runners did exactly that).
+    """
     session = HeadlessRunSession(config)
-    reports: list[tuple[str, str]] = []
-    session.report_written.connect(lambda html, pdf: reports.append((html, pdf)))
-    states: list[SessionState] = []
-    session.state_changed.connect(states.append)  # the public signal; never read session._state
+    try:
+        reports: list[tuple[str, str]] = []
+        session.report_written.connect(lambda html, pdf: reports.append((html, pdf)))
+        states: list[SessionState] = []
+        session.state_changed.connect(states.append)  # the public signal; never read session._state
 
-    # Step Name -> the node_seq that step gets in this run, so the scripted answers can be keyed by
-    # the name a schedule writer would recognise rather than by a bare index. Built once: the old
-    # per-toggle step_seq() rebuilt a whole LuaHost every time (packet 29b review).
-    seqs = step_seqs(schedule, release_dir)
+        # Step Name -> the node_seq that step gets in this run, so the scripted answers can be keyed by
+        # the name a schedule writer would recognise rather than by a bare index. Built once: the old
+        # per-toggle step_seq() rebuilt a whole LuaHost every time (packet 29b review).
+        seqs = step_seqs(schedule, release_dir)
 
-    def _seq(name: str) -> int:
-        if name not in seqs:
-            raise AssertionError(f"schedule {schedule!r} has no step named {name!r}")
-        return seqs[name]
+        def _seq(name: str) -> int:
+            if name not in seqs:
+                raise AssertionError(f"schedule {schedule!r} has no step named {name!r}")
+            return seqs[name]
 
-    session.set_operator(operator)
-    session.set_project(project)
-    session.set_uut_type(uut_type)
-    session.set_uut_serial(uut_serial)
-    session.select_schedule(schedule)
-    # A selection clears the pending toggles, so the Operator's step overrides go on after it
-    # (packet 11a: toggle_node is refused while a run is in progress, so this is the idle window).
-    for name, on in (enable or {}).items():
-        session.toggle_node(_seq(name), on)
-    if stop_on_fail is not None:
-        session.set_stop_on_fail(stop_on_fail)
-    session.start()
+        session.set_operator(operator)
+        session.set_project(project)
+        session.set_uut_type(uut_type)
+        session.set_uut_serial(uut_serial)
+        session.select_schedule(schedule)
+        # A selection clears the pending toggles, so the Operator's step overrides go on after it
+        # (packet 11a: toggle_node is refused while a run is in progress, so this is the idle window).
+        for name, on in (enable or {}).items():
+            session.toggle_node(_seq(name), on)
+        if stop_on_fail is not None:
+            session.set_stop_on_fail(stop_on_fail)
+        session.start()
 
-    values = {_seq(name): value for name, value in (inputs or {}).items()}
-    bad = {_seq(name): value for name, value in (bad_inputs or {}).items()}
-    poll_by_seq = {_seq(name): (index, text) for name, (index, text) in (polls or {}).items()}
+        values = {_seq(name): value for name, value in (inputs or {}).items()}
+        bad = {_seq(name): value for name, value in (bad_inputs or {}).items()}
+        poll_by_seq = {_seq(name): (index, text) for name, (index, text) in (polls or {}).items()}
 
-    refused: list[str] = []
-    #: A scripted answer the step's own declaration rejects. The step stays waiting for a value
-    #: nobody has, so the run would block until the pump timed out if the refusal were not caught.
-    unanswerable: list[str] = []
-    bad_tried: set[int] = set()
-    poll_pending: list[tuple[int, int, int, str, float]] = []  # (node_seq, attempt_no, index, text, announced_at)
-    poll_clicked: list[tuple[int, int, str]] = []
+        refused: list[str] = []
+        #: A scripted answer the step's own declaration rejects. The step stays waiting for a value
+        #: nobody has, so the run would block until the pump timed out if the refusal were not caught.
+        unanswerable: list[str] = []
+        bad_tried: set[int] = set()
+        poll_pending: list[tuple[int, int, int, str, float]] = []  # (node_seq, attempt_no, index, text, announced_at)
+        poll_clicked: list[tuple[int, int, str]] = []
 
-    def _supply(node_seq: int, attempt_no: int, index: int) -> None:
-        # Answer only when the run asks (packet 10a): `input_asked` fires when the step's
-        # ATE.input(n) call blocks, and once for each POLL the moment its Attempt starts, since a
-        # POLL is live for the whole Attempt (packet 29b). First try the out-of-range value: the
-        # session must refuse it with a ValueError, and the step stays waiting for the real answer.
-        if node_seq in poll_by_seq and poll_by_seq[node_seq][0] == index:
-            poll_pending.append((node_seq, attempt_no, index, poll_by_seq[node_seq][1], time.monotonic()))
-            return
-        if node_seq not in values:
-            # Nothing scripted for this input. A POLL announces itself here as well and is answered
-            # by the click below; a blocking input nobody answers ends in the TimeoutError.
-            return
-        if node_seq in bad and node_seq not in bad_tried:
-            bad_tried.add(node_seq)
+        def _supply(node_seq: int, attempt_no: int, index: int) -> None:
+            # Answer only when the run asks (packet 10a): `input_asked` fires when the step's
+            # ATE.input(n) call blocks, and once for each POLL the moment its Attempt starts, since a
+            # POLL is live for the whole Attempt (packet 29b). First try the out-of-range value: the
+            # session must refuse it with a ValueError, and the step stays waiting for the real answer.
+            if node_seq in poll_by_seq and poll_by_seq[node_seq][0] == index:
+                poll_pending.append((node_seq, attempt_no, index, poll_by_seq[node_seq][1], time.monotonic()))
+                return
+            if node_seq not in values:
+                # Nothing scripted for this input. A POLL announces itself here as well and is answered
+                # by the click below; a blocking input nobody answers ends in the TimeoutError.
+                return
+            if node_seq in bad and node_seq not in bad_tried:
+                bad_tried.add(node_seq)
+                try:
+                    session.supply_input(node_seq, attempt_no, index, bad[node_seq])
+                except ValueError as exc:
+                    refused.append(f"input {index}: {bad[node_seq]!r} refused: {exc}")
             try:
-                session.supply_input(node_seq, attempt_no, index, bad[node_seq])
+                session.supply_input(node_seq, attempt_no, index, values[node_seq])
             except ValueError as exc:
-                refused.append(f"input {index}: {bad[node_seq]!r} refused: {exc}")
-        try:
-            session.supply_input(node_seq, attempt_no, index, values[node_seq])
-        except ValueError as exc:
-            # The refusal comes out of this slot, in the worker thread. Uncaught it is a traceback
-            # and a run that blocks until the pump times out, so record it and let the loop end.
-            unanswerable.append(f"input {index}: {values[node_seq]!r} refused: {exc}")
+                # The refusal comes out of this slot, in the worker thread. Uncaught it is a traceback
+                # and a run that blocks until the pump times out, so record it and let the loop end.
+                unanswerable.append(f"input {index}: {values[node_seq]!r} refused: {exc}")
 
-    if values:
-        session.input_asked.connect(_supply)
+        if values:
+            session.input_asked.connect(_supply)
 
-    answers = list(choices or [])
-    unexpected: list[tuple[int, int]] = []
+        answers = list(choices or [])
+        unexpected: list[tuple[int, int]] = []
 
-    def _answer(node_seq: int, attempt_no: int) -> None:
-        if not answers:
-            # A prompt with no scripted choice means the schedule paused when it said it would not:
-            # a failure, not a question to answer. Record it and stop the run cleanly (the pause
-            # blocks with no timeout, so it must be answered to end the run).
-            unexpected.append((node_seq, attempt_no))
-            session.choose("ABORT")
-            return
-        session.choose(answers.pop(0))
+        def _answer(node_seq: int, attempt_no: int) -> None:
+            if not answers:
+                # A prompt with no scripted choice means the schedule paused when it said it would not:
+                # a failure, not a question to answer. Record it and stop the run cleanly (the pause
+                # blocks with no timeout, so it must be answered to end the run).
+                unexpected.append((node_seq, attempt_no))
+                session.choose("ABORT")
+                return
+            session.choose(answers.pop(0))
 
-    session.failure_prompt.connect(_answer)
+        session.failure_prompt.connect(_answer)
 
-    app = QCoreApplication.instance() or QCoreApplication([])
+        app = QCoreApplication.instance() or QCoreApplication([])
 
-    def _click_polls(_ticks: int) -> None:
-        # Deliver the scripted POLL click once POLL_CLICK_AFTER_SECONDS have passed since the Attempt
-        # announced it (packet 29b review): the announcement comes at Attempt start, so by then the
-        # step's loop has read nil three times. click_poll raises if the step is no longer running,
-        # so a POLL clicked at the wrong moment fails rather than passing silently.
-        due = [p for p in poll_pending if time.monotonic() - p[4] >= POLL_CLICK_AFTER_SECONDS]
-        for node_seq, attempt_no, index, text, _announced_at in due:
-            session.click_poll(node_seq, attempt_no, index, text)
-            poll_clicked.append((node_seq, index, text))
-        poll_pending[:] = [p for p in poll_pending if p not in due]
+        def _click_polls(_ticks: int) -> None:
+            # Deliver the scripted POLL click once POLL_CLICK_AFTER_SECONDS have passed since the Attempt
+            # announced it (packet 29b review): the announcement comes at Attempt start, so by then the
+            # step's loop has read nil three times. click_poll raises if the step is no longer running,
+            # so a POLL clicked at the wrong moment fails rather than passing silently.
+            due = [p for p in poll_pending if time.monotonic() - p[4] >= POLL_CLICK_AFTER_SECONDS]
+            for node_seq, attempt_no, index, text, _announced_at in due:
+                session.click_poll(node_seq, attempt_no, index, text)
+                poll_clicked.append((node_seq, index, text))
+            poll_pending[:] = [p for p in poll_pending if p not in due]
 
-    if not _pump(app, lambda: SessionState.FINISHED in states or unanswerable, on_tick=_click_polls):
-        raise TimeoutError(f"schedule '{schedule}' never finished")
-    if unanswerable:
-        # The step is still waiting, so the run cannot finish; say which answer was rejected
-        # rather than reporting a run that merely ran out of time.
-        raise ValueError("; ".join(unanswerable))
-    if not _pump(app, lambda: reports, timeout=10.0):
-        raise TimeoutError(f"schedule '{schedule}' finished without writing its report")
+        if not _pump(app, lambda: SessionState.FINISHED in states or unanswerable, on_tick=_click_polls):
+            raise TimeoutError(f"schedule '{schedule}' never finished")
+        if unanswerable:
+            # The step is still waiting, so the run cannot finish; say which answer was rejected
+            # rather than reporting a run that merely ran out of time.
+            raise ValueError("; ".join(unanswerable))
+        if not _pump(app, lambda: reports, timeout=10.0):
+            raise TimeoutError(f"schedule '{schedule}' finished without writing its report")
 
-    store = session.store
-    run_uuid = session.run_uuid
-    return {
-        "run": store.get_test_run(run_uuid),
-        "nodes": store.nodes(run_uuid),
-        "attempts": store.attempts(run_uuid),
-        "actions": store.actions(run_uuid),
-        "schedule_instances": store.schedule_instances(run_uuid),
-        "logs": store.log_lines(run_uuid),
-        "equipment": store.equipment(run_uuid),
-        "input_values": store.input_values(run_uuid),
-        "media_releases": store.media_releases(run_uuid),
-        "run_files": store.run_files(run_uuid),
-        "reports": reports,
-        "refused_inputs": refused,
-        "poll_clicks": poll_clicked,
-        "unexpected_prompts": unexpected,
-    }
+        store = session.store
+        run_uuid = session.run_uuid
+        return {
+            "run": store.get_test_run(run_uuid),
+            "nodes": store.nodes(run_uuid),
+            "attempts": store.attempts(run_uuid),
+            "actions": store.actions(run_uuid),
+            "schedule_instances": store.schedule_instances(run_uuid),
+            "logs": store.log_lines(run_uuid),
+            "equipment": store.equipment(run_uuid),
+            "input_values": store.input_values(run_uuid),
+            "media_releases": store.media_releases(run_uuid),
+            "run_files": store.run_files(run_uuid),
+            "reports": reports,
+            "refused_inputs": refused,
+            "poll_clicks": poll_clicked,
+            "unexpected_prompts": unexpected,
+        }
+    finally:
+        session.close()
 
 
 def run_all(tmp_dir: Path) -> dict[str, dict[str, Any]]:

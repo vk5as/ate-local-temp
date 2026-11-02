@@ -595,7 +595,7 @@ Here is the definition the manual's own examples ship, exactly as it sits on dis
     },
     {
       "path": "sandbox.tslua",
-      "sha256": "e40b7d8eafd167b5d52f844957962b505f53009d791a38bb2729413462aaee99"
+      "sha256": "c9f5d83334cfe892cc9f5a5bec7f34ea7c93b9b61845200c83bebd6ee7ce54c2"
     },
     {
       "path": "forbidden.tslua",
@@ -1058,16 +1058,18 @@ abort has to wait, and a writer should know which steps they apply to.
   command does: a command holds the abort for as long as it runs, however long that is. The step
   still reported `PASS` when it returned.
 - **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop in a
-  coroutine runs to completion after an abort and the run ends when the loop does, so a long enough
-  loop holds the abort the same way. An unbounded
+  coroutine may run on after an abort, and the run ends only when the loop does, so a long enough
+  loop holds the abort for as long as it takes. An unbounded
   `while true do end` inside `coroutine.wrap` stopped only when the process was killed, its
   `test_run` row left open. The engine's own docstring advises against coroutines for this reason
   (`src/ate/engine/run_engine.py`, "Because a schedule must not use coroutines"): the exception is
   real, but it is hard to stop.
 
-`os.exit` is not an exception and stays a never. `os.exit(7)` in a step exits the process with
-status 7. The run row is left with no `ended_at` and no result; the next launch closes it as
-`INTERRUPTED`/`FAIL`. No Post-test Action runs, and no report is written.
+`os.exit` is nil in a schedule and stays a never. `_lockdown` removes it the way it removes
+`dofile`, `loadfile` and `load`, so `os.exit(7)` in a step is an ordinary Lua error: the step is
+`ERROR`, the run is recorded and closed, Post-test Actions still run, and ATE keeps going. Before
+packet 35 the same call exited the process with status 7 and left the run row with no `ended_at` and
+no result. `os.execute` and `os.getenv` are still reachable.
 
 A plain loop in a step, `ATE.sleep` and `ATE.input` all do stop within the 10 s.
 
@@ -1104,13 +1106,15 @@ return ScheduleParams("Manual: abort", "a sleep the Operator aborts, and the tea
 
 ## The sandbox
 
-`dofile`, `loadfile`, `load` and `python` are gone. `package` exists but `package.path` and
-`package.cpath` are empty. `debug` is reduced to `debug.traceback`. `io`, `os`, `string`,
-`table` and the rest of the standard library are still there. This is traceability, not
-security: ATE needs to know which files a run ran. `os.execute` is reachable from a step and is
-allowed: the only cost is that an abort waits for the command (see Abort). `os.exit` is also
-reachable, and is the one thing in `os` never to call, because it ends the process with nothing
-recorded. A schedule can still open a file with `io.open` if it names a path.
+`dofile`, `loadfile`, `load` and `python` are gone, and so is `os.exit`: calling one of them in a step
+is `attempt to call a nil value` recorded as an ERROR Attempt, not an exit. `package` exists but
+`package.path` and `package.cpath` are empty. `debug` is reduced to `debug.traceback`. `io`, `os`,
+`string`, `table` and the rest of the standard library are still there. This is traceability, not
+security: ATE needs to know which files a run ran. A Test Schedule is the Station's own code, and it
+is trusted; what the sandbox catches is a schedule reading Lua from outside its Media Release, which
+a Test Definition cannot describe.
+`os.execute` is reachable from a step and is allowed: the only cost is that an abort waits for the
+command (see Abort). A schedule can still open a file with `io.open` if it names a path.
 
 ```lua:docs/manuals/examples/test-writer/sandbox.tslua
 -- sandbox.tslua: what the Test Schedule sandbox gives a schedule, and takes away.
@@ -1118,6 +1122,7 @@ recorded. A schedule can still open a file with `io.open` if it names a path.
 -- The sandbox is about traceability, not security: ATE wants to know exactly which files
 -- a Test Run ran, and it cannot do that if a schedule reads Lua from wherever it likes.
 --   * dofile, loadfile, load and the python table are gone; calling one is an error;
+--   * os.exit is nil too: a step that calls it gets an error, not an exit;
 --   * package exists but its path and cpath are empty, so nothing outside the Test
 --     Definition can be required;
 --   * debug is reduced to debug.traceback;
@@ -1129,6 +1134,7 @@ return ScheduleParams("Manual: the sandbox", "what a Test Schedule can reach")
     StepParams("Check what is removed"):setStepNo("1.")
       :setAction(function()
         local removed = dofile == nil and loadfile == nil and load == nil and python == nil
+                          and os.exit == nil
         local noPaths = type(package) == "table" and package.path == "" and package.cpath == ""
         ATE.log(Log.INFO, "debug now holds only: " .. table.concat(
           (function() local t = {} for k in pairs(debug) do t[#t + 1] = k end return t end)(), ", "))
@@ -1405,8 +1411,8 @@ the database.
 - Never call `ATE.report` or `ATE.input` in an Action.
 - Never rely on `package.path`, `dofile` or `loadfile`: they do not work.
 - Never use `pcall` to survive an abort: it re-raises.
-- Never call `os.exit` in a step: it ends the whole ATE process and leaves the run row open with
-  nothing recorded.
+- Never call `os.exit` in a step: it is nil, so the step ERRORs and the run is marked failed where
+  the schedule meant to stop cleanly.
 - Never assume a checksum mismatch stops the run; it only warns.
 - Never write to `ATE.run`; it is read-only.
 - Never ship a schedule without running `ate definition update` on its `.atedef`.
@@ -1418,12 +1424,10 @@ a schedule.
 
 ## Where the design specs and the code disagree
 
-The specs are the files under `.scratch/ate-v1-wayfinding/assets/`.
+The specs are the files under `.scratch/ate-v1-wayfinding/assets/`. Three disagreements this section
+used to hold are closed: the assets now say a bad Device parameter is isolated in a step rather than
+raised (`tests/test_device_onerror.py::test_bad_param_never_calls_handler`), that Pre-test Actions
+are also called with the run's standing result (`_record_phase_action`, which is always `"PASS"`
+before any step has run), and that `package` exists with `path` and `cpath` empty.
 
-- The specs say a bad Device parameter "always raises". The code isolates it: the call returns
-  `false` and the message, and the traceback is logged at ERROR. See
-  `tests/test_device_onerror.py::test_bad_param_never_calls_handler`.
-- They say only Post-test Actions are called with the run result. `_record_phase_action`
-  passes the standing result to Pre-test Actions too, always `"PASS"`.
-- They say the sandbox "has no `package` table". `package` exists; its `path` and `cpath`
-  are empty strings.
+Nothing else in the assets contradicts the shipped code as of this build.

@@ -6,9 +6,9 @@
 
 **Blocked by:** 34
 
-**Status:** queued
+**Status:** resolved
 
-- [ ] **Name:** ATE stands for "Automated Test Execution" (user, 2026-11-01), as `GLOSSARY.md` already says. Change `src/ate/cli.py` ("Automated Test Equipment"), the manuals, and anywhere else `git grep -n -i -E 'automatic test|test equipment'` finds, except history under `.scratch`.
+- [x] **Name:** ATE stands for "Automated Test Execution" (user, 2026-11-01), as `GLOSSARY.md` already says. Change `src/ate/cli.py` ("Automated Test Equipment"), the manuals, and anywhere else `git grep -n -i -E 'automatic test|test equipment'` finds, except history under `.scratch`.
 - [ ] **Backup on migrate:** `ate db migrate` makes a timestamped copy of the database beside it before changing anything, as the wayfinding asset says, and prints the copy's path. A new database, or one already at the current schema, makes no copy. If the copy fails, nothing is migrated: it refuses, naming the path and reason, with a non-zero exit. A migration that fails leaves the copy in place and says where it is. Include SQLite's WAL if the database uses one, using SQLite's backup API rather than a plain file copy. Tests: each case above, and restoring from the copy gives the old data. The admin manuals say what happens instead of telling the admin to make the copy, and say old copies are not removed automatically.
 - [ ] **Backup on every upgrade path:** the installers (`deb/postinst:20`, `install.sh:106`, `ate.iss:247`) run `ate setup`, which migrates through `setup.py` `_migrate_database` calling `RunStore` directly, so a backup only in `ate db migrate` misses every real upgrade. Share one routine. It migrates `<data_dir>/ate.db` rather than `database.path`: on a Station with a custom path, either migrate the configured database or say plainly that it didn't. `_ensure_schema` stamps `user_version` regardless (`store.py:268`), so a version bump with no migration makes an old database claim to be current: make that impossible, with a test.
 - [ ] **`os.exit`:** `os.exit(7)` in a step ends the whole of ATE with nothing recorded (Opus measured, 2026-11-02). Remove `os.exit` from the sandbox, with a test.
