@@ -358,8 +358,8 @@ The `windows-installer` job, on `windows-latest`:
    `ATE_SIGN_PASSWORD` are set in the repository; an unset secret arrives as an empty string and
    the build is unsigned;
 6. `python packaging/windows/smoke_installer.py` — installs, upgrades and uninstalls;
-7. uploads `dist/ate-*-windows-x64-setup.exe` to `actions/upload-artifact`. Publishing a GitHub
-   Release is not part of this packet.
+7. uploads `dist/ate-*-windows-x64-setup.exe` to `actions/upload-artifact`. The tagged release
+   workflow publishes the checked installer and Linux packages with the manuals.
 
 `smoke_installer.py` is the part that proves the installer is worth shipping. It asserts, at
 install, upgrade and uninstall:

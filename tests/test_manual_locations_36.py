@@ -229,6 +229,33 @@ def test_the_version_stamp_parser_accepts_the_untagged_dispatch_fallback():
     assert not helpers.VERSION_STAMP.fullmatch("0.0.0-dev-extra")
 
 
+def test_temporary_git_objects_are_removed_when_read_only(tmp_path, monkeypatch):
+    import shutil
+    import stat
+
+    from tests import _fixtures
+
+    root = tmp_path / "scratch"
+    object_path = root / ".git" / "objects" / "ab" / "object"
+    object_path.parent.mkdir(parents=True)
+    object_path.write_bytes(b"git object")
+    object_path.chmod(stat.S_IREAD)
+    real_rmtree = shutil.rmtree
+    called = False
+
+    def with_readonly_failure(path, *, onexc):
+        nonlocal called
+        if not called:
+            called = True
+            onexc(os.unlink, str(object_path), PermissionError("read-only Git object"))
+        real_rmtree(path)
+
+    monkeypatch.setattr(_fixtures.shutil, "rmtree", with_readonly_failure)
+    _fixtures.remove_tree(root)
+    assert called
+    assert not root.exists()
+
+
 def test_a_frozen_one_directory_bundle_names_its_internal_directory(tmp_path):
     """PyInstaller puts the data files in `_internal`; a frozen ATE reports exactly that path."""
     bundle = tmp_path / "dist" / "ate"

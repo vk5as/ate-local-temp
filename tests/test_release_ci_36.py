@@ -53,6 +53,7 @@ def _load(name: str, path: Path):
 build = _load("manuals_build_for_36", MANUALS_BUILD)
 assets = _load("release_assets_for_36", RELEASE_ASSETS)
 linux = _load("build_linux_for_36", BUILD_LINUX)
+packaging_manuals = _load("packaging_manuals_for_36", REPO / "packaging" / "manuals.py")
 
 #: The ten names a Release carries, as the packaging scripts write them: the publish glob has to
 #: match every one of them, not just the PDFs.
@@ -297,8 +298,27 @@ def check_title_pages(doc: dict) -> None:
         raise AssertionError("page 1 is the title page: a version on page 12 is not what the cover says")
     if not re.search(r'grep -Fxq "\$version"', step):
         raise AssertionError('the title page is not compared with the version as a whole: grep -Fq "ATE" passes any PDF TeX ever made')
-    if "|-dev" not in step:
-        raise AssertionError("the title page version check must accept the exact 0.0.0-dev stamp used by workflow_dispatch")
+    shell_pattern = re.search(r"grep -oE '([^']+)'", step)
+    if shell_pattern is None:
+        raise AssertionError("the title page check must extract one complete version stamp")
+    shell_stamp = re.compile(shell_pattern.group(1))
+    examples = {
+        "0.0.0-dev": True,
+        "0.1.0rc3": True,
+        "0.1.0rc3.dev40+gcfdab5c": True,
+        "0.1.0rc2": True,
+        "0.1.0-dev-extra": False,
+    }
+    for stamp, accepted in examples.items():
+        if bool(shell_stamp.fullmatch(stamp)) != accepted:
+            raise AssertionError(f"workflow title-page pattern handles {stamp!r} incorrectly")
+        if bool(packaging_manuals.VERSION_STAMP.fullmatch(stamp)) != accepted:
+            raise AssertionError(f"packaging/manuals.py handles {stamp!r} differently from the workflow")
+    current = "0.1.0rc3"
+    current_page = [match.group(0) for match in shell_stamp.finditer("ATE 0.1.0rc3")]
+    stale_page = [match.group(0) for match in shell_stamp.finditer("ATE 0.1.0rc2")]
+    if current not in current_page or current in stale_page:
+        raise AssertionError("a stale prerelease title page must not match the tag being released")
     if "exit 1" not in step:
         raise AssertionError("a title page without this release's version must fail the job, not print a note")
     checkout = _checkout(doc, "manuals")
@@ -389,8 +409,8 @@ def check_release_job(doc: dict) -> None:
         raise AssertionError(f"the Release is published before {sorted(missing)} smoke-tested their artifacts")
     if doc.get("permissions") != {"contents": "read"}:
         raise AssertionError("the workflow's own permissions are not read-only")
-    if job.get("permissions") != {"contents": "write"}:
-        raise AssertionError("contents: write belongs on the publish job and nowhere else")
+    if job.get("permissions") != {"contents": "write", "actions": "read"}:
+        raise AssertionError("the publish job needs contents: write and actions: read to verify master CI")
     for name, other in doc["jobs"].items():
         if name != "release" and "write" in str(other.get("permissions", "")):
             raise AssertionError(f"{name} has write permissions it does not need")
@@ -400,6 +420,17 @@ def check_release_job(doc: dict) -> None:
         raise AssertionError("the publish job must download every artifact of this run, not one named artifact")
     if downloads[0].get("path") != "artifacts":
         raise AssertionError("the artifacts must land where the check step is told to look")
+    steps = job["steps"]
+    download_step = next(step for step in steps if "download-artifact" in str(step.get("uses", "")))
+    download_index = steps.index(download_step)
+    count_step = next((step for step in steps if step.get("name") == "Check all ten files are present before creating anything"), None)
+    if count_step is None:
+        raise AssertionError("the release job must check that all ten files are present before creating anything")
+    if steps.index(count_step) < download_index:
+        raise AssertionError("the release job checks asset files before every artifact is downloaded")
+    publish_step = next((step for step in steps if "gh release" in str(step.get("run", ""))), None)
+    if publish_step is None or steps.index(count_step) > steps.index(publish_step):
+        raise AssertionError("all ten files must be checked before the Release is published")
 
     runs = _runs(doc, "release")
     assemble = next((r for r in runs if "release_assets.py" in r), None)
@@ -436,6 +467,34 @@ def check_release_job(doc: dict) -> None:
     checkout = _checkout(doc, "release")
     if checkout.get("fetch-depth") != 0:
         raise AssertionError(f"the publish job checks out at fetch-depth {checkout.get('fetch-depth')}: a shallow clone has no tag to describe")
+    check_release_ci_gate(doc)
+
+
+def check_release_ci_gate(doc: dict) -> None:
+    steps = [step for step in doc["jobs"]["release"]["steps"] if "gh run list" in str(step.get("run", ""))]
+    if len(steps) != 1:
+        raise AssertionError("the release job must check for a successful CI run on this exact commit")
+    step = steps[0]
+    run = step["run"]
+    if any(
+        token not in run
+        for token in (
+            "--workflow ci.yml",
+            "--commit \"$GITHUB_SHA\"",
+            'status == "completed"',
+            'conclusion == "success"',
+            'event == "push"',
+            'headBranch == "master"',
+            'if [ "$successful" -lt 1 ]',
+            "exit 1",
+        )
+    ):
+        raise AssertionError("the CI gate must require successful master push checks for GITHUB_SHA")
+    if (step.get("env") or {}).get("GH_TOKEN") != "${{ github.token }}":
+        raise AssertionError("the CI gate must authenticate gh run list with the Actions token")
+    publish = next((candidate for candidate in doc["jobs"]["release"]["steps"] if "gh release" in str(candidate.get("run", ""))), None)
+    if publish is None or doc["jobs"]["release"]["steps"].index(step) > doc["jobs"]["release"]["steps"].index(publish):
+        raise AssertionError("the CI gate must run before the release is published")
 
 
 def check_publish_token(doc: dict) -> None:
@@ -491,6 +550,23 @@ def test_a_smoke_job_missing_from_needs_is_caught():
         check_release_job(doc)
 
 
+def test_release_requires_successful_master_ci_for_the_same_commit():
+    doc = _workflow()
+    check_release_ci_gate(doc)
+    doc = _broken(doc, "release", lambda job: job["steps"].remove(next(s for s in job["steps"] if "gh run list" in str(s.get("run", "")))))
+    with pytest.raises(AssertionError, match="successful CI run"):
+        check_release_ci_gate(doc)
+    doc = _broken(
+        _workflow(),
+        "release",
+        lambda job: next(s for s in job["steps"] if "gh run list" in str(s.get("run", ""))).update(
+            {"run": next(s for s in job["steps"] if "gh run list" in str(s.get("run", "")))["run"].replace("$GITHUB_SHA", "$GITHUB_REF")}
+        ),
+    )
+    with pytest.raises(AssertionError, match="successful master push checks"):
+        check_release_ci_gate(doc)
+
+
 def test_write_permission_anywhere_else_is_caught():
     doc = _broken(_workflow(), None, lambda d: d["permissions"].update({"contents": "write"}))
     with pytest.raises(AssertionError, match="read-only"):
@@ -498,14 +574,23 @@ def test_write_permission_anywhere_else_is_caught():
     doc = _broken(_workflow(), "linux-build", lambda job: job.update({"permissions": {"contents": "write"}}))
     with pytest.raises(AssertionError, match="write permissions it does not need"):
         check_release_job(doc)
+    doc = _broken(_workflow(), "release", lambda job: job["permissions"].pop("actions"))
+    with pytest.raises(AssertionError, match="actions: read"):
+        check_release_job(doc)
 
 
 def test_the_asset_count_check_comes_before_the_publish():
-    doc = _broken(_workflow(), "release", lambda job: job["steps"].insert(3, job["steps"].pop(4)))
-    with pytest.raises(AssertionError, match="before every file"):
+    def count_before_download(job):
+        count_index = next(i for i, step in enumerate(job["steps"]) if step.get("name") == "Check all ten files are present before creating anything")
+        count_step = job["steps"].pop(count_index)
+        download_index = next(i for i, step in enumerate(job["steps"]) if "download-artifact" in str(step.get("uses", "")))
+        job["steps"].insert(download_index, count_step)
+
+    doc = _broken(_workflow(), "release", count_before_download)
+    with pytest.raises(AssertionError, match="before every artifact"):
         check_release_job(doc)
-    doc = _broken(_workflow(), "release", lambda job: job["steps"].pop(3))
-    with pytest.raises(AssertionError, match="assembles nothing"):
+    doc = _broken(_workflow(), "release", lambda job: job["steps"].remove(next(step for step in job["steps"] if step.get("name") == "Check all ten files are present before creating anything")))
+    with pytest.raises(AssertionError, match="all ten files"):
         check_release_job(doc)
     doc = _broken(_workflow(), "release", lambda job: job["steps"][-1].update({"run": job["steps"][-1]["run"].replace("--clobber", "")}))
     with pytest.raises(AssertionError, match="replace the assets"):

@@ -63,7 +63,7 @@ def remove_tree(path: Path, attempts: int = 10) -> None:
     an unclosed handle in this process outlasts that and still fails."""
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path, onerror=_make_writable_and_retry)
+            shutil.rmtree(path, onexc=_make_writable_and_retry)
             return
         except FileNotFoundError:
             return
@@ -74,13 +74,12 @@ def remove_tree(path: Path, attempts: int = 10) -> None:
 
 
 def _make_writable_and_retry(
-    function: Callable[..., object], name: str, error_info: tuple[type[BaseException], BaseException, object]
+    function: Callable[..., object], name: str, error: BaseException
 ) -> None:
     """Git makes object files read-only on Windows; make them removable during fixture cleanup."""
-    error = error_info[1]
     if not isinstance(error, PermissionError):
         raise error
-    os.chmod(name, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+    os.chmod(name, stat.S_IWRITE)
     function(name)
 
 

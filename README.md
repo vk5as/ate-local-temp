@@ -33,8 +33,8 @@ dev version when untagged).
 Full source-build and wheel instructions, including `pipx install` and
 `ate setup`, are in [docs/building-from-source.md](docs/building-from-source.md).
 
-## Known limitation
+## Lua schedules
 
-Ticket 01 builds the skeleton only. The pinned lupa wheel cannot host Lua
-schedules yet, so there is **no Lua runtime** in this checkout — later tickets
-add it.
+ATE runs Lua 5.5 Test Schedules through its pinned `lupa` runtime. The engine
+hosts Lua without importing the desktop UI, so schedule execution is testable
+without a display.
