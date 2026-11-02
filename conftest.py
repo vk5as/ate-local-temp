@@ -344,6 +344,11 @@ def _station_snapshot() -> tuple[dict[str, float], list[str]]:
     for directory in _REAL_STATION_DIRS:
         if not directory.exists():
             continue  # nothing there yet: a test that makes one is caught as a new entry
+        try:
+            snapshot[str(directory)] = directory.stat().st_mtime
+        except OSError as exc:
+            unreadable.append(f"{directory}: {exc}")
+            continue
         stack = [directory]
         while stack:
             current = stack.pop()
