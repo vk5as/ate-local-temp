@@ -206,9 +206,9 @@ class _StuckPeer:
             conn, _ = self._listener.accept()
         except OSError:
             return
-        # A listener's receive buffer does not carry to the socket it accepts: that one starts at
-        # the platform's default. Set it here, or the peer's window is whatever the OS likes and a
-        # big write gets out before the abort (packet 35b, CI 41407051552).
+        # On Windows the listener's receive buffer does not carry to the socket it accepts: that
+        # one starts at the platform's default. Set it here, or the peer's window is whatever the
+        # OS likes and a big write gets out before the abort (packet 35b, CI 41407051552).
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self._rcvbuf)
         except OSError:
