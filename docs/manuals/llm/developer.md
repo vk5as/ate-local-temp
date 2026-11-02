@@ -994,10 +994,11 @@ exist, none for one that holds no tables at all, one whenever `missing_tables(pa
 including a database already stamped at this version that is missing a table. SQLite's
 `Connection.backup` writes `<db>.backup-<YYYYMMDD-HHMMSS>` beside the file and never over an existing
 name; the copy is written as `<name>.partial`, checked (`integrity_check`, the same tables, the same
-version) and only then renamed. Every step of it is bounded by `BACKUP_LOCK_TIMEOUT_S = 10.0`: a
-database held by another process is refused inside ten seconds rather than waited out. If the copy
-cannot be written the migration is refused: the command names the path and the reason, exits 1, and
-changes nothing.
+version) and only then renamed. The copy is given up on when it stops moving for
+`BACKUP_LOCK_TIMEOUT_S = 10.0` seconds: a database held by another process is refused inside that
+time rather than waited out, and a database that keeps copying is never refused for taking a long
+time. If the copy cannot be written the migration is refused: the command names the path and the
+reason, exits 1, and changes nothing.
 
 Spec rule 20's timestamped backup is no longer the Administrator's job (see
 `.scratch/ate-v1-wayfinding/assets/test-run-record.md`).

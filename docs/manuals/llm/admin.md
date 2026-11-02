@@ -181,7 +181,9 @@ purge.
   no copy when the file does not exist or holds no tables at all (a zero-byte file included), a copy
   when a table is missing even if the version is already current. The copy is written as
   `<name>.partial`, checked (`integrity_check`, the same tables, the same version), then renamed; a
-  copy that cannot be finished inside the ten-second deadline is refused, naming the lock. A name
+  copy that makes no progress for ten seconds is refused, naming the stall. The ten seconds bound
+  lack of progress, not total time, so a big database that keeps copying is never refused however
+  long the copy takes. A name
   that is taken gets a `-2`, `-3` counter; nothing is overwritten. If the copy cannot be written,
   the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
   exit 1.

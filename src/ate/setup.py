@@ -218,12 +218,6 @@ def prepare_station(
         except OSError as exc:
             raise SetupError(f"cannot create the directory for the database {db_path}: {exc}") from exc
     print(f"database to migrate: {db_path} ({why})")
-    if db_path.parent != data_dir:
-        # The recursive pass over the data directory cannot reach a database somewhere else, so the
-        # directory it lives in gets its own pass (packet 35 review).
-        print(f"the permission pass runs over {db_path.parent}: the database is not under {data_dir}")
-    else:
-        print(f"no separate permission pass: the database is inside the data directory {data_dir}")
     report = _migrate_database(str(db_path))
     if report != 0:
         # create_all runs table by table, so a migration that fails may have created some of
@@ -245,8 +239,16 @@ def prepare_station(
         perms = permissions
 
     if perms is not None:
+        # What ran is printed only when it ran: an unprivileged `ate setup`, or one given
+        # --no-permissions, changes no group, mode or ACL and says nothing about a pass that
+        # did not happen (packet 35 review, round 2).
+        if db_path.parent != data_dir:
+            print(f"the permission pass runs over {db_path.parent}, not recursively: the database "
+                  f"{db_path}, the copies beside it, and the directory they are in")
+        else:
+            print(f"no separate permission pass: the database is inside the data directory {data_dir}")
         try:
-            _apply_permissions(perms, data_dir, config_dir, config_file, db_path.parent)
+            _apply_permissions(perms, data_dir, config_dir, config_file, db_path)
         except OSError as exc:
             raise SetupError(f"cannot apply permissions to {data_dir}: {exc}") from exc
 
@@ -260,7 +262,19 @@ def prepare_station(
     }
 
 
-def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path, config_file: Path, database_dir: Path) -> None:
+def _database_and_its_copies(db_path: Path) -> list[Path]:
+    """The database, everything written beside it, and the directory they are all in.
+
+    The glob ``<name>*`` catches the ``.backup-<stamp>`` copies, the ``-wal``/``-shm`` companions
+    and a ``.partial`` left by a killed copy. Nothing else in the directory is on the list:
+    ``database.path`` can point at a shared directory, and a permission pass is not licence to
+    change the group of everything in it (packet 35 review, round 2)."""
+    paths = [db_path.parent, db_path]
+    paths.extend(p for p in sorted(db_path.parent.glob(f"{db_path.name}*")) if p != db_path)
+    return paths
+
+
+def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path, config_file: Path, db_path: Path) -> None:
     """Grant ordinary users modify rights on the data tree and keep the config admin-only.
 
     Linux owns everything under ``data_dir`` to the group (recursively, with setgid so new files like
@@ -268,22 +282,25 @@ def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path, con
     ``config_dir`` root-owned; Windows grants Users Modify across ``data_dir`` and leaves
     ``config.json`` read-only for them.
 
-    ``database_dir`` is where the database actually lives. When ``database.path`` points outside
-    ``data_dir`` it gets its own pass, because the pass over ``data_dir`` never reaches it: the
-    backup copies written beside it would stay unreadable to ordinary users (packet 35 review).
-    When it is inside, the recursive pass over ``data_dir`` already covers it and nothing extra is
-    done.
+    ``db_path`` is where the database actually lives. When ``database.path`` points outside
+    ``data_dir`` only the database, the copies beside it and their own directory get the pass, and
+    none of it recursively: the pass over ``data_dir`` cannot reach them, and walking the parent of
+    a custom database path would reach whatever else that directory holds — on a Station where
+    ``/var/lib/ate/ate.db`` is named, everything under ``/var`` (packet 35 review, round 2). The
+    directory still gets the setgid bit, so files written later inherit the group.
     """
     if _current_platform() == "windows":
         perms.grant_users_modify(data_dir)
-        if database_dir != data_dir:
-            perms.grant_users_modify(database_dir)
+        if db_path.parent != data_dir:
+            for entry in _database_and_its_copies(db_path):
+                perms.grant_users_modify(entry)
         perms.admin_only(config_file)
     else:  # linux — a separate data tree, with the config dir itself admin-only (dir and file)
         perms.ensure_group(ATE_GROUP)
         perms.set_group_writable(data_dir, ATE_GROUP, recursive=True)
-        if database_dir != data_dir:
-            perms.set_group_writable(database_dir, ATE_GROUP, recursive=True)
+        if db_path.parent != data_dir:
+            for entry in _database_and_its_copies(db_path):
+                perms.set_group_writable(entry, ATE_GROUP, recursive=False)
         perms.set_admin_only(config_file)
         perms.set_admin_only(config_dir)
 

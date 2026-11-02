@@ -34,11 +34,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from .schema import SCHEMA_VERSION, metadata
 from ..errors import ATEError
 
-#: How long the copy may take before it is given up on: a deadline in seconds, checked at every
-#: step of the copy, not only SQLite's busy timeout. A copy that waits behind a lock another
-#: process holds would otherwise hang ``ate db migrate`` and, through it, an installer: the
-#: connect timeout alone did not bound it (packet 35 review).
+#: How long the copy may go without moving before it is given up on: seconds of no progress,
+#: not seconds in total. A copy waiting behind a lock another process holds would otherwise run
+#: forever --- CPython's backup loop keeps retrying while SQLite says the source is busy, and the
+#: connect timeout alone never bounded it (packet 35 review, round 2).
 BACKUP_LOCK_TIMEOUT_S = 10.0
+
+#: Pages copied per step of the copy, so the progress callback sees the copy move often enough
+#: to notice when it stops.
+BACKUP_PAGES = 64
+
+#: The pause CPython takes between steps that SQLite refused with BUSY or LOCKED.
+BACKUP_RETRY_SLEEP_S = 0.05
 
 
 class BackupError(ATEError):
@@ -47,6 +54,10 @@ class BackupError(ATEError):
 
 class SchemaVersionError(ATEError):
     """A database stores a version this migration cannot honestly raise to the current one."""
+
+
+class _CopyStalled(Exception):
+    """Internal: raised from the progress callback when the copy stops moving."""
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
@@ -185,10 +196,10 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
     * it is written to ``<name>.partial`` and only renamed to ``<name>.backup-<stamp>`` once it
       has been checked (:func:`_copy_is_sound`), so a copy killed mid-flight is never left behind
       under a name that reads like a backup;
-    * every step of it — opening the database, taking the lock, writing the copy, checking it,
-      renaming it — runs against a deadline of :data:`BACKUP_LOCK_TIMEOUT_S`. A database held by
-      another process is refused inside that time rather than hanging the command or the
-      installer, which is what the connect timeout on its own never did.
+    * it is given up on when it stops moving for :data:`BACKUP_LOCK_TIMEOUT_S` seconds. The bound
+      is on lack of progress, not on total time: a big database that keeps copying is never
+      refused however long it takes, while one held by another process is refused inside the
+      bound rather than hanging ``ate db migrate`` or an installer.
     """
     path = Path(path)
     if not path.exists():
@@ -200,7 +211,6 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
 
     target = _copy_name(path)
     partial = target.with_name(target.name + ".partial")
-    deadline = time.monotonic() + BACKUP_LOCK_TIMEOUT_S
     source: Optional[sqlite3.Connection] = None
     copy: Optional[sqlite3.Connection] = None
 
@@ -219,25 +229,39 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
         _discard_partial()
         return BackupError(f"cannot back up {path} to {target}: {reason}")
 
-    def _remaining() -> float:
-        """The seconds left on the deadline, refusing once it has passed."""
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _give_up(
-                f"it gave up on the database lock after {BACKUP_LOCK_TIMEOUT_S} s; "
-                "the database is held by another process — finish the Test Run or close the "
-                "other ATE and run the migration again"
+    moved_at = time.monotonic()
+    last_remaining: Optional[int] = None
+
+    def _progress(rc: int, remaining: int, pagecount: int) -> None:
+        """Called after every step of the copy; raises when the copy has stopped moving.
+
+        ``remaining`` is the pages still to copy. While another process holds the database
+        SQLite refuses each step with BUSY and CPython retries it, leaving ``remaining``
+        unchanged: that is the stall, and it is bounded here. A step that returns BUSY but
+        still advances ``remaining`` is a copy that is moving.
+
+        Raising here aborts the backup: CPython finalises the backup handle and re-raises,
+        which is what makes the abort safe to catch (packet 35 review, round 2)."""
+        nonlocal moved_at, last_remaining
+        if remaining != last_remaining:
+            last_remaining = remaining
+            moved_at = time.monotonic()
+            return
+        if time.monotonic() - moved_at >= BACKUP_LOCK_TIMEOUT_S:
+            raise _CopyStalled(
+                f"it made no progress for {BACKUP_LOCK_TIMEOUT_S} s; the database is held by "
+                "another process — finish the Test Run or close the other ATE and run the "
+                "migration again"
             )
-        return remaining
 
     try:
         source = sqlite3.connect(str(path), timeout=BACKUP_LOCK_TIMEOUT_S)
-        # SQLite's own busy timeout is set to what is left, so a wait for the lock cannot outlast
-        # the deadline; the deadline is checked again at every step below.
-        source.execute(f"PRAGMA busy_timeout={int(_remaining() * 1000)}")
+        # SQLite's own busy timeout bounds a single wait for the lock; the progress callback
+        # bounds the retries after it. Neither is a limit on how long the copy may take.
+        source.execute(f"PRAGMA busy_timeout={int(BACKUP_LOCK_TIMEOUT_S * 1000)}")
         # Step 1: prove the database can be locked. A process holding a write transaction makes
         # this wait; it is the step that used to hang the installer, and it is the one that now
-        # refuses inside the deadline.
+        # refuses inside the bound.
         try:
             source.execute("BEGIN IMMEDIATE")
             source.execute("ROLLBACK")
@@ -248,20 +272,21 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
             ) from exc
         # Step 2: write the copy under its temporary name.
         copy = sqlite3.connect(str(partial), timeout=BACKUP_LOCK_TIMEOUT_S)
-        copy.execute(f"PRAGMA busy_timeout={int(_remaining() * 1000)}")
+        copy.execute(f"PRAGMA busy_timeout={int(BACKUP_LOCK_TIMEOUT_S * 1000)}")
         try:
-            source.backup(copy)
+            source.backup(copy, pages=BACKUP_PAGES, progress=_progress, sleep=BACKUP_RETRY_SLEEP_S)
             # A copy of a WAL database carries the WAL header, so the fresh file picks up its own
             # -wal/-shm companions. Folding them back into the file leaves the backup as one file:
             # a copy whose data is still sitting in a side file is not a copy you can take away.
             copy.execute("PRAGMA journal_mode=DELETE")
             copy.commit()
+        except _CopyStalled as exc:
+            raise _give_up(str(exc)) from exc
         except sqlite3.Error as exc:
             raise _give_up(f"the copy was interrupted: {exc}") from exc
         # Step 3: close the copy (Windows cannot delete an open file) and check it.
         _close_quietly(copy)
         copy = None
-        _remaining()
         problem = _copy_is_sound(path, partial)
         if problem is not None:
             raise _give_up(problem)
@@ -331,10 +356,13 @@ def migrate_database(path: str | Path, *, config_file: Path | None = None) -> in
     except (ATEError, sqlite3.Error, SQLAlchemyError, OSError) as exc:
         # Every way a database can fail to be opened or written, a PermissionError included:
         # one line naming the copy that was already taken, never a traceback (packet 35 review).
+        # A SQLAlchemy error carries the whole statement it failed on, so only the first line of
+        # the cause is printed: an Operator reading it wants the reason, not the DDL.
+        reason = (str(exc).splitlines() or [""])[0]
         if copy is not None:
-            print(f"migration failed: {exc}; the copy taken before it is at {copy}", file=sys.stderr)
+            print(f"migration failed: {reason}; the copy taken before it is at {copy}", file=sys.stderr)
         else:
-            print(f"migration failed: {exc}", file=sys.stderr)
+            print(f"migration failed: {reason}", file=sys.stderr)
         return 1
 
     print(f"created or upgraded database at {path} (schema version {current_version(path)})")

@@ -10,8 +10,8 @@ What is pinned:
   itself before a migration changes it, refuses when the copy cannot be made, and leaves the
   copy in place when the migration then fails;
 * that copy is written as ``<name>.partial``, checked, and only then renamed to its
-  ``.backup-<stamp>`` name, and every step of it runs inside :data:`BACKUP_LOCK_TIMEOUT_S`
-  rather than waiting on a lock indefinitely;
+  ``.backup-<stamp>`` name, and it is given up on when it stops moving for
+  :data:`BACKUP_LOCK_TIMEOUT_S` seconds rather than waiting on a lock indefinitely;
 * a database is never stamped with the current version unless a migration actually created
   something for this build;
 * ``ate setup`` migrates the database the Station's config names, and says which it chose;
@@ -31,6 +31,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -298,13 +299,104 @@ def test_a_backup_taken_while_another_process_has_the_database_open(tmp_path: Pa
     assert serials == ["IN-FLIGHT", "OLD-1"], serials
 
 
-def _bulk_rows(path: Path, count: int) -> None:
-    """Put ``count`` 4 KB rows in a table of its own, so a copy of this file takes real pages."""
+def _bulk_rows(path: Path, count: int, journal: str = "WAL") -> None:
+    """Put ``count`` 4 KB rows in a table of its own, so a copy of this file takes real pages.
+
+    ``journal`` sets the journal mode: ``DELETE`` gives the rollback journal, whose locks show
+    up in the middle of a copy rather than in a side file."""
     conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA journal_mode={journal}")
     conn.execute("CREATE TABLE IF NOT EXISTS bulk(x BLOB)")
     conn.executemany("INSERT INTO bulk VALUES (?)", [(b"\x00" * 4096,) for _ in range(count)])
     conn.commit()
     conn.close()
+
+
+def _mid_copy_lock(path: Path, seconds: int) -> threading.Thread:
+    """A second connection that takes a write lock once the copy is under way.
+
+    The holder waits for the ``.partial`` file to appear and start growing, so the lock lands
+    mid-copy rather than before it: that is the case CPython's backup loop used to retry forever,
+    because a step SQLite refuses with BUSY is retried while ``remaining`` stays put. The
+    transaction is never committed: the rollback journal restores the database when the holder
+    closes."""
+    def holder() -> None:
+        while True:
+            partial = [p for p in path.parent.iterdir() if p.name.endswith(".partial") and p.stat().st_size > 0]
+            if partial:
+                break
+            time.sleep(0.01)
+        conn = sqlite3.connect(str(path), timeout=120)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO bulk VALUES (?)", (b"z" * 4194304,))
+            time.sleep(seconds)
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    return thread
+
+
+def test_a_lock_taken_mid_copy_is_refused_within_the_bound(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A lock that arrives while the copy is running stops the copy, and the copy says so.
+
+    :data:`BACKUP_PAGES` is 1 and the database is 60 MB of rollback journal, so the copy runs in
+    steps for long enough for the holder to take its write lock partway through. CPython's backup
+    loop retries a step that SQLite refuses with BUSY forever, so without the progress callback
+    this hangs until the holder lets go; the bound is on lack of progress, and the refusal comes
+    inside it."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 1)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 15000, journal="DELETE")
+    holder = _mid_copy_lock(path, 4)
+    try:
+        started = time.monotonic()
+        code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.join(timeout=30)
+
+    text = out + err
+    assert elapsed < 10, f"the copy waited {elapsed} s on a lock taken mid-copy"
+    assert code == 1, text
+    assert "no progress" in text.lower(), text
+    assert "2.0" in text, text
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert _version(path) == 4, "the refused migration changed the database's version"
+    assert "equipment" not in _tables(path), "the refused migration created a table"
+
+
+def test_a_copy_that_keeps_moving_is_never_refused_how_long_it_takes(tmp_path: Path, monkeypatch) -> None:
+    """A slow copy is not a stalled one: the bound is on progress, not on total time.
+
+    The copy is made one page at a time so it takes longer than :data:`BACKUP_LOCK_TIMEOUT_S`,
+    which is shortened to 20 ms. Before the bound was about progress, the copy was checked
+    against a deadline only after it had finished, so this one was refused with a message
+    blaming a lock that was never there."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 1)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 6000, journal="DELETE")
+
+    started = time.monotonic()
+    copy = backup_for_migration(path)
+    elapsed = time.monotonic() - started
+
+    assert copy is not None, "a copy that kept moving was refused"
+    assert elapsed > 0.02, f"the copy finished in {elapsed} s, shorter than the bound it was set to"
+    assert _tables(copy) == _tables(path), "the copy that was allowed does not hold the source's tables"
+
+
 
 
 def _locked_holder(path: Path, seconds: int) -> subprocess.Popen:
@@ -414,14 +506,14 @@ def test_a_copy_never_overwrites_a_file_that_is_already_there(tmp_path: Path, mo
     assert "already" in str(raised.value).lower(), str(raised.value)
 
 
-def test_a_copy_that_runs_past_the_deadline_is_refused_in_one_line(
+def test_a_database_locked_before_the_copy_starts_is_refused_in_one_line(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
-    """A database locked by another process is refused inside the deadline, not waited out.
+    """A database locked by another process is refused inside the bound, not waited out.
 
     The holder sits on a write transaction for 30 s. :data:`BACKUP_LOCK_TIMEOUT_S` is shortened
     to 2 s: the copy gives up inside it, in one line naming the lock, leaving the database and
-    no copy behind. Before the deadline was enforced this waited for the lock instead."""
+    no copy behind. Before the bound was enforced this waited for the lock instead."""
     from ate.storage import backup as backup_module
 
     monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
@@ -450,7 +542,11 @@ def test_a_copy_that_runs_past_the_deadline_is_refused_in_one_line(
 
 
 def test_a_migration_that_fails_leaves_the_copy_and_names_it(tmp_path: Path) -> None:
-    """The copy is taken first, so a migration that then fails can be rolled back — and says where."""
+    """The copy is taken first, so a migration that then fails can be rolled back — and says where.
+
+    A read-only database made the failure nineteen lines long: SQLAlchemy prints the statement it
+    failed on with the error, and the copy's path ended up on the last of them. One line is the
+    contract, so the first line of the cause and the copy are what an Operator sees."""
     path = tmp_path / "ate.db"
     _older_database(path, 4, ["equipment"])
     path.chmod(0o444)  # readable, so it can be copied; not writable, so the migration cannot run
@@ -462,6 +558,11 @@ def test_a_migration_that_fails_leaves_the_copy_and_names_it(tmp_path: Path) -> 
     assert len(copies) == 1, text
     assert str(copies[0]) in text, text
     assert "Traceback" not in err, err
+    failure = [line for line in err.splitlines() if "migration failed" in line]
+    assert len(failure) == 1, err
+    assert "readonly database" in failure[0], failure[0]
+    assert str(copies[0]) in failure[0], failure[0]
+    assert len(err.strip().splitlines()) == 1, err
     assert _version(path) == 4, "the failed migration changed a database it could not write"
     path.chmod(0o644)
 

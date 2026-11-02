@@ -109,15 +109,18 @@ It is written first as \texttt{ate.db.backup-\dots.partial}, checked (\texttt{in
 the same tables as the source, the same version), and only then renamed to the name above. A copy
 interrupted halfway is therefore never left beside the database under a name that reads like a
 backup: an empty SQLite file passes \texttt{integrity\_\allowbreak{}check}, which is why the table set and the
-version are compared as well. Making the copy is bounded by a deadline of ten seconds --- a database
-held by another process is refused inside it rather than waited out, which is what an installer needs.
+version are compared as well. A copy that stops moving is given up on after ten seconds without
+progress. The bound is on lack of progress, not on total time: a database held by another process
+is refused inside that time rather than waited out, which is what an installer needs, while a
+large database that keeps copying is never refused however long the copy takes.
 
-If the copy cannot be written --- the data directory is not writable, or another process is holding
+If the copy cannot be made --- the data directory is not writable, or another process is holding
 the database --- the migration is refused and nothing is changed:
 
 \begin{lstlisting}[language=ATEShell]
-refusing to migrate: cannot write a backup of /var/lib/ate/ate.db to
-/var/lib/ate/ate.db.backup-20261101-093312
+refusing to migrate: cannot back up /var/lib/ate/ate.db to
+/var/lib/ate/ate.db.backup-20261101-093312: it made no progress for 10.0 s; the database is
+held by another process --- finish the Test Run or close the other ATE and run the migration again
 nothing in the database was changed
 \end{lstlisting}
 

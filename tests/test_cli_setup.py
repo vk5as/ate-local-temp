@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import sys
 import types
+from pathlib import Path
+
 import pytest
 
 from ate.cli import main, _is_root
@@ -171,18 +173,24 @@ def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     assert str(root / "config" / "config.json") not in perms.group_writable_paths
 
 
-def test_the_permission_pass_covers_the_directory_the_database_actually_is_in(tmp_path, monkeypatch, capsys):
-    """``database.path`` outside the data directory: that directory gets the same treatment.
+def test_the_permission_pass_covers_the_database_and_its_copies_not_the_whole_directory(tmp_path, monkeypatch, capsys):
+    """``database.path`` outside the data directory: only the database and what sits beside it.
 
     The recursive pass over ``data_dir`` never reaches a database that lives elsewhere, so the
-    copies written beside it stay unreadable to ordinary users."""
+    copies written beside it stay unreadable to ordinary users. But walking the parent of a custom
+    ``database.path`` recursively reaches whatever else that directory holds — ``/var`` on a
+    Station that names ``/var/lib/ate/ate.db``, or a directory shared with another application —
+    so the pass is pinned entry by entry, with its recursive flag."""
     root = tmp_path / "station"
     data = root / "data"
     config_dir = root / "config"
-    db = tmp_path / "elsewhere" / "station.db"
+    elsewhere = tmp_path / "elsewhere"
+    db = elsewhere / "station.db"
     config_dir.mkdir(parents=True)
     data.mkdir(parents=True)
-    db.parent.mkdir(parents=True)
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "not-mine.conf").write_text("another application's file", encoding="utf-8")
+    (elsewhere / "station.db.backup-20260101-000000").write_text("an earlier copy", encoding="utf-8")
     (config_dir / "config.json").write_text(
         '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
         f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
@@ -194,13 +202,40 @@ def test_the_permission_pass_covers_the_directory_the_database_actually_is_in(tm
     monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
     prepare_station(data, config_dir, permissions=perms)
 
-    assert perms.group_writable_paths == [str(data), str(db.parent)], perms.calls
-    assert [c["op"] for c in perms.calls] == [
-        "ensure_group", "set_group_writable", "set_group_writable", "set_admin_only", "set_admin_only",
-    ]
+    passes = [c for c in perms.calls if c["op"] == "set_group_writable"]
+    assert [(c["path"], c["recursive"]) for c in passes][:2] == [(str(data), True), (str(elsewhere), False)], perms.calls
+    for entry in passes[1:]:
+        assert entry["recursive"] is False, entry
+        assert Path(entry["path"]) == elsewhere or Path(entry["path"]).name.startswith(db.name), entry
+    assert str(db) in perms.group_writable_paths, perms.calls
+    assert str(elsewhere / "station.db.backup-20260101-000000") in perms.group_writable_paths, perms.calls
+    assert str(elsewhere / "not-mine.conf") not in perms.group_writable_paths, perms.calls
     out = capsys.readouterr().out
-    assert f"the permission pass runs over {db.parent}" in out, out
+    assert f"the permission pass runs over {elsewhere}, not recursively" in out, out
     assert "no separate permission pass" not in out, out
+
+
+def test_a_skipped_permission_pass_prints_nothing_about_a_pass(tmp_path, capsys):
+    """Nothing is printed about a permission pass that did not run.
+
+    Before this, setup said which directory the pass would run over before it knew whether it ran
+    at all: an unprivileged ``ate setup`` reported a pass it then skipped."""
+    root = tmp_path / "station"
+    elsewhere = tmp_path / "elsewhere"
+    db = elsewhere / "station.db"
+    elsewhere.mkdir(parents=True)
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "config.json").write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    prepare_station(root / "data", root / "config", permissions=SKIP_PERMISSIONS)
+    out = capsys.readouterr().out
+    assert "permission pass" not in out, out
+    assert "database to migrate" in out, out
 
 
 def test_a_database_inside_the_data_directory_needs_no_extra_pass(tmp_path, monkeypatch, capsys):
