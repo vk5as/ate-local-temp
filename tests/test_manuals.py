@@ -1730,7 +1730,9 @@ peers = Peers()
 peers.start()
 session = HeadlessRunSession(read_config(config))
 states = []
+step_starts = []
 session.state_changed.connect(states.append)
+session.step_started.connect(step_starts.append)
 session.set_operator("Abort probe")
 session.set_project("Abort probe")
 session.set_uut_type("Probe board")
@@ -1740,9 +1742,11 @@ with bench_env(peers), pdf_stub():
     session.start()
     app = QCoreApplication.instance() or QCoreApplication([])
     t0 = time.monotonic()
-    while SessionState.STARTED not in states and time.monotonic() - t0 < 10:
+    while not step_starts and time.monotonic() - t0 < 10:
         app.processEvents()
         time.sleep(0.01)
+    if not step_starts:
+        raise RuntimeError("the schedule did not start its first step")
     if started_marker:
         marker = Path(started_marker)
         while not marker.exists() and time.monotonic() - t0 < 30:
@@ -1860,7 +1864,9 @@ def test_a_coroutine_loop_runs_to_completion_after_an_abort(tmp_path: Path) -> N
     The bound is the loop's own length on this machine, not a fixed number of seconds: a runner
     fast enough to do 120 million iterations in a third of a second is not a runner that was cut
     off (packet 35 review)."""
-    proc = _run_abort_probe(tmp_path, COROUTINE_LOOP)
+    # Ask during the step, shortly after its start signal. The coroutine itself is not interruptible;
+    # on fast runners a longer fixed delay could let this short loop finish before the abort request.
+    proc = _run_abort_probe(tmp_path, COROUTINE_LOOP, abort_after=0.1)
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
     loop = _loop_seconds()
