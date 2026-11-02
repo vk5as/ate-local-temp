@@ -455,8 +455,9 @@ abort. `print` is redirected to `ATE.log(INFO, ...)`.
 
 None of this is a defence against the person who wrote the schedule. `os.execute`, `os.remove` and
 `os.rename` are reachable from a step: `os.execute("kill -9 $PPID")` ends ATE with the run row left
-open, and `os.remove` on the database takes the record away under a running run. The lockdown buys
-traceability, not protection.
+open — that command is a POSIX shell command, and a Windows Station's `os.execute` goes to `cmd.exe`,
+which has no `kill` and no `$PPID` — and `os.remove` on the database takes the record away under a
+running run. The lockdown buys traceability, not protection.
 
 `_AteTable` is what a schedule sees. Every function is wrapped by `_isolate`, which turns a raised ATE
 error into the `(false, message)` Device failure shape or an ERROR Attempt, naming the schedule file and

@@ -93,18 +93,23 @@ def default_layout() -> StationLayout:
     ``sys.platform`` is the value a Windows machine actually reports (``win32``).
 
     Neither directory is written as a literal. The data directory is the one the ``<data>``
-    placeholder resolves to, and the config directory is the parent of the config file a launch
-    reads, so the test-only seams of packet 30c reach setup as well as the reader: conftest pins the
-    platform data directory and ``ATE_DEFAULT_CONFIG`` moves the config file, which is what keeps a
-    test from creating ``/etc/ate`` or ``/var/lib/ate`` (packet 35 review, round 3). On a real
-    Station, where neither is set, the answer is the documented one either way."""
-    from .config import _is_windows, _platform_data_dir, _platform_default, _windows_data_dir
+    placeholder resolves to, and the config directory is the directory the config reader's default
+    file sits in, so the test-only seams of packet 30c reach setup as well as the reader: conftest
+    pins the platform data directory and ``ATE_DEFAULT_CONFIG`` moves the config file, which is what
+    keeps a test from creating ``/etc/ate``, ``/var/lib/ate`` or ``%PROGRAMDATA%\\ATE`` (packet 35
+    review, round 3; packet 35b, CI 41407051552, where a bare setup on the Windows runner wrote
+    ``C:\\ProgramData\\ATE\\config.json`` because the Windows branch took its config directory from
+    ``%PROGRAMDATA%`` and never read the seam). On a real Station, where neither is set, the answer
+    is the documented one either way."""
+    from .config import _is_windows, _platform_config_dir, _platform_data_dir
 
-    if _is_windows():
-        base = _windows_data_dir()
-        return StationLayout(data_dir=base, config_dir=base, platform="windows")
-    # Linux: a separate admin-only config directory and a user-writable data directory.
-    return StationLayout(data_dir=_platform_data_dir(), config_dir=_platform_default().parent, platform="linux")
+    # Linux keeps a separate admin-only config directory beside the data directory; Windows holds
+    # both in %PROGRAMDATA%\ATE.
+    return StationLayout(
+        data_dir=_platform_data_dir(),
+        config_dir=_platform_config_dir(),
+        platform="windows" if _is_windows() else "linux",
+    )
 
 
 def _station_database_path(config_file: Path, data_dir: Path) -> tuple[Path, str]:

@@ -1882,6 +1882,19 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
     raise AssertionError(f"the unbounded coroutine loop ended after {proc.returncode}: {proc.stdout}")
 
 
+#: The command the abort probe waits on. On a POSIX shell the interpreter's own one-liner is the
+#: clearest hold; on a Windows Station `os.execute` reaches the shell through C `system()`, which
+#: hands the string to cmd.exe verbatim, and cmd's `/c` rule strips the first and the last quote of
+#: the whole string when it begins with one: `"python" -c "import time; ..."` arrives as
+#: `python" -c "import time; ...` and cmd exits 1 in a few milliseconds. subprocess builds the
+#: command line with the embedded quotes escaped, which is why the same string measured 3.03 s on
+#: the same Windows runner (packet 35b, CI 41407051552). `ping` needs no quotes at all.
+def _hold_command() -> str:
+    if sys.platform == "win32":
+        return "ping -n 4 127.0.0.1 >NUL"
+    return f'"{sys.executable}" -c "import time; time.sleep(3)"'
+
+
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
     """``os.execute`` is outside the hook: the run ends when the command does, not when the
     Operator asks.
@@ -1889,8 +1902,10 @@ def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -
     The command is timed here rather than assumed: ``sleep`` is not a Windows command, and the CI
     runner that passed this test had a ``sleep`` only because a Git tool happened to be on its PATH.
     The wait is measured, so the assertion is about the hold and not about a shell that may or may
-    not have the command (packet 35 review)."""
-    command = f'"{sys.executable}" -c "import time; time.sleep(3)"'
+    not have the command (packet 35 review). The command is chosen per platform for the same
+    reason: the quoted `python -c` form is mangled by cmd.exe when it comes through `system()`, so
+    on Windows the hold is `ping` (packet 35b, CI 41407051552)."""
+    command = _hold_command()
     started = time.perf_counter()
     held = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
     held_seconds = time.perf_counter() - started
@@ -1926,17 +1941,29 @@ def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error
     assert row and row["ended_at"] is not None and row["result"] is not None, f"the run row is not closed: {row}"
 
 
-#: The command the manual names as the way a schedule ends ATE from inside a step.
+#: The command the manual names as the way a schedule ends ATE from inside a step. A POSIX shell
+#: command: cmd.exe on a Windows Station has no `kill` and no `$PPID`, so the probe that runs it is
+#: skipped on Windows (packet 35b, CI 41407051552), and the manuals say so where they quote it.
 KILL_COMMAND = "kill -9 $PPID"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the step ends the process with `kill -9 $PPID`, which a POSIX shell has and cmd.exe "
+           "does not (packet 35b, CI 41407051552)",
+)
 def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tmp_path: Path) -> None:
     """lupa's `os` has no `abort`, and the manual used to say it stayed "unneeded".
 
     Two things were wrong with that sentence: it names a function the runtime does not have, and it
     implied the sandbox kept a schedule from hurting the Station. A step can run a command and can
     delete a file; a Test Schedule is the Station's own code. The probe runs the command the manual
-    now quotes, and the process dies with the run row still open."""
+    now quotes, and the process dies with the run row still open.
+
+    The command is a POSIX shell command, so the probe is skipped on Windows: the runner's
+    `os.execute` reached cmd.exe, which has no `kill`, and the step returned normally (packet 35b,
+    CI 41407051552). What the manuals say about it is checked on every platform by
+    :func:`test_the_manuals_say_which_schedule_examples_are_posix_only`."""
     proc = _run_abort_probe(tmp_path, f'os.execute("{KILL_COMMAND}") ATE.report(Result.PASS, "never reached")')
     assert proc.returncode != 0, f"the step was expected to end the process, it returned {proc.returncode}: {proc.stdout[-300:]}"
     row = _open_run_row(tmp_path / "station" / "ate.db")
@@ -1958,6 +1985,47 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
 
     manual = "\n".join(text for _label, text in MANUALS["developer"].texts())
     assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
+
+
+#: Shell commands a manual may quote that only a POSIX shell has, as a regex matching the command
+#: in either form: LaTeX escapes the `$` as `\$`. Each quote of one of them has to carry the caveat
+#: where the quote is, not somewhere else in the file.
+POSIX_ONLY_COMMANDS = {"kill -9 $PPID": r"kill -9 \\?\$PPID"}
+
+#: How many lines each side of the quote the caveat has to reach.
+_SHELL_CAVEAT_WINDOW = 4
+
+
+def test_the_manuals_say_which_schedule_examples_are_posix_only() -> None:
+    """Every manual, in both of its forms, names the shell a quoted shell command needs.
+
+    `kill -9 $PPID` is how the manuals show a schedule ending ATE, and the suite can only run it on
+    a POSIX shell: on the Windows runner cmd.exe answered "kill: illegal pid: $PPID" and the step
+    returned normally (packet 35b, CI 41407051552). An Operator on a Windows Station should read
+    that from the manual rather than find it out by ending their own run.
+
+    The check used to look at the developer manual only and at the file as one string, so a chapter
+    could quote the command with the caveat pages away, and the test-writer manual, which quotes it
+    too, was never looked at. Every quote is now checked in the few lines around it, in every
+    manual and form that quotes one."""
+    quotes = 0
+    for name, manual in MANUALS.items():
+        for path, text in manual.texts():
+            lines = text.splitlines()
+            for number, line in enumerate(lines):
+                for command, pattern in POSIX_ONLY_COMMANDS.items():
+                    if not re.search(pattern, line):
+                        continue
+                    quotes += 1
+                    window = "\n".join(lines[max(0, number - _SHELL_CAVEAT_WINDOW) : number + _SHELL_CAVEAT_WINDOW + 1])
+                    where = f"{name} manual's {Path(path).name}, line {number + 1}"
+                    assert re.search(r"POSIX|[Uu]nix|[Ll]inux", window), (
+                        f"{where} quotes `{command}` with nothing nearby saying only a POSIX shell has it"
+                    )
+                    assert re.search(r"[Ww]indows|cmd\.exe", window), (
+                        f"{where} quotes `{command}` with nothing nearby naming the shell a Windows Station has"
+                    )
+    assert quotes, "no manual quotes a POSIX-only command any more"
 
 
 # --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------

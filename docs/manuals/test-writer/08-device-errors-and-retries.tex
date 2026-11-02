@@ -74,7 +74,9 @@ affected before promising a stop.
   \item \textbf{A command run by \texttt{os.execute}.} \texttt{os.execute} is available in a step,
     and using it is allowed. The abort cannot end a process ATE did not start, so the run finishes
     when the command does: a command holds the abort for as long as it runs, however long that is.
-    The step still reported \texttt{PASS} when it returned.
+    The step still reported \texttt{PASS} when it returned. The command has to be one the Station's
+    shell has: \texttt{kill -9 \$PPID} is a POSIX command, and a Windows Station runs
+    \texttt{os.execute} through \texttt{cmd.exe}.
   \item \textbf{A busy loop inside a coroutine.} The count hook does not reach a coroutine, so a
     loop in one may run on after an abort and the run ends only when the loop does: a long enough
     loop holds the abort for as long as it takes. An unbounded \texttt{while true do end} inside

@@ -17,6 +17,7 @@ that never happens — only a lone application is ever finalized.
 import os
 import subprocess
 import sys
+import warnings
 import weakref
 from pathlib import Path
 
@@ -305,10 +306,93 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
     import ate.config
 
     data_dir = tmp_path_factory.mktemp("platform-data")
+    #: The machine's own Station directories, taken from the product's own reading of the
+    #: platform before this fixture pins the data directory: `_platform_data_dir` and
+    #: `_platform_config_dir` know the documented fallback for a missing `PROGRAMDATA`
+    #: (`config.PROGRAMDATA_FALLBACK`), so the guard sees `C:\ProgramData\ATE` on a Windows
+    #: runner that has no `PROGRAMDATA` at all (packet 35b, CI 41407051552).
+    _REAL_STATION_DIRS[:] = sorted(
+        {d for d in (ate.config._platform_data_dir(), ate.config._platform_config_dir()) if d.is_absolute()}
+    )
     original = ate.config._platform_data_dir
     ate.config._platform_data_dir = lambda: data_dir
     yield
     ate.config._platform_data_dir = original
+
+
+#: Where a real Station keeps its files, filled by the fixture above: `/etc/ate` and
+#: `/var/lib/ate` on Linux, `%PROGRAMDATA%\ATE` on Windows, with `C:\ProgramData\ATE` when
+#: `PROGRAMDATA` is unset.
+_REAL_STATION_DIRS: list[Path] = []
+
+#: Paths under those directories that the suite itself made, so a later test that changes one of
+#: them is still caught, while a real Station's own files are never flagged.
+_suite_station_files: set[str] = set()
+_unreadable_reported = False
+
+
+def _station_snapshot() -> tuple[dict[str, float], list[str]]:
+    """``{path: mtime}`` for every entry under the machine's real Station directories that can be
+    read, plus the directories pytest could not read.
+
+    `rglob` walks past a directory it cannot open without saying so, so the walk is written here:
+    what cannot be read is not snapshotted, and is named as unreadable instead of reported as
+    empty. The guard never claims a test left nothing behind in a place it was never able to look.
+    """
+    snapshot: dict[str, float] = {}
+    unreadable: list[str] = []
+    for directory in _REAL_STATION_DIRS:
+        if not directory.exists():
+            continue  # nothing there yet: a test that makes one is caught as a new entry
+        try:
+            snapshot[str(directory)] = directory.stat().st_mtime
+        except OSError as exc:
+            unreadable.append(f"{directory}: {exc}")
+            continue
+        stack = [directory]
+        while stack:
+            current = stack.pop()
+            try:
+                children = list(current.iterdir())
+            except OSError as exc:
+                unreadable.append(f"{current}: {exc}")
+                continue
+            for child in children:
+                try:
+                    snapshot[str(child)] = child.stat().st_mtime
+                except OSError:
+                    continue  # vanished between the walk and the stat: nothing to compare
+                if child.is_dir():
+                    stack.append(child)
+    return snapshot, unreadable
+
+
+@pytest.fixture(autouse=True)
+def _no_test_writes_to_a_real_station():
+    """Fail a test that leaves anything in the machine's own Station directories.
+
+    conftest pins the platform data directory and a test that needs a particular config pins
+    ``ATE_DEFAULT_CONFIG``, but a path those pins do not reach still lands in ``/etc/ate``,
+    ``/var/lib/ate`` or ``%PROGRAMDATA%\\ATE``: a bare ``ate setup`` on the Windows runner created
+    ``C:\\ProgramData\\ATE\\config.json`` (packet 35b, CI 41407051552).
+
+    On a machine that has a real Station, only entries that were not there when the test started
+    are flagged: the Station's own ATE writes into its data directory while the suite runs, and an
+    mtime moving on a file the suite never made is not a test's doing. A file the suite made is a
+    suite's file, so changing it in a later test is flagged too. What could not be read is said
+    once, as a warning, rather than passed off as an empty directory."""
+    global _unreadable_reported
+    before, unreadable = _station_snapshot()
+    yield
+    after, unreadable = _station_snapshot()
+    if unreadable and not _unreadable_reported:
+        _unreadable_reported = True
+        warnings.warn(f"the Station-directory guard cannot read: {', '.join(unreadable)}", stacklevel=1)
+    new = sorted(path for path in after if path not in before)
+    changed = sorted(path for path, when in after.items() if before.get(path) != when and path in _suite_station_files)
+    _suite_station_files.update(new)
+    if new or changed:
+        raise AssertionError(f"a test wrote into the machine's own Station: {new + changed}")
 
 
 @pytest.fixture(scope="session", autouse=True)

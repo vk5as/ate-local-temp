@@ -27,6 +27,23 @@ from ate.setup import SKIP_PERMISSIONS, prepare_station
 from ate.storage import RunStore
 
 
+def _config_with_database_elsewhere(path: Path, database: Path) -> None:
+    """A config whose ``database.path`` is elsewhere, written with json.dumps.
+
+    Building JSON from an f-string with a Windows path in it is not JSON: the backslashes read as
+    escapes, and every setup on the Windows runner refused the config it was handed (packet 35b,
+    CI 41407051552)."""
+    path.write_text(
+        json.dumps(
+            {"format": 1, "station": {"name": "Station 35", "uuid": "u-35"},
+             "database": {"type": "sqlite", "path": str(database)}},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def test_setup_creates_dirs_writes_config_and_migrates_database(tmp_path, capsys):
     """A fresh ``ate setup --root`` creates the dirs, a default config and a migrated database."""
     root = tmp_path / "station"
@@ -153,7 +170,10 @@ def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path,
     setup did not read it. A bare setup run where the suite is root (the Debian container) would
     then create the machine's own config directory. Both directories now come from
     :mod:`ate.config`, the same place the ``<data>`` placeholder and the platform config path come
-    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach."""
+    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach. The Windows branch was the same
+    bug in a different shape: it built the config directory from ``%PROGRAMDATA%\\ATE`` instead of
+    the parent of the config file a launch reads, so on the runner a bare setup created
+    ``C:\\ProgramData\\ATE\\config.json`` (packet 35b, CI 41407051552)."""
     monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(tmp_path / "etc" / "ate" / "config.json"))
     monkeypatch.setattr(ate_config, "_platform_data_dir", lambda: tmp_path / "var" / "lib" / "ate")
 
@@ -166,7 +186,7 @@ def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path,
     )
 
     for path in (layout.data_dir, layout.config_dir, layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
-        assert not str(path).startswith(("/etc/ate", "/var/lib/ate")), f"setup would write into the machine's own Station: {path}"
+        assert str(path).startswith(str(tmp_path)), f"setup would write into the machine's own Station: {path}"
 
     rc, captured = main(["setup", "--no-permissions"]), capsys.readouterr()
     assert rc == 0, captured.err[-300:]
@@ -248,12 +268,7 @@ def test_the_permission_pass_names_the_database_and_its_copies_exactly(tmp_path,
     conn.execute("PRAGMA user_version=4")
     conn.commit()
     conn.close()
-    (config_dir / "config.json").write_text(
-        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
-        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
-        encoding="utf-8",
-        newline="\n",
-    )
+    _config_with_database_elsewhere(config_dir / "config.json", db)
 
     perms = RecordingPermissions()
     monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
@@ -293,12 +308,7 @@ def test_a_skipped_permission_pass_prints_nothing_about_a_pass(tmp_path, capsys)
     db = elsewhere / "station.db"
     elsewhere.mkdir(parents=True)
     (root / "config").mkdir(parents=True)
-    (root / "config" / "config.json").write_text(
-        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
-        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
-        encoding="utf-8",
-        newline="\n",
-    )
+    _config_with_database_elsewhere(root / "config" / "config.json", db)
 
     prepare_station(root / "data", root / "config", permissions=SKIP_PERMISSIONS)
     out = capsys.readouterr().out

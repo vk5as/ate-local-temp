@@ -191,19 +191,30 @@ class _StuckPeer:
     to it stalls, which is how the write-timeout path is exercised."""
 
     def __init__(self, rcvbuf: int = 2048) -> None:
+        self._rcvbuf = rcvbuf
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         self._listener.bind(("127.0.0.1", 0))
         self._listener.listen(1)
         self.port = self._listener.getsockname()[1]
         self.conn: socket.socket | None = None
+        self.accepted = threading.Event()
         threading.Thread(target=self._accept, daemon=True).start()
 
     def _accept(self) -> None:
         try:
-            self.conn, _ = self._listener.accept()
+            conn, _ = self._listener.accept()
         except OSError:
             return
+        # On Windows the listener's receive buffer does not carry to the socket it accepts: that
+        # one starts at the platform's default. Set it here, or the peer's window is whatever the
+        # OS likes and a big write gets out before the abort (packet 35b, CI 41407051552).
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self._rcvbuf)
+        except OSError:
+            pass
+        self.conn = conn
+        self.accepted.set()
 
     def stop(self) -> None:
         self._listener.close()

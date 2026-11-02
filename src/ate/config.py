@@ -152,6 +152,22 @@ def _platform_default() -> Path:
     return Path(LINUX_CONFIG_PATH)
 
 
+def _platform_config_dir() -> Path:
+    r"""The directory the default config file sits in: ``%PROGRAMDATA%\ATE`` on Windows,
+    ``/etc/ate`` on Linux.
+
+    It is :func:`_platform_default`'s directory, so ``ATE_DEFAULT_CONFIG`` moves the directory with
+    the file a launch reads (packet 35b, CI 41407051552). ``ate setup`` writes the file as
+    ``config.json`` in it unless ``--config`` names a different one: the override changes where the
+    file is, not what setup calls it. The directory comes from the default file rather than from a
+    second reading of the override, and it is split on the separator this platform writes with: a
+    POSIX runner that is only pretending to be Windows sees a Windows path as one long name."""
+    default = str(_platform_default())
+    if _is_windows():
+        return Path(default.rsplit("\\", 1)[0])
+    return Path(default).parent
+
+
 # The only placeholder the config format defines (see ``assets/app-config-format.md``):
 # ``<data>`` stands for the platform data directory from the Location table.
 _DATA = "<data>"

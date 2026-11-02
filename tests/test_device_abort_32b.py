@@ -53,7 +53,16 @@ _OPEN = {
         'writeTerm=""}})'
     ),
 }
-_BIG_WRITE = 'ATE.write(dev, {data = string.rep("x", 200000000)})'
+#: The stuck-write test's payload, in pieces the step logs as they go out. A piece is 1 MB and
+#: there are 200 of them, so the write cannot finish inside the 0.3 s before the abort once the
+#: peer's window is full, and the log says how far it got when the abort landed.
+_WRITE_PIECES = 200
+_WRITE_PIECE_BYTES = 1000000
+_STUCK_WRITE = (
+    f'for i = 1, {_WRITE_PIECES} do '
+    f'ATE.write(dev, {{data = string.rep("x", {_WRITE_PIECE_BYTES})}}) '
+    f'ATE.log(Log.INFO, "piece " .. i .. " of {_WRITE_PIECES}") end'
+)
 
 
 @pytest.fixture(autouse=True)
@@ -157,16 +166,36 @@ class _UdpPeer:
 
 @pytest.mark.parametrize("device_type", ["TCP", "SERIAL", "VISA"])
 def test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading(qapp, device_type):
-    """UDP is not here: a datagram goes out or is dropped, so its socket does not stall."""
+    """UDP is not here: a datagram goes out or is dropped, so its socket does not stall.
+
+    The peer stops reading, the write stalls on the peer's window, and the abort has to arrive
+    while the write is stalled. The payload goes out in 1 MB pieces and the step logs each one,
+    so the run records how much was out when the abort landed, and a write that finished on its
+    own fails the test rather than quietly reporting a different thing. On the Windows runner the
+    whole 200 MB went out in a few tenths of a second: the peer's accepted socket had the
+    platform's default receive buffer, because on Windows an accepted socket does not inherit the
+    listener's ``SO_RCVBUF`` (Linux does, which is why this passed here — packet 35b, CI
+    41407051552). The read versions of these tests, which do not depend on a buffer filling, run
+    on every platform."""
     peer = _StuckPeer()
     try:
         opened = _OPEN[device_type].format(port=peer.port)
         with scratch_directory() as td:
-            run = _Run(td, _schedule(f"dev = {opened} ATE.ready() {_BIG_WRITE}"))
+            run = _Run(td, _schedule(f"dev = {opened} ATE.ready() {_STUCK_WRITE}"))
             try:
                 took = run.abort_in_flight(qapp)
-                print(f"\n{device_type} write: abort took {took:.3f} s")
+                run_uuid = run.seen["run_uuid"]
+                pieces = sum(1 for line in run.store.log_lines(run_uuid) if line["text"].startswith("piece "))
+                print(
+                    f"\n{device_type} write: abort took {took:.3f} s, "
+                    f"{pieces * _WRITE_PIECE_BYTES} of {_WRITE_PIECES * _WRITE_PIECE_BYTES} bytes out "
+                    f"when it landed (peer accepted: {peer.accepted.is_set()})"
+                )
                 run.assert_ended_aborted()
+                assert pieces < _WRITE_PIECES, (
+                    f"the write finished on its own ({pieces} pieces of {_WRITE_PIECES} logged) before "
+                    f"the abort, so nothing here ended a write in flight: {run.store.nodes(run_uuid)}"
+                )
             finally:
                 run.engine.stop_and_wait()
     finally:
