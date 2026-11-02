@@ -401,7 +401,10 @@ def _selftest_scan(directory: str, config_path: str | None = None) -> tuple[str,
 
     status = check_database_at_launch(config.database_path, config_file=config_hint(config.path))
     if status.status is not DbLaunchStatus.OK:
-        return ("scan", False, f"database {config.database_path}: {status.message}")
+        # The status is printed as well as the sentence: both refusals say the word "migrate", so
+        # a release check that only looks for that word has checked nothing (packet 35 review,
+        # round 2). Naming the status makes the check real.
+        return ("scan", False, f"database {config.database_path} [{status.status.value}]: {status.message}")
 
     rows = list_schedule_rows(directory)
     broken = [row for row in rows if row.error]

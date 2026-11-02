@@ -922,6 +922,48 @@ def test_refusing_a_database_that_cannot_be_migrated_touches_nothing(tmp_path: P
     assert _version(path) == SCHEMA_VERSION - 1
 
 
+def test_the_release_scan_names_which_refusal_a_behind_database_got(tmp_path: Path) -> None:
+    """Both refusals contain the word "migrate", so that word pins nothing.
+
+    `tests/test_release_ci_27c.py` asserted `"migrate" in out` on the scan's refusal, which the
+    NO_MIGRATION sentence satisfies as readily as the NEEDS_MIGRATE one. The status is what an
+    Operator acts on, and the scan prints it (packet 35 review, round 2)."""
+    release = ROOT / "examples" / "media-release"
+    for tables_missing, status, wanted, unwanted in (
+        (True, "NEEDS_MIGRATE", "to create or upgrade the database", "no migration from version"),
+        (False, "NO_MIGRATION", "this ATE has no migration from version", "to create or upgrade the database"),
+    ):
+        data = tmp_path / ("behind-with-work" if tables_missing else "behind-with-nothing-to-do")
+        data.mkdir()
+        db = data / "ate.db"
+        if tables_missing:
+            _older_database(db, SCHEMA_VERSION - 1, ["equipment"])
+        else:
+            _database_at_an_older_version_with_every_table(db)
+        config = tmp_path / f"{data.name}.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "station": {"name": "scan", "uuid": "00000000-0000-7000-8000-000000000035"},
+                    "testDefinitions": {"directories": [str(release)]},
+                    "database": {"type": "sqlite", "path": str(db)},
+                }
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        code, out, err = _cli_subprocess(["_selftest", "--scan", str(release), "--config", str(config)])
+        text = out + err
+        assert code == 1, text
+        assert "scan: MISSING" in text, text
+        assert f"[{status}]" in text, f"{data.name}: the scan did not name its status: {text}"
+        assert wanted in text, f"{data.name}: {text}"
+        assert unwanted not in text, f"{data.name}: the scan named the wrong refusal: {text}"
+        assert "Traceback" not in err, err
+
+
 def test_the_launch_dialog_says_the_same_one_line(tmp_path: Path) -> None:
     """The GUI never migrates, and it refuses with the same sentence `db status` prints."""
     from ate.app import launch

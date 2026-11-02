@@ -127,7 +127,11 @@ def test_scan_fails_on_a_database_at_the_wrong_version(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, out
     assert "scan: MISSING" in out, out
-    assert "migrate" in out, out
+    # A behind-in-version database with every table is not "needs a migrate": `assert "migrate"
+    # in out` was satisfied by the refusal's own sentence and pinned nothing (packet 35 review,
+    # round 2). The status is what matters, and the scan names it.
+    assert "[NO_MIGRATION]" in out, out
+    assert "no migration from version 4" in out, out
 
 
 def test_scan_fails_when_the_directory_has_no_test_definitions(tmp_path):
