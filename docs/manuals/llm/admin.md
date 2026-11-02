@@ -342,9 +342,12 @@ Every format runs `ate setup` as its last step, and each reports a failure of th
   database are not, and other packages will not install until this one is configured. Fix the cause
   (an unwritable `/etc/ate` or `/var/lib/ate` is the usual one), then `sudo /opt/ate/ate setup` and
   `sudo dpkg --configure -a`.
-- **`install.sh`:** run by an ordinary user it links `ate` into the prefix's own `bin`, setup cannot
-  create the `ate` group or set ownership, and the script says so and exits 1 telling you to finish
-  with `sudo ate setup`.
+- **`install.sh`:** run by an ordinary user the link lands in the prefix's own `bin`, and setup
+  prints `running unprivileged; skipping group/ownership/ACL setup` and skips the group and
+  ownership pass. That is not a failure: on a Station a root run has already prepared, setup
+  succeeds and `install.sh` exits 0. It exits 1 only when setup cannot do its job at all — it
+  cannot create `/etc/ate` or `/var/lib/ate` — and then it says so and tells you to finish with
+  `sudo ate setup`.
 
 `ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
 version: the two numbers are unrelated, so comparing them means nothing. A missing or older database

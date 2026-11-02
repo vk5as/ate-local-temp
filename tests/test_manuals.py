@@ -571,6 +571,14 @@ COMMANDS_NOT_RUN: dict[str, str] = {
         "the placeholder form of the `--root` line above, which is run in a temporary Station",
     "ate setup --data-dir DIR --config-dir DIR":
         "run by tests/test_cli_setup.py, which points both directories at a temporary directory",
+    "ate setup --config /etc/ate/config.json":
+        "names the platform config, and setup without --root would then write into /var/lib/ate: "
+        "conftest pins the platform directories for every test, so the real /etc/ate is never touched. "
+        "The flag itself is run against a temporary Station by tests/test_admin_gaps_35.py, which "
+        "asserts setup reads the config named before or after the subcommand",
+    "ate setup --config FILE":
+        "the placeholder form of the line above; tests/test_admin_gaps_35.py runs both sides of the "
+        "subcommand, and refuses a --config with no path after it",
     "ate setup --no-permissions":
         "run, as part of the `--root` line above",
     "ate db status [PATH]":
@@ -718,6 +726,22 @@ def test_the_config_flag_works_before_or_after_the_subcommand(station) -> None:
 
     manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
     assert "ate db status --config PATH" in manual, "the manual no longer shows the flag after the subcommand"
+
+
+def test_an_unprivileged_ate_setup_on_a_prepared_station_exits_zero(station) -> None:
+    """The manual says `install.sh` run by an ordinary user exits 1; it does not.
+
+    Skipping the group and ownership pass is not a failure: setup still creates the directories,
+    the config and the database, so on a Station a root run has already prepared an unprivileged
+    `ate setup` succeeds and `install.sh` exits 0. It exits 1 only when setup itself fails
+    (packet 35 review, round 2)."""
+    code, out, err = run_ate(["setup", "--root", str(station)], station)
+    assert code == 0, f"unprivileged setup on a prepared Station exited {code}: {out}\n{err}"
+    assert "running unprivileged; skipping group/ownership/ACL setup" in out + err, out + err
+
+    manual = " ".join("\n".join(text for _label, text in MANUALS["admin"].texts()).split())
+    assert "exits 0" in manual, "the manual still claims an ordinary user's setup cannot succeed"
+    assert "exits 1 telling you to finish" not in manual, manual
 
 
 def test_migrate_refuses_a_database_from_a_newer_ate(station) -> None:

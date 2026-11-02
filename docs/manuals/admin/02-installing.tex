@@ -79,9 +79,12 @@ upgrade: the bundle's own contents are cleared before the new copy is written, s
 previous version survives. \texttt{./install.sh --uninstall} removes the bundle and its link, and
 leaves \texttt{/etc/ate} and \texttt{/var/lib/ate} alone.
 
-Run by an ordinary user, the link lands in the prefix's own \texttt{bin} and setup cannot create
-the \texttt{ate} group or set ownership on \texttt{/etc/ate} and \texttt{/var/lib/ate}; the script
-says so and tells you to finish with \texttt{sudo ate setup}.
+Run by an ordinary user, the link lands in the prefix's own \texttt{bin} and setup prints
+\texttt{running unprivileged; skipping group/ownership/ACL setup} and skips the group and ownership
+pass. That is not a failure: on a Station a root run has already prepared, setup succeeds and
+\texttt{install.sh} exits 0. It exits 1 only when setup cannot do its job at all --- it cannot
+create \texttt{/etc/ate} or \texttt{/var/lib/ate} --- and then it says so and tells you to finish
+with \texttt{sudo ate setup}.
 
 The \texttt{.deb} is the same bundle, and its \texttt{postinst} runs \texttt{ate setup}:
 
