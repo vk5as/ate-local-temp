@@ -397,19 +397,24 @@ def test_a_copy_that_keeps_restarting_is_refused_within_the_bound(tmp_path: Path
     The restarts are driven, not raced. A second connection only lands a write between the copy's
     steps if the timing allows it, and on the Linux runners the copy finished before the writer
     got the lock, so the migration succeeded and the test failed for a reason that says nothing
-    about the bound (packet 35b, CI 41407051552). The copy is still made by the real sqlite3 on
-    the real file: only the counters handed to the progress callback are scripted, one page every
-    50 ms, which is how a page-at-a-time copy moves."""
+    about the bound (packet 35b, CI 41407051552). So nothing here races a writer: only the
+    counters handed to the progress callback are scripted, one page every 50 ms, which is how a
+    page-at-a-time copy moves. sqlite3 writes no copy while the bound is being tested — the real
+    ``backup`` runs only after the scripted walk finishes, which happens only if the bound fails
+    to refuse, and then the assertions on the refusal fail."""
     from ate.storage import backup as backup_module
 
     monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
-    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 1)
+    # More than one page. With one page ``remaining`` never changes, so the old rule that counted
+    # any change as progress refused too, and the test could not tell the two rules apart.
+    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 8)
     path = tmp_path / "ate.db"
     _older_database(path, 4, ["equipment"])
     _bulk_rows(path, 3000, journal="DELETE")
 
     class _RestartingCopy(sqlite3.Connection):
-        """A connection whose ``backup`` walks down the file and back to the top, over and over."""
+        """A connection whose ``backup`` reports ``remaining`` walking down to 1 and back to the
+        top, over and over, and copies for real only when that walk is over."""
 
         def backup(self, destination, *, pages: int = 0, progress=None, sleep: float = 0.0) -> None:
             remaining = pages
