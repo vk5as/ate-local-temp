@@ -173,9 +173,10 @@ def test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading(qapp, device_
     so the run records how much was out when the abort landed, and a write that finished on its
     own fails the test rather than quietly reporting a different thing. On the Windows runner the
     whole 200 MB went out in a few tenths of a second: the peer's accepted socket had the
-    platform's default receive buffer, because a listener's ``SO_RCVBUF`` does not reach the
-    socket it accepts (packet 35b, CI 41407051552). The read versions of these tests, which do
-    not depend on a buffer filling, run on every platform."""
+    platform's default receive buffer, because on Windows an accepted socket does not inherit the
+    listener's ``SO_RCVBUF`` (Linux does, which is why this passed here — packet 35b, CI
+    41407051552). The read versions of these tests, which do not depend on a buffer filling, run
+    on every platform."""
     peer = _StuckPeer()
     try:
         opened = _OPEN[device_type].format(port=peer.port)

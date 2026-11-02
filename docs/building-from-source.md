@@ -573,8 +573,10 @@ which silently skipped macOS for a Windows reason.
 
 Two tests that were skipped on Windows for a reason that turned out not to be a platform fact run
 everywhere now. `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading` (TCP, SERIAL,
-VISA) sets the receive buffer on the peer's *accepted* socket as well as on its listener, since a
-listener's `SO_RCVBUF` does not reach the socket it accepts, and logs each 1 MB piece of the
+VISA) sets the receive buffer on the peer's *accepted* socket as well as on its listener: on
+Windows an accepted socket does not inherit the listener's `SO_RCVBUF` (Linux does, which is why
+these tests passed before), and the peer never reads, so its window has to be small for the write
+to stall. The test logs each 1 MB piece of the
 200 MB payload so the run records how much of it was out when the abort landed.
 
 ### Testing seams: four environment variables
