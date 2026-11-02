@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from ate.cli import main, _is_root
+from ate import config as ate_config
 from ate import setup as ate_setup
 from ate.permissions import ATE_GROUP, LinuxPermissions, RecordingPermissions, WindowsPermissions
 from ate.setup import SKIP_PERMISSIONS, prepare_station
@@ -140,6 +141,37 @@ def test_setup_unwritable_target_fails_with_nonzero_exit(tmp_path, capsys):
     ), capsys.readouterr()
     assert rc != 0
     assert "failed" in captured.err.lower()
+
+
+def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path, monkeypatch, capsys) -> None:
+    """Setup with no ``--root`` builds the Station where the config reader says it is, so the test
+    seams move it (packet 35 review, round 3).
+
+    ``default_layout`` used to write ``/etc/ate`` and ``/var/lib/ate`` as literals. The admin manual
+    shows ``ate setup --config /etc/ate/config.json``, and the suite's accounting for that command
+    claimed conftest pins the platform directories for every test: it pins the data directory, and
+    setup did not read it. A bare setup run where the suite is root (the Debian container) would
+    then create the machine's own config directory. Both directories now come from
+    :mod:`ate.config`, the same place the ``<data>`` placeholder and the platform config path come
+    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach."""
+    monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(tmp_path / "etc" / "ate" / "config.json"))
+    monkeypatch.setattr(ate_config, "_platform_data_dir", lambda: tmp_path / "var" / "lib" / "ate")
+
+    layout = ate_setup.default_layout()
+    assert layout.config_file == ate_config._platform_default(), (
+        f"setup writes the config at {layout.config_file}, which no launch reads"
+    )
+    assert layout.data_dir == ate_config._platform_data_dir(), (
+        f"setup prepares {layout.data_dir}, while the config's <data> placeholder means {ate_config._platform_data_dir()}"
+    )
+
+    for path in (layout.data_dir, layout.config_dir, layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
+        assert not str(path).startswith(("/etc/ate", "/var/lib/ate")), f"setup would write into the machine's own Station: {path}"
+
+    rc, captured = main(["setup", "--no-permissions"]), capsys.readouterr()
+    assert rc == 0, captured.err[-300:]
+    for path in (layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
+        assert path.exists(), f"setup did not create {path}: {captured.out}"
 
 
 def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):

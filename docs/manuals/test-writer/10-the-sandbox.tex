@@ -3,7 +3,10 @@
 ATE removes the Lua entry points that could run code it has not checksummed:
 \texttt{dofile}, \texttt{loadfile} and \texttt{load} are gone, \texttt{os.exit} is nil,
 \texttt{package.path} and \texttt{package.cpath} are empty, \texttt{debug} is reduced to
-\texttt{debug.traceback}, and there is no \texttt{python} table.
+\texttt{debug.traceback}, and there is no \texttt{python} table. Calling one of the removed names is
+``attempt to call a nil value'', which the engine records as an ERROR Attempt
+(\texttt{tests/\allowbreak{}test\_\allowbreak{}lua\_\allowbreak{}host.py}:
+\texttt{test\_\allowbreak{}file\_\allowbreak{}loaders\_\allowbreak{}are\_\allowbreak{}removed}).
 
 This is traceability, not security. \texttt{io} and \texttt{os} are still there --- a schedule
 can read a file if it knows the path. What ATE is guaranteeing is that it knows exactly which

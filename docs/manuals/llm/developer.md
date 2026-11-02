@@ -432,7 +432,7 @@ version; `ate db migrate` creates or upgrades, after the copy.
 ## The Lua host and the sandbox
 
 `src/ate/engine/lua_host.py` treats a Test Schedule as code it has to account for, not as an enemy to
-defend against: a schedule is the Station's own code. Each schedule load gets a fresh
+defend against: a schedule is the Station's own trusted code. Each schedule load gets a fresh
 `lupa` runtime, created with `register_builtins=False`, and then `_lockdown` shadows the file-loading
 entry points before anything is registered:
 

@@ -1106,10 +1106,13 @@ return ScheduleParams("Manual: abort", "a sleep the Operator aborts, and the tea
 
 ## The sandbox
 
-`dofile`, `loadfile`, `load` and `python` are gone, and so is `os.exit`: calling it in a step is an
-ordinary Lua error, not an exit. `package` exists but `package.path` and `package.cpath` are empty.
-`debug` is reduced to `debug.traceback`. `io`, `os`, `string`, `table` and the rest of the standard
-library are still there. This is traceability, not security: ATE needs to know which files a run ran.
+`dofile`, `loadfile`, `load` and `python` are gone, and so is `os.exit`: calling one of them in a step
+is `attempt to call a nil value` recorded as an ERROR Attempt, not an exit. `package` exists but
+`package.path` and `package.cpath` are empty. `debug` is reduced to `debug.traceback`. `io`, `os`,
+`string`, `table` and the rest of the standard library are still there. This is traceability, not
+security: ATE needs to know which files a run ran. A Test Schedule is the Station's own code, and it
+is trusted; what the sandbox catches is a schedule reading Lua from outside its Media Release, which
+a Test Definition cannot describe.
 `os.execute` is reachable from a step and is allowed: the only cost is that an abort waits for the
 command (see Abort). A schedule can still open a file with `io.open` if it names a path.
 

@@ -572,10 +572,13 @@ COMMANDS_NOT_RUN: dict[str, str] = {
     "ate setup --data-dir DIR --config-dir DIR":
         "run by tests/test_cli_setup.py, which points both directories at a temporary directory",
     "ate setup --config /etc/ate/config.json":
-        "names the platform config, and setup without --root would then write into /var/lib/ate: "
-        "conftest pins the platform directories for every test, so the real /etc/ate is never touched. "
-        "The flag itself is run against a temporary Station by tests/test_admin_gaps_35.py, which "
-        "asserts setup reads the config named before or after the subcommand",
+        "names the platform config, and setup without --root would then write the database that "
+        "config names under the platform data directory. conftest pins that directory, and setup's "
+        "own layout takes both of them from ate.config: tests/test_cli_setup.py asserts a setup with "
+        "no --root lands where the config reader says the Station is, so nothing here touches the "
+        "real /etc/ate. The flag itself is run against a temporary Station by "
+        "tests/test_admin_gaps_35.py, which asserts setup reads the config named before or after the "
+        "subcommand",
     "ate setup --config FILE":
         "the placeholder form of the line above; tests/test_admin_gaps_35.py runs both sides of the "
         "subcommand, and refuses a --config with no path after it",
@@ -1939,11 +1942,22 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
     row = _open_run_row(tmp_path / "station" / "ate.db")
     assert row and row["ended_at"] is None, f"the process ended without closing its run row: {row}"
 
+    # Every manual, in both of its forms, has to say the same thing about a Test Schedule. The reader
+    # who reads one form and not the other should not come away believing the sandbox keeps a
+    # schedule from doing harm (packet 35 review, round 3).
+    for name in ("developer", "test-writer"):
+        for path, text in MANUALS[name].texts():
+            if "sandbox" not in Path(path).name.lower() and not path.endswith(".md"):
+                continue
+            where = f"the {name} manual's {Path(path).name}"
+            assert re.search(r"the\s+Station\Ss\s+own\s+(trusted\s+)?code", text), f"{where} never says a Test Schedule is ATE's own code"
+            assert "trust" in text.lower(), f"{where} calls a schedule the Station's own code but never says it is trusted"
+            assert "untrusted" not in text.lower(), f"{where} calls a Test Schedule untrusted input again"
+            assert "no schedule has ever needed" not in text, f"{where} still claims os.abort is there and unused"
+            assert "traceability" in text.lower(), f"{where} stopped saying what the sandbox is for"
+
     manual = "\n".join(text for _label, text in MANUALS["developer"].texts())
     assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
-    assert "no schedule has ever needed" not in manual, "the manual still claims os.abort is there and unused"
-    assert "traceability" in manual, "the manual stopped saying what the sandbox is actually for"
-    assert "untrusted" not in manual, "the developer manual calls a Test Schedule untrusted input again"
 
 
 # --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------
