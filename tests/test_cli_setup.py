@@ -189,8 +189,8 @@ def test_the_permission_pass_covers_the_database_and_its_copies_not_the_whole_di
     config_dir.mkdir(parents=True)
     data.mkdir(parents=True)
     elsewhere.mkdir(parents=True)
-    (elsewhere / "not-mine.conf").write_text("another application's file", encoding="utf-8")
-    (elsewhere / "station.db.backup-20260101-000000").write_text("an earlier copy", encoding="utf-8")
+    (elsewhere / "not-mine.conf").write_text("another application's file", encoding="utf-8", newline="\n")
+    (elsewhere / "station.db.backup-20260101-000000").write_text("an earlier copy", encoding="utf-8", newline="\n")
     (config_dir / "config.json").write_text(
         '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
         f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
