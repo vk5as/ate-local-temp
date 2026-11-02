@@ -728,6 +728,22 @@ def test_the_config_flag_works_before_or_after_the_subcommand(station) -> None:
     assert "ate db status --config PATH" in manual, "the manual no longer shows the flag after the subcommand"
 
 
+def test_both_forms_of_the_admin_manual_say_a_killed_copy_leaves_a_partial_to_delete() -> None:
+    """A `.partial` beside the database is the one thing a migration leaves that is not a copy.
+
+    Nothing can delete a half-written file at the instant the process dies, so a kill in the
+    middle of a migration leaves it there. An admin who finds one has to be told it is not a
+    backup and is safe to delete; the LaTeX chapter and the agent manual both have to say it
+    (packet 35 review, round 2)."""
+    chapter = next(text for path, text in MANUALS["admin"].texts() if path.endswith("05-the-database.tex"))
+    markdown = MANUALS["admin"].markdown.read_text(encoding="utf-8")
+    for label, text in (("the LaTeX database chapter", chapter), ("the agent manual", markdown)):
+        text = " ".join(text.split())  # LaTeX breaks a sentence across source lines
+        assert ".partial" in text, f"{label} never names the file a killed copy leaves behind"
+        assert "killed" in text, f"{label} does not say a killed copy can leave it behind"
+        assert "safe to delete" in text, f"{label} does not say the leftover .partial is safe to delete"
+
+
 def test_an_unprivileged_ate_setup_on_a_prepared_station_exits_zero(station) -> None:
     """The manual says `install.sh` run by an ordinary user exits 1; it does not.
 

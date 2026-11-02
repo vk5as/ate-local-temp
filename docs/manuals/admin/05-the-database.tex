@@ -114,6 +114,13 @@ progress. The bound is on lack of progress, not on total time: a database held b
 is refused inside that time rather than waited out, which is what an installer needs, while a
 large database that keeps copying is never refused however long the copy takes.
 
+The cleanup that removes a half-written copy runs when ATE stops the copy. A copy killed outright
+--- \texttt{Ctrl-C} in the middle of an installer, \texttt{SIGKILL}, a machine that stops --- leaves
+\texttt{ate.db.backup-\dots.partial} beside the database, because nothing can delete a file at the
+moment the process dies. That file is not a backup, and nothing ever reads it: the next migration
+names around it, and the permission pass treats it like the copies beside the database. It is safe
+to delete, and it is the only thing a migration leaves that is not a copy.
+
 If the copy cannot be made --- the data directory is not writable, or another process is holding
 the database --- the migration is refused and nothing is changed:
 

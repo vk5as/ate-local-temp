@@ -456,6 +456,31 @@ def test_a_copy_interrupted_halfway_is_never_left_named_as_a_backup(tmp_path: Pa
     assert _version(path) == 4
 
 
+def test_a_partial_left_by_a_kill_is_never_read_and_can_be_deleted(tmp_path: Path, monkeypatch) -> None:
+    """The claim the admin manual makes, executed: nothing reads a leftover ``.partial``.
+
+    A process killed in the middle of a copy cannot clean up, so ``<name>.partial`` can be left
+    beside the database. The next migration names around it, leaves it alone, and deleting it
+    makes that name free again (packet 35 review, round 2)."""
+    from ate.storage import backup as backup_module
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    monkeypatch.setattr(backup_module, "_stamp", lambda: "20260101-000000")
+    wanted = path.with_name("ate.db.backup-20260101-000000")
+    stray = Path(str(wanted) + ".partial")
+    stray.write_bytes(b"half a database, written by a process that died")
+
+    copy = backup_for_migration(path)
+    assert copy is not None, sorted(p.name for p in tmp_path.iterdir())
+    assert copy == path.with_name("ate.db.backup-20260101-000000-2"), copy.name
+    assert stray.read_bytes() == b"half a database, written by a process that died", "a migration touched a copy it never made"
+    assert not any(p.name.endswith(".partial") and p != stray for p in tmp_path.iterdir()), sorted(p.name for p in tmp_path.iterdir())
+
+    stray.unlink()
+    assert backup_module._copy_name(path) == wanted, "the name the stray file was blocking is still taken"
+
+
 def test_a_copy_is_checked_before_it_is_named_a_backup(tmp_path: Path, monkeypatch) -> None:
     """The rename happens only after the copy is verified: a truncated copy is deleted, not kept."""
     from ate.storage import backup as backup_module

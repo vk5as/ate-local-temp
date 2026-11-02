@@ -192,6 +192,9 @@ purge.
   that is taken gets a `-2`, `-3` counter; nothing is overwritten. If the copy cannot be written,
   the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
   exit 1.
+- A copy killed outright (`Ctrl-C`, `SIGKILL`, a machine that stops) leaves `<name>.partial` beside
+  the database: nothing can delete a file when the process dies. It is not a backup, nothing reads
+  it, and it is safe to delete.
 - Copies are never deleted. They pile up beside the database until the Administrator removes them.
 - What is still backed up by hand: the config (`apt purge` deletes it), the reports directory, and
   the data directory as a whole now and then. A database that never migrates never gets a copy.
