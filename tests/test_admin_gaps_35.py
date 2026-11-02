@@ -569,9 +569,12 @@ def _hard_kill(pid: int) -> None:
     there is not. Windows' signal table has no SIGKILL (packet 35b, CI 41407051552), so there the
     equivalent is `taskkill /F`, which is TerminateProcess and not a signal at all."""
     if sys.platform == "win32":
+        # check=False: taskkill exits 1 when the process is already gone, which is what happens if
+        # the copy finished before the kill. The assertions after it decide whether the kill did
+        # its job; a CalledProcessError here would report the copy ending, not the backup naming.
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/F"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
     else:
         os.kill(pid, signal.SIGKILL)
