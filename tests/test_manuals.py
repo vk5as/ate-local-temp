@@ -1977,21 +1977,45 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
     assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
 
 
-def test_the_manuals_say_which_schedule_examples_are_posix_only() -> None:
-    """A manual that quotes a shell command says which shell has it.
+#: Shell commands a manual may quote that only a POSIX shell has, as a regex matching the command
+#: in either form: LaTeX escapes the `$` as `\$`. Each quote of one of them has to carry the caveat
+#: where the quote is, not somewhere else in the file.
+POSIX_ONLY_COMMANDS = {"kill -9 $PPID": r"kill -9 \\?\$PPID"}
 
-    `kill -9 $PPID` is how the developer manual shows a schedule ending ATE, and the suite can only
-    run it on a POSIX shell: on the Windows runner cmd.exe answered "kill: illegal pid: $PPID" and
-    the step returned normally (packet 35b, CI 41407051552). An Operator on a Windows Station should
-    read that from the manual rather than find it out by ending their own run."""
-    quoted = False
-    for path, text in MANUALS["developer"].texts():
-        if KILL_COMMAND not in text:
-            continue
-        quoted = True
-        where = f"the developer manual's {Path(path).name}"
-        assert re.search(r"POSIX|[Uu]nix|[Ll]inux", text), f"{where} quotes `kill -9 $PPID` without saying only a POSIX shell has it"
-    assert quoted, "the developer manual no longer quotes the command at all"
+#: How many lines each side of the quote the caveat has to reach.
+_SHELL_CAVEAT_WINDOW = 4
+
+
+def test_the_manuals_say_which_schedule_examples_are_posix_only() -> None:
+    """Every manual, in both of its forms, names the shell a quoted shell command needs.
+
+    `kill -9 $PPID` is how the manuals show a schedule ending ATE, and the suite can only run it on
+    a POSIX shell: on the Windows runner cmd.exe answered "kill: illegal pid: $PPID" and the step
+    returned normally (packet 35b, CI 41407051552). An Operator on a Windows Station should read
+    that from the manual rather than find it out by ending their own run.
+
+    The check used to look at the developer manual only and at the file as one string, so a chapter
+    could quote the command with the caveat pages away, and the test-writer manual, which quotes it
+    too, was never looked at. Every quote is now checked in the few lines around it, in every
+    manual and form that quotes one."""
+    quotes = 0
+    for name, manual in MANUALS.items():
+        for path, text in manual.texts():
+            lines = text.splitlines()
+            for number, line in enumerate(lines):
+                for command, pattern in POSIX_ONLY_COMMANDS.items():
+                    if not re.search(pattern, line):
+                        continue
+                    quotes += 1
+                    window = "\n".join(lines[max(0, number - _SHELL_CAVEAT_WINDOW) : number + _SHELL_CAVEAT_WINDOW + 1])
+                    where = f"{name} manual's {Path(path).name}, line {number + 1}"
+                    assert re.search(r"POSIX|[Uu]nix|[Ll]inux", window), (
+                        f"{where} quotes `{command}` with nothing nearby saying only a POSIX shell has it"
+                    )
+                    assert re.search(r"[Ww]indows|cmd\.exe", window), (
+                        f"{where} quotes `{command}` with nothing nearby naming the shell a Windows Station has"
+                    )
+    assert quotes, "no manual quotes a POSIX-only command any more"
 
 
 # --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------
