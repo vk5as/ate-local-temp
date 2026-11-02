@@ -1882,11 +1882,19 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
     raise AssertionError(f"the unbounded coroutine loop ended after {proc.returncode}: {proc.stdout}")
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="the step runs the command through the Lua host's os.execute, and cmd.exe refuses the "
-           "quoted -c form the test times (packet 35b, CI 41407051552)",
-)
+#: The command the abort probe waits on. On a POSIX shell the interpreter's own one-liner is the
+#: clearest hold; on a Windows Station `os.execute` reaches the shell through C `system()`, which
+#: hands the string to cmd.exe verbatim, and cmd's `/c` rule strips the first and the last quote of
+#: the whole string when it begins with one: `"python" -c "import time; ..."` arrives as
+#: `python" -c "import time; ...` and cmd exits 1 in a few milliseconds. subprocess builds the
+#: command line with the embedded quotes escaped, which is why the same string measured 3.03 s on
+#: the same Windows runner (packet 35b, CI 41407051552). `ping` needs no quotes at all.
+def _hold_command() -> str:
+    if sys.platform == "win32":
+        return "ping -n 4 127.0.0.1 >NUL"
+    return f'"{sys.executable}" -c "import time; time.sleep(3)"'
+
+
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
     """``os.execute`` is outside the hook: the run ends when the command does, not when the
     Operator asks.
@@ -1894,8 +1902,10 @@ def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -
     The command is timed here rather than assumed: ``sleep`` is not a Windows command, and the CI
     runner that passed this test had a ``sleep`` only because a Git tool happened to be on its PATH.
     The wait is measured, so the assertion is about the hold and not about a shell that may or may
-    not have the command (packet 35 review)."""
-    command = f'"{sys.executable}" -c "import time; time.sleep(3)"'
+    not have the command (packet 35 review). The command is chosen per platform for the same
+    reason: the quoted `python -c` form is mangled by cmd.exe when it comes through `system()`, so
+    on Windows the hold is `ping` (packet 35b, CI 41407051552)."""
+    command = _hold_command()
     started = time.perf_counter()
     held = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
     held_seconds = time.perf_counter() - started
