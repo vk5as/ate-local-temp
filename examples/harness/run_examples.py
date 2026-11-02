@@ -219,7 +219,7 @@ def run_schedule(
     stop_on_fail: bool | None = None,
     polls: dict[str, tuple[int, str]] | None = None,
     release_dir: Path = RELEASE_DIR,
-    timeout: float = 15.0,
+    timeout: float = 60.0,
     operator: str = "Ada Lovelace",
     project: str = "Example project",
     uut_type: str = "Example board",
