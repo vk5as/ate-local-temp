@@ -531,7 +531,7 @@ def test_the_report_hook_adds_its_section_and_never_replaces_the_failure(tmp_pat
     output = done.stdout + done.stderr
     assert "2 failed" in output, output
     assert "THE TEST'S OWN FAILURE" in output and "THE SECOND TEST'S OWN FAILURE" in output
-    assert "RunEngine worker still running" in output and "worker_is_held_here" in output
+    assert "RunEngine worker still running" in output and "running=True" in output
     assert "could not describe the stuck run" in output and "ZeroDivisionError" in output
     assert "INTERNALERROR" not in output
 
