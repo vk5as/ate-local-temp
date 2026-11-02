@@ -318,60 +318,64 @@ def main() -> int:
     config = read_config(Path(args.config))
     names = _step_names(config, args.schedule)
     session = HeadlessRunSession(config, pdf_choice=lambda _html: PDF_SKIPPED)
-    states: list[SessionState] = []
-    session.state_changed.connect(states.append)
-    # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
-    # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
-    # the name is looked up in the schedule's tree before the value is supplied.
-    refused: list[str] = []
+    try:
+        states: list[SessionState] = []
+        session.state_changed.connect(states.append)
+        # A Step Input is answered when the worker asks (packet 10a): `input_asked` carries the node, the
+        # Attempt and the 1-based index of the declaration. `--input` is written with the Step Name, so
+        # the name is looked up in the schedule's tree before the value is supplied.
+        refused: list[str] = []
 
-    def _supply(node_seq: int, attempt_no: int, index: int) -> None:
-        name = names.get(node_seq)
-        if name not in inputs:
-            print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
-            return
-        try:
-            session.supply_input(node_seq, attempt_no, index, inputs[name])
-        except ValueError as exc:
-            # The step's declaration rejected the value. This slot runs in the worker thread, so an
-            # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
-            refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
-            print(f"ERROR: {refused[-1]}", file=sys.stderr)
+        def _supply(node_seq: int, attempt_no: int, index: int) -> None:
+            name = names.get(node_seq)
+            if name not in inputs:
+                print(f"WARNING: step {name!r} asked for input {index} and no --input answers it", file=sys.stderr)
+                return
+            try:
+                session.supply_input(node_seq, attempt_no, index, inputs[name])
+            except ValueError as exc:
+                # The step's declaration rejected the value. This slot runs in the worker thread, so an
+                # uncaught ValueError would be a traceback and a step waiting for an answer nobody gives.
+                refused.append(f"step {name!r} input {index}: {inputs[name]!r} refused: {exc}")
+                print(f"ERROR: {refused[-1]}", file=sys.stderr)
 
-    if inputs:
-        session.input_asked.connect(_supply)
-    # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
-    # somebody here, so every pause gets the scripted answer in order.
-    answers = list(args.choice)
-    session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose(answers.pop(0) if answers else "CONTINUE"))
-    session.set_operator("runner.py")
-    session.set_project("Developer manual worked example")
-    session.set_uut_type("Example board")
-    session.set_uut_serial("DEV-34C")
-    session.select_schedule(args.schedule)
-    session.start()
+        if inputs:
+            session.input_asked.connect(_supply)
+        # A Stop-on-Fail pause blocks the worker until somebody answers it; a script is the only
+        # somebody here, so every pause gets the scripted answer in order.
+        answers = list(args.choice)
+        session.failure_prompt.connect(lambda node_seq, attempt_no: session.choose(answers.pop(0) if answers else "CONTINUE"))
+        session.set_operator("runner.py")
+        session.set_project("Developer manual worked example")
+        session.set_uut_type("Example board")
+        session.set_uut_serial("DEV-34C")
+        session.select_schedule(args.schedule)
+        session.start()
 
-    app = QCoreApplication.instance() or QCoreApplication([])
-    started = time.monotonic()
-    deadline = started + 25.0
-    while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
-        if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
-            session.request_abort()
-            args.abort_after = None  # request once, not every turn of the loop
-        app.processEvents()
-        time.sleep(0.02)
+        app = QCoreApplication.instance() or QCoreApplication([])
+        started = time.monotonic()
+        deadline = started + 25.0
+        while SessionState.FINISHED not in states and not refused and time.monotonic() < deadline:
+            if args.abort_after is not None and time.monotonic() - started >= args.abort_after:
+                session.request_abort()
+                args.abort_after = None  # request once, not every turn of the loop
+            app.processEvents()
+            time.sleep(0.02)
 
-    run = session.store.get_test_run(session.run_uuid)
-    print(json.dumps({
-        "result": run["result"],
-        "end_reason": run["end_reason"],
-        "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
-        "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
-        "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
-        "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
-        "refused_inputs": refused,
-    }))
-    session.close()
+        run = session.store.get_test_run(session.run_uuid)
+        print(json.dumps({
+            "result": run["result"],
+            "end_reason": run["end_reason"],
+            "steps": {n["step_number"]: n["result"] for n in session.store.nodes(session.run_uuid) if n["kind"] == "step"},
+            "inputs": [v["value"] for v in session.store.input_values(session.run_uuid)],
+            "logs": [line["text"] for line in session.store.log_lines(session.run_uuid)],
+            "levels": [line["level"] for line in session.store.log_lines(session.run_uuid)],
+            "refused_inputs": refused,
+        }))
+    finally:
+        # Closed whatever the run did, as the harness does: a session left open keeps the database
+        # and the app log handle open, and the scratch directory it wrote into cannot be removed.
+        session.close()
     return 0 if SessionState.FINISHED in states else 1
 
 
