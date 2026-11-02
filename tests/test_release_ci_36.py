@@ -297,6 +297,8 @@ def check_title_pages(doc: dict) -> None:
         raise AssertionError("page 1 is the title page: a version on page 12 is not what the cover says")
     if not re.search(r'grep -Fxq "\$version"', step):
         raise AssertionError('the title page is not compared with the version as a whole: grep -Fq "ATE" passes any PDF TeX ever made')
+    if "|-dev" not in step:
+        raise AssertionError("the title page version check must accept the exact 0.0.0-dev stamp used by workflow_dispatch")
     if "exit 1" not in step:
         raise AssertionError("a title page without this release's version must fail the job, not print a note")
     checkout = _checkout(doc, "manuals")
@@ -313,6 +315,9 @@ def test_every_title_page_is_checked_against_the_version_being_released():
         check_title_pages(doc)
     doc = _broken(_workflow(), "manuals", lambda job: job["steps"][4].update({"run": job["steps"][4]["run"].replace("exit 1", "echo looks wrong")}))
     with pytest.raises(AssertionError, match="must fail the job"):
+        check_title_pages(doc)
+    doc = _broken(_workflow(), "manuals", lambda job: job["steps"][4].update({"run": job["steps"][4]["run"].replace("|-dev", "")}))
+    with pytest.raises(AssertionError, match="0.0.0-dev"):
         check_title_pages(doc)
 
 

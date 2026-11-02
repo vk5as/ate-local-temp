@@ -103,8 +103,9 @@ jobs:
             case "$name" in *.pdf) ;; *) continue ;; esac
             page="$(pdftotext -f 1 -l 1 "docs/manuals/build/${name%.pdf}/main.pdf" -)"
             # The stamp is read whole: `grep -Fq "0.1.0"` is satisfied by a title page that says
-            # 0.1.0rc3, so the release would ship manuals from its own prerelease.
-            if ! printf '%s' "$page" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([a-z]+[0-9]+)?(\.dev[0-9]+\+g[0-9a-f]+)?' | grep -Fxq "$version"; then
+            # 0.1.0rc3, so the release would ship manuals from its own prerelease. Include the
+            # untagged fallback used by workflow_dispatch (`0.0.0-dev`) as one complete stamp too.
+            if ! printf '%s' "$page" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([a-z]+[0-9]+)?(\.dev[0-9]+\+g[0-9a-f]+|-dev)?' | grep -Fxq "$version"; then
               echo "$name's title page does not show $version; page 1 reads: $(printf '%s' "$page" | head -n 3)"
               exit 1
             fi

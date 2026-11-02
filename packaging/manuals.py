@@ -97,7 +97,7 @@ def pdf_title(path: Path) -> str:
 
 #: A version as it can appear in a manual: base, optional prerelease, optional dev suffix. This is
 #: the same shape `_version.py` produces, so a stamp is read whole rather than as a substring.
-VERSION_STAMP = re.compile(r"\d+\.\d+\.\d+(?:[a-z]+\d+)?(?:\.dev\d+\+g[0-9a-f]+)?")
+VERSION_STAMP = re.compile(r"\d+\.\d+\.\d+(?:[a-z]+\d+)?(?:\.dev\d+\+g[0-9a-f]+|-dev)?")
 
 
 def version_stamps(path: Path) -> set[str]:

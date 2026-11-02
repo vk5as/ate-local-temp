@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import struct
 import sys
 import tempfile
@@ -62,7 +63,7 @@ def remove_tree(path: Path, attempts: int = 10) -> None:
     an unclosed handle in this process outlasts that and still fails."""
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path)
+            shutil.rmtree(path, onerror=_make_writable_and_retry)
             return
         except FileNotFoundError:
             return
@@ -70,6 +71,17 @@ def remove_tree(path: Path, attempts: int = 10) -> None:
             if attempt == attempts - 1:
                 raise
             time.sleep(0.2)
+
+
+def _make_writable_and_retry(
+    function: Callable[..., object], name: str, error_info: tuple[type[BaseException], BaseException, object]
+) -> None:
+    """Git makes object files read-only on Windows; make them removable during fixture cleanup."""
+    error = error_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(name, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+    function(name)
 
 
 def files_refusing_a_rename_under(root: Path) -> set[str]:

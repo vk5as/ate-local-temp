@@ -136,7 +136,8 @@ def _stub_bundle(root: Path, manuals: str = "full", version: str = "1.2.3") -> P
     exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     exe.chmod(0o755)
     (internal / "PySide6" / "Qt" / "plugins" / "platforms" / "libqoffscreen.so").write_text("stub", encoding="utf-8", newline="\n")
-    (internal / "PySide6" / "Qt" / "libexec" / "QtWebEngineProcess").write_text("stub", encoding="utf-8", newline="\n")
+    helper_name = "QtWebEngineProcess.exe" if os.name == "nt" else "QtWebEngineProcess"
+    (internal / "PySide6" / "Qt" / "libexec" / helper_name).write_text("stub", encoding="utf-8", newline="\n")
     (internal / "PySide6" / "Qt" / "resources" / "icudtl.dat").write_text("stub", encoding="utf-8", newline="\n")
     (internal / "PySide6" / "Qt" / "resources" / "qtwebengine_resources.pak").write_text("stub", encoding="utf-8", newline="\n")
     (internal / "ate" / "lua" / "devices.lua").write_text("-- bundled", encoding="utf-8", newline="\n")
@@ -220,6 +221,12 @@ def test_a_source_checkout_names_src_ate_manuals():
         assert f"{len(on_disk)} PDFs in {expected}" in last, last
     else:
         assert "none in this install" in last and str(expected) in last, last
+
+
+def test_the_version_stamp_parser_accepts_the_untagged_dispatch_fallback():
+    assert helpers.VERSION_STAMP.fullmatch("0.0.0-dev")
+    assert helpers.VERSION_STAMP.fullmatch("0.0.0")
+    assert not helpers.VERSION_STAMP.fullmatch("0.0.0-dev-extra")
 
 
 def test_a_frozen_one_directory_bundle_names_its_internal_directory(tmp_path):
