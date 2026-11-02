@@ -2,7 +2,7 @@
 
 **Parent:** none. User decisions, 2026-11-02: all manuals, PDF and Markdown, are attached to GitHub Releases, built as part of the workflow, and the PDFs are built into the installed apps.
 
-**What to build:** `release.yml` builds the three PDF manuals first, feeds them into every package, and on a tag publishes a GitHub Release carrying all six manuals.
+**What to build:** `release.yml` builds the three PDF manuals first, feeds them into every package, and on a tag publishes a GitHub Release carrying all six manuals, the installer, the `.deb`, the tarball and the wheel.
 
 **Blocked by:** 35 (it changes the manuals and `build.py`)
 
@@ -25,9 +25,9 @@
 
 ## GitHub Release
 
-- [ ] On a `v*` tag only, after every package job passes, a final job creates a GitHub Release for that tag and uploads all six manuals as release assets. `workflow_dispatch` never publishes. Needs `permissions: contents: write` on that job only. A tag with a pre-release suffix such as `-rc2` is marked pre-release. Re-running the job replaces the assets and does not fail on an existing Release.
+- [ ] On a `v*` tag only, after every package job passes, a final job creates a GitHub Release for that tag and uploads as release assets: all six manuals, the Windows installer, the `.deb`, the tarball and the wheel (user, 2026-11-02). Every asset comes from the artifacts of this same run, the ones the smoke tests passed, and is never rebuilt. The job fails if any is missing, and publishes nothing partial: check all of them are present before creating the Release. `workflow_dispatch` never publishes. Needs `permissions: contents: write` on that job only. A tag with a pre-release suffix such as `-rc2` is marked pre-release. Re-running the job replaces the assets and does not fail on an existing Release.
 - [ ] The workflow keeps working if the repo is private. Check what a private repo needs, and say what isn't provable until a tag is pushed.
-- [ ] Tests in the style of `tests/test_release_ci_28c.py`: job order and `needs`, triggers, the publish job gated on tags, all six files, the permission scope. Each is shown to fail when the workflow is broken. File names come from one list in `build.py`, so a new manual can't be left out silently.
+- [ ] Tests in the style of `tests/test_release_ci_28c.py`: job order and `needs`, triggers, the publish job gated on tags and needing every smoke job, all six manuals and all four packages, the permission scope. Each is shown to fail when the workflow is broken. File names come from one list in `build.py`, so a new manual can't be left out silently.
 
 ## Docs and proof
 
