@@ -311,6 +311,44 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
     ate.config._platform_data_dir = original
 
 
+#: Where a real Station keeps its files, on each platform. Absolute only: without PROGRAMDATA
+#: there is no Windows Station directory to protect.
+_REAL_STATION_DIRS = tuple(
+    directory for directory in (
+        Path("/etc/ate"), Path("/var/lib/ate"), Path(os.environ.get("PROGRAMDATA", "")) / "ATE"
+    )
+    if directory.is_absolute()
+)
+
+
+def _station_files() -> set[str]:
+    """Every path under the machine's real Station directories, the directories themselves included."""
+    found: set[str] = set()
+    for directory in _REAL_STATION_DIRS:
+        if not directory.exists():
+            continue
+        found.add(str(directory))
+        found.update(str(path) for path in directory.rglob("*"))
+    return found
+
+
+@pytest.fixture(autouse=True)
+def _no_test_writes_to_a_real_station():
+    """Fail a test that leaves anything in the machine's own Station directories.
+
+    conftest pins the platform data directory and a test that needs a particular config pins
+    ``ATE_DEFAULT_CONFIG``, but a path those pins do not reach still lands in ``/etc/ate``,
+    ``/var/lib/ate`` or ``%PROGRAMDATA%\\ATE``: a bare ``ate setup`` on the Windows runner created
+    ``C:\\ProgramData\\ATE\\config.json`` (packet 35b, CI 41407051552). What is under those
+    directories is snapshotted before the test and compared after it, so a file a test made is
+    caught whatever route it took, and a Station that was already there is left alone."""
+    before = _station_files()
+    yield
+    created = _station_files() - before
+    if created:
+        raise AssertionError(f"a test wrote into the machine's own Station: {sorted(created)}")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _runner_privilege_is_not_a_test_variable() -> None:
     """Pin "is ATE elevated?" to False for the whole session, on every runner.

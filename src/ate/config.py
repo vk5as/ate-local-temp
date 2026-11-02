@@ -152,6 +152,19 @@ def _platform_default() -> Path:
     return Path(LINUX_CONFIG_PATH)
 
 
+def _platform_config_dir() -> Path:
+    r"""The directory the default config file sits in: ``%PROGRAMDATA%\ATE`` on Windows,
+    ``/etc/ate`` on Linux.
+
+    ``ATE_DEFAULT_CONFIG`` moves it with the file, so ``ate setup`` writes ``config.json`` where a
+    launch reads it rather than in the data directory (packet 35b, CI 41407051552). On Windows
+    this is also the data directory: one directory holds both there."""
+    override = os.environ.get("ATE_DEFAULT_CONFIG", "").strip()
+    if override:
+        return Path(override).parent
+    return _windows_data_dir() if _is_windows() else Path(LINUX_CONFIG_PATH).parent
+
+
 # The only placeholder the config format defines (see ``assets/app-config-format.md``):
 # ``<data>`` stands for the platform data directory from the Location table.
 _DATA = "<data>"

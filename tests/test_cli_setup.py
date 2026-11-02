@@ -170,7 +170,10 @@ def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path,
     setup did not read it. A bare setup run where the suite is root (the Debian container) would
     then create the machine's own config directory. Both directories now come from
     :mod:`ate.config`, the same place the ``<data>`` placeholder and the platform config path come
-    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach."""
+    from, which is where conftest and ``ATE_DEFAULT_CONFIG`` reach. The Windows branch was the same
+    bug in a different shape: it built the config directory from ``%PROGRAMDATA%\\ATE`` instead of
+    the parent of the config file a launch reads, so on the runner a bare setup created
+    ``C:\\ProgramData\\ATE\\config.json`` (packet 35b, CI 41407051552)."""
     monkeypatch.setenv("ATE_DEFAULT_CONFIG", str(tmp_path / "etc" / "ate" / "config.json"))
     monkeypatch.setattr(ate_config, "_platform_data_dir", lambda: tmp_path / "var" / "lib" / "ate")
 
@@ -183,7 +186,7 @@ def test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams(tmp_path,
     )
 
     for path in (layout.data_dir, layout.config_dir, layout.config_file, layout.database_path, layout.reports_dir, layout.log_dir):
-        assert not str(path).startswith(("/etc/ate", "/var/lib/ate")), f"setup would write into the machine's own Station: {path}"
+        assert str(path).startswith(str(tmp_path)), f"setup would write into the machine's own Station: {path}"
 
     rc, captured = main(["setup", "--no-permissions"]), capsys.readouterr()
     assert rc == 0, captured.err[-300:]
