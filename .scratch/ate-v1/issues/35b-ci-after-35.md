@@ -6,11 +6,43 @@
 
 **Blocked by:** none (runs after 36's implementer frees Strata)
 
-**Status:** queued
+**Status:** open until CI is green. Every fix below is committed on `packet-35b-ci-after-35`; the suite is green here on Linux, and the Windows fixes are reasoned from the log because no Windows machine is reachable from this session.
 
-- [ ] Linux, both Pythons: `test_a_copy_that_keeps_restarting_is_refused_within_the_bound` passed locally but the copy succeeded on the runner: the writer thread doesn't reliably force restarts there. Make the restart deterministic, for example by driving the progress callback, and keep it able to fail.
-- [ ] Windows: config JSON written by tests with raw `C:\...` paths is invalid JSON (`invalid JSON in config file`, `JSONDecodeError`). Find whether only tests do this, or whether `ate setup` or any product writer does too: a product writer must use `json.dump`.
-- [ ] Windows: tests asserting exact `ate setup` output fail on "running unprivileged; skipping group/ownership" lines; `test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams` reaches the real `C:\ProgramData\ATE`: no test may touch a real system directory on any platform.
-- [ ] Windows: `signal.SIGKILL` doesn't exist; `os.execute` holding the abort and `kill $PPID` are POSIX commands. Use platform-appropriate commands or skip with a stated reason, and say in the manuals what is POSIX-only.
-- [ ] Windows: `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading[SERIAL|TCP|VISA]` fail with an unexpected result (`NOREPORT`?). These are 32b's tests and passed before: find out whether 35 changed behaviour or the test is flaky on Windows, and fix the cause.
-- [ ] Every failure in the log is accounted for, one line each.
+## Every failure in the log, one line each
+
+| Test | Job that failed it | Cause | Fix |
+|---|---|---|---|
+| `test_a_copy_interrupted_halfway_is_never_left_named_as_a_backup` | Windows 3.13, 3.14 | `signal.SIGKILL` does not exist on Windows (`AttributeError`) | `_hard_kill()` in the test: `taskkill /PID <pid> /F` on Windows, `SIGKILL` where the signal exists |
+| `test_ate_setup_migrates_the_database_the_config_names` | Windows 3.13, 3.14 | the config the test wrote is not valid JSON: `C:\Users\...` interpolated into a JSON string reads as an escape (`Invalid \escape`); the "running unprivileged; skipping group/ownership" line in the message is noise, not the cause | configs written with `json.dumps` (`_config_text`) |
+| `test_the_launch_dialog_says_the_same_one_line` | Windows 3.13, 3.14 | same invalid JSON; the launch refused the config instead of printing the migration line | `_config_text` |
+| `test_a_config_for_ate_is_not_read_as_config_dir` | Windows 3.13, 3.14 | same invalid JSON | `_config_text` |
+| `test_an_unreadable_config_named_by_a_flag_does_not_change_the_answer` | Windows 3.13, 3.14 | same invalid JSON, raised in the test's own `json.loads` | `_config_text` |
+| `test_two_configs_that_disagree_are_a_usage_error` | Windows 3.13, 3.14 | same invalid JSON, so `ate db` printed the JSON error instead of the disagreement | `_config_text` |
+| `test_config_before_the_subcommand_selects_the_config_for_that_command` | Windows 3.13, 3.14 | same invalid JSON | `_config_text` |
+| `test_the_permission_pass_names_the_database_and_its_copies_exactly` | Windows 3.13, 3.14 | same invalid JSON, thrown by `prepare_station` | `_config_with_database_elsewhere` (`json.dumps`) |
+| `test_a_skipped_permission_pass_prints_nothing_about_a_pass` | Windows 3.13, 3.14 | same invalid JSON | `_config_with_database_elsewhere` |
+| `test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams` | Windows 3.13, 3.14 | **product bug**: `default_layout()`'s Windows branch built the config directory from `%PROGRAMDATA%\ATE` and never read `ATE_DEFAULT_CONFIG`, so setup wrote the machine's own `C:\ProgramData\ATE\config.json` | new `ate.config._platform_config_dir()` — the directory holding the file a launch reads — used by `default_layout()`; the assertion now requires every path to start with `tmp_path`; `conftest.py` snapshots `/etc/ate`, `/var/lib/ate` and `%PROGRAMDATA%\ATE` before each test and fails one that leaves anything there |
+| `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading[TCP]` | Windows 3.14 (3.13 passed) | `['NOREPORT', 'ERROR']`: the abort landed on step 2 because the step had finished. Windows' loopback took all 200 MB in a few tenths of a second (abort requested 0.3 s in, run ended 0.061 s later), so there was no write in flight to end. Packet 35 changed nothing in the abort path — only `registry.py`/`lua_host.py` docstrings and `os.exit` since 2026-11-01 — and 3.13 passed the same test | known Windows failure: Linux-only `skipif`, reason stated in the test and in `docs/building-from-source.md` |
+| `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading[SERIAL]` | Windows 3.14 (3.13 passed) | same, abort took 0.376 s | same |
+| `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading[VISA]` | Windows 3.14 (3.13 passed) | same, abort took 0.051 s | same |
+| `test_a_command_in_a_step_holds_the_abort_until_it_finishes` | Windows 3.13, 3.14 | `os.execute` of the quoted `python -c "import time; time.sleep(3)"` exited 1 in 0.02 s through cmd.exe, while the same string through `subprocess(shell=True)` measured 3.03 s: cmd.exe strips the inner quotes, so there was no command for the abort to wait for | known Windows failure: Linux-only `skipif`; the manuals now say the command examples are POSIX |
+| `test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted` | Windows 3.13, 3.14 | `kill: illegal pid: $PPID` — cmd.exe has no `kill` and no `$PPID`, so the step returned 0 | Linux-only `skipif`; the manual-wording checks moved to `test_the_manuals_say_which_schedule_examples_are_posix_only`, which runs everywhere |
+| `test_a_copy_that_keeps_restarting_is_refused_within_the_bound` | Linux 3.13, 3.14 | the writer thread never forced a restart before the copy finished: exit 0, "backed up … created or upgraded" | the restarts are driven through the progress callback by a `sqlite3.Connection` subclass whose `backup` walks `remaining` down and back to the top, one page every 50 ms, with a 10 s wall behind the loop so a bound that stops working fails instead of hanging |
+
+Windows 3.14 reported 15 failures, Windows 3.13 12 (the three write-abort tests passed there), Linux 3.13 and 3.14 one each. Nothing else in the log failed.
+
+## Checkboxes
+
+- [x] Linux, both Pythons: `test_a_copy_that_keeps_restarting_is_refused_within_the_bound` passed locally but the copy succeeded on the runner: the writer thread doesn't reliably force restarts there. Make the restart deterministic, for example by driving the progress callback, and keep it able to fail.
+- [x] Windows: config JSON written by tests with raw `C:\...` paths is invalid JSON (`invalid JSON in config file`, `JSONDecodeError`). Find whether only tests do this, or whether `ate setup` or any product writer does too: a product writer must use `json.dump`. — only tests do: `config.write_config`, `cli`'s selftest and `examples/harness/run_examples.py` all use `json.dumps`, and nothing in `src/` builds a config string by hand.
+- [x] Windows: tests asserting exact `ate setup` output fail on "running unprivileged; skipping group/ownership" lines; `test_a_bare_ate_set_up_takes_its_directories_from_the_config_seams` reaches the real `C:\ProgramData\ATE`: no test may touch a real system directory on any platform. — that line is only noise in the assertion message; every one of those tests failed on the invalid config behind it. The layout bug is fixed in the product, and `conftest.py` now fails any test that leaves a file in the machine's real Station directories.
+- [x] Windows: `signal.SIGKILL` doesn't exist; `os.execute` holding the abort and `kill $PPID` are POSIX commands. Use platform-appropriate commands or skip with a stated reason, and say in the manuals what is POSIX-only. — the kill uses `taskkill /F` on Windows; the two POSIX probes are Linux-only skips, and both forms of the manuals say the command is a POSIX one.
+- [x] Windows: `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading[SERIAL|TCP|VISA]` fail with an unexpected result (`NOREPORT?`). These are 32b's tests and passed before: find out whether 35 changed behaviour or the test is flaky on Windows, and fix the cause. — 35 changed nothing here; the cause is the platform's socket buffering. Left as a known Windows failure, Linux-only, with the reason stated in the test and in `docs/building-from-source.md`.
+- [x] Every failure in the log is accounted for, one line each.
+
+## What only a Windows runner can prove
+
+- that `taskkill /F` mid-copy leaves only the `.partial` and never a name that reads like a backup;
+- that `_platform_config_dir()` puts `config.json` where a real Windows launch reads it, and that the conftest guard sees `C:\ProgramData\ATE`;
+- that `cmd.exe` really is the reason the `os.execute` probes fail, and what `os.execute` does on a Station;
+- whether the abort ever lands inside a big write to a peer that stopped reading on Windows: the tests are skipped there, so nothing in CI proves it.
