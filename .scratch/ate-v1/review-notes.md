@@ -843,3 +843,9 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - SQLite `synchronous` stays at today's safer setting.
 - A Post-test Action waiting on an abandoned Device call is not capped at 10 s for now; revisit if it is a real problem.
 - The repo stays public until all this work is done.
+
+## 35 — admin gaps (merged 2026-11-02, Windows CI pending)
+
+- Strata implemented and reworked four times; reviews Strata 4, 3, 0 and Haiku 8, 5, 5. Haiku found the issues that mattered in rounds 2 and 3 (recursive permission pass over a shared directory; an active writer starving the copy). Final round had a light review only.
+- Delivered: backup before every migration (`.partial`, verified, renamed; bounded by lack of progress), shared by `ate db migrate` and `ate setup`; setup migrates the configured database; NO_MIGRATION status; `os.exit` removed; `--config` anywhere; `allow_abbrev=False`; `paperSize` validated; the name; Windows fixes for the manuals' tests; abort flake made deterministic.
+- Left: `_discard_partial` doesn't delete `.partial-journal` (manual says it's safe to delete); the restart test uses a writer thread, not a second process; a migration registry is needed before the next schema version.
