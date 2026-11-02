@@ -316,7 +316,15 @@ def _platform_data_dir_under_basetemp(tmp_path_factory):
     )
     original = ate.config._platform_data_dir
     ate.config._platform_data_dir = lambda: data_dir
+    # A test that starts ATE in a fresh interpreter inherits this, so its application log lands
+    # here too and not in the runner's real `C:\ProgramData\ATE` (packet 35b, CI 41445252353).
+    previous_env = os.environ.get("ATE_DATA_DIR")
+    os.environ["ATE_DATA_DIR"] = str(data_dir)
     yield
+    if previous_env is None:
+        os.environ.pop("ATE_DATA_DIR", None)
+    else:
+        os.environ["ATE_DATA_DIR"] = previous_env
     ate.config._platform_data_dir = original
 
 

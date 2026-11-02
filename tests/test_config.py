@@ -298,6 +298,7 @@ def _pretend_windows(monkeypatch, programdata: str | None = r"C:\ProgramData") -
     fixture ran, and put back here."""
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(config, "_platform_data_dir", _real_platform_data_dir)
+    monkeypatch.delenv("ATE_DATA_DIR", raising=False)  # conftest sets it for subprocesses
     if programdata is None:
         monkeypatch.delenv("PROGRAMDATA", raising=False)
     else:
