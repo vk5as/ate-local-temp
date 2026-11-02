@@ -1,6 +1,6 @@
 # 33: Appearance implementation plan
 
-Draft for the user's approval, 2026-11-02. Nothing starts until approved, and all of it follows packet 36. Details and values are in `33-opus.md`; `R` numbers refer to its section 4.
+Approved by the user, 2026-11-02. **Order:** finish 35 and 36, then cut a release (tag `v0.1.0-rc3`, authorised by the user) and check CI is green and the GitHub Release carries all the right artifacts: six manuals, Windows installer, `.deb`, tarball, wheel. Only once that is true do these packets start. Details and values are in `33-opus.md`; `R` numbers refer to its section 4.
 
 ## User decisions
 
@@ -24,7 +24,7 @@ Draft for the user's approval, 2026-11-02. Nothing starts until approved, and al
 | 37e Step rows | Result badges with word, symbol and weight for colour-blind Operators; Actual and Expected on rows; a larger current or failed row with a left bar | R4, R10's table parts, both layouts. 500-step speed checked | L |
 | 37f Setup | Stage rail and Back; fields of a sensible width; a primary Next, Enter advances, validation at Next; a schedule picker showing Media Release | R5, R11, and the three-pane setup equivalents | L |
 | 37g History and empty states | More than 3 visible runs; compact filters; result badges; labelled details; clear messages when empty or busy | R9, R17 | M |
-| 37h Strip, icons, keyboard | Top strip; Lucide icons and a window icon; mnemonics, visible focus, F5, tab order | R13, R14, R15, D5. The icon licence is read when vendored | M |
+| 37h Strip, icons, keyboard | Top strip; a Help menu that opens the manuals; Lucide icons and a window icon; mnemonics, visible focus, F5, tab order | R13, R14, R15, D5. A Help menu opening the installed manuals (user, 2026-11-02). The icon licence is read when vendored | M |
 
 ## How it runs
 
@@ -37,7 +37,6 @@ Draft for the user's approval, 2026-11-02. Nothing starts until approved, and al
 
 - Dark mode, bundled fonts, and the one-line summary for future steps.
 - A real Windows desktop check: someone needs to run a release on a Windows PC. This is the main risk to the look, and should happen after 37a and again at the end.
-- A Help menu for the manuals. It would be cheap to add to 37h if wanted.
 
 ## Rough time
 
