@@ -385,48 +385,21 @@ def test_a_lock_taken_mid_copy_is_refused_within_the_bound(tmp_path: Path, capsy
     assert "equipment" not in _tables(path), "the refused migration created a table"
 
 
-def _still_copying(path: Path) -> bool:
-    """Whether the copy's ``.partial`` is still on disk: the writer stops when it is gone."""
-    return any(p.name.endswith(".partial") and p.stat().st_size > 0 for p in path.parent.iterdir())
-
-
-def _restarting_writer(path: Path, seconds: int) -> threading.Thread:
-    """A second connection that writes to ``path`` the way a Test Run does: transaction, commit.
-
-    It waits for the copy's ``.partial`` to appear so the first write lands mid-copy rather than
-    before it, and stops when the ``.partial`` does. Each commit makes SQLite take a fresh
-    snapshot of the source and start the copy from the top of the file: the pages left to copy
-    go back up. That is a change in ``remaining`` and not progress, which is the distinction the
-    bound has to make (packet 35 review, round 3)."""
-    def writer() -> None:
-        while not _still_copying(path):
-            time.sleep(0.01)
-        conn = sqlite3.connect(str(path), timeout=120)
-        try:
-            end = time.monotonic() + seconds
-            while time.monotonic() < end and _still_copying(path):
-                conn.execute("BEGIN EXCLUSIVE")
-                conn.execute("INSERT INTO bulk VALUES (?)", (b"w" * 204800,))
-                conn.commit()
-                time.sleep(0.05)
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
-
-    thread = threading.Thread(target=writer)
-    thread.start()
-    return thread
-
-
 def test_a_copy_that_keeps_restarting_is_refused_within_the_bound(tmp_path: Path, capsys, monkeypatch) -> None:
-    """A copy beside a Test Run writer is refused inside the bound instead of running forever.
+    """A copy that keeps restarting is refused inside the bound instead of running forever.
 
     SQLite restarts a copy when another connection writes to the source, so ``remaining`` goes
     back up. Counting any change as progress let a copy restart for as long as the writer kept
     writing: 60 s measured, no refusal, an installer hanging on a database a Test Run is writing
     to. Progress is now ``remaining`` reaching a new lowest value, so a restart does not reset
-    the clock, and the refusal names the writer and tells the Operator to finish the Test Run."""
+    the clock, and the refusal names the writer and tells the Operator to finish the Test Run.
+
+    The restarts are driven, not raced. A second connection only lands a write between the copy's
+    steps if the timing allows it, and on the Linux runners the copy finished before the writer
+    got the lock, so the migration succeeded and the test failed for a reason that says nothing
+    about the bound (packet 35b, CI 41407051552). The copy is still made by the real sqlite3 on
+    the real file: only the counters handed to the progress callback are scripted, one page every
+    50 ms, which is how a page-at-a-time copy moves."""
     from ate.storage import backup as backup_module
 
     monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
@@ -435,13 +408,33 @@ def test_a_copy_that_keeps_restarting_is_refused_within_the_bound(tmp_path: Path
     _older_database(path, 4, ["equipment"])
     _bulk_rows(path, 3000, journal="DELETE")
 
-    writer = _restarting_writer(path, 20)
-    try:
-        started = time.monotonic()
-        code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
-        elapsed = time.monotonic() - started
-    finally:
-        writer.join(timeout=30)
+    class _RestartingCopy(sqlite3.Connection):
+        """A connection whose ``backup`` walks down the file and back to the top, over and over."""
+
+        def backup(self, destination, *, pages: int = 0, progress=None, sleep: float = 0.0) -> None:
+            remaining = pages
+            # Enough steps that the bound has to be broken by a restart, and a wall behind the loop
+            # so a bound that stops working fails the test instead of hanging it.
+            stop = time.monotonic() + 10.0
+            while time.monotonic() < stop:
+                if progress is not None:
+                    progress(0, remaining, pages - remaining)
+                remaining = remaining - 1 if remaining > 1 else pages
+                time.sleep(sleep)
+            super().backup(destination, pages=pages, progress=progress, sleep=sleep)
+
+    monkeypatch.setattr(
+        backup_module,
+        "sqlite3",
+        types.SimpleNamespace(
+            Error=sqlite3.Error,
+            connect=lambda file, **kwargs: sqlite3.connect(file, factory=_RestartingCopy, **kwargs),
+        ),
+    )
+
+    started = time.monotonic()
+    code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    elapsed = time.monotonic() - started
 
     text = out + err
     assert elapsed < 10, f"the copy beside a writing connection ran {elapsed} s: {text}"
@@ -566,6 +559,19 @@ def _locked_holder(path: Path, seconds: int, journal: str = "WAL", begin: str = 
     return proc
 
 
+def _hard_kill(pid: int) -> None:
+    """End a process with no chance to clean up: SIGKILL where there is one, the OS hard kill where
+    there is not. Windows' signal table has no SIGKILL (packet 35b, CI 41407051552), so there the
+    equivalent is `taskkill /F`, which is TerminateProcess and not a signal at all."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+        )
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
 def test_a_copy_interrupted_halfway_is_never_left_named_as_a_backup(tmp_path: Path) -> None:
     """A process killed while the copy is in flight leaves nothing that reads like a backup.
 
@@ -590,7 +596,7 @@ def test_a_copy_interrupted_halfway_is_never_left_named_as_a_backup(tmp_path: Pa
             break
         time.sleep(0.02)
     assert partial is not None, "the copy never started"
-    os.kill(proc.pid, signal.SIGKILL)
+    _hard_kill(proc.pid)
     proc.wait(timeout=10)
 
     assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())

@@ -554,6 +554,22 @@ because a PyInstaller build takes minutes:
 ATE_BUILD_TESTS=1 pytest -m build -q
 ```
 
+### Tests that only run on Linux
+
+A few tests are Linux-only because what they measure is the shell or the socket, not ATE. They are
+known gaps on Windows, not passes: CI on Windows cannot prove these things, and the reason is in
+the `skipif` reason on each of them (packet 35b, CI 41407051552).
+
+- `tests/test_manuals.py`: the two abort probes that run a command through the Lua host's
+  `os.execute` — `kill -9 $PPID`, and a quoted `python -c "import time; time.sleep(3)"` timed
+  against the abort. `cmd.exe` has no `kill` and no `$PPID`, and it exits 1 on the quoted `-c`
+  form, so there is no command for the abort to wait for. Both forms of the manuals say the
+  command is a POSIX one where they quote it.
+- `tests/test_device_abort_32b.py`: `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading`
+  (TCP, SERIAL, VISA) needs a write stalled on a socket whose peer stopped reading. The Windows
+  runner's loopback took all 200 MB in a few tenths of a second, so the step ended before the
+  abort landed. The read versions of the same test run on every platform.
+
 ### Testing seams: four environment variables
 
 Tests that run `ate` in a real subprocess need to aim the platform paths somewhere writable

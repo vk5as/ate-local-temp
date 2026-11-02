@@ -46,8 +46,10 @@ which the host refuses.
 
 What the lockdown is \emph{not} is a defence against the person who wrote the schedule. A Test
 Schedule is the Station's own code, and \texttt{os.execute}, \texttt{os.remove} and \texttt{os.rename}
-are reachable from a step: \texttt{os.execute("kill -9 \$PPID")} ends ATE with the run row left open,
-and \texttt{os.remove} on the database takes the record away under a running Test Run. The guarantee
+are reachable from a step: \texttt{os.execute("kill -9 \$PPID")} ends ATE with the run row left open.
+That command is a POSIX shell command: on a Windows Station \texttt{os.execute} goes to
+\texttt{cmd.exe}, which has no \texttt{kill} and no \texttt{\$PPID}. And \texttt{os.remove} on the
+database takes the record away under a running Test Run. The guarantee
 is traceability --- ATE knows which files a run ran --- not protection from a schedule that means
 harm (\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}:
 \texttt{test\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}can\_\allowbreak{}end\_\allowbreak{}the\_\allowbreak{}process\_\allowbreak{}and\_\allowbreak{}the\_\allowbreak{}manual\_\allowbreak{}says\_\allowbreak{}schedules\_\allowbreak{}are\_\allowbreak{}trusted}).

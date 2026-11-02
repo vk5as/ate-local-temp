@@ -1056,7 +1056,8 @@ abort has to wait, and a writer should know which steps they apply to.
 - **A command run by `os.execute` is allowed, and the abort waits for it.** `os.execute` is
   available in a step. ATE cannot end a process it did not start, so the run finishes when the
   command does: a command holds the abort for as long as it runs, however long that is. The step
-  still reported `PASS` when it returned.
+  still reported `PASS` when it returned. The command has to be one the Station's shell has:
+  `kill -9 $PPID` is a POSIX command, and a Windows Station runs `os.execute` through `cmd.exe`.
 - **A busy loop inside a coroutine is allowed, and the hook does not reach it.** A loop in a
   coroutine may run on after an abort, and the run ends only when the loop does, so a long enough
   loop holds the abort for as long as it takes. An unbounded

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -155,9 +156,21 @@ class _UdpPeer:
         self._sock.close()
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the abort has to land while the write is stalled, and the Windows runner's loopback "
+           "took all 200 MB in a few tenths of a second (packet 35b, CI 41407051552)",
+)
 @pytest.mark.parametrize("device_type", ["TCP", "SERIAL", "VISA"])
 def test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading(qapp, device_type):
-    """UDP is not here: a datagram goes out or is dropped, so its socket does not stall."""
+    """UDP is not here: a datagram goes out or is dropped, so its socket does not stall.
+
+    Linux only, for a reason that is the platform's rather than ATE's: the peer stops reading, the
+    write stalls on the socket, and the abort has to arrive while it is stalled. On the Windows
+    runner the 200 MB went out in a few tenths of a second, so step 1 finished on its own and the
+    abort landed on step 2 (`NOREPORT`, `ERROR`) instead of ending a write in flight (packet 35b,
+    CI 41407051552). The read versions of these tests, which do not depend on a buffer filling,
+    run on every platform."""
     peer = _StuckPeer()
     try:
         opened = _OPEN[device_type].format(port=peer.port)

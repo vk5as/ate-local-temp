@@ -1882,6 +1882,11 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
     raise AssertionError(f"the unbounded coroutine loop ended after {proc.returncode}: {proc.stdout}")
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the step runs the command through the Lua host's os.execute, and cmd.exe refuses the "
+           "quoted -c form the test times (packet 35b, CI 41407051552)",
+)
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
     """``os.execute`` is outside the hook: the run ends when the command does, not when the
     Operator asks.
@@ -1926,17 +1931,29 @@ def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error
     assert row and row["ended_at"] is not None and row["result"] is not None, f"the run row is not closed: {row}"
 
 
-#: The command the manual names as the way a schedule ends ATE from inside a step.
+#: The command the manual names as the way a schedule ends ATE from inside a step. A POSIX shell
+#: command: cmd.exe on a Windows Station has no `kill` and no `$PPID`, so the probe that runs it is
+#: Linux-only (packet 35b, CI 41407051552), and the manuals say so where they quote it.
 KILL_COMMAND = "kill -9 $PPID"
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the step ends the process with `kill -9 $PPID`, which only a POSIX shell has "
+           "(packet 35b, CI 41407051552)",
+)
 def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tmp_path: Path) -> None:
     """lupa's `os` has no `abort`, and the manual used to say it stayed "unneeded".
 
     Two things were wrong with that sentence: it names a function the runtime does not have, and it
     implied the sandbox kept a schedule from hurting the Station. A step can run a command and can
     delete a file; a Test Schedule is the Station's own code. The probe runs the command the manual
-    now quotes, and the process dies with the run row still open."""
+    now quotes, and the process dies with the run row still open.
+
+    The command is a POSIX shell command, so this probe runs on Linux only: on the Windows runner
+    `os.execute` reached cmd.exe, which has no `kill`, and the step returned normally (packet 35b,
+    CI 41407051552). What the manuals say about it is checked on every platform by
+    :func:`test_the_manuals_say_which_schedule_examples_are_posix_only`."""
     proc = _run_abort_probe(tmp_path, f'os.execute("{KILL_COMMAND}") ATE.report(Result.PASS, "never reached")')
     assert proc.returncode != 0, f"the step was expected to end the process, it returned {proc.returncode}: {proc.stdout[-300:]}"
     row = _open_run_row(tmp_path / "station" / "ate.db")
@@ -1958,6 +1975,23 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
 
     manual = "\n".join(text for _label, text in MANUALS["developer"].texts())
     assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
+
+
+def test_the_manuals_say_which_schedule_examples_are_posix_only() -> None:
+    """A manual that quotes a shell command says which shell has it.
+
+    `kill -9 $PPID` is how the developer manual shows a schedule ending ATE, and the suite can only
+    run it on a POSIX shell: on the Windows runner cmd.exe answered "kill: illegal pid: $PPID" and
+    the step returned normally (packet 35b, CI 41407051552). An Operator on a Windows Station should
+    read that from the manual rather than find it out by ending their own run."""
+    quoted = False
+    for path, text in MANUALS["developer"].texts():
+        if KILL_COMMAND not in text:
+            continue
+        quoted = True
+        where = f"the developer manual's {Path(path).name}"
+        assert re.search(r"POSIX|[Uu]nix|[Ll]inux", text), f"{where} quotes `kill -9 $PPID` without saying only a POSIX shell has it"
+    assert quoted, "the developer manual no longer quotes the command at all"
 
 
 # --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------
