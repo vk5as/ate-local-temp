@@ -836,3 +836,10 @@ With another agent running pytest loops on the same machine, the Qt/timing seam 
 - Findings carried to packet 35: backups on installer upgrades, custom `database.path`, `os.exit`, `user_version` stamping, the name.
 - User decision: `os.execute` and coroutine busy loops are documented exceptions to the abort limit.
 - Also found, not fixed: `Driver.close` and `VisaDriver.close` are dead code; `_location()` can report the wrong place for multi-line Actions.
+
+## User decisions (2026-11-02)
+
+- `LICENSE`: MIT text downloaded from GitHub's licenses API, not written by hand; copyright line "2026 VK5AS".
+- SQLite `synchronous` stays at today's safer setting.
+- A Post-test Action waiting on an abandoned Device call is not capped at 10 s for now; revisit if it is a real problem.
+- The repo stays public until all this work is done.
