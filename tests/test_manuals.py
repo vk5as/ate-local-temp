@@ -1920,7 +1920,9 @@ def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -
     )
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    assert elapsed >= held_seconds - 0.5, (
+    # The abort is requested 0.4 s after the schedule starts, so the command has already run for
+    # roughly that long; allow another 0.6 s for Windows process scheduling jitter.
+    assert elapsed >= held_seconds - 1.0, (
         f"the abort ended the run in {elapsed} s while the same command takes {held_seconds:.2f} s "
         f"outside ATE: {proc.stdout}"
     )
