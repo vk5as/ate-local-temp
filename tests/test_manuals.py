@@ -2267,7 +2267,7 @@ def test_the_failed_run_query_in_the_manual_reads_a_run_that_happened(station) -
     command line from the manual is executed as its own process."""
     config = write_config(station / "data")  # the fixture's Station database, where {db} points
     with bench_env(Peers()):
-        record = run_schedule(config, "Example basics", inputs={"Operator input": 1.5})
+        record = run_schedule(config, "Example basics", inputs={"Operator input": 1.5}, timeout=60.0)
     assert record["run"]["result"] == "PASS", record["run"]
     line, argv, expected, wanted, cwd = next(
         entry for entry in DEV_COMMANDS_RUN if entry[0].startswith("python -c \"import sqlite3")

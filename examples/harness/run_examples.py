@@ -219,6 +219,7 @@ def run_schedule(
     stop_on_fail: bool | None = None,
     polls: dict[str, tuple[int, str]] | None = None,
     release_dir: Path = RELEASE_DIR,
+    timeout: float = 15.0,
     operator: str = "Ada Lovelace",
     project: str = "Example project",
     uut_type: str = "Example board",
@@ -329,7 +330,7 @@ def run_schedule(
                 poll_clicked.append((node_seq, index, text))
             poll_pending[:] = [p for p in poll_pending if p not in due]
 
-        if not _pump(app, lambda: SessionState.FINISHED in states or unanswerable, on_tick=_click_polls):
+        if not _pump(app, lambda: SessionState.FINISHED in states or unanswerable, timeout=timeout, on_tick=_click_polls):
             raise TimeoutError(f"schedule '{schedule}' never finished")
         if unanswerable:
             # The step is still waiting, so the run cannot finish; say which answer was rejected
