@@ -12,6 +12,8 @@ What is pinned:
 * that copy is written as ``<name>.partial``, checked, and only then renamed to its
   ``.backup-<stamp>`` name, and it is given up on when it stops moving for
   :data:`BACKUP_LOCK_TIMEOUT_S` seconds rather than waiting on a lock indefinitely;
+* a copy the check cannot read is deleted on the way out, never left as a ``.partial`` beside the
+  database with the refusal naming only the database;
 * a database is never stamped with the current version unless a migration actually created
   something for this build;
 * ``ate setup`` migrates the database the Station's config names, and says which it chose;
@@ -468,6 +470,67 @@ def test_a_copy_that_keeps_moving_is_never_refused_how_long_it_takes(tmp_path: P
     assert _tables(copy) == _tables(path), "the copy that was allowed does not hold the source's tables"
 
 
+
+
+def _lock_taken_when_the_copy_is_written(path: Path, seconds: int) -> subprocess.Popen:
+    """A separate process that takes the write lock as soon as the copy is written.
+
+    It waits for the ``.partial`` to reach the size of the database it came from --- the moment
+    the copy is finished and the check of it begins --- and then sits on an exclusive transaction.
+    The check reads the source to compare the two, and that read is what fails: the cleanup has to
+    cover it (packet 35 review, round 3). The process is started before the copy so its own start-up
+    is not part of the timing."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time, os, sqlite3\n"
+         "path = sys.argv[1]; directory = sys.argv[3]; size = os.path.getsize(path)\n"
+         "while not any(n.endswith('.partial') and os.path.getsize(os.path.join(directory, n)) >= size"
+         "              for n in os.listdir(directory)):\n"
+         "    time.sleep(0.002)\n"
+         "conn = sqlite3.connect(path, timeout=120)\n"
+         "conn.execute('BEGIN EXCLUSIVE')\n"
+         "time.sleep(float(sys.argv[2]))",
+         str(path), str(seconds), str(path.parent)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    time.sleep(1.0)  # the process is waiting for the copy, not for the lock
+    assert proc.poll() is None, "the process meant to take the lock died before waiting for the copy"
+    return proc
+
+
+def test_a_copy_the_check_cannot_read_is_not_left_behind_as_a_partial(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A copy refused by its own check is deleted, not left beside the database.
+
+    The check reads the source to compare tables and version. If another process has taken the
+    write lock by then, that read raises, and the exception left :func:`backup_for_migration`
+    through a path that did not delete the ``.partial``: a half-written copy stayed beside the
+    database under a name that reads like a backup in progress. The refusal must name the copy and
+    leave nothing behind."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 1)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 15000, journal="DELETE")  # 60 MB: the check takes long enough to be interrupted
+
+    holder = _lock_taken_when_the_copy_is_written(path, 10)
+    try:
+        code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+    text = out + err
+    assert code == 1, text
+    assert "cannot back up" in text, text
+    assert "cannot be read to see what is in it" in text, text
+    assert "Traceback" not in err, err
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert not any(".partial" in p.name for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert _version(path) == 4, "the refused migration changed the database's version"
+    assert "equipment" not in _tables(path), "the refused migration created a table"
 
 
 def _locked_holder(path: Path, seconds: int, journal: str = "WAL", begin: str = "IMMEDIATE") -> subprocess.Popen:

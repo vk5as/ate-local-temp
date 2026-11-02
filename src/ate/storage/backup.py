@@ -323,7 +323,14 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
         # Step 3: close the copy (Windows cannot delete an open file) and check it.
         _close_quietly(copy)
         copy = None
-        problem = _copy_is_sound(path, partial)
+        try:
+            problem = _copy_is_sound(path, partial)
+        except BackupError as exc:
+            # The check reads the source to compare the two, and the source can be locked by
+            # another process at that moment. The half-written copy is on disk either way, and
+            # this is the path that used to leave it there: giving up deletes it (packet 35
+            # review, round 3).
+            raise _give_up(str(exc)) from exc
         if problem is not None:
             raise _give_up(problem)
         # Step 4: rename, never overwriting.

@@ -191,7 +191,9 @@ purge.
   copy again from the top of the file, so the pages left jump back up, and a restart is not
   progress. The ten seconds bounds lack of progress, not total time: a big database that keeps
   copying is never refused however long the copy takes, and one held by another process is refused
-  inside the bound rather than waited out. A name
+  inside the bound rather than waited out. If the check cannot read the database at the moment it
+  compares the copy with the source, the migration is refused and the `.partial` is deleted with it:
+  nothing is left beside the database. A name
   that is taken gets a `-2`, `-3` counter; nothing is overwritten. If the copy cannot be written,
   the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
   exit 1.

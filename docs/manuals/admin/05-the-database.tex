@@ -115,7 +115,10 @@ the database makes SQLite start the copy again from the top of the file, so the 
 up: that is not progress, and a copy beside a Test Run writer is refused rather than run for as long
 as the writer runs. The bound is on lack of progress, not on total time: a database held by another
 process is refused inside that time rather than waited out, which is what an installer needs, while a
-large database that keeps copying is never refused however long the copy takes.
+large database that keeps copying is never refused however long the copy takes. If the check
+cannot read the database --- another process took the lock while the copy was being written --- the
+migration is refused and the \texttt{.partial} is deleted with it: nothing is left beside the
+database, and the line printed names both the database and the copy.
 
 The cleanup that removes a half-written copy runs when ATE stops the copy. A copy killed outright
 --- \texttt{Ctrl-C} in the middle of an installer, \texttt{SIGKILL}, a machine that stops --- leaves
