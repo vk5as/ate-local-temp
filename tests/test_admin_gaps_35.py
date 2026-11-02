@@ -302,6 +302,15 @@ def test_a_backup_taken_while_another_process_has_the_database_open(tmp_path: Pa
     assert serials == ["IN-FLIGHT", "OLD-1"], serials
 
 
+def _config_text(**sections: object) -> str:
+    """A config body as JSON, built with json.dumps.
+
+    A path interpolated into a JSON string is not JSON: `C:\\Users\\...` is read as an escape, and
+    every `ate setup` on the Windows runner refused its own config (packet 35b, CI 41407051552).
+    """
+    return json.dumps({"format": 1, **sections}, indent=2) + "\n"
+
+
 def _bulk_rows(path: Path, count: int, journal: str = "WAL") -> None:
     """Put ``count`` 4 KB rows in a table of its own, so a copy of this file takes real pages.
 
@@ -831,8 +840,7 @@ def test_ate_setup_migrates_the_database_the_config_names(tmp_path: Path, capsys
     config.parent.mkdir(parents=True)
     (station / "data").mkdir(parents=True)
     config.write_text(
-        '{"format": 1, "station": {"name": "Station 35"}, '
-        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        _config_text(station={"name": "Station 35"}, database={"type": "sqlite", "path": str(db)}),
         encoding="utf-8",
         newline="\n",
     )
@@ -1107,8 +1115,7 @@ def test_the_launch_dialog_says_the_same_one_line(tmp_path: Path) -> None:
     path = station / "ate.db"
     _database_at_an_older_version_with_every_table(path)
     config.write_text(
-        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
-        f'"database": {{"type": "sqlite", "path": "{path}"}}}}',
+        _config_text(station={"name": "Station 35", "uuid": "u-35"}, database={"type": "sqlite", "path": str(path)}),
         encoding="utf-8",
         newline="\n",
     )
@@ -1247,8 +1254,7 @@ def test_a_config_for_ate_is_not_read_as_config_dir(tmp_path: Path, capsys) -> N
     data.mkdir(parents=True)
     config.parent.mkdir(parents=True)
     config.write_text(
-        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
-        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        _config_text(station={"name": "Station 35", "uuid": "u-35"}, database={"type": "sqlite", "path": str(db)}),
         encoding="utf-8",
         newline="\n",
     )
@@ -1272,8 +1278,7 @@ def test_an_unreadable_config_named_by_a_flag_does_not_change_the_answer(tmp_pat
     config_dir.mkdir(parents=True)
     config = config_dir / "config.json"
     config.write_text(
-        '{"format": 1, "station": {"name": "Station 35"}, '
-        f'"database": {{"type": "sqlite", "path": "{tmp_path / 'elsewhere.db'}"}}}}',
+        _config_text(station={"name": "Station 35"}, database={"type": "sqlite", "path": str(tmp_path / "elsewhere.db")}),
         encoding="utf-8",
         newline="\n",
     )
@@ -1311,8 +1316,7 @@ def test_two_configs_that_disagree_are_a_usage_error(tmp_path: Path, capsys) -> 
     second = tmp_path / "second.json"
     for name, db in ((first, tmp_path / "one.db"), (second, tmp_path / "two.db")):
         name.write_text(
-            '{"format": 1, "station": {"name": "S", "uuid": "u"}, '
-            f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+            _config_text(station={"name": "S", "uuid": "u"}, database={"type": "sqlite", "path": str(db)}),
             encoding="utf-8",
             newline="\n",
         )
@@ -1364,8 +1368,7 @@ def test_config_before_the_subcommand_selects_the_config_for_that_command(tmp_pa
     config = tmp_path / "station-config.json"
     db = tmp_path / "elsewhere" / "station.db"
     config.write_text(
-        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
-        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        _config_text(station={"name": "Station 35", "uuid": "u-35"}, database={"type": "sqlite", "path": str(db)}),
         encoding="utf-8",
         newline="\n",
     )
