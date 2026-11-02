@@ -62,8 +62,13 @@ injected (`tests/test_gui_launch_30a.py`) rather than running it as a process.
 ate setup                                    # as root on Linux, as admin on Windows
 ate setup --root DIR                         # put the Station under DIR/data and DIR/config
 ate setup --data-dir DIR --config-dir DIR    # override one of the two; packagers and tests
+ate setup --config FILE                      # read FILE instead of <config-dir>/config.json
 ate setup --no-permissions                   # skip the group/ownership/ACL treatment
 ```
+
+`--config` works before the subcommand too — `ate --config X setup` — and a `--config` written on
+both sides with different values is refused rather than resolved. `--config=` with nothing after it
+is a usage error, not a default.
 
 `ate setup` is idempotent: it creates nothing that exists and never overwrites an existing config.
 It also runs the migration `ate db migrate` runs — the same routine, `migrate_database` in

@@ -1054,6 +1054,82 @@ def test_a_flag_ate_does_not_have_is_a_usage_error_not_a_silent_misread(tmp_path
         assert "unknown argument" in err, f"{flag}: {err}"
 
 
+def test_a_db_subcommand_refuses_a_flag_it_does_not_have(tmp_path: Path, capsys) -> None:
+    """`ate db status --d` said nothing and carried on; setup refuses the same thing.
+
+    A flag nobody knows is a typo worth reporting, not a token to ignore: the command either
+    does what the Operator asked or says it did not understand (packet 35 review, round 2)."""
+    db = tmp_path / "station.db"
+    for argv in (["db", "status", str(db), "--d"], ["db", "migrate", str(db), "--yes", "--nope"], ["db", "status", "--noyes"]):
+        code, out, err = _cli(argv, capsys)
+        text = out + err
+        assert code == 1, f"{argv}: {text}"
+        assert "unknown argument" in err, f"{argv}: {text}"
+        assert "Traceback" not in err, f"{argv}: {err}"
+    assert not db.exists(), "the refused db command created a database"
+
+    # The flags db does have still work.
+    code, out, err = _cli(["db", "migrate", str(db), "-y"], capsys)
+    assert code == 0 and str(db) in out, out
+
+
+def test_config_before_the_subcommand_selects_the_config_for_that_command(tmp_path: Path, capsys) -> None:
+    """`ate --config X setup` prepares the Station X names instead of the default one.
+
+    `--config` before `setup` was parsed and then dropped: setup wrote `<config-dir>/config.json`
+    and migrated `<data>/ate.db` whatever the flag said (packet 35 review, round 2)."""
+    station = tmp_path / "station"
+    config = tmp_path / "station-config.json"
+    db = tmp_path / "elsewhere" / "station.db"
+    config.write_text(
+        '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
+        f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    code, out, err = _cli(["--config", str(config), "setup", "--root", str(station), "--no-permissions"], capsys)
+    assert code == 0, err
+    assert str(db) in out, out
+    assert db.exists() and _version(db) == SCHEMA_VERSION
+    assert not (station / "data" / "ate.db").exists(), "setup migrated the database it was given"
+    assert not (station / "config" / "config.json").exists(), "setup wrote a config in the config dir instead of reading the one it was given"
+
+
+def test_a_config_given_twice_to_setup_is_a_usage_error(tmp_path: Path, capsys) -> None:
+    """`ate --config A setup --config B` has no right answer, so it gives none."""
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    for name in (first, second):
+        name.write_text('{"format": 1, "station": {"name": "S", "uuid": "u"}}', encoding="utf-8", newline="\n")
+
+    code, out, err = _cli(
+        ["--config", str(first), "setup", "--root", str(tmp_path / "station"), "--config", str(second), "--no-permissions"],
+        capsys,
+    )
+    assert code == 1, out + err
+    assert "two --config values" in err, err
+    assert str(first) in err and str(second) in err, err
+
+    # The same path twice is not a disagreement.
+    code, out, err = _cli(
+        ["--config", str(first), "setup", "--root", str(tmp_path / "station"), "--config", str(first), "--no-permissions"],
+        capsys,
+    )
+    assert code == 0, out + err
+    assert "two --config values" not in err, err
+
+
+def test_a_config_option_with_no_value_is_a_usage_error_for_setup_too(tmp_path: Path, capsys) -> None:
+    """`ate setup --config=` and `ate --config= setup` name nothing, and both say so."""
+    for argv in (["setup", "--root", str(tmp_path / "station"), "--config=", "--no-permissions"],
+                 ["--config=", "setup", "--root", str(tmp_path / "station"), "--no-permissions"]):
+        code, out, err = _cli(argv, capsys)
+        assert code == 1, f"{argv}: {out + err}"
+        assert "needs a path" in err, f"{argv}: {err}"
+        assert "Traceback" not in err, f"{argv}: {err}"
+
+
 # --- os.exit in the sandbox -------------------------------------------------------------
 
 

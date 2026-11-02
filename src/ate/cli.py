@@ -550,7 +550,7 @@ def main(argv=None) -> int:
     if command == "db":
         return _cmd_db(_subcommand_args(argv, command), config_path=args.config)
     if command == "setup":
-        return _cmd_setup(_subcommand_args(argv, command))
+        return _cmd_setup(_subcommand_args(argv, command), config_path=args.config)
     if command == "definition":
         return _cmd_definition(_subcommand_args(argv, command))
 
@@ -590,6 +590,12 @@ def _cmd_db(argv: list[str], config_path: str | None = None) -> int:
 
     sub = argv[0]
     rest = argv[1:]
+    stray = [token for token in rest if token.startswith("-") and token not in ("--yes", "-y")]
+    if stray:
+        # `ate db status --d` used to be ignored, which reads as a command that worked. setup
+        # refuses a flag it does not know, and db does the same (packet 35 review, round 2).
+        print(f"ate db: unknown argument(s): {' '.join(stray)}", file=sys.stderr)
+        return 1
     path = next((token for token in rest if not token.startswith("-")), None)
     hint = None  # the config to name in the migrate hint, when one is not the platform default
     if path is None:
@@ -659,24 +665,41 @@ def _db_migrate(path: str, extra: list[str], hint: Path | None = None) -> int:
     return migrate_database(path, config_file=hint)
 
 
-def _cmd_setup(argv: list[str]) -> int:
-    """Dispatch ``ate setup [--root DIR] [--no-permissions]``.
+def _cmd_setup(argv: list[str], config_path: str | None = None) -> int:
+    """Dispatch ``ate setup [--root DIR] [--config FILE] [--no-permissions]``.
 
     Prepares the Station's directories and default config (:func:`prepare_station`), which also runs
     the database migration, then prints what was created versus already present. ``--root DIR`` roots
     the layout at ``DIR`` for automation and tests; otherwise the platform defaults are used (see
-    ``assets/packaging.md``). The group/ownership/ACL treatment is applied by default when running as
-    root/admin; an unprivileged run prints a warning on stderr and skips it rather than failing, and
+    ``assets/packaging.md``). ``--config FILE`` names the config file setup reads, and writes if there
+    is none, instead of ``<config-dir>/config.json``: it works before the subcommand
+    (``ate --config X setup``) and after it (``ate setup --config X``) alike, and two different
+    values on one command are refused rather than quietly resolved (packet 35 review, round 2).
+    The group/ownership/ACL treatment is applied by default when running as root/admin; an
+    unprivileged run prints a warning on stderr and skips it rather than failing, and
     ``--no-permissions`` skips it explicitly. A failure to create or write anything — e.g. an
     unwritable target — is reported on stderr and turned into a non-zero exit.
     """
     from argparse import ArgumentParser
 
+    try:
+        argv, inline_config = _take_config(argv)
+    except CliUsageError as exc:
+        print(f"ate setup: {exc}", file=sys.stderr)
+        return 1
+    if inline_config is not None:
+        if config_path is not None and config_path != inline_config:
+            print(
+                f"ate setup: two --config values given, {config_path} and {inline_config}; give one",
+                file=sys.stderr,
+            )
+            return 1
+        config_path = inline_config
+
     parser = ArgumentParser(prog="ate setup", add_help=False, allow_abbrev=False)
     parser.add_argument("--root", metavar="DIR", help="prepare this directory as the Station root (for automation and tests)")
     parser.add_argument("--data-dir", metavar="DIR", help="use this data directory instead of --root's data/ (packagers and tests)")
     parser.add_argument("--config-dir", metavar="DIR", help="use this config directory instead of --root's config/ (packagers and tests)")
-    parser.add_argument("--config", metavar="FILE", help="the config file to read (and write if there is none) instead of <config-dir>/config.json")
     parser.add_argument("--no-permissions", action="store_true", help="skip group/ownership/ACL setup (unprivileged or test runs)")
     args, unknown = parser.parse_known_args(argv)
 
@@ -691,7 +714,7 @@ def _cmd_setup(argv: list[str]) -> int:
     layout = StationLayout.from_root(args.root) if args.root is not None else default_layout()
     data_dir = Path(args.data_dir) if args.data_dir is not None else layout.data_dir
     config_dir = Path(args.config_dir) if args.config_dir is not None else layout.config_dir
-    config_file = Path(args.config) if args.config is not None else None
+    config_file = Path(config_path) if config_path is not None else None
 
     elevated = _is_root()
     skip_permissions = args.no_permissions or not elevated  # unprivileged: warn and skip, don't fail

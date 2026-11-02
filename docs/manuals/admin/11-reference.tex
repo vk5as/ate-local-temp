@@ -26,6 +26,10 @@ Command & What it does \\
 \texttt{--root DIR} & Prepare DIR as the Station root: DIR/data and DIR/config. \\
 \texttt{--data-dir DIR} & Use DIR for the data directory instead of the root's \texttt{data/}. \\
 \texttt{--config-dir DIR} & Use DIR for the config directory instead of the root's \texttt{config/}. \\
+\texttt{--config FILE} & Read that file as the config, and write the default into it if it is not
+  there, instead of \texttt{<config-dir>/config.json}. It may sit before \texttt{setup}
+  (\texttt{ate --config X setup}) or after it (\texttt{ate setup --config X}); two different values
+  on one command are refused. \\
 \texttt{--no-permissions} & Skip the group, ownership and ACL treatment explicitly (packagers and
   test runs). \\
 \texttt{ate definition update <file.atedef>} & Recompute every listed file's SHA-256 in place,
