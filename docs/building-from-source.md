@@ -556,9 +556,9 @@ ATE_BUILD_TESTS=1 pytest -m build -q
 
 ### Tests that only run on Linux
 
-A few tests are Linux-only because what they measure is the shell or the socket, not ATE. They are
-known gaps on Windows, not passes: CI on Windows cannot prove these things, and the reason is in
-the `skipif` reason on each of them (packet 35b, CI 41407051552).
+A few tests are Linux-only because what they measure is a POSIX shell, not ATE. They are known
+gaps on Windows, not passes: CI on Windows cannot prove these things, and the reason is in the
+`skipif` reason on each of them (packet 35b, CI 41407051552).
 
 - `tests/test_manuals.py`: the abort probe that runs `kill -9 $PPID` through the Lua host's
   `os.execute`. `cmd.exe` has no `kill` and no `$PPID`, so there is no command for the abort to
@@ -566,10 +566,12 @@ the `skipif` reason on each of them (packet 35b, CI 41407051552).
   `os.execute` probe, which times a hold against the abort, runs on every platform: it uses a
   quoted `python -c` one-liner on a POSIX shell and `ping -n 4 127.0.0.1 >NUL` on Windows, because
   cmd.exe mangles a command that starts with a quote when it is handed to it by C `system()`.
-- `tests/test_device_abort_32b.py`: `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading`
-  (TCP, SERIAL, VISA) needs a write stalled on a socket whose peer stopped reading. The Windows
-  runner's loopback took all 200 MB in a few tenths of a second, so the step ended before the
-  abort landed. The read versions of the same test run on every platform.
+
+Two tests that were skipped on Windows for a reason that turned out not to be a platform fact run
+everywhere now. `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading` (TCP, SERIAL,
+VISA) sets the receive buffer on the peer's *accepted* socket as well as on its listener, since a
+listener's `SO_RCVBUF` does not reach the socket it accepts, and logs each 1 MB piece of the
+200 MB payload so the run records how much of it was out when the abort landed.
 
 ### Testing seams: four environment variables
 
