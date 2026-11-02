@@ -169,6 +169,29 @@ def _close_quietly(conn: Optional[sqlite3.Connection]) -> None:
             pass
 
 
+def _create_partial_like_source(source: Path, partial: Path) -> None:
+    """Make the half-written copy's file with the database's mode, before anything is written.
+
+    SQLite creates a new database at the process default, and the mode was matched only when the
+    copy was renamed, so between those two moments a half-written copy of a 0600 database sat
+    beside it readable by everyone on the machine (packet 35 review, round 2). Creating the file
+    with the source's mode first closes that window. The owner's write bit is added if the
+    database itself is not writable: a copy the copy cannot write is no copy at all. Best effort:
+    a filesystem that will not take the mode still gets a valid copy.
+    """
+    try:
+        mode = source.stat().st_mode & 0o7777
+    except OSError:
+        return
+    if not mode & 0o200:
+        mode |= 0o200  # a copy the copying process cannot write is not a copy
+    try:
+        handle = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    except OSError:
+        return  # the name is taken, or this filesystem answers os.open differently
+    os.close(handle)
+
+
 def _match_source_permissions(source: Path, copy: Path) -> None:
     """Give the copy the database's mode, and its group where the platform has one.
 
@@ -279,7 +302,8 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
                 f"the database lock is held by another process ({exc}); "
                 f"the copy gave up after {BACKUP_LOCK_TIMEOUT_S} s"
             ) from exc
-        # Step 2: write the copy under its temporary name.
+        # Step 2: write the copy under its temporary name, in the database's own mode.
+        _create_partial_like_source(path, partial)
         copy = sqlite3.connect(str(partial), timeout=BACKUP_LOCK_TIMEOUT_S)
         copy.execute(f"PRAGMA busy_timeout={int(BACKUP_LOCK_TIMEOUT_S * 1000)}")
         try:

@@ -962,6 +962,44 @@ def test_the_copy_keeps_the_database_mode_and_group(tmp_path: Path) -> None:
     path.chmod(0o644)
 
 
+def test_the_half_written_copy_is_never_world_readable(tmp_path: Path, monkeypatch) -> None:
+    """The copy is created with the database's mode, not given it after the rename.
+
+    SQLite makes a new database at the process default, and the mode was matched only when the
+    copy was renamed, so for the whole length of the copy a half-written 0600 database's copy sat
+    beside it at 0644, readable by anyone on the machine (packet 35 review, round 2). The mode is
+    taken from the source at the moment the file is created."""
+    from ate.storage import backup as backup_module
+
+    if os.name != "posix":
+        pytest.skip("file modes are a Unix notion; on Windows the directory's ACL governs the copy")
+
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 4000)  # enough pages that the copy is not instantaneous
+    path.chmod(0o600)
+
+    mode_when_created: list[int] = []
+    real_connect = sqlite3.connect
+
+    def spy(target, *args, **kwargs):
+        conn = real_connect(target, *args, **kwargs)
+        name = str(target)
+        if name.endswith(".partial"):
+            mode_when_created.append(os.stat(name).st_mode & 0o777)
+        return conn
+
+    monkeypatch.setattr(
+        backup_module, "sqlite3", types.SimpleNamespace(connect=spy, Error=sqlite3.Error)
+    )
+    copy = backup_for_migration(path)
+    assert copy is not None
+    assert mode_when_created, "the copy was never opened as a file"
+    assert mode_when_created[0] == 0o600, f"the half-written copy was {oct(mode_when_created[0])} beside a 0600 database"
+    assert copy.stat().st_mode & 0o777 == 0o600, oct(copy.stat().st_mode)
+    path.chmod(0o644)
+
+
 def test_an_empty_or_table_less_database_gets_no_copy(tmp_path: Path) -> None:
     """The copy rule, stated exactly once: a table has to be about to be created.
 
