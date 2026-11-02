@@ -61,26 +61,33 @@ class _CopyStalled(Exception):
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
-    """Open ``path`` read-only without creating it."""
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    """Open ``path`` read-only without creating it.
+
+    The busy timeout is the same bound the copy uses: a database held by another process answers
+    in that time instead of waiting out SQLite's five seconds and then saying "no tables"."""
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=BACKUP_LOCK_TIMEOUT_S)
 
 
 def tables_at(path: str | Path) -> set[str]:
-    """Every table present in ``path``; an unreadable or missing file gives an empty set.
+    """Every table present in ``path``; an empty set only when the file is not there.
 
     Never creates the file, so asking about a database that is not there leaves nothing
-    behind."""
+    behind. A file that is there but cannot be read raises :class:`BackupError` rather than
+    answering "no tables" (packet 35 review, round 2): a database held by another process
+    answers nothing, and answering "no tables" to that made the copy look unnecessary and let
+    the migration run with no way back. An empty set is only ever the truth about a file that
+    does not exist."""
     path = Path(path)
     if not path.exists():
         return set()
     try:
         conn = _read_only(path)
-    except sqlite3.Error:
-        return set()
+    except sqlite3.Error as exc:
+        raise BackupError(f"{path} exists but cannot be read to see what is in it: {exc}") from exc
     try:
         return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    except sqlite3.Error:
-        return set()
+    except sqlite3.Error as exc:
+        raise BackupError(f"{path} exists but cannot be read to see what is in it: {exc}") from exc
     finally:
         conn.close()
 
@@ -196,6 +203,8 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
     * it is written to ``<name>.partial`` and only renamed to ``<name>.backup-<stamp>`` once it
       has been checked (:func:`_copy_is_sound`), so a copy killed mid-flight is never left behind
       under a name that reads like a backup;
+    * the ``.partial`` is created with the database's own mode, so the half-written copy is never
+      more readable than the records it is copying (:func:`_create_partial_like_source`);
     * it is given up on when it stops moving for :data:`BACKUP_LOCK_TIMEOUT_S` seconds. The bound
       is on lack of progress, not on total time: a big database that keeps copying is never
       refused however long it takes, while one held by another process is refused inside the

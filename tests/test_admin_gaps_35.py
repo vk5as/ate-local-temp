@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -399,17 +400,22 @@ def test_a_copy_that_keeps_moving_is_never_refused_how_long_it_takes(tmp_path: P
 
 
 
-def _locked_holder(path: Path, seconds: int) -> subprocess.Popen:
-    """A separate process that opens the database, starts writing, and sits on it."""
+def _locked_holder(path: Path, seconds: int, journal: str = "WAL", begin: str = "IMMEDIATE") -> subprocess.Popen:
+    """A separate process that opens the database, starts writing, and sits on it.
+
+    ``journal`` and ``begin`` matter together: a WAL database lets a read-only connection read
+    while a writer is busy, and a rollback journal only refuses a reader when the writer took an
+    exclusive lock, so a test that needs the reader refused passes ``journal="DELETE",
+    begin="EXCLUSIVE"``."""
     proc = subprocess.Popen(
         [sys.executable, "-c",
          "import sys, time, sqlite3;"
          "conn = sqlite3.connect(sys.argv[1], timeout=120);"
-         "conn.execute('PRAGMA journal_mode=WAL');"
-         "conn.execute('BEGIN IMMEDIATE');"
+         "conn.execute('PRAGMA journal_mode=' + sys.argv[3]);"
+         "conn.execute('BEGIN ' + sys.argv[4]);"
          "conn.execute(\"INSERT INTO test_run (run_uuid, uut_serial) VALUES ('in-flight', 'IN-FLIGHT')\");"
          "time.sleep(float(sys.argv[2]))",
-         str(path), str(seconds)],
+         str(path), str(seconds), journal, begin],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(ROOT),
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
     )
@@ -539,6 +545,44 @@ def test_a_database_locked_before_the_copy_starts_is_refused_in_one_line(
     assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
     assert path.read_bytes() == before, "the refused copy changed the database"
     assert _version(path) == 4
+
+
+def test_a_database_held_by_another_process_refuses_rather_than_answer_no_tables(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A transient lock used to be read as "no tables", which meant no copy and a migration.
+
+    `tables_at` swallowed every SQLite error and returned an empty set; an empty set is exactly
+    the answer `backup_for_migration` uses to decide there is nothing to back up. A database a
+    Test Run is writing to is not empty, it is unreadable, and unreadable is a refusal: the
+    migration does not go ahead on a database nobody could look at (packet 35 review, round 2).
+    The read is bounded by :data:`BACKUP_LOCK_TIMEOUT_S`, shortened to 1 s here so the refusal is
+    quick."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 1.0)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 1, journal="DELETE")  # a rollback journal: its lock really blocks a reader
+    before = path.read_bytes()
+
+    holder = _locked_holder(path, 30, journal="DELETE", begin="EXCLUSIVE")
+    try:
+        with pytest.raises(BackupError) as raised:
+            backup_for_migration(path)
+        reason = str(raised.value)
+        assert "cannot be read" in reason, reason
+        assert "no tables" not in reason.lower(), reason
+        assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+        assert path.read_bytes() == before, "the refused copy wrote to the database"
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+    assert _version(path) == 4, "the refused migration changed a version it could not even read"
+    # Read it again with nothing holding it, and the same database copies cleanly.
+    copy = backup_for_migration(path)
+    assert copy is not None and _tables(copy) == _tables(path), sorted(p.name for p in tmp_path.iterdir())
 
 
 def test_a_migration_that_fails_leaves_the_copy_and_names_it(tmp_path: Path) -> None:

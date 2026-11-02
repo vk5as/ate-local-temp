@@ -24,7 +24,7 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import create_engine, event, func, select
 
 from ._uuid import new_uuid7
-from .backup import SchemaVersionError, current_version, missing_tables
+from .backup import BackupError, SchemaVersionError, current_version, missing_tables
 from .schema import (
     SCHEMA_VERSION,
     action,
@@ -162,11 +162,18 @@ def check_database_at_launch(path: str | Path, config_file: str | Path | None = 
         )
         return DbLaunchResult(status, None, database, hint, reason)
     if not has_tables or user_version < SCHEMA_VERSION:
-        if has_tables and user_version < SCHEMA_VERSION and not missing_tables(path):
-            # Behind in version, complete in tables: nothing this build would create, so there
-            # is no migration to run and no stamp to earn (packet 35). Read-only: deciding this
-            # touches the file and takes no copy.
-            return DbLaunchResult(DbLaunchStatus.NO_MIGRATION, user_version, database, hint)
+        if has_tables and user_version < SCHEMA_VERSION:
+            try:
+                nothing_to_create = not missing_tables(path)
+            except BackupError as exc:
+                # The file was readable a moment ago and is not now: refuse rather than guess
+                # that there is nothing to create (packet 35 review, round 2).
+                return DbLaunchResult(DbLaunchStatus.NOT_READABLE, user_version, database, hint, str(exc))
+            if nothing_to_create:
+                # Behind in version, complete in tables: nothing this build would create, so there
+                # is no migration to run and no stamp to earn (packet 35). Read-only: deciding this
+                # touches the file and takes no copy.
+                return DbLaunchResult(DbLaunchStatus.NO_MIGRATION, user_version, database, hint)
         return DbLaunchResult(DbLaunchStatus.NEEDS_MIGRATE, user_version, database, hint)
     if user_version > SCHEMA_VERSION:
         return DbLaunchResult(DbLaunchStatus.TOO_OLD, user_version, database, hint)
