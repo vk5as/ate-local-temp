@@ -110,8 +110,11 @@ the same tables as the source, the same version), and only then renamed to the n
 interrupted halfway is therefore never left beside the database under a name that reads like a
 backup: an empty SQLite file passes \texttt{integrity\_\allowbreak{}check}, which is why the table set and the
 version are compared as well. A copy that stops moving is given up on after ten seconds without
-progress. The bound is on lack of progress, not on total time: a database held by another process
-is refused inside that time rather than waited out, which is what an installer needs, while a
+progress, where progress is the pages left to copy reaching a new low. Another connection writing to
+the database makes SQLite start the copy again from the top of the file, so the pages left jump back
+up: that is not progress, and a copy beside a Test Run writer is refused rather than run for as long
+as the writer runs. The bound is on lack of progress, not on total time: a database held by another
+process is refused inside that time rather than waited out, which is what an installer needs, while a
 large database that keeps copying is never refused however long the copy takes.
 
 The cleanup that removes a half-written copy runs when ATE stops the copy. A copy killed outright
@@ -126,8 +129,9 @@ the database --- the migration is refused and nothing is changed:
 
 \begin{lstlisting}[language=ATEShell]
 refusing to migrate: cannot back up /var/lib/ate/ate.db to
-/var/lib/ate/ate.db.backup-20261101-093312: it made no progress for 10.0 s; the database is
-held by another process --- finish the Test Run or close the other ATE and run the migration again
+/var/lib/ate/ate.db.backup-20261101-093312: it made no progress for 10.0 s: another process
+is writing to the database and the copy keeps restarting --- finish the Test Run or close
+the other ATE and run the migration again
 nothing in the database was changed
 \end{lstlisting}
 

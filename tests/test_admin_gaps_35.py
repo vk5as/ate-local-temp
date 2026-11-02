@@ -374,6 +374,76 @@ def test_a_lock_taken_mid_copy_is_refused_within_the_bound(tmp_path: Path, capsy
     assert "equipment" not in _tables(path), "the refused migration created a table"
 
 
+def _still_copying(path: Path) -> bool:
+    """Whether the copy's ``.partial`` is still on disk: the writer stops when it is gone."""
+    return any(p.name.endswith(".partial") and p.stat().st_size > 0 for p in path.parent.iterdir())
+
+
+def _restarting_writer(path: Path, seconds: int) -> threading.Thread:
+    """A second connection that writes to ``path`` the way a Test Run does: transaction, commit.
+
+    It waits for the copy's ``.partial`` to appear so the first write lands mid-copy rather than
+    before it, and stops when the ``.partial`` does. Each commit makes SQLite take a fresh
+    snapshot of the source and start the copy from the top of the file: the pages left to copy
+    go back up. That is a change in ``remaining`` and not progress, which is the distinction the
+    bound has to make (packet 35 review, round 3)."""
+    def writer() -> None:
+        while not _still_copying(path):
+            time.sleep(0.01)
+        conn = sqlite3.connect(str(path), timeout=120)
+        try:
+            end = time.monotonic() + seconds
+            while time.monotonic() < end and _still_copying(path):
+                conn.execute("BEGIN EXCLUSIVE")
+                conn.execute("INSERT INTO bulk VALUES (?)", (b"w" * 204800,))
+                conn.commit()
+                time.sleep(0.05)
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    return thread
+
+
+def test_a_copy_that_keeps_restarting_is_refused_within_the_bound(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A copy beside a Test Run writer is refused inside the bound instead of running forever.
+
+    SQLite restarts a copy when another connection writes to the source, so ``remaining`` goes
+    back up. Counting any change as progress let a copy restart for as long as the writer kept
+    writing: 60 s measured, no refusal, an installer hanging on a database a Test Run is writing
+    to. Progress is now ``remaining`` reaching a new lowest value, so a restart does not reset
+    the clock, and the refusal names the writer and tells the Operator to finish the Test Run."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "BACKUP_LOCK_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(backup_module, "BACKUP_PAGES", 1)
+    path = tmp_path / "ate.db"
+    _older_database(path, 4, ["equipment"])
+    _bulk_rows(path, 3000, journal="DELETE")
+
+    writer = _restarting_writer(path, 20)
+    try:
+        started = time.monotonic()
+        code, out, err = _cli(["db", "migrate", str(path), "--yes"], capsys)
+        elapsed = time.monotonic() - started
+    finally:
+        writer.join(timeout=30)
+
+    text = out + err
+    assert elapsed < 10, f"the copy beside a writing connection ran {elapsed} s: {text}"
+    assert code == 1, text
+    assert "no progress" in text.lower(), text
+    assert "2.0" in text, text
+    assert "test run" in text.lower(), text
+    assert "Traceback" not in err, err
+    assert _backups(tmp_path) == [], sorted(p.name for p in tmp_path.iterdir())
+    assert not any(p.name.endswith(".partial") for p in tmp_path.iterdir()), sorted(tmp_path.iterdir())
+    assert _version(path) == 4, "the refused migration changed the database's version"
+
+
 def test_a_copy_that_keeps_moving_is_never_refused_how_long_it_takes(tmp_path: Path, monkeypatch) -> None:
     """A slow copy is not a stalled one: the bound is on progress, not on total time.
 

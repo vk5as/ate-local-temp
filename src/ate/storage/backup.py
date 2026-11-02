@@ -262,28 +262,31 @@ def backup_for_migration(path: str | Path) -> Optional[Path]:
         return BackupError(f"cannot back up {path} to {target}: {reason}")
 
     moved_at = time.monotonic()
-    last_remaining: Optional[int] = None
+    lowest_remaining: Optional[int] = None
 
     def _progress(rc: int, remaining: int, pagecount: int) -> None:
         """Called after every step of the copy; raises when the copy has stopped moving.
 
-        ``remaining`` is the pages still to copy. While another process holds the database
-        SQLite refuses each step with BUSY and CPython retries it, leaving ``remaining``
-        unchanged: that is the stall, and it is bounded here. A step that returns BUSY but
-        still advances ``remaining`` is a copy that is moving.
+        ``remaining`` is the pages still to copy. Progress is ``remaining`` reaching a value
+        lower than any seen so far. A step SQLite refuses with BUSY reports the counters reset,
+        and the step that then succeeds puts ``remaining`` back at the top of the file: the
+        copy restarted, it did not advance. Any change counted as progress (the old rule), so a
+        copy beside a Test Run writer kept restarting, `remaining` kept changing, and the copy
+        ran for as long as the writer did — 60 s measured, no refusal, an installer hanging on a
+        database a Test Run is writing to (packet 35 review, round 3).
 
         Raising here aborts the backup: CPython finalises the backup handle and re-raises,
         which is what makes the abort safe to catch (packet 35 review, round 2)."""
-        nonlocal moved_at, last_remaining
-        if remaining != last_remaining:
-            last_remaining = remaining
+        nonlocal moved_at, lowest_remaining
+        if lowest_remaining is None or remaining < lowest_remaining:
+            lowest_remaining = remaining
             moved_at = time.monotonic()
             return
         if time.monotonic() - moved_at >= BACKUP_LOCK_TIMEOUT_S:
             raise _CopyStalled(
-                f"it made no progress for {BACKUP_LOCK_TIMEOUT_S} s; the database is held by "
-                "another process — finish the Test Run or close the other ATE and run the "
-                "migration again"
+                f"it made no progress for {BACKUP_LOCK_TIMEOUT_S} s: another process is writing "
+                "to the database and the copy keeps restarting — finish the Test Run or close "
+                "the other ATE and run the migration again"
             )
 
     try:

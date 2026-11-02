@@ -186,9 +186,12 @@ purge.
   no copy when the file does not exist or holds no tables at all (a zero-byte file included), a copy
   when a table is missing even if the version is already current. The copy is written as
   `<name>.partial`, checked (`integrity_check`, the same tables, the same version), then renamed; a
-  copy that makes no progress for ten seconds is refused, naming the stall. The ten seconds bound
-  lack of progress, not total time, so a big database that keeps copying is never refused however
-  long the copy takes. A name
+  copy that makes no progress for ten seconds is refused, naming the stall. Progress is the pages
+  left to copy reaching a new low: another connection writing to the source makes SQLite start the
+  copy again from the top of the file, so the pages left jump back up, and a restart is not
+  progress. The ten seconds bounds lack of progress, not total time: a big database that keeps
+  copying is never refused however long the copy takes, and one held by another process is refused
+  inside the bound rather than waited out. A name
   that is taken gets a `-2`, `-3` counter; nothing is overwritten. If the copy cannot be written,
   the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
   exit 1.
