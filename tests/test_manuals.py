@@ -1943,14 +1943,14 @@ def test_os_exit_in_a_step_is_not_in_the_sandbox_and_ends_the_step_with_an_error
 
 #: The command the manual names as the way a schedule ends ATE from inside a step. A POSIX shell
 #: command: cmd.exe on a Windows Station has no `kill` and no `$PPID`, so the probe that runs it is
-#: Linux-only (packet 35b, CI 41407051552), and the manuals say so where they quote it.
+#: skipped on Windows (packet 35b, CI 41407051552), and the manuals say so where they quote it.
 KILL_COMMAND = "kill -9 $PPID"
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="the step ends the process with `kill -9 $PPID`, which only a POSIX shell has "
-           "(packet 35b, CI 41407051552)",
+    sys.platform == "win32",
+    reason="the step ends the process with `kill -9 $PPID`, which a POSIX shell has and cmd.exe "
+           "does not (packet 35b, CI 41407051552)",
 )
 def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tmp_path: Path) -> None:
     """lupa's `os` has no `abort`, and the manual used to say it stayed "unneeded".
@@ -1960,7 +1960,7 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
     delete a file; a Test Schedule is the Station's own code. The probe runs the command the manual
     now quotes, and the process dies with the run row still open.
 
-    The command is a POSIX shell command, so this probe runs on Linux only: on the Windows runner
+    The command is a POSIX shell command, so the probe is skipped on Windows: the runner's
     `os.execute` reached cmd.exe, which has no `kill`, and the step returned normally (packet 35b,
     CI 41407051552). What the manuals say about it is checked on every platform by
     :func:`test_the_manuals_say_which_schedule_examples_are_posix_only`."""

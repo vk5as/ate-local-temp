@@ -554,18 +554,22 @@ because a PyInstaller build takes minutes:
 ATE_BUILD_TESTS=1 pytest -m build -q
 ```
 
-### Tests that only run on Linux
+### Tests that only run on some platforms
 
-A few tests are Linux-only because what they measure is a POSIX shell, not ATE. They are known
-gaps on Windows, not passes: CI on Windows cannot prove these things, and the reason is in the
-`skipif` reason on each of them (packet 35b, CI 41407051552).
+A few tests are skipped where the platform cannot show what they measure. They are known gaps, not
+passes: the reason is on the `skipif` itself (packet 35b, CI 41407051552). A skip written for one
+platform must not sweep up another: the `kill $PPID` probe used to be `sys.platform != "linux"`,
+which silently skipped macOS for a Windows reason.
 
+- `tests/test_manuals.py`, `tests/test_unexpected_run_end.py`: the pseudo-terminal probes are
+  Linux-only; they need a Linux pty.
 - `tests/test_manuals.py`: the abort probe that runs `kill -9 $PPID` through the Lua host's
-  `os.execute`. `cmd.exe` has no `kill` and no `$PPID`, so there is no command for the abort to
-  wait for. Both forms of the manuals say the command is a POSIX one where they quote it. The other
-  `os.execute` probe, which times a hold against the abort, runs on every platform: it uses a
-  quoted `python -c` one-liner on a POSIX shell and `ping -n 4 127.0.0.1 >NUL` on Windows, because
-  cmd.exe mangles a command that starts with a quote when it is handed to it by C `system()`.
+  `os.execute` is skipped on Windows only. `cmd.exe` has no `kill` and no `$PPID`, so there is no
+  command for the abort to wait for. Both forms of the manuals say the command is a POSIX one
+  where they quote it. The other `os.execute` probe, which times a hold against the abort, runs on
+  every platform: it uses a quoted `python -c` one-liner on a POSIX shell and
+  `ping -n 4 127.0.0.1 >NUL` on Windows, because cmd.exe mangles a command that starts with a
+  quote when it is handed to it by C `system()`.
 
 Two tests that were skipped on Windows for a reason that turned out not to be a platform fact run
 everywhere now. `test_an_abort_ends_a_long_write_to_a_peer_that_stopped_reading` (TCP, SERIAL,
