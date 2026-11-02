@@ -23,6 +23,7 @@ a migration runs.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -243,8 +244,11 @@ def prepare_station(
         # --no-permissions, changes no group, mode or ACL and says nothing about a pass that
         # did not happen (packet 35 review, round 2).
         if db_path.parent != data_dir:
-            print(f"the permission pass runs over {db_path.parent}, not recursively: the database "
-                  f"{db_path}, the copies beside it, and the directory they are in")
+            who = "Users" if _current_platform() == "windows" else f"the {ATE_GROUP} group"
+            print(f"the permission pass names the database {db_path} and the files written beside "
+                  f"it; {db_path.parent} is not touched. SQLite writes its journal next to the "
+                  f"database, so the Administrator has to make that directory group-writable for "
+                  f"{who} before ordinary users can run a Test Run on it")
         else:
             print(f"no separate permission pass: the database is inside the data directory {data_dir}")
         try:
@@ -263,14 +267,30 @@ def prepare_station(
 
 
 def _database_and_its_copies(db_path: Path) -> list[Path]:
-    """The database, everything written beside it, and the directory they are all in.
+    """The database and every file SQLite or a backup writes beside it, by exact name.
 
-    The glob ``<name>*`` catches the ``.backup-<stamp>`` copies, the ``-wal``/``-shm`` companions
-    and a ``.partial`` left by a killed copy. Nothing else in the directory is on the list:
-    ``database.path`` can point at a shared directory, and a permission pass is not licence to
-    change the group of everything in it (packet 35 review, round 2)."""
-    paths = [db_path.parent, db_path]
-    paths.extend(p for p in sorted(db_path.parent.glob(f"{db_path.name}*")) if p != db_path)
+    The names are the ones the code and SQLite actually use: ``<name>`` itself, the
+    ``-wal``/``-shm`` companions, the ``.backup-<stamp>`` copies (``-2``, ``-3`` when the name
+    was taken), the ``.partial`` a copy is written under and the ``.partial-journal`` that copy
+    journals through. ``<name>*`` caught all of those and also whatever else shared the
+    database's name: another application's ``ate.db2.cfg`` beside a custom ``database.path``
+    had its group changed by a pass that had no business touching it.
+
+    The directory the database lives in is deliberately not on the list: ``database.path`` can
+    point at a directory shared with other applications, and a permission pass is not licence
+    to change the group of everything in it (packet 35 review, round 3). See
+    :func:`_apply_permissions` for what setup says about that directory instead.
+    """
+    paths = [db_path]
+    for suffix in ("-wal", "-shm"):
+        companion = db_path.with_name(f"{db_path.name}{suffix}")
+        if companion.exists():
+            paths.append(companion)
+    copies = re.compile(
+        rf"^{re.escape(db_path.name)}\.backup-\d{{8}}-\d{{6}}(-\d+)?(\.partial(-journal)?)?$"
+    )
+    if db_path.parent.is_dir():
+        paths.extend(p for p in sorted(db_path.parent.iterdir()) if copies.match(p.name))
     return paths
 
 
@@ -283,11 +303,13 @@ def _apply_permissions(perms: Permissions, data_dir: Path, config_dir: Path, con
     ``config.json`` read-only for them.
 
     ``db_path`` is where the database actually lives. When ``database.path`` points outside
-    ``data_dir`` only the database, the copies beside it and their own directory get the pass, and
-    none of it recursively: the pass over ``data_dir`` cannot reach them, and walking the parent of
-    a custom database path would reach whatever else that directory holds — on a Station where
-    ``/var/lib/ate/ate.db`` is named, everything under ``/var`` (packet 35 review, round 2). The
-    directory still gets the setgid bit, so files written later inherit the group.
+    ``data_dir`` only the database and the files written beside it get the pass, each by name and
+    none of it recursively: the pass over ``data_dir`` cannot reach them, and the directory they
+    are in is left alone because it may be shared — on a Station where ``/var/lib/ate/ate.db``
+    is named, walking that parent would reach everything under ``/var`` (packet 35 review,
+    round 3). The pass cannot make that directory setgid or give it the group, so files SQLite
+    creates there later inherit nothing: setup prints that the Administrator has to make the
+    directory itself writable, because SQLite writes its journal beside the database.
     """
     if _current_platform() == "windows":
         perms.grant_users_modify(data_dir)

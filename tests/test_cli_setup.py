@@ -173,14 +173,21 @@ def test_prepare_station_applies_permissions_via_seam(tmp_path, monkeypatch):
     assert str(root / "config" / "config.json") not in perms.group_writable_paths
 
 
-def test_the_permission_pass_covers_the_database_and_its_copies_not_the_whole_directory(tmp_path, monkeypatch, capsys):
-    """``database.path`` outside the data directory: only the database and what sits beside it.
+def test_the_permission_pass_names_the_database_and_its_copies_exactly(tmp_path, monkeypatch, capsys):
+    """``database.path`` outside the data directory: the pass is a list of names, not a glob.
 
     The recursive pass over ``data_dir`` never reaches a database that lives elsewhere, so the
-    copies written beside it stay unreadable to ordinary users. But walking the parent of a custom
-    ``database.path`` recursively reaches whatever else that directory holds — ``/var`` on a
-    Station that names ``/var/lib/ate/ate.db``, or a directory shared with another application —
-    so the pass is pinned entry by entry, with its recursive flag."""
+    copies written beside it stay unreadable to ordinary users. ``<name>*`` was the wrong answer
+    to that: it catches whatever merely starts with the database's name — another application's
+    ``station.db2.cfg`` beside a custom ``database.path`` — and it chgrp'd the directory the
+    database sits in, which on a shared directory is a licence to change everything in it.
+    SQLite still needs that directory writable, because its journal is written beside the
+    database, so setup says plainly that the Administrator has to make it so (packet 35 review,
+    round 3)."""
+    from ate.storage import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "_stamp", lambda: "20260101-000000")
+
     root = tmp_path / "station"
     data = root / "data"
     config_dir = root / "config"
@@ -189,8 +196,26 @@ def test_the_permission_pass_covers_the_database_and_its_copies_not_the_whole_di
     config_dir.mkdir(parents=True)
     data.mkdir(parents=True)
     elsewhere.mkdir(parents=True)
-    (elsewhere / "not-mine.conf").write_text("another application's file", encoding="utf-8", newline="\n")
-    (elsewhere / "station.db.backup-20260101-000000").write_text("an earlier copy", encoding="utf-8", newline="\n")
+    for name, body in (
+        ("station.db-wal", ""),  # left by a Test Run that is still open
+        ("station.db-shm", ""),
+        ("station.db.backup-20260101-000000", "an earlier copy, blocking the name"),
+        ("station.db.backup-20251231-000000.partial", "a copy a kill stopped halfway"),
+        ("station.db.backup-20251231-000000.partial-journal", "that copy's own journal"),
+        ("station.db2.cfg", "another application's config, sharing the database's name"),
+        ("not-mine.conf", "another application's file"),
+    ):
+        (elsewhere / name).write_text(body, encoding="utf-8", newline="\n")
+
+    # A database this setup is about to migrate, so the migration writes its own copy beside it.
+    store = RunStore(db)
+    store.insert_test_run({"uut_serial": "OLD-1", "schedule_name": "before the upgrade"})
+    store.close()
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE equipment")
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+    conn.close()
     (config_dir / "config.json").write_text(
         '{"format": 1, "station": {"name": "Station 35", "uuid": "u-35"}, '
         f'"database": {{"type": "sqlite", "path": "{db}"}}}}',
@@ -202,16 +227,27 @@ def test_the_permission_pass_covers_the_database_and_its_copies_not_the_whole_di
     monkeypatch.setattr("ate.setup._current_platform", lambda: "linux")
     prepare_station(data, config_dir, permissions=perms)
 
-    passes = [c for c in perms.calls if c["op"] == "set_group_writable"]
-    assert [(c["path"], c["recursive"]) for c in passes][:2] == [(str(data), True), (str(elsewhere), False)], perms.calls
-    for entry in passes[1:]:
-        assert entry["recursive"] is False, entry
-        assert Path(entry["path"]) == elsewhere or Path(entry["path"]).name.startswith(db.name), entry
-    assert str(db) in perms.group_writable_paths, perms.calls
-    assert str(elsewhere / "station.db.backup-20260101-000000") in perms.group_writable_paths, perms.calls
+    # The pass, entry by entry, in the order the pass makes it: the data directory recursively,
+    # then the database and the files SQLite and the backup writer write, none of them recursive.
+    assert [(c["path"], c["recursive"]) for c in perms.calls if c["op"] == "set_group_writable"] == [
+        (str(data), True),
+        (str(db), False),
+        (str(elsewhere / "station.db-wal"), False),
+        (str(elsewhere / "station.db-shm"), False),
+        (str(elsewhere / "station.db.backup-20251231-000000.partial"), False),
+        (str(elsewhere / "station.db.backup-20251231-000000.partial-journal"), False),
+        (str(elsewhere / "station.db.backup-20260101-000000"), False),
+        (str(elsewhere / "station.db.backup-20260101-000000-2"), False),
+    ], perms.calls
+
+    # The directory the database lives in gets nothing: not its group, not its mode.
+    assert str(elsewhere) not in perms.group_writable_paths, perms.calls
+    assert str(elsewhere / "station.db2.cfg") not in perms.group_writable_paths, perms.calls
     assert str(elsewhere / "not-mine.conf") not in perms.group_writable_paths, perms.calls
+
     out = capsys.readouterr().out
-    assert f"the permission pass runs over {elsewhere}, not recursively" in out, out
+    assert f"{elsewhere} is not touched" in out, out
+    assert "group-writable" in out, out
     assert "no separate permission pass" not in out, out
 
 
