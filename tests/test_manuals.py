@@ -1714,6 +1714,7 @@ import sys, time
 from pathlib import Path
 
 root, release, work, schedule, abort_after = sys.argv[1:6]
+started_marker = sys.argv[6] if len(sys.argv) > 6 else ""
 for path in (Path(root) / "src", Path(root)):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -1742,6 +1743,13 @@ with bench_env(peers), pdf_stub():
     while SessionState.STARTED not in states and time.monotonic() - t0 < 10:
         app.processEvents()
         time.sleep(0.01)
+    if started_marker:
+        marker = Path(started_marker)
+        while not marker.exists() and time.monotonic() - t0 < 30:
+            app.processEvents()
+            time.sleep(0.01)
+        if not marker.exists():
+            raise RuntimeError("the command did not write its started marker")
     time.sleep(float(abort_after))
     t0 = time.monotonic()
     session.request_abort()
@@ -1794,7 +1802,14 @@ return ScheduleParams("Abort probe", "one long step, then a step after it")
 """
 
 
-def _run_abort_probe(tmp_path: Path, action: str, *, abort_after: float = 0.4, timeout: int = 90) -> subprocess.CompletedProcess:
+def _run_abort_probe(
+    tmp_path: Path,
+    action: str,
+    *,
+    abort_after: float = 0.4,
+    timeout: int = 90,
+    started_marker: Path | None = None,
+) -> subprocess.CompletedProcess:
     """Run one schedule through the driver above and return the process."""
     release = scratch_release(tmp_path, ABORT_SCHEDULE % action, name="abort")
     work = tmp_path / "station"
@@ -1802,7 +1817,7 @@ def _run_abort_probe(tmp_path: Path, action: str, *, abort_after: float = 0.4, t
     driver = tmp_path / "abort_driver.py"
     driver.write_text(ABORT_DRIVER, encoding="utf-8", newline="\n")
     return subprocess.run(
-        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", str(abort_after)],
+        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", str(abort_after), str(started_marker or "")],
         capture_output=True, text=True, timeout=timeout, cwd=str(ROOT),
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
     )
@@ -1889,10 +1904,12 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
 #: `python" -c "import time; ...` and cmd exits 1 in a few milliseconds. subprocess builds the
 #: command line with the embedded quotes escaped, which is why the same string measured 3.03 s on
 #: the same Windows runner (packet 35b, CI 41407051552). `ping` needs no quotes at all.
-def _hold_command() -> str:
+def _hold_command(started_marker: Path | None = None) -> str:
     if sys.platform == "win32":
-        return "ping -n 4 127.0.0.1 >NUL"
-    return f'"{sys.executable}" -c "import time; time.sleep(3)"'
+        marker = f'echo started > "{started_marker}" && ' if started_marker else ""
+        return marker + "ping -n 4 127.0.0.1 >NUL"
+    marker = f'printf started > "{started_marker}"; ' if started_marker else ""
+    return marker + f'"{sys.executable}" -c "import time; time.sleep(3)"'
 
 
 def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -> None:
@@ -1905,23 +1922,26 @@ def test_a_command_in_a_step_holds_the_abort_until_it_finishes(tmp_path: Path) -
     not have the command (packet 35 review). The command is chosen per platform for the same
     reason: the quoted `python -c` form is mangled by cmd.exe when it comes through `system()`, so
     on Windows the hold is `ping` (packet 35b, CI 41407051552)."""
-    command = _hold_command()
+    command_started = tmp_path / "command-started"
+    command = _hold_command(command_started)
     started = time.perf_counter()
     held = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
     held_seconds = time.perf_counter() - started
     assert held.returncode == 0 and held_seconds >= 2.0, (
         f"the timing command itself took {held_seconds:.2f} s and exited {held.returncode}: {held.stderr[-200:]}"
     )
+    command_started.unlink(missing_ok=True)
     proc = _run_abort_probe(
         tmp_path,
         f'local ok, how, code = os.execute({command!r}) '
         f'ATE.log(Log.INFO, "the step ran a command that exited " .. tostring(code)) '
         f"ATE.report(Result.PASS, 'the command finished')",
+        started_marker=command_started,
     )
     assert proc.returncode == 0, proc.stderr[-400:]
     elapsed = float(re.search(r"elapsed=(\d+\.\d+)", proc.stdout).group(1))
-    # The abort is requested 0.4 s after the schedule starts, so the command has already run for
-    # roughly that long; allow another 0.6 s for Windows process scheduling jitter.
+    # The driver waits for the command's marker, then allows it to run for 0.4 s before requesting
+    # abort; allow another 0.6 s for Windows process scheduling jitter.
     assert elapsed >= held_seconds - 1.0, (
         f"the abort ended the run in {elapsed} s while the same command takes {held_seconds:.2f} s "
         f"outside ATE: {proc.stdout}"
