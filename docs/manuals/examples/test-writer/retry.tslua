@@ -1,0 +1,30 @@
+-- retry.tslua: Stop on Fail, and what a Retry does.
+--
+-- Demonstrates:
+--   * setStopOnFail(true) is the default: a step ending FAIL or ERROR pauses the run and
+--     the Operator chooses Continue, Retry or Abort.
+--   * Retry runs the step's action again from the beginning. Each Attempt is recorded;
+--     the step's result is its last Attempt's, and the Operator's choice is recorded too.
+--   * ATE gives a step no way to read its own Attempt number, so the schedule keeps the
+--     count itself in a local the action closes over.
+local attempts = 0
+
+return ScheduleParams("Manual: retry", "the first Attempt fails, the Retry passes")
+  :setStopOnFail(true)
+  :setSchedule({
+    StepParams("Retry this one"):setStepNo("1.")
+      :setAction(function()
+        attempts = attempts + 1
+        if attempts == 1 then
+          ATE.report(Result.FAIL, "attempt " .. attempts .. ": the joint is cold", 0.2, 2.4)
+        else
+          ATE.report(Result.PASS, "attempt " .. attempts .. ": the joint is warm", 2.4, 2.4)
+        end
+      end),
+
+    -- Only reached after the step passed, or after the Operator chose to continue.
+    StepParams("Next check"):setStepNo("2.")
+      :setAction(function()
+        ATE.report(Result.PASS, "the rail is steady", 5.0, 5.0)
+      end),
+  })

@@ -1,0 +1,33 @@
+# Local virtual environments (installed into here for dev; never committed)
+.venv/
+
+# Isolated git worktrees used by implementer subagents (each on its own branch);
+# their contents are tracked only within the worktree, never in this repo.
+.worktrees/
+.eggs/
+__pycache__/
+*.py[cod]
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+# PDFs built by docs/manuals/build.py (packet 34a): LaTeX output, never committed
+docs/manuals/build/
+# The version stamp build.py writes before each compile (packet 36), and the staged PDFs it
+# produces for packaging: PyInstaller and the wheel collect whatever is in src/ate/manuals.
+docs/manuals/*/ateversion.tex
+src/ate/manuals/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+*.swp

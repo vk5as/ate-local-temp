@@ -1,0 +1,43 @@
+\chapter{What the sandbox takes away}\label{ch:sandbox}
+
+ATE removes the Lua entry points that could run code it has not checksummed:
+\texttt{dofile}, \texttt{loadfile} and \texttt{load} are gone, \texttt{os.exit} is nil,
+\texttt{package.path} and \texttt{package.cpath} are empty, \texttt{debug} is reduced to
+\texttt{debug.traceback}, and there is no \texttt{python} table. Calling one of the removed names is
+``attempt to call a nil value'', which the engine records as an ERROR Attempt
+(\texttt{tests/\allowbreak{}test\_\allowbreak{}lua\_\allowbreak{}host.py}:
+\texttt{test\_\allowbreak{}file\_\allowbreak{}loaders\_\allowbreak{}are\_\allowbreak{}removed}).
+
+This is traceability, not security. \texttt{io} and \texttt{os} are still there --- a schedule
+can read a file if it knows the path. What ATE is guaranteeing is that it knows exactly which
+files a Test Run ran, so a report can name them and their checksums. A Test Schedule is the
+Station's own code: it is trusted. The sandbox is there to catch a mistake --- a schedule that
+reads Lua from outside its Media Release is not something the Test Definition can describe, and
+a report that cannot name what a run read is not a report.
+
+\noindent\textbf{\texttt{sandbox.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/sandbox.tslua}
+
+\section{Where each call is legal}
+
+The top level of a \texttt{.tslua} file runs before a Test Run exists. Only the builders,
+\texttt{require}, \texttt{ATE.log} and the enums are legal there. Everything else ---
+\texttt{ATE.open}, \texttt{ATE.report}, \texttt{ATE.input}, \texttt{ATE.addEquipment} --- raises
+a load error that names the function:
+
+\begingroup\footnotesize
+\begin{verbatim}
+forbidden.tslua:7: ATE.open: only legal after the schedule has loaded
+\end{verbatim}
+\endgroup
+
+That is why the Device is opened in a Pre-test Action and not at the top of the file.
+
+\noindent\textbf{\texttt{forbidden.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/forbidden.tslua}
+
+In a Pre-test or Post-test Action everything is legal except \texttt{ATE.input} and
+\texttt{ATE.report}, which belong to steps. In a step action, everything is legal.
+
+\cando{tell which Lua and \texttt{ATE} calls a schedule may make, and where, and read the
+error a schedule gets when it makes one in the wrong place.}

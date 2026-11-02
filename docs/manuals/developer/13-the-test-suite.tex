@@ -1,0 +1,125 @@
+\chapter{The test suite: seams, fixtures, gates, and how a timing test must be written}\label{ch:tests}
+
+The suite is 1591 tests on Linux with the offscreen platform, plus the \texttt{examples/} harness that
+CI also runs. As this manual was written it ran green in 336.65 s: 1586 passed, 5 skipped (the two
+build-gate tests, the two container-gate tests, and the opt-in review-screenshot test). It is long
+(about five and a half minutes on this machine) and it is the only place most of the rules in this
+manual are actually proven, so a change to it is as consequential as a change to the code.
+
+\section{Fixtures that every test inherits}
+
+\texttt{conftest.py} is not boilerplate; each fixture in it exists because of a failure.
+
+\begin{itemize}
+  \item \textbf{One \texttt{QApplication} for the session.} This Qt 6.11 build segfaults at interpreter
+    shutdown when a live \texttt{QApplication} is finalised alongside any \texttt{QCoreApplication}.
+    Sharing one application means only a lone application is ever finalised. The binding's
+    \texttt{QApplication} does not accept a \texttt{platform=} keyword, so the offscreen platform comes
+    from \texttt{QT\_QPA\_PLATFORM}.
+  \item \textbf{Widget trees and workers are torn down per test.} A \texttt{StagedRunScreen} keeps a live
+    worker and a one-second timer for its whole lifetime; if it survives into the next test, its queued
+    signals fire into that test's widgets and corrupt their visibility --- the \texttt{run\_view} flake.
+    \texttt{\_stop\_workers} and \texttt{\_\allowbreak{}destroy\_\allowbreak{}widget\_\allowbreak{}tree} run before every test, and the widget
+    tree is destroyed while Python is still alive.
+  \item \textbf{Every started engine is stopped after every test.} \texttt{\_\allowbreak{}stop\_\allowbreak{}running\_\allowbreak{}engines}
+    wraps \texttt{RunEngine.start} weakly, then aborts and joins anything still running. If it cannot, the
+    test fails with ``a RunEngine worker outlived its test'' and the description of the stuck run
+    (section below).
+  \item \textbf{Files are closed, strictly.} On Linux an open file can be deleted; on Windows it cannot.
+    The \texttt{\_release\_files} fixtures close every \texttt{RunStore}, \texttt{HeadlessRunSession} and
+    \texttt{AppLog} a test opened, then assert that nothing under pytest's temp directory is still open.
+    A handle that only Windows would complain about is caught here, on Linux.
+  \item \textbf{The data directory is redirected.} Config defaults are written as
+    \texttt{<data>/\dots}; the autouse fixture points \texttt{ate.config.\_\allowbreak{}platform\_\allowbreak{}data\_\allowbreak{}dir} at
+    pytest's basetemp so no test writes to \texttt{/var/lib} or \texttt{C:\textbackslash ProgramData}.
+  \item \textbf{Privilege is pinned.} \texttt{ATE\_ELEVATED=0} for the session, session-scoped on purpose:
+    a module-scoped fixture that starts a run runs before any per-test fixture, so a function-scoped pin
+    would arrive too late. A test that wants to be privileged sets \texttt{ATE\_ELEVATED=1}.
+  \item \textbf{The PDF helper is a stub by default.} \texttt{\_fake\_pdf\_helper} replaces
+    \texttt{ate.report.pdf\_\allowbreak{}job.pdf\_\allowbreak{}helper\_\allowbreak{}command} with a process that writes a 13-byte stub, except
+    in the four tests that must prove a PDF has text. A test needing other helper behaviour patches it
+    itself.
+  \item \textbf{Qt's fatal messages are not swallowed.} \texttt{report\_qt\_fatal} keeps Qt's fatal
+    message from dying inside pytest-qt's capture.
+\end{itemize}
+
+\texttt{tests/\_fixtures.py} holds the seams a test can use: \texttt{LoopbackPeer} and
+\texttt{UdpLoopbackPeer} for Device tests (a TCP/UDP peer that records what it received),
+\texttt{scratch\_directory} for temporary directories that conftest removes,
+\texttt{executable\_stub} for a stand-in binary, \texttt{fake\_pdf\_helper} and
+\texttt{recording\_\allowbreak{}pdf\_\allowbreak{}helper}, \texttt{wait\_\allowbreak{}for\_\allowbreak{}disconnect}, \texttt{watch\_store\_writes} (which
+records every store call and its duration), \texttt{describe\_\allowbreak{}stuck\_\allowbreak{}runs},
+\texttt{wait\_\allowbreak{}for\_\allowbreak{}aborted\_\allowbreak{}run}, \texttt{SlowAbortWarning} and
+\texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception}.
+
+\section{Two gates}
+
+\begin{lstlisting}[language=ATEShell]
+ATE_BUILD_TESTS=1 pytest -m build -q      # the real PyInstaller bundle, and the .deb built from it
+ATE_DOCKER_TESTS=1 pytest -m build -q     # the debian:stable container smokes
+\end{lstlisting}
+
+Both are off by default, and both are marked \texttt{build}. The marker description in
+\texttt{pyproject.toml} is the documented contract: a test marked \texttt{build} is skipped unless
+\texttt{ATE\_BUILD\_TESTS=1}; the container tests skip unless \texttt{ATE\_DOCKER\_TESTS=1} and Docker is
+present. \texttt{tests/\allowbreak{}test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py} asserts that the gate is written the way it says, so a
+container test cannot quietly start running on every CI job.
+
+The five skips in a default run are therefore
+\texttt{test\_\allowbreak{}pyinstaller\_\allowbreak{}build\_\allowbreak27a.py}'s frozen bundle,
+\texttt{test\_\allowbreak{}linux\_\allowbreak{}packages\_\allowbreak28b.py}'s \texttt{.deb} built from it,
+\texttt{test\_\allowbreak{}manuals.py}'s container permissions smoke,
+\texttt{test\_\allowbreak{}release\_\allowbreak{}ci\_\allowbreak28c.py}'s three containers, and
+\texttt{test\_\allowbreak{}finished\_\allowbreak{}run\_\allowbreak{}layout\_\allowbreak30b.py}'s review screenshots, which need
+\texttt{ATE\_\allowbreak{}30B\_\allowbreak{}SHOTS}. Both gates were run for this manual; the numbers are in
+chapter~\ref{ch:packaging}.
+
+\section{Timing tests, and the rule that came out of 31e}
+
+Packet 31e was two tests that failed intermittently on Windows CI and passed on Linux. Reading the notes
+and the code together, the rule that emerged is worth applying to every new timing test:
+
+\begin{enumerate}
+  \item \textbf{Start the clock on an event, not on a sleep.} The old abort test started timing after
+    \texttt{time.sleep(0.1)} with no proof the action had begun, so any stall of the worker around that
+    point was counted as abort latency. \texttt{\_drive\_abort} now starts on the worker being inside
+    \texttt{ATE.sleep}'s wait, or on \texttt{input\_asked} for a blocked input, and stops at
+    \texttt{FINISHED}, before any read.
+  \item \textbf{Separate the requirement from the expectation.} Spec story 83 says an abort should stop within
+    0.5 s and must stop within 10 s. A test fails past 10 s and \textbf{warns} past 0.5 s, so a slow
+    runner stays visible in CI's summary instead of being a false failure.
+    \texttt{wait\_\allowbreak{}for\_\allowbreak{}aborted\_\allowbreak{}run} implements both, and prints the worker's timeline.
+  \item \textbf{A stamp means what the code did, not what the test expected.} \texttt{record\_log} takes
+    \texttt{time.monotonic()} when the line is recorded; the drain maps it to wall-clock later. A test
+    that compares \texttt{at} with a deadline measures the scheduler, not the product. The fixed tests
+    bracket each \texttt{record\_log} call on the worker and require \texttt{at} to fall inside the
+    bracket.
+  \item \textbf{Show that the bound can fail.} Every bound in these tests has a test that plants a stall
+    and proves the test catches it: a 1 s injected stall gives ``abort took 1.011 s''; a busy loop of
+    \texttt{1e10} iterations fails the 10 s requirement; a stamp taken at drain time fails the bracket.
+    A bound nobody has seen violated is a bound nobody has tested.
+  \item \textbf{Do not widen a timeout.} Packet 32b's checklist says it plainly: the 10 s wait stays and
+    can still fail, and when it does it now says what the worker was doing.
+  \item \textbf{Run under load.} The convention the packets use is ten repetitions of the changed files
+    with six busy loops on three cores. Several flakes only appear under contention, and two shared-helper
+    races (the \texttt{LoopbackPeer} that stopped reading at \texttt{stop()} and the VISA tests that read
+    \texttt{peer.received} before the peer had seen the connection end) were found that way.
+\end{enumerate}
+
+\section{What \texttt{describe\_\allowbreak{}stuck\_\allowbreak{}runs} gives you}
+
+When a run does not end, the failure message includes a report section: every live worker and session,
+what is recorded in the store, the store's write timings with any write still in flight, and all thread
+stacks from \texttt{faulthandler}. \texttt{pytest\_\allowbreak{}runtest\_\allowbreak{}makereport} adds it to any test that failed
+with a worker running, whichever wait helper it used. Its purpose is to answer the question packet 31e
+could not: whether a stall is the disk (long or in-flight writes) or something else (normal writes, with
+the worker's stack elsewhere).
+
+\section{Where a new test goes}
+
+Name it after the packet that added it, in the style the suite already uses
+(\texttt{tests/\allowbreak{}test\_\allowbreak{}device\_\allowbreak{}abort\_\allowbreak32b.py}). Put shared helpers in \texttt{tests/\_fixtures.py}, not in a
+test file, so the next test does not copy a helper that has a known race. If your test starts a Qt process,
+use \texttt{assert\_\allowbreak{}no\_\allowbreak{}swallowed\_\allowbreak{}exception}: exit 0 no longer means nothing went wrong.
+
+\cando{write a timing test that can fail, and pick the right gate for a slow one.}

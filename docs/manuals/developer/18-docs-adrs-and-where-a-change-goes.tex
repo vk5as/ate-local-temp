@@ -1,0 +1,75 @@
+\chapter{Documents, ADRs, and where a change has to go}\label{ch:docs}
+
+There are five kinds of document in this repository and they are not equal. When they disagree, the
+code is the record: a document that says something the code does not do is a bug in the document, and
+the manual chapters in this packet are written from the code, not from the documents.
+
+\begingroup\small
+\begin{longtable}{p{4.4cm} p{8.2cm}}
+\toprule
+\textbf{Where it is} & \textbf{What it is good for} \\
+\midrule
+\endhead
+\texttt{GLOSSARY.md} & the words. \texttt{Test Run}, \texttt{Test Step}, \texttt{Attempt},
+  \texttt{Media Release}, \texttt{Device Type}: every manual and every test uses these, so a new
+  term has to be added here before it is used anywhere \\
+\texttt{docs/adr/} & decisions that were argued and settled. ADR-0001 is PySide6 rather than PyQt6
+  (the licence question). If you change a binding, a runtime or a packaging choice, an ADR is where
+  the reason goes \\
+\texttt{src/ate/} and \texttt{tests/} & the implemented behaviour and its executable checks. When
+  written guidance and these checks differ, follow the code and tests \\
+\texttt{docs/manuals/} & the three manuals and the three Markdown manuals, held to the code by
+  \texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py} \\
+\texttt{docs/\allowbreak{}building-from-source.md} & how to build, including how to build these PDFs \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+\section{Where a change has to go, by kind}
+
+A change is not finished when the code works. Each kind of change has documents that follow it, and
+the suite checks most of them:
+
+\begin{itemize}
+  \item \textbf{A new config key} --- \texttt{src/ate/config.py}'s \texttt{\_SCHEMA} and the admin
+    manual, both LaTeX and Markdown. \texttt{config\_keys()} is derived from \texttt{\_SCHEMA}, so a
+    key added to the code and not to the manual fails the suite.
+  \item \textbf{A new \texttt{ate} subcommand or flag} --- \texttt{src/ate/cli.py} and the admin
+    manual. \texttt{cli\_names()} reads the parser itself, including the hidden
+    \texttt{\_pdf}/\texttt{\_selftest} helpers and the \texttt{db}/\texttt{definition} subcommands
+    the parser never sees.
+  \item \textbf{A new \texttt{ATE} function, enum or setter} --- \texttt{lua\_host.py} and both
+    test-writer manuals. Same mechanism, same failure.
+  \item \textbf{A new Device Type} --- the driver, the register line, the enum member, and both
+    test-writer manuals (\texttt{device\_types()} and \texttt{device\_drivers()} derive it from the
+    classes that exist). Chapter~\ref{ch:device-type} is the worked version.
+  \item \textbf{A new module under \texttt{src/ate}} --- the developer manual and
+    \texttt{docs/\allowbreak{}manuals/\allowbreak{}llm/\allowbreak{}developer.md}. \texttt{ate\_modules()} walks the package, so a module
+    nobody mentioned is a red suite.
+  \item \textbf{A new table in the record} --- \texttt{schema.py}, the version bump, and both
+    developer manuals (\texttt{schema\_tables()} reads \texttt{metadata.tables}).
+  \item \textbf{A new command a manual tells someone to run} --- it goes into
+    \texttt{COMMANDS\_RUN} or \texttt{COMMANDS\_NOT\_RUN} (admin) or \texttt{DEV\_COMMANDS\_RUN} or
+    \texttt{DEV\_\allowbreak{}COMMANDS\_\allowbreak{}NOT\_\allowbreak{}RUN} (developer), with the exit code and the output it must produce,
+    or a reason it is not run. A command in a listing that nobody runs and nobody explains fails.
+  \item \textbf{A change to the staged screens, the abort path or the timing of a run} --- the ADRs
+    if the decision changes, \texttt{GLOSSARY.md} if a term changes, and the packet file if a rule is
+    being bent.
+\end{itemize}
+
+\section{Writing an ADR}
+
+One decision per file, named \texttt{NNNN-short-sentence.md}, with the context, the decision, the
+consequences, and what was not tested. ADR-0001 is the pattern: it records why PySide6 (MIT) was
+chosen over PyQt6 (GPL), and it is where the licence reason lives so that nobody re-litigates it in
+a pull request. Where a claim rests on a comparison that was never run on both sides --- the
+PySide6/PyQt6 exception behaviour, for instance --- the ADR says so. That is the difference between a
+decision record and a marketing page.
+
+\section{Reading implementation notes as a developer}
+
+The source and executable tests are the public record of current behaviour. The manual chapters
+call out limits that have not been verified on the target platform; the Windows-only Qt and
+installer behaviour still needs a real Windows run.
+
+\cando{say which document a given change must also update, and which document is not authoritative.}

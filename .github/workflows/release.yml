@@ -1,0 +1,476 @@
+name: Release
+
+# Every tagged release builds the manuals, then builds and smoke-tests the Windows installer on a
+# clean runner and the Linux artifacts in a clean Debian stable container (assets/packaging.md,
+# "CI"), and finally publishes a GitHub Release for the tag carrying all of it. Tags and a manual
+# run are the only triggers: an artifact is only ever made for a release, so an ordinary push to a
+# branch must not start this job. The per-push test matrix is .github/workflows/ci.yml.
+#
+# First run: tag v0.1.0-rc1 (2026-10-31). The Linux build and the tarball's smoke passed; the .deb and
+# wheel smokes and the Windows job failed, and the Windows job stopped at the Inno Setup step. That is
+# fixed: at v0.1.0-rc2 (run 41198438867) all five job runs are green, `packaging/windows/ate.iss` is
+# compiled by `packaging/windows/build_installer.py`, and `packaging/windows/smoke_installer.py`
+# installs the installer silently, checks PATH and the database, runs a Test Run, upgrades and
+# uninstalls.
+# `packaging/linux/docker_smoke.py` runs the Linux side in `debian:stable` containers without Actions.
+# `tests/test_release_ci_27c.py`, `tests/test_release_ci_28c.py` and `tests/test_release_ci_36.py`
+# check the workflow's shape and the smoke scripts' logic, never an installed program.
+#
+# Packet 36 added two jobs and one ordering rule. `manuals` runs before everything else, because no
+# package job can build TeX: the PDFs it stages are what the bundle, the wheel and the installer
+# carry. `release` runs on a tag only, after every smoke job, and uploads the artifacts of this very
+# run to the Release for that tag. A `workflow_dispatch` run builds and uploads artifacts and
+# publishes nothing.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Nothing here needs to write to the repository: only the `release` job does, and it declares that
+# itself. Publishing a Release is a write to the repository's releases, which `contents: write`
+# covers. Actions hands every job a token for this run and puts it in the environment as
+# GITHUB_TOKEN, so `gh` is authenticated even when nothing names it — but the publish step writes
+# `GH_TOKEN: ${{ github.token }}` on its own, because a step that depends on an inherited
+# environment is a step nobody can read. A private repository needs nothing more: no personal
+# access token, no secret, no shared state. What is not provable until a tag is pushed is the
+# publish itself — that `gh release create` accepts this token, that the ten assets land, and that
+# a re-run of the same tag replaces them.
+permissions:
+  contents: read
+
+jobs:
+  # The manuals, built once for the whole run (36). Every package takes the PDFs as input, so a
+  # manual that fails to compile fails the run here, including build.py's own gates for undefined
+  # references and overfull boxes. TeX Live is pinned by digest so a release can be rebuilt with the
+  # same TeX; the digest lives in docs/manuals/build.py and this job reads it from there, so the two
+  # cannot disagree.
+  manuals:
+    name: Manuals (pinned TeX Live)
+    runs-on: ubuntu-24.04
+    # The pinned image is 2.8 GB as a download and 9.1 GB unpacked on the runner's disk. The three
+    # PDFs took 1 m 12 s with the image already pulled (latexmk -lualatex, 32 + 57 + 40 pages); the
+    # pull is the long part on a runner that has never seen it, so the bound is 45 minutes.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The title page carries the version `ate --version` prints in this checkout, which comes
+          # from the tag. A shallow clone reports 0.0.0-dev, and the version check below fails on it.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Check the runner has room for the TeX Live image
+        run: |
+          df -h /
+          # The pinned image is 9.1 GB unpacked. GitHub runners have roughly 20 GB, but a runner
+          # that has already lost most of it fails `docker pull` with a write error, which is not a
+          # message anyone can act on. 12 GB is the floor this job needs: the image, the checkout,
+          # and the build directory.
+          avail=$(df -B1 --output=avail / | tail -n 1)
+          if [ "$avail" -lt 12000000000 ]; then
+            echo "only $((avail / 1000000000)) GB free on /: the pinned texlive image is 9.1 GB"
+            exit 1
+          fi
+
+      - name: Build the three PDF manuals
+        run: |
+          image="$(python docs/manuals/build.py --image)"
+          echo "TeX Live image: $image"
+          docker pull "$image"
+          started=$(date +%s)
+          python docs/manuals/build.py
+          echo "manuals: $(( $(date +%s) - started )) s for the three PDFs"
+
+      - name: Check every title page carries the version this release is
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+          version="$(python -c "import sys; sys.path.insert(0, 'src'); from ate._version import __version__; print(__version__)")"
+          echo "version this checkout reports: $version"
+          if [[ "$GITHUB_REF_NAME" =~ ^v ]] && [[ "$version" == 0.0.0-dev ]]; then
+            echo "the tag produced no version: the checkout has no tags to describe, so nothing here can be released"
+            exit 1
+          fi
+          for name in $(python docs/manuals/build.py --list); do
+            case "$name" in *.pdf) ;; *) continue ;; esac
+            page="$(pdftotext -f 1 -l 1 "docs/manuals/build/${name%.pdf}/main.pdf" -)"
+            # The stamp is read whole: `grep -Fq "0.1.0"` is satisfied by a title page that says
+            # 0.1.0rc3, so the release would ship manuals from its own prerelease.
+            if ! printf '%s' "$page" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([a-z]+[0-9]+)?(\.dev[0-9]+\+g[0-9a-f]+)?' | grep -Fxq "$version"; then
+              echo "$name's title page does not show $version; page 1 reads: $(printf '%s' "$page" | head -n 3)"
+              exit 1
+            fi
+            echo "title page: $name carries $version"
+          done
+
+      - name: Count the release files before the upload
+        run: |
+          # `if-no-files-found: error` fires when a glob matches nothing at all. Three PDFs built
+          # and two staged is a glob that matches, an upload that succeeds, and a Release one manual
+          # short: the count has to be made here, against the list build.py owns.
+          expected=$(python docs/manuals/build.py --list)
+          missing=0
+          for name in $expected; do
+            case "$name" in
+              *.pdf) file="src/ate/manuals/$name" ;;
+              *) file="docs/manuals/llm/$name" ;;
+            esac
+            if [ ! -f "$file" ]; then
+              echo "$name is not at $file: it was built but never staged"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "$missing of the $(printf '%s\n' "$expected" | wc -l) release files are missing: the artifact would ship incomplete"
+            exit 1
+          fi
+          echo "staged: $(printf '%s\n' "$expected" | wc -l) release files" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the manuals
+        uses: actions/upload-artifact@v4
+        with:
+          name: ate-manuals
+          # The staged PDFs are named after the manuals (src/ate/manuals/test-writer.pdf), and the
+          # Markdown manuals are the llm/ copies an agent reads. No retention-days: the same default
+          # as every other artifact in this workflow. A glob that matches nothing is an upload that
+          # silently shipped two manuals instead of three.
+          path: |
+            src/ate/manuals/*.pdf
+            docs/manuals/llm/*.md
+          if-no-files-found: error
+
+  windows-installer:
+    name: Windows installer (build and smoke)
+    # The PDFs come from the manuals job: a Windows runner has no TeX, and pulling a 9 GB TeX Live
+    # image there would build nothing.
+    needs: manuals
+    runs-on: windows-latest
+    # A PyInstaller bundle with QtWebEngine, an Inno Setup install, a silent install and an
+    # uninstall: minutes, but bounded. Nothing in this job may wait indefinitely, and the
+    # smoke step runs the installer's own dialogs.
+    timeout-minutes: 45
+    env:
+      # Qt needs a platform with no display, exactly as in ci.yml: the bundle's _pdf helper and
+      # the smoke script's `ate` calls both start QtWebEngine.
+      QT_QPA_PLATFORM: offscreen
+      # A release build ships every manual: verify_bundle() fails on a missing or empty PDF.
+      ATE_RELEASE_BUILD: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # ATE's version is the git tag (src/ate/_version.py runs `git describe --tags`), so a
+          # shallow clone would stamp 0.0.0-dev into the installer.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          # The frozen builds bundle CPython 3.14 (assets/packaging.md); the build script has no
+          # way to choose an interpreter, so this is where 3.14 is decided.
+          python-version: "3.14"
+
+      - name: Download the manuals
+        uses: actions/download-artifact@v4
+        with:
+          name: ate-manuals
+          path: manuals
+
+      - name: Stage the manuals where the bundle and the wheel pick them up
+        # --stage refuses to write anything unless every name in docs/manuals/build.py's list is
+        # present, so a manual that never got built stops the build here rather than shipping an
+        # installer with two manuals.
+        run: python docs/manuals/build.py --stage manuals
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          # Pinned: `x64compatible` in ate.iss needs Inno 6.3 or newer.
+          # Chocolatey installs Inno Setup 6 under "C:\Program Files (x86)\Inno Setup 6", so this
+          # step does not test one directory — that check fails on a clean runner. iscc lands on
+          # PATH, and packaging/windows/build_installer.py resolves it from $ISCC, then PATH, then
+          # both standard locations. The runner image may already have it, and choco then installs
+          # nothing. ISCC has no version switch ("Unknown option", exit 1), so finding it is the
+          # check, and the last line stops the step ending on choco's exit code.
+          choco install innosetup --no-progress -y --version=6.7.1
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            Write-Error "iscc.exe is not on PATH after installing Inno Setup: the installer cannot be compiled"
+            exit 1
+          }
+          Write-Output "iscc: $($iscc.Source)"
+          exit 0
+
+      - name: Build the frozen bundle (27a smoke checks)
+        run: python packaging/build_pyinstaller.py --smoke
+
+      - name: Compile the installer
+        # Signing is optional (assets/packaging.md, "Code signing"): an unset secret arrives as an
+        # empty string, and build_installer.py builds unsigned when either variable is empty.
+        # Before real signing secrets are configured, put this job behind a protected
+        # `environment:` so only approved tags and reviewers can reach them.
+        env:
+          ATE_SIGN_CERT: ${{ secrets.ATE_SIGN_CERT }}
+          ATE_SIGN_PASSWORD: ${{ secrets.ATE_SIGN_PASSWORD }}
+        run: python packaging/windows/build_installer.py --dist dist
+
+      - name: Smoke-test the installer
+        # Installs silently, checks the machine PATH and the /LOG file and the exit code, runs
+        # ate setup, scans the example Media Release headless, upgrades, then uninstalls. Also
+        # checks the manual PDFs inside the installed bundle are there, are PDFs, and carry this
+        # tag's version (36).
+        run: |
+          # PowerShell has no `${VAR#v}`; `-match '^v'` plus Substring is the same rule. The gate is
+          # the ref, not the ref name: a workflow_dispatch run on a branch called v2-fix has
+          # GITHUB_REF_NAME "v2-fix", which is not a tag and expects no version.
+          $ref = "${{ github.ref }}"
+          if ($ref -match '^refs/tags/v') { $tag = $env:GITHUB_REF_NAME.Substring(1) } else { $tag = "" }
+          python packaging/windows/smoke_installer.py --expect-version "$tag"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ate-windows-installer
+          path: dist/ate-*-windows-x64-setup.exe
+          # A glob that matches nothing is a build that quietly produced no artifact.
+          if-no-files-found: error
+
+  # Linux artifacts (28c): the same bundle the Windows installer carries, packaged as a tarball
+  # and a .deb, plus the wheel, each smoke-tested in its own clean Debian stable container.
+  #
+  # Why `ubuntu-24.04` and not `ubuntu-latest`: a PyInstaller bundle is linked against the glibc of
+  # the machine that built it, and glibc is only forward compatible — a binary built against 2.39
+  # runs on 2.41, never the other way round. Ubuntu 24.04 ships glibc 2.39 and Debian stable ships a
+  # newer one, so artifacts built here start in the smoke container. ubuntu-latest will move to a
+  # newer Ubuntu, and a bundle linked against that glibc would fail to start in Debian. The build
+  # writes its own glibc into dist/glibc-build.txt and every smoke run reads it back, so the
+  # baseline is checked rather than trusted: move the pin only with a Debian that can run it.
+  linux-build:
+    name: Linux artifacts (build)
+    needs: manuals
+    runs-on: ubuntu-24.04
+    # The frozen bundle is the long part; dpkg-deb and the wheel are minutes.
+    timeout-minutes: 45
+    env:
+      # The bundle's _pdf helper and `ate _selftest --run` both start QtWebEngine, and a runner
+      # has no display (the same as in ci.yml).
+      QT_QPA_PLATFORM: offscreen
+      # A release build ships every manual: verify_bundle() fails on a missing or empty PDF.
+      ATE_RELEASE_BUILD: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # ATE's version is the git tag (src/ate/_version.py runs `git describe --tags`), so a
+          # shallow clone would stamp 0.0.0-dev into the artifact names.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          # The frozen builds bundle CPython 3.14 (assets/packaging.md); the build script has no
+          # way to choose an interpreter, so this is where 3.14 is decided.
+          python-version: "3.14"
+
+      - name: Download the manuals
+        uses: actions/download-artifact@v4
+        with:
+          name: ate-manuals
+          path: manuals
+
+      - name: Stage the manuals where the bundle and the wheel pick them up
+        # Before PyInstaller and before `python -m build`: both collect src/ate/manuals, and a
+        # staged directory that is missing one PDF is a release with one manual short.
+        run: python docs/manuals/build.py --stage manuals
+
+      - name: Record the glibc this build links against
+        run: |
+          mkdir -p dist
+          ldd --version | head -n 1 | tee dist/glibc-build.txt
+
+      - name: Install the libraries PyInstaller's Qt hooks need
+        # The hooks for PySide6.QtWebEngineCore collect QtWebEngineProcess, its .pak resources and the
+        # Qt platform plugins only if PySide6 can be *imported* in the build environment. In a bare
+        # container the import fails on libGL/libglib, the hooks are skipped silently, and the
+        # bundle ships a renderer that cannot start: `ate _pdf` then dies with "Could not find the
+        # Qt platform plugin offscreen". A debian:stable container proved this (packaging/linux/
+        # docker_smoke.py), and the 27a smoke check for the helper and the platform plugin is what
+        # catches it. Install the same libraries the artifacts themselves need.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0t64 libdbus-1-3 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxtst6 libxkbcommon0 libxkbfile1 \
+            libasound2t64 libfontconfig1 fontconfig fonts-dejavu-core libnss3 libnspr4 libgssapi-krb5-2 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0
+
+      - name: Build the frozen bundle (27a smoke checks)
+        run: python packaging/build_pyinstaller.py --smoke
+
+      - name: Package the tarball and the .deb
+        # Needs dpkg-deb, which every Ubuntu runner has. Both artifacts carry the same bundle, and
+        # the .deb copies the manual PDFs to /usr/share/doc/ate as well (36).
+        run: python packaging/linux/build_linux.py --dist dist
+
+      - name: Build the wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Upload the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ate-linux-artifacts
+          path: |
+            dist/ate-*-linux-x86_64.tar.gz
+            dist/ate_*_amd64.deb
+            dist/ate-*.whl
+            dist/glibc-build.txt
+          # A glob that matches nothing is a build that quietly produced no artifact.
+          if-no-files-found: error
+
+  # One smoke run per artifact, each in its own untouched Debian stable container: nothing is
+  # preinstalled, so apt-get resolving the .deb's Depends and pipx's PySide6 finding libGL are real
+  # checks. The runner only hosts the container; the glibc the smoke script compares against is
+  # Debian's, and the container runs as root, so `ate setup` really creates the ate group and sets
+  # the ownership of /etc/ate and /var/lib/ate.
+  #
+  # fail-fast: false: a broken .deb must not cancel the wheel's run, because the tag needs to show
+  # which artifact failed.
+  linux-smoke:
+    name: Linux smoke (${{ matrix.kind }})
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    # apt-get, one container pull and one smoke run per artifact: minutes, but bounded.
+    timeout-minutes: 30
+    container:
+      image: debian:stable
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [deb, tar, wheel]
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Checkout
+        # No fetch-depth: 0 here. The smoke container has no git and the script reads no history:
+        # `git describe` runs in the build job, where the artifacts get their names and versions.
+        uses: actions/checkout@v4
+
+      - name: Install the interpreter and tar the container needs to run the smoke script
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 tar
+
+      - name: Download the artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ate-linux-artifacts
+          path: artifacts
+
+      - name: Smoke-test the ${{ matrix.kind }}
+        # install.sh is called with its documented --prefix/--bin seam so the smoke script's root is
+        # the container's.
+        # --expect-version is the tag the release was cut from: the bundle carries it in
+        # ate/version.txt and the wheel in its metadata, so `ate --version` must print it.
+        # The tag arrives as cut, minus the leading v: `v0.1.0-rc1` comes in as `0.1.0-rc1` and
+        # smoke_linux.py compares it as `0.1.0rc1`, the PEP 440 spelling the artifact reports.
+        run: |
+          # The gate is the ref, not the ref name: a workflow_dispatch run on a branch called
+          # v2-fix has GITHUB_REF_NAME "v2-fix", and expecting version "2-fix" from it checks the
+          # artifacts against a release that does not exist.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then tag="${GITHUB_REF_NAME#v}"; else tag=""; fi
+          python3 packaging/linux/smoke_linux.py --kind ${{ matrix.kind }} --dist artifacts --expect-version "$tag"
+
+  # The GitHub Release for a tag (36). Everything on it is a file this run built and this run's
+  # smoke jobs installed: nothing is rebuilt for the Release, and nothing is published from a
+  # manual run of the workflow.
+  #
+  # The job needs every job that runs a smoke test — the installer job builds and smokes in one
+  # job, and the linux-smoke matrix is a single job id whose three runs all have to be green. A
+  # tag whose .deb did not install gets no Release.
+  #
+  # `permissions: contents: write` is on this job only: the workflow's own level stays read. The
+  # `gh` the runner has authenticates with the token Actions mints for this run, and the publish
+  # step names that token in its `env` rather than relying on the environment it inherits, so
+  # nothing about it is implicit. A private repository needs no additional token or secret, and
+  # downloading this run's artifacts needs no extra scope for the same reason. What is not provable
+  # here, and cannot be until a tag is pushed: that the token is accepted, that the assets land on
+  # the Release, and that a re-run replaces them.
+  release:
+    name: Publish the GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [manuals, windows-installer, linux-build, linux-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # packaging/release_assets.py reads docs/manuals/build.py, which reads src/ate/_version.py,
+          # which asks git for the tag. No history, no version, no verified PDFs.
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Download the artifacts of this run
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Check all ten files are present before creating anything
+        run: |
+          version="$(python -c "import sys; sys.path.insert(0, 'src'); from ate._version import __version__; print(__version__)")"
+          python packaging/release_assets.py \
+            --manuals artifacts/ate-manuals \
+            --installer artifacts/ate-windows-installer \
+            --packages artifacts/ate-linux-artifacts \
+            --out release-assets \
+            --version "$version"
+
+      - name: Publish the Release for the tag
+        # The token Actions mints for this run, written on the step rather than inherited: `gh`
+        # reads GH_TOKEN, and a step that spells out what authenticates it is one a reader can
+        # check. Nothing else here needs write access, so this is the only place a token appears.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          assets=(release-assets/*)
+          manuals="$(python docs/manuals/build.py --list)"
+          expected=$(( $(printf '%s\n' "$manuals" | wc -l) + 4 ))
+          if [ "${#assets[@]}" -ne "$expected" ]; then
+            echo "release-assets holds ${#assets[@]} files, expected $expected (the manuals plus four packages)"
+            exit 1
+          fi
+          echo "publishing ${#assets[@]} assets to $tag"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Re-running this job for the same tag replaces the assets instead of failing.
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" --title "$tag" "${assets[@]}"
+          fi
+          # A tag with a prerelease suffix, v0.1.0-rc2, is a prerelease of 0.1.0. Set it on a
+          # re-run too, so a first run that guessed wrong is corrected by the second. The flag is
+          # `--prerelease`: `gh release edit` has no `--pre-release` (checked against gh 2.102.0).
+          if [[ "$tag" == *-* ]]; then
+            gh release edit "$tag" --prerelease
+          fi
+          gh release view "$tag" --json name,isPrerelease,assets \
+            --jq '.name + " (prerelease: " + (.isPrerelease | tostring) + "): " + ([.assets[].name] | join(", "))'

@@ -1,0 +1,234 @@
+{# ATE HTML Test Report (ticket 21). Inline CSS + CSS @page margin boxes (Chromium / QWebEngine),
+   self-contained with no external assets. The logo is a base64 data URI. Only reports.organisation,
+   reports.logo and reports.paperSize customise it in v1.
+
+   Packet 21a builds the Cover section, 21b the Steps section and 21c the Equipment, Configuration
+   and Run log sections here. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ doc_title or "Test Report" }} · {{ uut_type }} {{ uut_serial }}</title>
+<style>
+@page {
+  size: {{ paper }} portrait;
+  margin: {{ page_margin_css }};
+  @top-left   { content: url("{{ logo }}"); vertical-align: middle; width: 32mm; }
+  @top-center { content: "{{ header_line }}"; font: 8pt sans-serif; color: #333; text-align: left; vertical-align: middle; }
+  @top-right  { content: "{{ uut_type }} {{ uut_serial }}"; font: bold 9pt sans-serif; border-bottom: none; }
+  @bottom-left{ content: "{{ run_ftr }}"; font: 7pt sans-serif; color: #555; width: 150mm; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt sans-serif; }
+}
+@media screen { body { max-width: 190mm; margin: 1em auto; } }
+@media print { .screen-only { display: none; } }
+body { font-family: "DejaVu Sans", "Segoe UI", Arial, sans-serif; font-size: 9pt; color: #111; }
+h1 { font-size: 16pt; margin: 0 0 2mm 0; }
+h2 { font-size: 12pt; margin: 6mm 0 2mm 0; border-bottom: 0.4mm solid #1f4e8c; padding-bottom: 1mm; color: #1f4e8c; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 1mm 1.5mm; }
+.kv th { width: 35mm; color: #555; font-weight: normal; }
+.banner { border: 0.5mm solid #b36b00; background: #fff4e0; color: #6b3e00; padding: 2mm 3mm; margin: 2mm 0; font-weight: bold; }
+.verdict { font-size: 34pt; font-weight: bold; letter-spacing: 1mm; padding: 2mm 4mm; border: 1mm solid; text-align: center; }
+.verdict-pass { color: #146c2e; border-color: #146c2e; }
+.verdict-fail { color: #a4161a; border-color: #a4161a; }
+.endreason { text-align: center; color: #333; font-size: 10pt; margin-top: 1mm; }
+.small { font-size: 7.5pt; color: #444; }
+.sig { border: 0.4mm solid #333; height: 26mm; width: 80mm; }
+.sigline { border-bottom: 0.3mm solid #333; height: 7mm; width: 50mm; }
+.counts td, .counts th { border: 0.2mm solid #bbb; text-align: center; }
+.res { font-weight: bold; }
+.res-pass { color: #146c2e; } .res-fail, .res-error, .res-noreport { color: #a4161a; }
+.res-skipped, .res-notrun, .res-forced_notrun { color: #777; }
+.mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 7pt; word-break: break-all; }
+/* Steps table (packet 21b): a row is never split across pages. The <thead> is what makes Chromium
+   repeat the column headings after a page break, so no display rule is needed here. Header
+   roll-ups are styled so they do not read as a Result. */
+tr { page-break-inside: avoid; }
+.steps th { background: #f4f7fb; border-bottom: 0.4mm solid #1f4e8c; }
+.steps .num { width: 20mm; }
+.steps .hdr { background: #eef1f5; font-weight: bold; }
+.rollup { font-size: 7.5pt; font-style: italic; color: #555; }
+.retry { font-size: 7.5pt; color: #1f4e8c; }
+.override { color: #6b3e00; }
+.sub-row td { font-size: 8pt; color: #444; border-top: 0.1mm solid #d8d8d8; }
+/* Equipment, Configuration and log tables (packet 21c). */
+h3 { font-size: 10pt; margin: 3mm 0 1mm 0; color: #1f4e8c; }
+.equip th, .equip td, .config th, .config td, .log th, .log td { border: 0.15mm solid #c9c9c9; }
+.mismatch { background: #fdeceb; }
+tr.mismatch td:first-child::before { content: "\26A0  "; }  /* readable in greyscale print too */
+h2, h3 { break-after: avoid; page-break-after: avoid; }
+table.log { table-layout: fixed; width: 100%; }
+table.log td:nth-child(1), table.log th:nth-child(1) { width: 44mm; white-space: nowrap; }
+table.log td:nth-child(2), table.log th:nth-child(2) { width: 20mm; }
+table.log td:nth-child(3), table.log th:nth-child(3) { width: 18mm; }
+.lvl-warning { color: #b36b00; font-weight: bold; }
+.lvl-error { color: #a4161a; font-weight: bold; }
+</style>
+</head>
+<body>
+
+{% if org %}
+<div class="screen-only">
+  <table><tr>
+    <td style="width: 34mm"><img src="{{ logo }}" style="height: 9mm"></td>
+    <td>{{ header_line }}</td>
+    <td style="text-align: right; font-weight: bold">{{ uut_type }} {{ uut_serial }}</td>
+  </tr></table>
+</div>
+{% endif %}
+
+<!-- ============ Cover ============ -->
+<h1>{{ doc_title or "Test Report" }}</h1>
+<div class="small">{{ doc_id or '—' }}{% if doc_rev %} · revision {{ doc_rev }}{% endif %}</div>
+
+{% if interrupted %}<div class="banner">⚠ This Test Run was INTERRUPTED and did not finish.</div>{% endif %}
+{% if checksum_mismatch %}<div class="banner">⚠ One or more files did not match their recorded checksum. See the Configuration section.</div>{% endif %}
+{% if pretest_failed_schedule %}<div class="banner">⚠ {{ pretest_failed_schedule.name }} failed: {{ pretest_failed_schedule.error }}</div>{% endif %}
+{% if posttest_failed_schedule %}<div class="banner">⚠ {{ posttest_failed_schedule.name }} errored: {{ posttest_failed_schedule.error }}</div>{% endif %}
+
+<table style="margin-top: 4mm"><tr>
+  <td style="width: 60%">
+    <table class="kv">
+      <tr><th>UUT Type</th><td>{{ uut_type }}</td></tr>
+      <tr><th>Serial</th><td><b>{{ uut_serial }}</b></td></tr>
+      <tr><th>Project</th><td>{{ project }}</td></tr>
+      <tr><th>Station</th><td>{{ station }}</td></tr>
+      <tr><th>Start</th><td>{{ start_local }}</td></tr>
+      <tr><th>End</th><td>{{ end_local or '—' }}</td></tr>
+      <tr><th>Duration</th><td>{{ duration or '—' }}</td></tr>
+      <tr><th>ATE version</th><td>{{ ate_version }}</td></tr>
+      <tr><th>Stop on Fail</th><td>{{ 'on' if stop_on_fail else 'off' }}</td></tr>
+      <tr><th>Schedule</th><td>{{ schedule_name }}{% if schedule_description or schedule_file %}<br><span class="small">{% if schedule_description %}{{ schedule_description }}<br>{% endif %}{{ schedule_file or '' }}</span>{% endif %}</td></tr>
+      <tr><th>Media Release</th><td>{{ media_number }}{% if media_name or media_version %} — {{ media_name or '—' }}{% if media_version %} v{{ media_version }}{% endif %}{% endif %}</td></tr>
+    </table>
+  </td>
+  <td style="width: 40%">
+    <div class="verdict verdict-{{ 'pass' if result == 'PASS' else 'fail' }}">{{ result }}</div>
+    <div class="endreason">End Reason: {{ end_reason or '—' }}</div>
+  </td>
+</tr></table>
+
+<h2>Summary</h2>
+<table class="counts"><tr>{% for r in result_labels %}<th class="small">{{ r }}</th>{% endfor %}</tr>
+<tr>{% for r in result_labels %}<td class="{{ 'res ' ~ r|lower }}">{{ counts[r] }}</td>{% endfor %}</tr></table>
+<p class="small">Retried steps: {{ retried_steps }} · Operator enable overrides: {{ operator_overrides }}</p>
+
+{% if failures %}
+<h2>Failures</h2>
+<table>
+{% for f in failures %}<tr><td style="width: 16mm">{{ f.number }}</td><td>{{ f.name }}<br><span class="small">{{ f.message }}</span></td><td style="width: 26mm" class="{{ 'res ' ~ f.result|lower }}">{{ f.result }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+
+<h2>Operator</h2>
+<table><tr>
+  <td style="width: 50%">{{ operator }}<br><br><span class="small">Date</span><div class="sigline"></div></td>
+  <td><span class="small">Signature</span><div class="sig"></div></td>
+</tr></table>
+
+<!-- ============ Steps (packet 21b) — one row per expanded-tree node in tree order, disabled steps
+     included; the depth indent is on the name cell (the Step Number cell is fixed width), headers
+     carry their roll-up, retried steps are followed by their earlier Attempts as deeper sub-rows. -->
+<h2 class="page-break">Steps</h2>
+<table class="steps">
+<thead><tr><th>Step Number</th><th>Step Name / message</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
+<tbody>
+{% for s in steps %}
+<tr class="{{ 'hdr' if s.is_header else ('sub-row' if s.sub else 'step-row') }}">
+  <td class="num">{{ s.number }}</td>
+  {% if s.is_header %}
+  <td colspan="3" style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.name }}{% if s.override %}<br><span class="small override">{{ s.override }}</span>{% endif %}</td>
+  <td class="rollup">{{ s.rollup }}</td>
+  {% else %}
+  <td style="padding-left: {{ (s.depth * 4) + 1.5 }}mm">{{ s.name }}{% if s.retry %} <span class="retry">{{ s.retry }}</span>{% endif %}
+    {% if s.message %}<br><span class="small">{{ s.message }}{% if s.choice %} {{ s.choice }}{% endif %}</span>{% elif s.choice %}<br><span class="small">{{ s.choice }}</span>{% endif %}
+    {% if s.override %}<br><span class="small override">{{ s.override }}</span>{% endif %}
+    {% for i in s.inputs %}<br><span class="small">Input {{ i.index }}{% if i.desc %} ({{ i.desc }}){% endif %}: {{ i.value }}</span>{% endfor %}
+  </td>
+  <td>{{ s.expected }}</td>
+  <td>{{ s.actual }}</td>
+  <td class="res {{ s.result|lower }}">{{ s.result }}</td>
+  {% endif %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% if not steps %}<p class="small"><i>No steps in this run.</i></p>{% endif %}
+
+<!-- ============ Equipment (packet 21c) — what the schedule declared with ATE.addEquipment, in
+     declaration order; nil values print as blanks, and with no Equipment the section says so. ==== -->
+<h2 class="page-break">Equipment</h2>
+{% if equipment %}
+<table class="equip">
+<thead><tr><th>Name</th><th>Serial</th><th>Connection</th><th>Cal due</th><th>Notes</th></tr></thead>
+<tbody>
+{% for e in equipment %}<tr><td>{{ e.name }}</td><td>{{ e.serial }}</td><td>{{ e.connection }}</td><td>{{ e.cal_due }}</td><td>{{ e.notes }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No equipment declared.</i></p>
+{% endif %}
+
+<!-- ============ Configuration (packet 21c) — only what this run used: the releases that supplied
+     a file, every run_file row (mismatches highlighted), and the Sub-schedule instances. ==== -->
+<h2>Configuration</h2>
+<h3>Media Releases</h3>
+{% if media_releases %}
+<table class="config media">
+<thead><tr><th>Media Number</th><th>Name</th><th>Version</th><th>.atedef SHA-256</th></tr></thead>
+<tbody>
+{% for m in media_releases %}<tr><td>{{ m.media_number }}</td><td>{{ m.name }}</td><td>{{ m.version }}</td><td class="mono">{{ m.atedef_sha256 }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No media releases recorded for this run.</i></p>
+{% endif %}
+
+<h3>Files</h3>
+{% if files %}
+<table class="config files">
+<thead><tr><th>Path</th><th>Media Number</th><th>Expected SHA-256</th><th>Computed SHA-256</th><th>Stored</th></tr></thead>
+<tbody>
+{% for f in files %}<tr class="{{ 'mismatch' if f.mismatch else '' }}"><td>{{ f.path }}</td><td>{{ f.media_number }}</td><td class="mono">{{ f.expected }}</td><td class="mono">{{ f.computed }}</td><td>{{ 'yes' if f.stored else 'no' }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No files used by this run.</i></p>
+{% endif %}
+
+<h3>Sub-schedule instances</h3>
+{% if instances %}
+<table class="config instances">
+<thead><tr><th>Schedule</th><th>File</th><th>Prefix</th></tr></thead>
+<tbody>
+{% for i in instances %}<tr><td style="padding-left: {{ (i.depth * 4) + 1.5 }}mm">{{ i.name }}</td><td class="mono">{{ i.file }}</td><td>{{ i.prefix }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="small"><i>No schedule instances.</i></p>
+{% endif %}
+
+<!-- ============ Run log (packet 21c) — INFO/WARNING/ERROR lines grouped by owner: the run, then
+     each Pre-test and Post-test Action, then each step Attempt, each group in time order. Left out
+     when regenerating from History with the toggle off, where a one-line note stands in for it. ==== -->
+{% if include_run_log %}
+<h2 class="page-break">Run log</h2>
+{% if run_log %}
+{% for g in run_log %}
+<h3>{{ g.label }}</h3>
+<table class="log">
+<thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Text</th></tr></thead>
+<tbody>
+{% for l in g.lines %}<tr><td class="small mono">{{ l.time }}</td><td class="lvl lvl-{{ l.level|lower }}">{{ l.level }}</td><td class="small">{{ l.source }}</td><td>{{ l.text }}</td></tr>{% endfor %}
+</tbody>
+</table>
+{% endfor %}
+{% else %}
+<p class="small"><i>No INFO, WARNING or ERROR lines recorded for this run.</i></p>
+{% endif %}
+{% else %}
+<p class="small"><i>Run log left out of this report.</i></p>
+{% endif %}
+
+</body>
+</html>

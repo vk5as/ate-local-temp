@@ -1,0 +1,83 @@
+\chapter{The screens: layouts, shared widgets, and dialogs that answer themselves}\label{ch:ui}
+
+GUI code lives only in \texttt{src/ate/ui/} and \texttt{src/ate/app.py}. A layout contains no test
+logic: it connects to the session, paints, and sends the Operator's clicks back. That separation is what
+makes a Test Run testable with no display, and it is what the dialog rules below protect.
+
+\section{Two layouts, one set of widgets}
+
+\texttt{ui.layout} selects \texttt{staged} (the default, \texttt{StagedRunScreen} in
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}staged\_\allowbreak{}run\_\allowbreak{}screen.py}) or \texttt{threePane} (\texttt{ThreePaneRunScreen} in
+\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}three\_\allowbreak{}pane\_\allowbreak{}run\_\allowbreak{}screen.py}). \texttt{App.set\_layout} swaps the two in a
+\texttt{QStackedWidget} --- only if \texttt{ui.allowLayoutSwitch} is on, and for that session only, since
+the config is never written by a View switch. \texttt{\_carry\_over} moves the Operator's state --- the
+four setup fields, the filter, the On-failure pair, the picked schedule --- from the layout being left to
+the one being shown, so switching mid-session does not lose a run setup. The layout that is no longer
+showing is made inert with \texttt{set\_active(False)}, and the one coming to the front takes the keyboard
+through \texttt{focus\_waiting()}. \texttt{\_mark\_layout} stamps the window so a test can tell which one
+is current.
+
+The pieces they share are in \texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}run\_\allowbreak{}widgets.py}:
+
+\begin{itemize}
+  \item \texttt{LogPane} --- the Run log, with the level/source/owner formatting both layouts use;
+  \item \texttt{StatusBar} --- the run's phase and the current-item timer (packet 14d);
+  \item \texttt{StepEnabler} --- the enable tree: a header's check state is derived from its subtree
+    (packet 15d), and \texttt{toggle} returns the rows it changed;
+  \item \texttt{ResultCounts}, \texttt{RunFieldsForm}, \texttt{SchedulePicker} (which emits
+    \texttt{selection\_changed} with the exact schedule name, or \texttt{""} when nothing runnable is
+    selected), \texttt{FailurePromptBar}, \texttt{StepInputWidget}, \texttt{RunScreenMixin} and
+    \texttt{MismatchConfirmation}.
+  \item \texttt{load\_\allowbreak{}schedule\_\allowbreak{}steps(session, name)} is how a layout gets the expanded step list before
+    a run, and \texttt{\_\allowbreak{}broken\_\allowbreak{}row\_\allowbreak{}widget} is how a schedule that fails to load is shown with its error.
+\end{itemize}
+
+The other screens: \texttt{HistoryScreen} (\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}history\_\allowbreak{}screen.py}, ticket 23b) and
+\texttt{ExportLogDialog} (\texttt{src/\allowbreak{}ate/\allowbreak{}ui/\allowbreak{}export\_\allowbreak{}log\_\allowbreak{}dialog.py}, packet 24b). History queries go
+through \texttt{ate/\allowbreak{}history/\allowbreak{}session.py}, which has no widgets and is testable on its own.
+
+New widgets go in \texttt{run\_widgets.py} if both layouts need them. A widget in one layout that the
+other layout also ends up needing is how the two drift apart, and the layout-switching tests
+(\texttt{tests/\allowbreak{}test\_\allowbreak{}layout\_\allowbreak{}switching\_\allowbreak25b.py}) are what catch the state loss.
+
+\section{Every modal must be able to answer itself}
+
+\texttt{src/ate/dialogs.py} is the only place that decides when a dialog has nobody to answer it. A modal
+\texttt{exec()} blocks until someone clicks. On a CI runner, in a container, or in any process started
+with \texttt{QT\_\allowbreak{}QPA\_\allowbreak{}PLATFORM=offscreen} there is no window server, so no one ever clicks: the second real
+CI run hung for 30 minutes on the run-start mismatch confirmation, and the first hung on the
+unsandboxed-PDF question.
+
+\texttt{dismiss\_\allowbreak{}if\_\allowbreak{}headless(dialog, answer)} arms a dialog to close itself as soon as its own event
+loop runs, using \texttt{QTimer.singleShot(0, ...)}. It fires when either of these is true:
+
+\begin{itemize}
+  \item \texttt{QT\_QPA\_PLATFORM} is \texttt{offscreen} or \texttt{minimal} --- no display at all;
+  \item \texttt{ATE\_\allowbreak{}AUTO\_\allowbreak{}DISMISS\_\allowbreak{}DIALOG} is set to something that means yes (\texttt{""}, \texttt{"0"},
+    \texttt{"false"}, \texttt{"no"} and \texttt{"off"} all mean unset). That variable is the explicit
+    seam for subprocess tests (packet 30c); it does not make a real operator's dialog auto-answer on a
+    desktop.
+\end{itemize}
+
+With no \texttt{answer}, the box is \texttt{accept()}ed, which clicks no button:
+\texttt{clickedButton()} is \texttt{None}, and every prompt therefore takes its \emph{negative} branch ---
+the missing-config prompt aborts, the close confirmation keeps the run going, the PDF question is answered
+``Skip PDF''. A dialog with a decision of its own is handed an explicit function:
+\texttt{MismatchConfirmation.answer\_\allowbreak{}from\_\allowbreak{}setting} starts the run and stores the mismatched bytes only
+when \texttt{database.storeMismatchedFiles} says \texttt{always}, because an unattended run makes no
+choice and a ticked-by-default box is not one (packet 31d).
+
+The rule for a new modal is short: if you add a dialog, call \texttt{dismiss\_\allowbreak{}if\_\allowbreak{}headless} on it, and
+decide what the negative branch means. \texttt{tests/\allowbreak{}test\_\allowbreak{}modals\_\allowbreak{}never\_\allowbreak{}block\_\allowbreak{}headless.py} is where
+that is pinned; a dialog that is not armed hangs the suite, and the hang looks like a stuck run rather
+than a missing call.
+
+\section{What the shell does}
+
+\texttt{app.py} reads the config once at launch (spec 17), refuses to open if the config or the database
+is wrong, builds the layout named by \texttt{ui.layout}, installs the exception hook
+(chapter~\ref{ch:config}), and shows the History screen when \texttt{ui.allowHistoryDuringRun} allows
+it. \texttt{launch()} is the entry point, and \texttt{tests/\allowbreak{}test\_\allowbreak{}gui\_\allowbreak{}launch\_\allowbreak30a.py} drives it with the
+dialogs injected, so no window is ever shown in the suite.
+
+\cando{add a modal without hanging CI, and say which layout a widget belongs in.}

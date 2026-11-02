@@ -1,0 +1,145 @@
+\chapter{Devices: talking to the bench}\label{ch:devices}
+
+A Device is a connection ATE opens for the schedule: an instrument on the LAN reached over a
+socket, a serial connection, a datagram peer, a VISA instrument. Four Device Types exist in v1.
+Each one takes connection details from the schedule, and the schedule names them --- ATE has no
+Device discovery.
+
+GLOSSARY.md fixes the name. The object \texttt{ATE.open} returns is a \textbf{Device}; \emph{instrument},
+\emph{resource} and \emph{port} are what people on the bench call it, and this manual uses
+\emph{instrument} only for the equipment at the far end of the connection, never for the handle a
+step holds.
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{11.2cm}@{}}
+\toprule
+Device Type & What it is \\
+\midrule
+\texttt{DeviceType.TCP} & a raw socket stream: an instrument taking SCPI on port 5025, a UUT
+  debug port \\
+\texttt{DeviceType.SERIAL} & RS-232 or USB serial, through pyserial \\
+\texttt{DeviceType.UDP} & datagrams; one datagram is one message \\
+\texttt{DeviceType.VISA} & GPIB, USBTMC and VXI-11 instruments through pyvisa, named by a VISA
+  resource string \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Opening a Device}
+
+\texttt{ATE.open(deviceType, params [, onError])} returns a handle the schedule passes back to
+\texttt{read}, \texttt{write}, \texttt{flush} and \texttt{close}. The handle is opaque: treat it
+as a value you cannot inspect.
+
+Every field \texttt{open} needs is required --- it has no defaults, and a missing one is an
+error. The builders in \texttt{ate.devices} fill in the sensible ones, which is why almost
+every schedule uses them:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{1.6cm}>{\raggedright\arraybackslash}p{6.8cm}>{\raggedright\arraybackslash}p{6.2cm}@{}}
+\toprule
+Device Type & \texttt{open} fields & Builder defaults \\
+\midrule
+TCP & \texttt{host}, \texttt{port}, \texttt{timeout}, \texttt{readTerm}, \texttt{writeTerm} &
+  \texttt{Tcp(host, port)}: timeout 1.0 s, both terminators \texttt{"\textbackslash n"} \\
+SERIAL & \texttt{port}, \texttt{baud}, \texttt{dataBits}, \texttt{stopBits}, \texttt{parity},
+  \texttt{flowControl}, \texttt{timeout}, \texttt{readTerm}, \texttt{writeTerm} &
+  \texttt{Serial(port)}: 9600 baud, 8 data bits, \texttt{Parity.NONE}, 1 stop bit,
+  \texttt{FlowControl.NONE}, timeout 1.0 s, both terminators \texttt{"\textbackslash n"} \\
+UDP & \texttt{host}, \texttt{port}, \texttt{localPort}, \texttt{timeout} &
+  \texttt{Udp(host, port)}: \texttt{localPort} 0 (any), timeout 1.0 s \\
+VISA & \texttt{resource}, \texttt{timeout}, \texttt{readTerm}, \texttt{writeTerm} &
+  \texttt{Visa(resource)}: timeout 1.0 s, both terminators \texttt{"\textbackslash n"} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Times are seconds. \texttt{readTerm} and \texttt{writeTerm} are byte strings; \texttt{""} means
+no terminator, which is what a binary protocol needs. UDP has no terminators at all, because a
+datagram is already a whole message. \texttt{parity} takes one of \texttt{Parity.NONE},
+\texttt{Parity.EVEN}, \texttt{Parity.ODD}, \texttt{Parity.MARK} or \texttt{Parity.SPACE};
+\texttt{flowControl} takes \texttt{FlowControl.NONE}, \texttt{FlowControl.RTSCTS},
+\texttt{FlowControl.XONXOFF} or \texttt{FlowControl.DSRDTR}.
+
+Each setter sets one field and returns the table, so a params table can be built in one
+expression, with no \texttt{:build()} step at the end: \texttt{devices.Tcp(host, port)} then
+\texttt{:setTimeout(2.0)} and so on.
+
+\section{Reading, writing, flushing and closing}
+
+For \texttt{read}, \texttt{write} and \texttt{close} every field is optional; a field you leave
+out uses what the Device was opened with. \texttt{read} takes \texttt{size}, \texttt{timeout}
+and \texttt{readTerm}. \texttt{write} takes \texttt{data} (required), \texttt{writeTerm} and
+\texttt{timeout}. \texttt{close(dev [, params] [, onError])} takes no fields of its own: the
+params table is accepted so an \texttt{onError} can be given, and it is used only if the close
+itself fails. UDP has no terminators at all, because a datagram is already a whole message:
+its \texttt{read} takes \texttt{size} and \texttt{timeout}, and its \texttt{write} takes
+\texttt{data} (required) and \texttt{timeout}; a \texttt{readTerm} on a UDP Device is refused
+with the field named.
+
+Data is raw bytes both ways. The terminator is stripped from \texttt{data} and \texttt{count} is
+what is left; a \texttt{write}'s \texttt{count} includes the terminator it sent. Convert with
+\texttt{string.byte} or \texttt{string.pack} when you need numbers.
+
+From \texttt{open} to \texttt{close} ATE reads every TCP, SERIAL and UDP Device in the
+background and buffers what arrives, so a reply that comes before the schedule asks for it is
+not lost. \texttt{ATE.read} takes from that buffer first and waits only for what is not there
+yet. Each buffer holds the Station config key \texttt{devices.receiveBufferBytes} (16 MiB by
+default); on overflow ATE drops the oldest bytes, logs one WARNING, and the next read result
+carries \texttt{overflow = true}. \texttt{ATE.flush(dev)} empties the buffer and returns how many
+bytes it discarded --- useful just before sending a command. VISA has no background reader and no
+buffer, so \texttt{flush} discards nothing: polling an SCPI instrument with empty reads makes it
+log \emph{Query UNTERMINATED} ($-420$) and ties up the bus.
+
+\noindent\textbf{\texttt{tcp.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/tcp.tslua}
+
+\section{Every Device Type, one at a time}
+
+UDP is the one with no terminators. Its only partial read is a \texttt{size} that cuts a
+datagram short, and the log says so rather than claiming a timeout.
+
+\noindent\textbf{\texttt{udp.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/udp.tslua}
+
+A serial port is named by its COM or tty name; pyserial also accepts a URL such as
+\texttt{socket://127.0.0.1:5025}, which is how these examples exercise a serial Device without
+hardware.
+
+\noindent\textbf{\texttt{serial.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/serial.tslua}
+
+A VISA Device is named by a resource string, and the string's shape says what kind of connection
+it is:
+
+\begin{itemize}
+  \item \texttt{GPIB0::5::INSTR} --- an instrument on a GPIB bus;
+  \item \texttt{TCPIP0::192.168.1.10::inst0::INSTR} --- a VXI-11 instrument over TCPIP;
+  \item \texttt{TCPIP0::127.0.0.1::5025::SOCKET} --- a raw TCP socket wrapped in a VISA session,
+    not a VXI-11 instrument, and the same stream a \texttt{DeviceType.TCP} Device would open.
+\end{itemize}
+
+ATE uses whatever pyvisa backend it finds and ships only pyvisa-py, which covers TCPIP and USBTMC.
+A GPIB instrument needs a real VISA driver installed on the Station (NI-VISA, or linux-GPIB):
+nothing in ATE supplies one, so ask the schedule author what their instrument actually speaks
+before writing the schedule.
+
+\noindent\textbf{\texttt{visa.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/visa.tslua}
+
+\section{Lifetime}
+
+A Device handle lives for the whole Test Run, so a Pre-test Action can open one and every step
+can use it through an upvalue. Closing a Device that is already closed does nothing and reports
+success. Using a closed Device is a failure, and goes through \texttt{onError}.
+
+ATE closes every Device still open when the run ends, and logs a WARNING naming each one. It is
+worth closing what you open, if only to keep the log clean.
+
+\noindent\textbf{\texttt{left\_open.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/left_open.tslua}
+
+\cando{open a Device of any of the four Types, read and write it with per-call overrides, and
+close it --- and explain what a buffered, overflowing or truncated read means.}

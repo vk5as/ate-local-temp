@@ -1,0 +1,26 @@
+-- channel.tslua: a Sub-schedule. It is complete enough to run on its own, and is listed
+-- as hidden in manual.atedef so the Operator never picks it directly.
+--
+-- Each include runs this file again, with the keyvals passed as the chunk's argument.
+-- Its own Actions take part in the run's Pre-test and Post-test order.
+local kv = ...
+local channel = kv.channel or 1
+local label = kv.label or "a channel"
+
+return ScheduleParams("Channel check", "one output channel")
+  :setPreTestAction(function()
+    ATE.log(Log.INFO, "channel " .. channel .. " (" .. label .. ") pre-test")
+  end)
+  :setPostTestAction(function(passFail)
+    ATE.log(Log.INFO, "channel " .. channel .. " post-test, run stands at " .. passFail)
+  end)
+  :setSchedule({
+    StepParams("Switch the channel on"):setStepNo("1.")
+      :setAction(function()
+        ATE.report(Result.PASS, "channel " .. channel .. " switches on")
+      end),
+
+    -- A Sub-schedule inside a Sub-schedule: step numbers become 2.2.1. and so on.
+    StepParams("Its LEDs"):setStepNo("2.")
+      :setInclude("led.tslua", { channel = channel }):setPrefix("2."),
+  })

@@ -1,0 +1,75 @@
+\chapter{The Station, and what has been proved}\label{ch:station}
+
+An ATE \textbf{Station} is one installation of ATE on one computer. As the administrator you are
+responsible for three things on that computer, and they are separate:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{5.6cm}@{}}
+\toprule
+Part & Windows & Linux \\
+\midrule
+The program & \texttt{C:\textbackslash Program Files\textbackslash ATE} (one directory,
+  \texttt{ate.exe} plus \texttt{\_internal}) & \texttt{/opt/ate} for the \texttt{.deb}, with
+  \texttt{/usr/bin/ate} linking to it; the tarball goes where \texttt{install.sh} is told to put it \\
+The config & \texttt{\%PROGRAMDATA\%\textbackslash ATE\textbackslash config.json} & \texttt{/etc/ate/config.json} \\
+The data & \texttt{\%PROGRAMDATA\%\textbackslash ATE} & \texttt{/var/lib/ate} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On Windows the config and the data share one directory; on Linux they are deliberately apart,
+because the config is meant to be admin-only and the data has to be writable by whoever runs
+Test Runs. The data directory holds the database (\texttt{ate.db}), \texttt{reports},
+\texttt{logs} and \texttt{definitions}. Nothing else on the machine matters to ATE.
+
+The words used throughout this manual are the project's: an \textbf{Operator} is the person
+running a Test Run (not a Windows user account); a \textbf{UUT} is the unit under test, named by
+its UUT Type and serial; a \textbf{Media Release} is a set of Lua files delivered together,
+described by one \textbf{Test Definition}; a \textbf{Device} is a connection a Test Step talks
+through, and \textbf{Equipment} is a record of what was on the bench, declared by the schedule so
+it appears on the Test Report. They are not the same thing and ATE never links them.
+
+\section{What has been checked, and what has not}
+
+ATE is a desktop application that has only ever been exercised headless. Say this to anyone who
+asks how much of it is proven, because the difference matters when a Station misbehaves.
+
+\textbf{Proved.} The whole test suite runs on Windows and on Linux, on CPython 3.13 and 3.14,
+with \texttt{QT\_QPA\_PLATFORM=offscreen}. Config validation, database migration and its refusals,
+the permissions treatment \texttt{ate setup} applies, checksums, Device error handling, the Test
+Report and its PDF helper, log export --- each is pinned by tests. The Windows installer has been
+compiled with Inno Setup and installed on a clean CI runner: silent install, machine PATH entry,
+the Station setup it runs, a headless scan of the example Media Release, an upgrade over the top
+of the first install, and an uninstall that leaves the PATH as it found it. The Linux artifacts
+have been installed in clean \texttt{debian:stable} containers --- the \texttt{.deb} with
+\texttt{apt-get}, the tarball with \texttt{install.sh}, the wheel with \texttt{pipx} --- and the
+built bundle has run a Test Schedule end to end there, writing a Test Report PDF that
+\texttt{pdftotext} reads.
+
+\textbf{Not proved.} A real desktop session. No window of ATE has ever been looked at by a
+human: every run mentioned above had no display, so the layout, the fonts, and what a click
+does are not verified by anything. Real instruments have not been connected: every Device test
+uses a loopback peer, a \texttt{socket://} URL that pyserial accepts in place of a port, or
+pyvisa-py's own backends. No GPIB, USBTMC or RS-232 hardware has been attached, and NI-VISA is
+never shipped. The installer is unsigned, because there is no certificate yet; what a given
+Windows machine will show for an unsigned installer is not established by anything in this
+repository. Finally, the stall one Test Run hit on the Windows CI runner is
+\emph{believed} to be a slow disk, not measured: the fix is proven, the cause is not.
+
+\section{What you will do, in order}
+
+\begin{enumerate}
+  \item Install the program (chapter~\ref{ch:installing}).
+  \item Prepare the Station with \texttt{ate setup} (chapter~\ref{ch:setup}).
+  \item Set the config keys that describe this bench (chapter~\ref{ch:config}).
+  \item Create the database, and keep a copy of it (chapter~\ref{ch:database}).
+  \item Put Media Releases where ATE can find them (chapter~\ref{ch:media-releases}).
+  \item Run the station day to day (chapter~\ref{ch:running}), and know where the logs are
+    (chapter~\ref{ch:logs}).
+  \item When something is wrong, start from the message the machine printed
+    (chapter~\ref{ch:troubleshooting}).
+\end{enumerate}
+
+\cando{say what lives where on a Station, and state honestly which of ATE's behaviours have been
+tested and which have not.}

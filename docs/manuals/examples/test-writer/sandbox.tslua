@@ -1,0 +1,34 @@
+-- sandbox.tslua: what the Test Schedule sandbox gives a schedule, and takes away.
+--
+-- The sandbox is about traceability, not security: ATE wants to know exactly which files
+-- a Test Run ran, and it cannot do that if a schedule reads Lua from wherever it likes.
+--   * dofile, loadfile, load and the python table are gone; calling one is an error;
+--   * os.exit is nil too: a step that calls it gets an error, not an exit;
+--   * package exists but its path and cpath are empty, so nothing outside the Test
+--     Definition can be required;
+--   * debug is reduced to debug.traceback;
+--   * io, os, string, table and the rest of the standard library are still there.
+local devices = require("ate.devices")   -- the ate. namespace is ATE's own
+
+return ScheduleParams("Manual: the sandbox", "what a Test Schedule can reach")
+  :setSchedule({
+    StepParams("Check what is removed"):setStepNo("1.")
+      :setAction(function()
+        local removed = dofile == nil and loadfile == nil and load == nil and python == nil
+                          and os.exit == nil
+        local noPaths = type(package) == "table" and package.path == "" and package.cpath == ""
+        ATE.log(Log.INFO, "debug now holds only: " .. table.concat(
+          (function() local t = {} for k in pairs(debug) do t[#t + 1] = k end return t end)(), ", "))
+        ATE.report((removed and noPaths) and Result.PASS or Result.FAIL,
+                   "the file-loading functions are gone",
+                   tostring(removed) .. "/" .. tostring(noPaths), "true/true")
+      end),
+
+    -- os and io still work, which is why this is about traceability rather than safety.
+    StepParams("The standard library is there"):setStepNo("2.")
+      :setAction(function()
+        local now = os.time()
+        local joined = string.format("%s", table.concat({ "a", "b" }, "-"))
+        ATE.report(Result.PASS, "os.time and string.format work", joined, "a-b")
+      end),
+  })

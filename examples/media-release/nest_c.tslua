@@ -1,0 +1,12 @@
+-- Example Media Release: the deepest file in the nested chain. Its Pre-test Action is the last of
+-- the chain's, so its Post-test Action is the first of the chain's - Post-test Actions run in the
+-- exact reverse of the Pre-test order.
+
+return ScheduleParams("Nested C", "the innermost Sub-schedule")
+  :setPreTestAction(function() ATE.log(Log.INFO, "pre-test of nest C") end)
+  :setPostTestAction(function(passFail) ATE.log(Log.INFO, "post-test of nest C") end)
+  :setSchedule({
+    -- 1. The deepest Test Step in the tree.
+    StepParams("C step"):setStepNo("1.")
+      :setAction(function() ATE.report(Result.PASS, "nest C ready") end),
+  })

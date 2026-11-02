@@ -1,0 +1,75 @@
+\chapter{Reports, and the PDF helper that has to be sandboxed}\label{ch:pdf}
+
+Two files produce a Test Report. \texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}html.py} renders the self-contained HTML from
+the recorded run; \texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}pdf.py} turns that HTML into PDF in a separate process, and
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}pdf\_\allowbreak{}job.py} is the \texttt{QProcess} plumbing that runs it. A Test Report is not
+optional (spec 21a), so a failure here must never crash a run.
+
+\section{The HTML}
+
+\texttt{write\_\allowbreak{}report(store, run\_\allowbreak{}uuid, config)} renders through the Jinja template
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}templates/\allowbreak{}report.html.j2} and writes under \texttt{reports.directory} as
+
+\begin{lstlisting}[language=ATEShell]
+<UUT Type>/<UUT Type>_<serial>_<local start yyyymmdd-HHMMSS>_<PASS|FAIL>.html
+\end{lstlisting}
+
+Windows-invalid characters are replaced, and an existing file is never overwritten: a free
+\texttt{-2}, \texttt{-3} suffix is used instead. The name is only free when neither the HTML nor its PDF
+exists, because the PDF takes the same stem. \texttt{generated\_at} freezes the footer stamp for a
+byte-deterministic write, which is what makes the report tests able to compare output.
+
+\texttt{src/\allowbreak{}ate/\allowbreak{}report/\allowbreak{}log\_\allowbreak{}export.py} is the Run log export (packet 24a): CSV, JSON Lines or text,
+filtered by level, source and owner --- the same filters \texttt{ExportLogDialog} shows.
+
+\section{Why the PDF is a separate process}
+
+Rendering needs Qt WebEngine. Running it in the application's process would put Chromium's renderer in
+the same process as the Test Run, and the render is slow: a run's \texttt{FINISHED} must not wait for it.
+So the helper is \texttt{python -m ate \_\allowbreak{}pdf <html> <pdf> --paper A4|Letter [--unsandboxed]} started by
+\texttt{start\_pdf\_job}, with \texttt{PDF\_\allowbreak{}TIMEOUT\_\allowbreak{}MS = 60000}. The helper is parented to the session
+that started it, and \texttt{stop\_pdf\_jobs()} must run before the session dies: a \texttt{QProcess}
+destroyed mid-render by Qt makes the job's \texttt{finished} callback fire against a session whose Qt
+side is gone, and that aborted the test run at teardown (packet 25b review). It is why
+\texttt{HeadlessRunSession.close} and \texttt{\_\_del\_\_} both call it, and why
+\texttt{conftest.py} has an autouse fixture that calls it after every test.
+
+\section{The sandbox decision, asked once}
+
+Chromium's sandbox cannot run as root or as a Windows administrator, and turning it off silently is a
+security decision nobody should make by accident. \texttt{pdf\_\allowbreak{}sandbox\_\allowbreak{}choice()} is built once at launch
+and handed to the session and to History, so neither of them reads the environment or guesses at
+privilege. The decision, per PDF:
+
+\begin{itemize}
+  \item not privileged --- \texttt{PDF\_SANDBOXED}, nothing is asked. \texttt{--allow-unsandboxed-pdf}
+    has no effect, and the log says so;
+  \item privileged and \texttt{--allow-unsandboxed-pdf} --- \texttt{PDF\_UNSANDBOXED}, no dialog, logged
+    as a WARNING;
+  \item privileged and there is a dialog to ask --- the Operator's answer. No means \texttt{PDF\_SKIPPED},
+    and the HTML Test Report is still written;
+  \item privileged with no way to ask (headless, \texttt{ate \_selftest --run}) --- \texttt{PDF\_SKIPPED}.
+\end{itemize}
+
+Two environment variables can switch WebEngine's sandbox off by inheritance,
+\texttt{SANDBOX\_\allowbreak{}OFF\_\allowbreak{}VARIABLES} --- \texttt{QTWEBENGINE\_\allowbreak{}DISABLE\_\allowbreak{}SANDBOX} and
+\texttt{QTWEBENGINE\_\allowbreak{}CHROMIUM\_\allowbreak{}FLAGS} with \texttt{--no-sandbox} --- and \texttt{\_\allowbreak{}strip\_\allowbreak{}inherited\_\allowbreak{}sandbox\_\allowbreak{}off}
+removes them from the child's environment so a Station cannot get an unsandboxed render without choosing
+it.
+
+The test seam is \texttt{ATE\_ELEVATED} (\texttt{ELEVATION\_ENV}): \texttt{conftest.py} pins it to 0 for
+every test, because a GitHub Windows runner is an administrator and a container runs as root, and a
+privileged session asks a question that \texttt{exec()} would block forever on an offscreen platform. A
+test that wants to be privileged sets \texttt{ATE\_ELEVATED=1}, and it reaches a spawned \texttt{ate \_pdf}
+child through the inherited environment.
+
+\section{Proving a report rendered}
+
+A 13-byte stub PDF is enough for signal plumbing and is what \texttt{conftest.py} installs for every
+run that is not specifically about the PDF. Four tests use the real helper, because ``the PDF has text in
+it'' can only be proven against a PDF that was printed: \texttt{test\_\allowbreak{}run\_\allowbreak{}end\_\allowbreak{}writes\_\allowbreak{}real\_\allowbreak{}pdf\_\allowbreak{}report},
+the two \texttt{\_selftest --run} cases and the ordinary-user-with-the-flag case.
+\texttt{pdf\_has\_text(pdf)} is the check. If you add a report feature, decide which side of that line
+your test is on.
+
+\cando{add something to the Test Report and know whether your test needs a real render or a stub.}

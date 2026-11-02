@@ -1,0 +1,104 @@
+\chapter{Device failures, Stop on Fail and Abort}\label{ch:errors}
+
+\section{Two kinds of failure}
+
+A \textbf{Device failure} is the connection itself going wrong: nothing listening on the port,
+the socket reset, the serial port gone, a read that times out with no bytes. These are handled
+with \texttt{onError}.
+
+A \textbf{schedule bug} is a bad argument: a field the Device Type does not know, a missing
+required field, a value of the wrong type, an \texttt{ATE} function called where it is not
+allowed. That is not a Device failure and never reaches \texttt{onError}. In the code it is
+isolated: the call returns \texttt{false} and the message, and the log carries an ERROR line
+starting with the schedule's own file and line. ATE never lets a Python exception reach Lua.
+
+\section{\texttt{onError}}
+
+\texttt{ATE.open(devType, params, onError)} and \texttt{ATE.read(dev, params, onError)} take a
+handler called as \texttt{onError(opResult, opArgs)}: the failure table the call would have
+returned, with \texttt{err} set, and the params table that was passed in. If a later call has no
+handler of its own, the one given to \texttt{open} is used.
+
+\begin{itemize}
+  \item If \texttt{onError} returns anything other than \texttt{nil}, the failed call returns
+    that value and the schedule carries on.
+  \item If it returns \texttt{nil}, or there is no handler, the call raises a Lua error. Unless
+    the step catches it, the step records \texttt{Result.ERROR}.
+  \item The error message names the function and the Device: \texttt{tcp.tslua:42: ATE.read:
+    TCP 127.0.0.1:5025: timeout}.
+\end{itemize}
+
+A read that times out \emph{after} some bytes arrived is not a Device failure: it returns
+\texttt{partial = true} and logs a WARNING. ATE never reconnects on its own; to recover, close
+the Device and open it again with the same params, which gives a new handle.
+
+\noindent\textbf{\texttt{errors.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/errors.tslua}
+
+\section{Stop on Fail and Retry}
+
+By default a step that ends \texttt{FAIL} or \texttt{ERROR} pauses the run and the Operator
+chooses \texttt{CONTINUE}, \texttt{RETRY} or \texttt{ABORT}. \texttt{:setStopOnFail(false)}
+turns that off for the run, and the Operator can change it on the Run screen before starting.
+
+A Retry runs the step's action again from the beginning, with its POLL inputs reset and its
+blocking inputs cleared. Every Attempt is recorded; the step's result is its last Attempt's. A
+schedule has no way to read its own Attempt number, so keep the count yourself in a local the
+action closes over.
+
+\noindent\textbf{\texttt{retry.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/retry.tslua}
+
+\section{Abort}
+
+Abort is a whole-run stop. The step running when it lands records \texttt{ERROR} with the
+message \texttt{Aborted by Operator}; every step that never ran records \texttt{NOTRUN}; the
+run's End Reason is \texttt{ABORTED} and its result \texttt{FAIL}.
+
+An abort cannot be caught. Once it is requested, \texttt{ATE.sleep} and \texttt{ATE.input} wake
+immediately, a busy Lua loop \emph{in the step's own code} is stopped by an instruction-count
+hook, and \texttt{pcall} and \texttt{xpcall} re-raise rather than returning. ATE aims to stop
+within half a second, and the test suite fails a run that takes longer than ten.
+
+Post-test Actions still run afterwards, each with the run's result. A second abort ends only the
+Action it lands in. Every Device still open is closed.
+
+\section{Two exceptions to the ten-second rule, and one thing never to do}
+
+The ten seconds hold only for what the hook can reach. Two cases are allowed exceptions rather than
+bugs, both shown by runs against the shipped code. They are not forbidden; they are the two
+situations in which the Operator's Abort has to wait, and a writer should know which steps are
+affected before promising a stop.
+
+\begin{itemize}
+  \item \textbf{A command run by \texttt{os.execute}.} \texttt{os.execute} is available in a step,
+    and using it is allowed. The abort cannot end a process ATE did not start, so the run finishes
+    when the command does: a command holds the abort for as long as it runs, however long that is.
+    The step still reported \texttt{PASS} when it returned. The command has to be one the Station's
+    shell has: \texttt{kill -9 \$PPID} is a POSIX command, and a Windows Station runs
+    \texttt{os.execute} through \texttt{cmd.exe}.
+  \item \textbf{A busy loop inside a coroutine.} The count hook does not reach a coroutine, so a
+    loop in one may run on after an abort and the run ends only when the loop does: a long enough
+    loop holds the abort for as long as it takes. An unbounded \texttt{while true do end} inside
+    \texttt{coroutine.wrap} stopped at all only when the process was killed, with its
+    \texttt{test\_run} row left open. This is why the engine's own docstring advises a schedule
+    not to use coroutines: the exception is real, but it is not easy to stop.
+\end{itemize}
+
+\texttt{os.exit} is not in the sandbox, and stays a never. \texttt{\_lockdown} sets it to
+\texttt{nil} alongside \texttt{dofile}, \texttt{loadfile} and \texttt{load}, so
+\texttt{os.exit(7)} called in a step is an ordinary Lua error: the step reports \texttt{ERROR}, the
+run is recorded and closed, Post-test Actions still run, and ATE keeps going. Before this build the
+same call exited the whole process with status 7 and left the run row with no \texttt{ended\_at} and
+no result (\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}:
+\texttt{test\_\allowbreak{}os\_\allowbreak{}exit\_\allowbreak{}in\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}is\_\allowbreak{}not\_\allowbreak{}in\_\allowbreak{}the\_\allowbreak{}sandbox\_\allowbreak{}and\_\allowbreak{}ends\_\allowbreak{}the\_\allowbreak{}step\_\allowbreak{}with\_\allowbreak{}an\_\allowbreak{}error}). \texttt{os.execute} and
+\texttt{os.getenv} are still there.
+
+A plain loop in a step, \texttt{ATE.sleep} and \texttt{ATE.input} all do stop inside the ten
+seconds.
+
+\noindent\textbf{\texttt{abort.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/abort.tslua}
+
+\cando{handle a Device failure without letting it end a run, and explain what Stop on Fail,
+Retry and Abort each do to the record.}

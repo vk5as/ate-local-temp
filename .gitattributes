@@ -1,0 +1,6 @@
+# Test Definition checksums (packet 06b) are sha256 of the file's bytes, so Git must never rewrite
+# a schedule's line endings. core.autocrlf=true on Windows would turn LF into CRLF at checkout and
+# every checksum in an .atedef would mismatch, refusing the run. Text stays LF for everyone.
+*.tslua text eol=lf
+*.lua text eol=lf
+*.atedef text eol=lf

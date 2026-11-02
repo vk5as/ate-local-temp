@@ -1,0 +1,92 @@
+\chapter{Modules and Test Definitions}\label{ch:modules}
+
+A schedule is never one file on its own. It is part of a \textbf{Media Release}: a set of Lua
+files delivered together and described by a \textbf{Test Definition}, a JSON file with the
+extension \texttt{.atedef}.
+
+\section{The Test Definition}
+
+These are the files the manual's examples live in:
+
+\begingroup\footnotesize
+\begin{verbatim}
+{
+  "format": 1,
+  "mediaNumber": "MR-MANUAL-TW",
+  "name": "Test writer manual examples",
+  "version": "1.0.0",
+  "files": [
+    { "path": "first.tslua",  "sha256": "a260d2b923819ff6..." },
+    { "path": "channel.tslua", "hidden": true, "sha256": "1cecd8b3566e4783..." },
+    { "path": "lib/rails.lua", "sha256": "392e385ab81dfb81..." },
+    { "path": "modules/limits.lua", "module": "board_limits", "sha256": "ea8a21a8a7bef16b..." }
+  ]
+}
+\end{verbatim}
+\endgroup
+
+This is an abbreviation of the real \texttt{manual.atedef} beside the examples: only the fields
+that matter for reading it are shown, and the checksums are truncated.
+
+\begin{itemize}
+  \item \texttt{format} is \texttt{1}. An unknown version makes the Test Definition broken.
+  \item \texttt{mediaNumber} is the release's identity. \texttt{name} and \texttt{version}
+    (semantic version) are what other releases \texttt{depends} on.
+  \item \texttt{files} lists every Lua file, with \texttt{path} and \texttt{sha256} --- the
+    SHA-256 of the file's raw bytes, lowercase hex.
+  \item \texttt{hidden} (only on a \texttt{.tslua}) keeps a schedule off the Run screen while
+    still allowing it to be a Sub-schedule.
+  \item \texttt{module} (only on a \texttt{.lua}) names it for \texttt{require}. A plain
+    relative path derives its name: \texttt{lib/rails.lua} is \texttt{lib.rails}. An absolute
+    path, or one containing \texttt{..}, must state \texttt{module}.
+  \item Paths may be relative to the \texttt{.atedef} or absolute; forward slashes work on both
+    Windows and Linux.
+\end{itemize}
+
+A Test Definition is broken if a listed file is missing, if a file has an extension that is
+neither \texttt{.tslua} nor \texttt{.lua}, if two entries share a path or a module name, or if a
+dependency cannot be resolved. A schedule that raises while loading is listed as broken with
+that error; the rest of its release is unaffected.
+
+Run \texttt{ate definition update <file.atedef>} to recompute every checksum in place: it
+computes the SHA-256 of each listed file, writes it over the old value, and fills in a
+\texttt{sha256} that is absent. The file is rewritten only if a checksum changed, so a correct
+Test Definition comes back byte for byte the same; a listed file the command cannot read keeps
+its value and warns.
+
+The Test Definition these very examples ship, exactly as it stands on disk: \texttt{channel.tslua}
+and \texttt{led.tslua} are \texttt{hidden}, and \texttt{modules/limits.lua} is given the module
+name \texttt{board\_limits} because a name derived from the path would be \texttt{modules.limits}.
+
+\noindent\textbf{\texttt{manual.atedef}}\par
+\lstinputlisting[language=ATEJSON]{../examples/test-writer/manual.atedef}
+
+\section{Checksums that do not match}
+
+A mismatch is not a hard failure. ATE logs a WARNING naming the file and the expected and
+computed checksums, loads the file anyway, and records both checksums with the Test Run.
+Whether the differing bytes are stored is the \texttt{database.storeMismatchedFiles} config
+setting: \texttt{ask} shows a confirmation at run start, \texttt{always} stores them,
+\texttt{never} does not.
+
+\section{\texttt{require}}
+
+ATE replaces \texttt{require}. A module name resolves against the files in the release, then
+against its dependencies, depth first in declaration order --- never against
+\texttt{package.path}, which ATE empties. Asking for a module that is not listed is an error.
+A module runs once per Test Run and its return value is cached.
+
+The \texttt{ate.} prefix is reserved: \texttt{require("ate.devices")} is always the Device
+params builder bundled with ATE, and a Test Definition may not list files under \texttt{ate.}.
+
+\noindent\textbf{\texttt{modules.tslua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/modules.tslua}
+
+\noindent\textbf{\texttt{rails.lua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/lib/rails.lua}
+
+\noindent\textbf{\texttt{limits.lua}}\par
+\lstinputlisting[language=ATELua]{../examples/test-writer/modules/limits.lua}
+
+\cando{put a schedule and its helper modules in a Media Release, name the modules the way
+\texttt{require} will find them, and check the checksums.}
