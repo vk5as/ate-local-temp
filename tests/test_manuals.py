@@ -732,14 +732,16 @@ def test_both_forms_of_the_admin_manual_say_a_killed_copy_leaves_a_partial_to_de
     """A `.partial` beside the database is the one thing a migration leaves that is not a copy.
 
     Nothing can delete a half-written file at the instant the process dies, so a kill in the
-    middle of a migration leaves it there. An admin who finds one has to be told it is not a
-    backup and is safe to delete; the LaTeX chapter and the agent manual both have to say it
-    (packet 35 review, round 2)."""
+    middle of a migration leaves it there, along with the journal the half-written copy grew while
+    it was being written. An admin who finds one has to be told it is not a backup and is safe to
+    delete; the LaTeX chapter and the agent manual both have to say it (packet 35 review, rounds 2
+    and 3)."""
     chapter = next(text for path, text in MANUALS["admin"].texts() if path.endswith("05-the-database.tex"))
     markdown = MANUALS["admin"].markdown.read_text(encoding="utf-8")
     for label, text in (("the LaTeX database chapter", chapter), ("the agent manual", markdown)):
         text = " ".join(text.split())  # LaTeX breaks a sentence across source lines
         assert ".partial" in text, f"{label} never names the file a killed copy leaves behind"
+        assert ".partial-journal" in text, f"{label} never names the journal the half-written copy grows"
         assert "killed" in text, f"{label} does not say a killed copy can leave it behind"
         assert "safe to delete" in text, f"{label} does not say the leftover .partial is safe to delete"
 
@@ -1964,6 +1966,66 @@ def test_the_manual_recovers_from_an_install_that_left_the_station_unprepared() 
     assert "dpkg --configure -a" in manual, "the manual never tells an Operator to finish a half-configured package"
     assert "sudo /opt/ate/ate setup" in manual, "the manual never names the setup command to re-run"
     assert "hidden" in manual, "the manual stopped saying the Windows setup step has no output to read"
+
+
+def test_the_manual_gives_the_exit_codes_install_sh_actually_returns(tmp_path: Path) -> None:
+    """The admin manual's exit codes for ``install.sh`` are the ones the script returns.
+
+    It said ``install.sh`` exits 1 only when setup cannot do its job. It also exits 1 when there is
+    nothing to install and 2 when the command line is wrong, and an Operator wrapping it in a script
+    has to branch on the difference (packet 35 review, round 3). Each case is run for real against a
+    temporary prefix; nothing outside ``tmp_path`` is written."""
+    if os.name != "posix":
+        pytest.skip("install.sh is a POSIX shell script")
+
+    here = tmp_path / "tarball"
+    here.mkdir()
+    shutil.copyfile(ROOT / "packaging" / "linux" / "install.sh", here / "install.sh")
+
+    def run(*args: str) -> int:
+        proc = subprocess.run(
+            ["/bin/sh", str(here / "install.sh"), *args],
+            capture_output=True, text=True, cwd=str(here), timeout=60,
+        )
+        return proc.returncode
+
+    assert run("--prefix") == 2, "install.sh did not exit 2 on --prefix with no value"
+    assert run("--what") == 2, "install.sh did not exit 2 on an argument it does not know"
+    assert run("--prefix", "/") == 2, "install.sh did not exit 2 on a prefix of /"
+    assert run("--prefix", str(tmp_path / "opt")) == 1, "install.sh did not exit 1 with no bundle beside it"
+    assert run("--uninstall", "--prefix", str(tmp_path / "empty")) == 1, "install.sh did not exit 1 when there is nothing to uninstall"
+
+    manual = "\n".join(text for _label, text in MANUALS["admin"].texts())
+    assert "exits 2" in manual, "the manual never says a wrong command line exits 2"
+    assert re.search(r"bundle\s+beside the script", manual), "the manual never says a missing bundle is an exit 1"
+    assert "exits 1 only when setup cannot" not in manual, "the manual still claims setup is the only exit 1"
+
+
+def test_every_test_the_manuals_cite_is_a_test_the_suite_has() -> None:
+    """A manual that names a test names one the suite has.
+
+    The sandbox chapter pointed at ``test_a_schedule_is_the_station_s_own_code_and_can_end_the_process``:
+    no test is called that, and a developer who goes looking for it finds nothing (packet 35 review,
+    round 3). A name the code itself uses --- the ``test_run`` table, the ``test_definition_dirs``
+    config key --- is not a citation, so it is allowed; everything else spelled like a test has to
+    be a file under ``tests/`` or a function defined in one."""
+    defined = {
+        name
+        for path in (ROOT / "tests").rglob("*.py")
+        for name in re.findall(r"^def (test_[A-Za-z0-9_]+)", path.read_text(encoding="utf-8"), re.M)
+    }
+    files = {path.stem for path in (ROOT / "tests").glob("*.py")}
+    code = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.py"))
+
+    drift: list[str] = []
+    for label, text in (item for manual in MANUALS.values() for item in manual.texts()):
+        for stem in set(re.findall(r"tests/([A-Za-z0-9_]+)\.py", text)):
+            if not (ROOT / "tests" / f"{stem}.py").exists():
+                drift.append(f"{label}: there is no tests/{stem}.py")
+        for name in set(re.findall(r"\btest_[A-Za-z0-9_]+", text)):
+            if name not in defined and name not in files and name not in code:
+                drift.append(f"{label}: there is no test named {name}")
+    assert not drift, f"the manuals cite tests that do not exist: {sorted(drift)}"
 
 
 def test_a_command_the_manual_shows_does_not_put_a_path_inside_the_code() -> None:

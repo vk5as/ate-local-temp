@@ -50,7 +50,7 @@ are reachable from a step: \texttt{os.execute("kill -9 \$PPID")} ends ATE with t
 and \texttt{os.remove} on the database takes the record away under a running Test Run. The guarantee
 is traceability --- ATE knows which files a run ran --- not protection from a schedule that means
 harm (\texttt{tests/\allowbreak{}test\_\allowbreak{}manuals.py}:
-\texttt{test\_\allowbreak{}a\_\allowbreak{}schedule\_\allowbreak{}is\_\allowbreak{}the\_\allowbreak{}station\_\allowbreak{}s\_\allowbreak{}own\_\allowbreak{}code\_\allowbreak{}and\_\allowbreak{}can\_\allowbreak{}end\_\allowbreak{}the\_\allowbreak{}process}).
+\texttt{test\_\allowbreak{}a\_\allowbreak{}step\_\allowbreak{}can\_\allowbreak{}end\_\allowbreak{}the\_\allowbreak{}process\_\allowbreak{}and\_\allowbreak{}the\_\allowbreak{}manual\_\allowbreak{}says\_\allowbreak{}schedules\_\allowbreak{}are\_\allowbreak{}trusted}).
 
 The abort hook is installed before the schedule runs: \texttt{debug.sethook(check\_\allowbreak{}abort, "", 1000)}, and
 \texttt{pcall}/\texttt{xpcall} are wrapped to re-raise \texttt{aborted} so a schedule's own error handling

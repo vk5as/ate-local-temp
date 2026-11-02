@@ -123,9 +123,12 @@ database, and the line printed names both the database and the copy.
 The cleanup that removes a half-written copy runs when ATE stops the copy. A copy killed outright
 --- \texttt{Ctrl-C} in the middle of an installer, \texttt{SIGKILL}, a machine that stops --- leaves
 \texttt{ate.db.backup-\dots.partial} beside the database, because nothing can delete a file at the
-moment the process dies. That file is not a backup, and nothing ever reads it: the next migration
-names around it, and the permission pass treats it like the copies beside the database. It is safe
-to delete, and it is the only thing a migration leaves that is not a copy.
+moment the process dies, and with it
+\texttt{ate.db.backup-\dots.partial-journal}: the copy is an ordinary SQLite database while it is
+being written, so it has a journal of its own. Neither file is a backup and nothing ever reads them:
+the next migration names around them, and the permission pass treats them like the copies beside the
+database. Both are safe to delete, and they are the only things a migration leaves that are not a
+copy.
 
 If the copy cannot be made --- the data directory is not writable, or another process is holding
 the database --- the migration is refused and nothing is changed:

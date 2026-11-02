@@ -82,9 +82,12 @@ leaves \texttt{/etc/ate} and \texttt{/var/lib/ate} alone.
 Run by an ordinary user, the link lands in the prefix's own \texttt{bin} and setup prints
 \texttt{running unprivileged; skipping group/ownership/ACL setup} and skips the group and ownership
 pass. That is not a failure: on a Station a root run has already prepared, setup succeeds and
-\texttt{install.sh} exits 0. It exits 1 only when setup cannot do its job at all --- it cannot
-create \texttt{/etc/ate} or \texttt{/var/lib/ate} --- and then it says so and tells you to finish
-with \texttt{sudo ate setup}.
+\texttt{install.sh} exits 0. It exits 1 when there is nothing to install --- no \texttt{ate} bundle
+beside the script, or \texttt{--uninstall} pointed at a prefix with no bundle in it --- or when
+\texttt{ate setup} fails, and then it says so and tells you to finish with \texttt{sudo ate setup}.
+An argument it does not understand, a \texttt{--prefix} or \texttt{--bin} with no value after it, or a
+prefix of \texttt{/} is a mistake in the command line rather than a Station problem: the script prints
+its usage and exits 2, before it touches anything.
 
 The \texttt{.deb} is the same bundle, and its \texttt{postinst} runs \texttt{ate setup}:
 

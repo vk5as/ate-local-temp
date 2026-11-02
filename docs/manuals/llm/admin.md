@@ -198,8 +198,9 @@ purge.
   the migration is refused: `refusing to migrate: <reason>`, `nothing in the database was changed`,
   exit 1.
 - A copy killed outright (`Ctrl-C`, `SIGKILL`, a machine that stops) leaves `<name>.partial` beside
-  the database: nothing can delete a file when the process dies. It is not a backup, nothing reads
-  it, and it is safe to delete.
+  the database, and usually `<name>.partial-journal` with it: the copy is an ordinary SQLite file
+  while it is being written, so it has a journal of its own. Nothing can delete a file when the
+  process dies. Neither is a backup, nothing reads them, and both are safe to delete.
 - Copies are never deleted. They pile up beside the database until the Administrator removes them.
 - What is still backed up by hand: the config (`apt purge` deletes it), the reports directory, and
   the data directory as a whole now and then. A database that never migrates never gets a copy.
@@ -353,9 +354,11 @@ Every format runs `ate setup` as its last step, and each reports a failure of th
 - **`install.sh`:** run by an ordinary user the link lands in the prefix's own `bin`, and setup
   prints `running unprivileged; skipping group/ownership/ACL setup` and skips the group and
   ownership pass. That is not a failure: on a Station a root run has already prepared, setup
-  succeeds and `install.sh` exits 0. It exits 1 only when setup cannot do its job at all — it
-  cannot create `/etc/ate` or `/var/lib/ate` — and then it says so and tells you to finish with
-  `sudo ate setup`.
+  succeeds and `install.sh` exits 0. It exits 1 when there is nothing to install — no `ate` bundle
+  beside the script, or `--uninstall` at a prefix with no bundle in it — or when `ate setup` fails,
+  and then it says so and tells you to finish with `sudo ate setup`. An argument it does not
+  understand, a `--prefix` or `--bin` with no value, or a prefix of `/` is a command-line mistake,
+  not a Station problem: it prints the usage and exits 2 without touching anything.
 
 `ate db status` on a current database prints `5` and exits 0. `5` is the schema version, not the ATE
 version: the two numbers are unrelated, so comparing them means nothing. A missing or older database
