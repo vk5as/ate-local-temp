@@ -1617,6 +1617,47 @@ def test_the_developer_runner_reports_a_refused_input(tmp_path: Path) -> None:
     assert "Traceback" not in proc.stderr, proc.stderr[-400:]
 
 
+def _load_manual_runner():
+    """The manual's own ``runner.py`` as a module, so a test can drive it and patch its session."""
+    spec = importlib.util.spec_from_file_location("manual_runner", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_developer_runner_closes_its_session_when_the_run_fails(tmp_path: Path, monkeypatch) -> None:
+    """A run that raises after the session opens still closes it, and the app log with it.
+
+    ``session.close()`` sat at the end of ``main``, outside any ``finally``: the happy path closed
+    the session, and anything that went wrong in between left the database handle and the app log
+    open. The harness closes in a ``finally``; the manual's runner now does the same, and this is
+    the case where it matters."""
+    from ate.run_session.headless import HeadlessRunSession
+
+    runner = _load_manual_runner()
+    config = _echo_config(tmp_path, tmp_path / "src")
+    opened: dict[str, object] = {}
+
+    class SessionThatCannotStart(HeadlessRunSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened["session"] = self
+
+        def start(self) -> None:
+            raise RuntimeError("the worker refused to start")
+
+    monkeypatch.setattr(runner, "HeadlessRunSession", SessionThatCannotStart)
+    monkeypatch.setattr(sys, "argv", ["runner.py", str(config), "Developer: echo Device"])
+
+    with pytest.raises(RuntimeError, match="refused to start"):
+        runner.main()
+
+    session = opened["session"]
+    app_log = session._app_log
+    assert app_log is not None and app_log.path.exists(), "the session never opened its app log"
+    assert app_log._fh.closed, f"the runner left {app_log.path} open after the run failed"
+
+
 # --- The three things an abort does not stop, as the manual says ---------------------------
 
 #: The driver the abort tests run in their own process: a headless session on a scratch release,
@@ -1860,6 +1901,7 @@ def test_a_step_can_end_the_process_and_the_manual_says_schedules_are_trusted(tm
     assert KILL_COMMAND in manual, "the manual no longer names what a schedule can do to the process"
     assert "no schedule has ever needed" not in manual, "the manual still claims os.abort is there and unused"
     assert "traceability" in manual, "the manual stopped saying what the sandbox is actually for"
+    assert "untrusted" not in manual, "the developer manual calls a Test Schedule untrusted input again"
 
 
 # --- Packet 35: the manual's own claims, checked against the packaging and the shell ---------

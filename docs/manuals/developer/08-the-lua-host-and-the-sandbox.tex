@@ -1,7 +1,8 @@
 \chapter{The Lua host and the sandbox}\label{ch:lua}
 
 \texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}lua\_\allowbreak{}host.py} is 1798 lines, and most of them are about one thing: a Test
-Schedule is untrusted input, and the host has to run it without letting it reach the machine. Read it as
+Schedule is the Station's own code, and the host has to run it so that everything it touched is
+known. Read it as
 three parts: the runtime and its lockdown, the \texttt{ATE} table, and the schedule builders that turn a
 Lua file into the tree the engine walks.
 
