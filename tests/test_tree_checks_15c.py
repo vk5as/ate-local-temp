@@ -18,6 +18,7 @@ import pytest
 from ate.catalog import find_definitions, include_map, list_schedule_rows, module_map
 from ate.engine.lua_host import HostError, LuaHost
 from ate.run_session.headless import HeadlessRunSession, SessionError, SessionState
+from ate.ui.run_widgets import STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
 
 
@@ -187,7 +188,8 @@ def test_prefixed_numbers_are_recorded_and_shown_everywhere(qapp, tmp_path) -> N
 
     rows = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
     assert [r.split()[0] for r in rows] == STACKED_NUMBERS
-    assert rows[-1].strip() == "3.2.1.2.  c two  →  FAIL"
+    assert rows[-1].strip() == "3.2.1.2.  c two"  # R4: the Result is a painted badge, not row text
+    assert screen.run_view.step_list.item(len(rows) - 1).data(STEP_RESULT_ROLE) == "FAIL"
 
     report = Path(html).read_text(encoding="utf-8")
     assert "3.2.1.2." in report and "c two" in report

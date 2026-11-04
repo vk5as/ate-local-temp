@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from ate.run_session.headless import HeadlessRunSession
 from ate.ui.staged_run_screen import StagedRunScreen
+from ate.ui.theme import STYLESHEET
 
 from ._fixtures import _sha256, write_ate_env
 from .test_staged_run_screen import _find_item, _wait_finished
@@ -162,8 +163,13 @@ def test_status_bar_is_the_last_widget_of_the_run_view(qapp, tmp_path):
     assert widgets[-1] is screen.run_view.status_bar, "the status bar is not the view's last widget"
     assert widgets.index(screen.run_view.status_bar) > widgets.index(screen.run_view.step_list)
     assert widgets.index(screen.run_view.status_bar) > widgets.index(screen.run_view.tabs)
-    assert screen.run_view.status_bar.styleSheet().lower().startswith("background")
-    assert "border-top" in screen.run_view.status_bar.styleSheet().lower(), "the mockup's top border is missing"
+    assert screen.run_view.status_bar.objectName() == "status_bar", "the bar is not the widget the theme styles"
+    assert screen.run_view.status_bar.testAttribute(Qt.WidgetAttribute.WA_StyledBackground), (
+        "the bar opts into stylesheet backgrounds, so the theme's rules paint it"
+    )
+    # Ticket 39 (R1): the bar's look moved from an inline stylesheet to the one app stylesheet.
+    assert "#status_bar" in STYLESHEET, "the theme has no rule for the status bar"
+    assert "border-top" in STYLESHEET.lower(), "the mockup's top border is missing"
 
 
 def test_status_bar_shows_all_three_counters_at_once(qapp, tmp_path):

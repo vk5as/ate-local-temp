@@ -97,6 +97,7 @@ blocking input and records the thread each slot ran on.
 | `src/ate/ui/export_log_dialog.py` | the Run log export dialog: Level/Source/Owner and Save As |
 | `src/ate/ui/history_screen.py` | the History screen: the table of past runs and its summary panel |
 | `src/ate/ui/run_widgets.py` | the widgets both Run-screen layouts share |
+| `src/ate/ui/theme.py` | the palette tokens, the platform fonts, the painted badges and the one application stylesheet |
 | `src/ate/ui/staged_run_screen.py` | the staged Run screen: the vertical stack of stages |
 | `src/ate/ui/three_pane_run_screen.py` | the three-pane Run screen: setup pane, step table, log |
 

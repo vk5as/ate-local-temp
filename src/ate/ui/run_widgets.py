@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, QSize, Signal
-from PySide6.QtGui import QBrush, QColor, QFontMetrics
+from PySide6.QtCore import QEvent, QObject, Qt, QRect, QRectF, QSize, Signal
+from PySide6.QtGui import QBrush, QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QGridLayout,
@@ -29,15 +29,30 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QScrollArea,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QSizePolicy,
     QStackedWidget,
+    QStyledItemDelegate,
+    QStyle,
     QGroupBox,
     QVBoxLayout,
     QWidget,
     QDialog,
+)
+
+from .theme import (
+    CHIP_STYLES,
+    MONO_FONT,
+    RESULT_STYLES,
+    TOKENS,
+    badge_width_for,
+    contrast,
+    ink_on,
+    mono_font,
+    paint_result_badge,
+    ui_font,
 )
 
 from ate.dialogs import dismiss_if_headless
@@ -59,18 +74,65 @@ def _format_elapsed(delta: datetime) -> str:
 
 
 def _format_log_line(line: dict) -> str:
-    """Render one recorded log line as ``LEVEL  SOURCE  text`` for a pane."""
+    """Render one recorded log line as ``HH:MM:SS LEVEL  SOURCE  text`` for a pane.
+
+    Ticket 39 (R3): the band's log is drawn in the mono font, so the padded
+    columns line up, and each line carries the time it was recorded."""
+    at = str(line.get("at") or "")
+    when = at[11:19] if len(at) >= 19 else ""
     level = str(line.get("level", ""))
     source = str(line.get("source", ""))
-    return f"{level:<7} {source:<8} {line.get('text', '')}"
+    return f"{when:<9} {level:<7} {source:<8} {line.get('text', '')}"
+
+
+def _no_auto_default(*buttons: QPushButton) -> None:
+    """Take away a button's Enter-key default (ticket 39 review, D6).
+
+    Qt marks every button in a window `autoDefault`, so a stray Enter — a barcode
+    scanner's newline, an Operator pressing Enter to move on — fires the button Qt
+    picks as the window's default. That is fine for the OK of a dialog the Operator
+    opened and dangerous for Debug, Abort and New run, none of which anyone should
+    trigger by accident. `setDefault(False)` as well, so no other widget in the
+    window can make it the default."""
+    for button in buttons:
+        button.setAutoDefault(False)
+        button.setDefault(False)
+
+
+class TextPane(QPlainTextEdit):
+    """A scrollable text pane with the ``text``/``setText`` shape the screens and tests use.
+
+    Plain text scrolls, so the Log and Summary tabs keep a small fixed minimum (packet 30b); the
+    QLabel they replaced grew their minimumSizeHint with every line the run wrote. The Operator reads
+    them; the run writes them, so they are read-only (packet 30b review)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setReadOnly(True)
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, value: str) -> None:
+        self.setPlainText(value)
+
+    def clear(self) -> None:
+        """Empty the pane, so a new run's Log and Summary hold only their own lines (packet 30b)."""
+        self.setPlainText("")
 
 
 class LogPane(QWidget):
     """A scrollable pane that renders recorded log lines under a header label.
 
-    Both the Run view's Log pane (ticket 08) and its separate Debug window are instances of
-    this: one is fed ``INFO``-and-above lines, the other every level. It never decides what
-    to show — :meth:`add_lines` only renders whatever store rows it is handed, in seq order.
+    Both the Run view's live Log tab (ticket 08, made live by 25a) and the Debug
+    window are instances of this: one is fed ``INFO``-and-above lines, the other
+    every level. It never decides what to show — :meth:`add_lines` only renders
+    whatever store rows it is handed, in seq order. Ticket 39 (R3): the lines are
+    drawn by one read-only monospace ``QPlainTextEdit``, not a ``QListWidget``
+    inside a ``QScrollArea`` — the old list-in-scroll-area nested two vertical
+    scrollbars and drew the padded ``LEVEL  SOURCE`` columns in a proportional
+    font that made them line up in name only. ``title`` is empty for a pane
+    whose name is on the tab it sits in.
     """
 
     def __init__(self, title: str) -> None:
@@ -79,25 +141,97 @@ class LogPane(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self._title = QLabel(title)
         self._title.setStyleSheet("font-weight: bold;")
-        self._list = QListWidget()
-        self._area = QScrollArea()
-        self._area.setWidget(self._list)
-        self._area.setWidgetResizable(True)
+        if not title:
+            self._title.hide()
+        self._text = QPlainTextEdit()
+        self._text.setObjectName("log_text")
+        self._text.setReadOnly(True)
+        self._text.setFont(mono_font(12))
         layout.addWidget(self._title)
-        layout.addWidget(self._area, stretch=1)
+        layout.addWidget(self._text, stretch=1)
+        #: The highest log ``seq`` this pane has drawn, or -1 when it holds nothing.
+        #: A live refresh is handed the whole run log, so this is what says which of
+        #: those rows are new (ticket 39 review).
+        self._last_seq = -1
 
     def clear(self) -> None:
         """Remove every rendered line."""
-        self._list.clear()
+        self._text.clear()
+        self._last_seq = -1
 
     def add_lines(self, lines: Iterable[dict]) -> None:
-        """Render ``lines`` (each a log_line dict) as level/source/text rows in seq order."""
+        """Render ``lines`` (each a log_line dict) as level/source/text rows in seq order.
+
+        Ticket 39 review: the Log tab is live, and every refresh is passed the whole
+        log the store has recorded. Only the rows after the highest seq already drawn
+        are added, and they are appended rather than the pane rewritten — rewriting
+        it reset the view to the top of the log every time a line was logged. So the
+        Operator's place in the log survives a refresh: reading the middle stays where
+        it was, and reading the end follows the end.
+        """
+        new: list[str] = []
+        highest = self._last_seq
         for line in sorted(lines, key=lambda ln: ln.get("seq", 0)):
-            self._list.addItem(QListWidgetItem(_format_log_line(line)))
+            seq = int(line.get("seq") or 0)
+            if seq <= self._last_seq:
+                continue
+            new.append(_format_log_line(line))
+            highest = max(highest, seq)
+        if not new:
+            return
+        bar = self._text.verticalScrollBar()
+        reading_the_tail = bar.value() >= bar.maximum()
+        where = bar.value()
+        self._text.appendPlainText("\n".join(new))
+        # Appending can scroll to the new text; put the view back unless the Operator
+        # was already at the end, in which case the tail is what they want to see.
+        bar.setValue(bar.maximum() if reading_the_tail else min(where, bar.maximum()))
+        self._last_seq = highest
 
     def rendered_lines(self) -> list[str]:
         """Return the pane's lines in order (for inspection and tests)."""
-        return [self._list.item(i).text() for i in range(self._list.count())]
+        return self._text.toPlainText().splitlines()
+
+    def text_widget(self) -> QPlainTextEdit:
+        """The read-only mono widget that paints the lines (ticket 39 review).
+
+        Ticket 25a's scrollbar checks reached the pane through its ``QScrollArea``, which the mono
+        ``QPlainTextEdit`` replaced: the accessor is what lets a test ask the pane for the widget
+        that actually scrolls, rather than digging for a child by object name."""
+        return self._text
+
+
+class DebugWindow(LogPane):
+    """Every level of the run log, in its own window (ticket 39, R3/D2).
+
+    `run-screen.md` line 33 always asked for a separate Debug window; packets 08
+    and 30b built it as a permanent band inside the Run view instead, which is the
+    single biggest space the step list never got. The header's Debug button and
+    ``Ctrl+D`` open and close it; it keeps its contents across toggles so the
+    Operator can flip it while reading the steps.
+
+    ``parent`` (ticket 39 review) makes it a top-level window that belongs to the
+    main window: one Debug window is shared by both layouts, so switching layouts
+    cannot leave two open, and closing ATE closes it instead of leaving an orphan
+    window holding the application open."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__("Debug — every level")
+        self.setObjectName("debug_window")
+        self.setWindowTitle("Debug log — every level")
+        self._text.setObjectName("debug_text")
+        if parent is not None:
+            # A child QWidget is normally painted inside its parent; the Window flag
+            # keeps it a window of its own while the parent still owns its lifetime.
+            self.setParent(parent)
+            self.setWindowFlag(Qt.WindowType.Window)
+
+    def toggle(self) -> None:
+        """Open if closed, close if open."""
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
 
 
 class StatusBar(QWidget):
@@ -111,7 +245,14 @@ class StatusBar(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setStyleSheet("background:#e4e4e4; border-top:1px solid #c4c4c4; padding:3px 10px;")
+        # Ticket 39 (R1): the look is the theme stylesheet's `#status_bar` rules.
+        # The old selector-less stylesheet painted the bar's background, border
+        # and padding onto every child label — the grey "chips" the review found.
+        self.setObjectName("status_bar")
+        # A bare QWidget paints no stylesheet background: without this the
+        # `#status_bar` rules have no effect and the bar sits on the window's
+        # canvas with nothing to separate it from the panes (39 review).
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.status_label = QLabel("Ready")
         self.status_pre = QLabel("Pre-test 0/0")
         self.status_steps = QLabel("Steps 0/0")
@@ -151,12 +292,15 @@ class StatusBar(QWidget):
             self.status_current.setText(f"Current {_format_elapsed(now - item_started_at)}")
 
 
-#: The mockup's header row background (`.row.hdr` / `.b-row.hdr`), packet 15d.
-_HEADER_BG = "#eef1f5"
+#: The mockup's header row background (`.row.hdr` / `.b-row.hdr`), packet 15d —
+#: the palette's `subtle` token, so the header rows keep their tint under the theme.
+_HEADER_BG = TOKENS["subtle"]
 
-#: A broken picker row, straight from the mockup: `.b-sched .it.broken` background and `.err` text.
-_BROKEN_BG = "#fff5f5"
-_BROKEN_ERR = "#b71c1c"
+#: A broken picker row: the design system's failed-row tint with the error in the
+#: theme's red. (The mockup's `#fff5f5`/`#b71c1c` pair came from the prototype CSS;
+#: ticket 39 moves them to the tokens so every red in the app is the same red.)
+_BROKEN_BG = TOKENS["failed_tint"]
+_BROKEN_ERR = TOKENS["broken_err"]
 
 #: The marker on a row that cannot run. `×` (U+00D7), not `⛔` (U+26D4): the "no entry" sign is not
 #: in DejaVu Sans, the only font a headless Linux runner has, so Qt drew its missing-glyph box and
@@ -164,7 +308,7 @@ _BROKEN_ERR = "#b71c1c"
 #: so every font Qt can find draws it. ``tests/test_broken_rows_05b.py`` renders the marker and
 #: compares its ink with the box Qt draws for a character no font has.
 BROKEN_MARKER = "×"
-_MUTED_STYLE = "color: #777; font-size: 12px;"
+_MUTED_STYLE = f"color: {TOKENS['ink_2']}; font-size: 12px;"
 
 #: `.b-sched .it.broken { cursor: not-allowed }` (mockup line 97): the pointer says "can't pick this".
 _FORBIDDEN_CURSOR = Qt.CursorShape.ForbiddenCursor
@@ -173,36 +317,56 @@ _FORBIDDEN_CURSOR = Qt.CursorShape.ForbiddenCursor
 _ROW_MARGIN_X, _ROW_MARGIN_Y = 6, 4
 
 #: The mockup's ``.flag`` box (amber), used for the mismatch flag line and the confirmation's file list.
-_FLAG_STYLE = "background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px;"
+_FLAG_STYLE = (
+    f"background: {TOKENS['ask']}; border: 1px solid {TOKENS['ask_edge']}; "
+    f"color: {TOKENS['ask_ink']}; padding: 4px 10px; border-radius: 4px;"
+)
 
-#: The mockup's active input, `.inp.inp-on` (prototype line 54): `#fff6cc` background and an
-#: `#e0a800` left border. A plain QWidget paints both once it opts into styled backgrounds.
-_INPUT_ACTIVE_STYLE = "QWidget#step_input { background: #fff6cc; border-left: 3px solid #e0a800; }"
+#: The mockup's active input, `.inp.inp-on` (prototype line 54): the palette's `ask`
+#: background and its amber left rule. A plain QWidget paints both once it opts into
+#: styled backgrounds.
+_INPUT_ACTIVE_STYLE = (
+    f"QWidget#step_input {{ background: {TOKENS['ask']}; border-left: 3px solid {TOKENS['ask_edge']}; }}"
+)
 
 #: The mockup's `.err` (line 28): the inline message an input shows without submitting anything.
-_INPUT_ERROR_STYLE = "color: #b71c1c; font-size: 12px;"
+_INPUT_ERROR_STYLE = f"color: {TOKENS['broken_err']}; font-size: 12px;"
 
 #: `.inp` has no background when it is not asking, so an inert input reads as the list's own white.
 _INPUT_IDLE_STYLE = ""
 
 #: `.b-sticky` (mockup line 108): the red banner the centre pane keeps at the top while paused.
-_STICKY_STYLE = "background: #c62828; color: white; padding: 5px 10px; font-weight: 600;"
+_STICKY_STYLE = (
+    f"background: {TOKENS['failed']}; color: {TOKENS['white']}; padding: 5px 10px; font-weight: 600; border-radius: 4px;"
+)
 
-#: A paused step's row, the mockup's `.row.failed-hl` / `.b-row.failed-hl`.
-_FAILED_BG = "#fff0f0"
+#: A paused step's row: the design system's failed-row tint, with the left bar painted
+#: by the row delegate (R4).
+_FAILED_BG = TOKENS["failed_tint"]
+
+#: The current step's row: soft primary tint with the primary left bar (R4).
+_CURRENT_BG = TOKENS["primary_tint"]
 
 #: The ordinary table row. A cell's background must be set explicitly to clear a tint: an unset
 #: QColor paints it black.
-_ROW_BG = "#ffffff"
+_ROW_BG = TOKENS["surface"]
 
-#: The mockup's `.b-inline-prompt`: a red-outlined box hugging the failed step.
+#: The prompt buttons' own metrics (R6, D6): 15 px type, 18 px side padding, 1 px border. Both bar
+#: styles and the equal-width rule in `FailurePromptBar` are built from these, so the widths the
+#: buttons are fixed to are the widths the stylesheet actually paints.
+_PROMPT_BUTTON_FONT_PX = 15
+_PROMPT_BUTTON_PAD_X = 18
+_PROMPT_BUTTON_PAD_Y = 6
+_PROMPT_BUTTON_BORDER = 1
+
+#: The mockup's `.b-inline-prompt`: a red-outlined box hugging the failed step. Three equal
+#: buttons (D6): Retry is not the primary, and Abort's separation is spacing, not colour.
 _INLINE_PROMPT_STYLE = (
-    "FailurePromptBar { background: white; border: 2px solid #c62828; padding: 8px; }"
-    "FailurePromptBar QLabel { color: #7b1113; }"
-    "FailurePromptBar QPushButton { background: #f5f5f5; color: black; padding: 6px 16px; "
-    "border: 1px solid #a9a9a9; border-radius: 3px; }"
-    "FailurePromptBar QPushButton#retry { background: #0a64d6; color: white; border-color: #0850ad; }"
-    "FailurePromptBar QPushButton#abort { background: #c62828; color: white; border-color: #8e1c1c; }"
+    f"FailurePromptBar {{ background: {TOKENS['white']}; border: 2px solid {TOKENS['failed']}; padding: 8px; border-radius: 6px; }}"
+    f"FailurePromptBar QLabel {{ color: {TOKENS['prompt_ink']}; background: transparent; }}"
+    f"FailurePromptBar QPushButton {{ background: {TOKENS['white']}; color: {TOKENS['ink']}; "
+    f"font-size: {_PROMPT_BUTTON_FONT_PX}px; padding: {_PROMPT_BUTTON_PAD_Y}px {_PROMPT_BUTTON_PAD_X}px; "
+    f"border: {_PROMPT_BUTTON_BORDER}px solid {TOKENS['line_strong']}; border-radius: 6px; min-height: 32px; }}"
 )
 
 
@@ -323,7 +487,7 @@ def _schedule_row_widget(name: str, release: str, files: list[str]) -> QWidget:
     one-line-tall row and run over the rows below it."""
     widget = QWidget()
     if files:
-        widget.setStyleSheet("background: #fff8e6;")
+        widget.setStyleSheet(f"background: {TOKENS['warn_bg']};")
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(_ROW_MARGIN_X, _ROW_MARGIN_Y, _ROW_MARGIN_X, _ROW_MARGIN_Y)
     title = QLabel(f"⚠ {name}" if files else name)
@@ -337,7 +501,7 @@ def _schedule_row_widget(name: str, release: str, files: list[str]) -> QWidget:
         note = QLabel("⚠ checksum mismatch: " + ", ".join(files))
         note.setObjectName("schedule_mismatch")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #8a5a00; font-size: 12px;")
+        note.setStyleSheet(f"color: {TOKENS['amber_ink']}; font-size: 12px;")
         layout.addWidget(note)
     return widget
 
@@ -849,9 +1013,11 @@ class FailurePromptBar(QWidget):
     Rendered only while a prompt is pending — the layout shows it with :meth:`show_prompt` and it
     hides itself once a choice is made — and it holds no run logic of its own: each button only
     hides the bar and emits ``choice_made`` with CONTINUE, RETRY or ABORT, which the layout sends on
-    to the session. The look follows the run-screen mockup: a bold ``Step <no> <result>`` label, the
-    step's message growing across the bar, then the three buttons in order. ``style`` picks the
-    mockup's full-width bar (variant C) or the box hugging the failed step (variant B)."""
+    to the session. Ticket 39 (R6, D6): three *equal* buttons — Retry is not highlighted as the
+    primary, because pushing the Operator toward one answer on hardware where retrying may not be
+    right is worse than a neutral prompt — with Abort set 16 px apart, and no button a stray Enter
+    from a barcode scanner can trigger. ``style`` picks the full-width red bar (staged) or the box
+    hugging the failed step (three-pane inline)."""
 
     choice_made = Signal(str)
 
@@ -866,9 +1032,7 @@ class FailurePromptBar(QWidget):
         layout.setSpacing(12)
 
         self.step_label = QLabel()
-        bold = self.step_label.font()
-        bold.setBold(True)
-        self.step_label.setFont(bold)
+        self.step_label.setObjectName("prompt_step")
         self.message_label = QLabel()
         # The message grows to fill whatever width the labels leave, like the mockup's .grow.
         self.message_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -879,22 +1043,37 @@ class FailurePromptBar(QWidget):
         self.retry_button.setToolTip("Run the step's action again")
         self.abort_button = QPushButton("Abort")
         self.abort_button.setToolTip("Run the Post-test Actions and end the run")
-        # Red bar, 15px type, and the mockup's button classes: plain Continue, primary Retry,
-        # danger Abort.
+        # R6: no button is the default, so a scanner's Enter or an untouched dialog answers
+        # nothing; focus lands on the bar, not on a button.
+        _no_auto_default(self.continue_button, self.retry_button, self.abort_button)
+        # Red bar, 15 px type (16 px for the step), three equal white buttons with Abort set
+        # apart — deliberately not the mockup's red-on-red Abort (contrast 1.00, R6).
         self.setStyleSheet(
             style
             or (
-                "FailurePromptBar { background: #c62828; color: white; font-size: 15px; }"
-                "FailurePromptBar QLabel { color: white; }"
-                "FailurePromptBar QPushButton { background: #f5f5f5; color: black; font-size: 15px; "
-                "padding: 6px 18px; border: 1px solid #a9a9a9; border-radius: 3px; }"
-                "FailurePromptBar QPushButton:hover { background: #e6e6e6; }"
-                "FailurePromptBar QPushButton#retry { background: #0a64d6; color: white; border-color: #0850ad; }"
-                "FailurePromptBar QPushButton#abort { background: #c62828; color: white; border-color: #8e1c1c; }"
+                f"FailurePromptBar {{ background: {TOKENS['failed']}; color: {TOKENS['white']}; padding: 10px 16px; border-radius: 6px; }}"
+                f"FailurePromptBar QLabel {{ color: {TOKENS['white']}; font-size: 15px; background: transparent; }}"
+                "FailurePromptBar QLabel#prompt_step { font-size: 16px; font-weight: 700; }"
+                f"FailurePromptBar QPushButton {{ background: {TOKENS['white']}; color: {TOKENS['ink']}; "
+                f"font-size: {_PROMPT_BUTTON_FONT_PX}px; padding: {_PROMPT_BUTTON_PAD_Y}px {_PROMPT_BUTTON_PAD_X}px; "
+                f"border: {_PROMPT_BUTTON_BORDER}px solid {TOKENS['line_strong']}; border-radius: 6px; min-height: 32px; }}"
+                f"FailurePromptBar QPushButton:hover {{ background: {TOKENS['canvas']}; }}"
             )
         )
         self.retry_button.setObjectName("retry")
         self.abort_button.setObjectName("abort")
+        # R6/D6, second pass: the three buttons are the same width. Left to their own size hints
+        # they measured 106 px ("Continue"), 78 px ("Retry") and 79 px ("Abort"), so the bar read as
+        # one wide button and two narrow ones. The width is measured from the bar's own 15 px font
+        # and its padding rather than taken from `sizeHint()`, which is still the unstyled 61 px
+        # before the widget is first polished.
+        button_width = max(
+            QFontMetrics(ui_font(_PROMPT_BUTTON_FONT_PX)).horizontalAdvance(button.text())
+            + 2 * (_PROMPT_BUTTON_PAD_X + _PROMPT_BUTTON_BORDER)
+            for button in (self.continue_button, self.retry_button, self.abort_button)
+        )
+        for button in (self.continue_button, self.retry_button, self.abort_button):
+            button.setFixedWidth(button_width)
 
         self.continue_button.clicked.connect(lambda: self._on_choice("CONTINUE"))
         self.retry_button.clicked.connect(lambda: self._on_choice("RETRY"))
@@ -904,15 +1083,22 @@ class FailurePromptBar(QWidget):
         layout.addWidget(self.message_label)
         layout.addWidget(self.continue_button)
         layout.addWidget(self.retry_button)
+        layout.addSpacing(16)  # Abort is set apart from the two Continue/Retry peers (D6)
         layout.addWidget(self.abort_button)
 
         # Only shown while a prompt is pending; the layout shows it via show_prompt.
         self.hide()
 
-    def show_prompt(self, step_number: str, result: str, message: str) -> None:
-        """Show the bar naming the failed step and its message, for the Operator to answer."""
+    def show_prompt(self, step_number: str, result: str, message: str, actual: str = "", expected: str = "") -> None:
+        """Show the bar naming the failed step and its message, for the Operator to answer.
+
+        R6: the bar carries the step's measurements too — Actual and Expected appear in the
+        prompt whenever the Attempt recorded them, not only in the report."""
         self.step_label.setText(f"Step {step_number} {result}")
-        self.message_label.setText(message)
+        detail = ""
+        if actual or expected:
+            detail = f"  Actual {actual or '—'} · Expected {expected or '—'}"
+        self.message_label.setText(f"{message}{detail}")
         self.show()
 
     def _on_choice(self, choice: str) -> None:
@@ -921,6 +1107,110 @@ class FailurePromptBar(QWidget):
             return  # a second click after the bar already hid itself must not answer twice
         self.hide()
         self.choice_made.emit(choice)
+
+
+class RunStateChip(QWidget):
+    """The run header's state chip (R2, D4): a painted word plus glyph.
+
+    The chip is the loudest element in the header and is sized so the state reads
+    from across a bench (2 m at 96 dpi). The word and glyph carry the meaning; the
+    hue only supports it, which is why the chip never relies on green-versus-red
+    alone (PASS and FAIL are near-identical under deuteranopia)."""
+
+    WORD_PX = 22
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._kind = "ready"
+        self._word = "READY"
+
+    def set_state(self, kind: str, word: str) -> None:
+        """Change the chip's state; the widget repaints from the new kind.
+
+        Ticket 39 review, second pass: `update()` repaints, and only the paint changes — the
+        layout never learns that the chip now needs a different width. `sizeHint` is measured from
+        the word ("READY" 140 px, "INPUT NEEDED" 223 px), so a chip that started READY stayed 140
+        px wide while the run needed 223, and the badge drew its 22 px word squeezed down. The
+        geometry is invalidated with the paint so both layouts re-space the header."""
+        self._kind = kind
+        self._word = word
+        self.update()
+        self.updateGeometry()
+
+    def state_word(self) -> str:
+        """The word currently on the chip."""
+        return self._word
+
+    def state_kind(self) -> str:
+        """The state the chip is painted in: the key of `CHIP_STYLES`."""
+        return self._kind
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt's name
+        metrics = QFontMetrics(ui_font(self.WORD_PX, bold=True))
+        return QSize(max(140, metrics.horizontalAdvance(self._word) + 40), 42)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        painter = QPainter(self)
+        paint_result_badge(
+            painter,
+            QRect(0, 0, self.width(), self.height()),
+            self._kind,
+            word=self._word,
+            word_px=self.WORD_PX,
+        )
+
+
+class RunHeader(QWidget):
+    """The shared run header both layouts put above the work (R2).
+
+    It answers "which run is this, and what does the Operator need to do next?" from
+    a glance: the state chip (RUNNING / INPUT NEEDED / STEP FAILED / POST-TEST, then
+    PASS or FAIL with the End Reason), the Test Schedule and its Media Release, the
+    UUT, Project, Operator and Stop-on-Fail choices, the run timer, and the Debug
+    button. Like every other widget here it decides nothing: each value is read from
+    the session or the store by the layout that owns the header."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("run_header")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.state_chip = RunStateChip()
+        self.schedule_label = QLabel("")
+        self.schedule_label.setObjectName("run_title")
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("run_meta")
+        self.meta_label.setWordWrap(True)
+        self.timer_label = QLabel("Run --:--")
+        self.timer_label.setObjectName("run_timer")
+        self.timer_label.setFont(mono_font(12))
+        self.debug_button = QPushButton("Debug")
+        self.debug_button.setObjectName("debug_button")
+        self.debug_button.setToolTip("Open or close the Debug window (Ctrl+D)")
+        # Ticket 39 review: the header's Debug button must not become the window's
+        # default. An Enter pressed while the Operator is typing a Serial opens the
+        # Debug window; a button that answers nothing is the safe one.
+        _no_auto_default(self.debug_button)
+
+        context = QVBoxLayout()
+        context.addWidget(self.schedule_label)
+        context.addWidget(self.meta_label)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.addWidget(self.state_chip)
+        layout.addLayout(context, stretch=1)
+        layout.addWidget(self.timer_label)
+        layout.addWidget(self.debug_button)
+
+    def set_state(self, kind: str, word: str) -> None:
+        self.state_chip.set_state(kind, word)
+
+    def set_run_info(self, schedule: str, release: str = "", meta: str = "") -> None:
+        """Name the run: schedule — Media Release, and the identity line under it."""
+        self.schedule_label.setText(f"{schedule} — {release}" if release else schedule)
+        self.meta_label.setText(meta)
+
+    def set_timer(self, elapsed: str) -> None:
+        self.timer_label.setText(f"Run {elapsed}")
 
 
 class StepInputWidget(QWidget):
@@ -975,7 +1265,23 @@ class StepInputWidget(QWidget):
         # empty, the indent has to come from the widget's own left margin (26 + the 6 px padding).
         outer.setContentsMargins(32, 2, 6, 2)
         outer.setSpacing(8)
-        outer.addWidget(QLabel(f"{self.index}. {declaration.desc}"))  # the mockup's .inp-desc
+        self._desc_label = QLabel(f"{self.index}. {declaration.desc}")  # the mockup's .inp-desc
+        outer.addWidget(self._desc_label)
+        #: Ticket 39 (D3): in the staged Run view a future step shows this one-line
+        # summary instead of its controls, so the step list is not drowned in inert
+        # inputs. The summary never appears on stage 3 or in the three-pane layout.
+        # Ticket 39 review: the label was built but never put in the widget's layout,
+        # so it had no parent — Qt then treated it as its own top-level window, and
+        # `setVisible(True)` on a collapsed future input popped a separate window
+        # beside the Run screen. It is the first item of `outer`, which carries the
+        # mockup's `.inputs` indent, and it wraps so a long description stays inside
+        # the row instead of running past it.
+        self.summary_label = QLabel(f"{self.index} input: {declaration.desc}")
+        self.summary_label.setObjectName("muted")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        outer.addWidget(self.summary_label)
+        self.summary_label.hide()
 
         # .inp-w: the controls. orient=VERT stacks them (`.inp.vert .inp-w`), otherwise they sit in a
         # row, exactly as the mockup's flex layout does.
@@ -1076,12 +1382,33 @@ class StepInputWidget(QWidget):
 
     # -- state, driven entirely by the session ----------------------------
 
+    def set_summary(self, on: bool) -> None:
+        """Collapse or expand this input (ticket 39, D3).
+
+        In the staged Run view a step the run has not reached shows a one-line
+        muted summary of its input instead of the full controls; the current,
+        asking and finished steps always show them. Stage 3 and the three-pane
+        layout never collapse, and a finished run's view is fully expanded."""
+        self._desc_label.setVisible(not on)
+        self._controls_widget.setVisible(not on)
+        self.value_label.setVisible(not on)
+        self.error_label.setVisible(not on)
+        self.summary_label.setVisible(on)
+        #: Ticket 39 review: collapsing and expanding changes what the widget needs,
+        # and the row keeps the size hint it was given. A row left at the summary's
+        # one line clips the radios, checkboxes or buttons the run is asking for, so
+        # the item is resized with the widget here (and in `_render_rows`, which sets
+        # the hint every time the list is rebuilt).
+        if self.input_item is not None:
+            self.input_item.setSizeHint(self.sizeHint())
+
     def activate(self, attempt_no: int) -> None:
         """This input is being asked for: enable it, give it the mockup's active look, focus it.
 
         The mockup's `focusActive` puts the cursor in whichever input is currently waiting, so the
         Operator can type without reaching for the mouse."""
         self.attempt_no = attempt_no
+        self.set_summary(False)  # an asking input is never shown as a summary line
         self.error_label.setText("")
         for control in self.controls:
             control.setEnabled(True)
@@ -1155,6 +1482,161 @@ class StepInputWidget(QWidget):
             self.error_label.setText(str(exc))
 
 
+#: Item roles a painted step row reads (R4). `UserRole` itself still carries the
+#: row's un-bumped font size, and the picker uses UserRole + 1/+ 2.
+STEP_RESULT_ROLE = Qt.ItemDataRole.UserRole + 10
+STEP_DETAIL_ROLE = Qt.ItemDataRole.UserRole + 11
+STEP_EMPHASIS_ROLE = Qt.ItemDataRole.UserRole + 12
+
+
+def _row_fill(item) -> QBrush:
+    """The background a painted row should use: the item's own brush, or the list's
+    white when the item carries no background.
+
+    Ticket 39 review: the delegate asked a `QBrush` for `brushStyle()`, which PySide6
+    does not have — the correct method is `style()`. The exception was raised inside
+    `paint`, Qt swallowed it and the row was left unpainted, so every tinted row and
+    every ordinary row in both layouts drew nothing at all."""
+    background = item.data(Qt.ItemDataRole.BackgroundRole)
+    if background is None or background.style() == Qt.BrushStyle.NoBrush:
+        return QBrush(QColor(TOKENS["surface"]))
+    return background
+
+
+def _detail_pen(fill: QColor) -> QColor:
+    """The colour of a row's secondary line on ``fill``.
+
+    Ticket 39 review: the muted ink reads 6.38:1 on the pale tints, but on the solid primary
+    fill a selected row takes it drops to 1.01:1 — the Actual/Expected line simply vanished.
+    The muted tone is kept wherever it still reaches 4.5:1, and the body ink or white is used
+    where it does not."""
+    muted = TOKENS["ink_2"]
+    return QColor(muted) if contrast(muted, fill) >= 4.5 else QColor(ink_on(fill))
+
+
+class StepRowDelegate(QStyledItemDelegate):
+    """Paint a Run-view step row: name, a result badge at the right edge, the
+    Actual/Expected detail line, and the 5 px left bar on the current or failed
+    step (R4). The item keeps its text, so the row stays readable to tests,
+    tooltips and screen readers; only the drawing changes."""
+
+    #: The narrowest a badge is ever drawn: enough for PASS, FAIL or ERROR with their
+    #: glyph. Longer Result words widen it (ticket 39 review, `badge_width_for`).
+    BADGE_MIN_WIDTH = 64
+    #: The step name keeps at least this much of the row beside the badge, so a wide
+    #: badge on a narrow list never pushes the step's name out of view.
+    NAME_MIN_WIDTH = 40
+
+    def _badge_width(self, word: str, rect) -> int:
+        """How much of the row the badge for ``word`` may take.
+
+        The word is painted, not clipped, so the badge is measured from the font's own
+        metrics; on a list too narrow for both the badge and the name, the badge keeps
+        its minimum and the name is what loses the room."""
+        needed = badge_width_for(word)
+        return min(max(self.BADGE_MIN_WIDTH, needed), max(self.BADGE_MIN_WIDTH, rect.width() - self.NAME_MIN_WIDTH))
+
+    def paint(self, painter, option, item) -> None:  # noqa: N802 - Qt's name
+        rect = option.rect
+        painter.save()
+        # The delegate's third argument is the model index, not the QListWidgetItem: read the
+        # roles (and the roles this screen sets) through it, so both layouts' delegates work.
+        text = item.data(Qt.ItemDataRole.DisplayRole) or ""
+        emphasis = item.data(STEP_EMPHASIS_ROLE) or ""
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        left = rect.left() + (5 if emphasis else 4)
+        if emphasis:
+            fill, bar = (
+                (TOKENS["failed_tint"], TOKENS["failed"])
+                if emphasis == "failed"
+                else (_CURRENT_BG, TOKENS["primary"])
+            )
+            painter.fillRect(rect, QColor(fill))
+            painter.fillRect(QRect(rect.left(), rect.top(), 5, rect.height()), QColor(bar))
+        elif selected:
+            fill = TOKENS["primary"]
+            painter.fillRect(rect, QColor(fill))
+        else:
+            brush = _row_fill(item)
+            fill = brush.color()
+            painter.fillRect(rect, brush)
+        font = item.data(Qt.ItemDataRole.FontRole)
+        painter.setFont(font if font is not None else painter.font())
+        # Ticket 39 review, second pass: the ink is decided by the background this row is actually
+        # painted, not by the row being selected. A selected current or failed row keeps its pale
+        # tint — white ink on primary_tint is 1.23:1 and on failed_tint 1.24:1, so the step's name
+        # was invisible — while a plain selected row is filled solid primary, where white is the
+        # only ink that reads (6.28:1 against 2.50:1).
+        painter.setPen(QColor(ink_on(fill)))
+        result = item.data(STEP_RESULT_ROLE) or ""
+        badge_width = self._badge_width(result, rect) if result else self.BADGE_MIN_WIDTH
+        text_rect = QRect(left, rect.top() + 4, max(0, rect.width() - left - badge_width - 6), rect.height())
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
+        if result:
+            badge = QRect(rect.right() - badge_width - 2, rect.top() + 4, badge_width, 18)
+            paint_result_badge(painter, badge, result, word=result)
+        detail = item.data(STEP_DETAIL_ROLE) or ""
+        if detail:
+            painter.setFont(mono_font(11))
+            painter.setPen(_detail_pen(fill))
+            detail_rect = QRect(left, rect.top() + 22, max(0, rect.width() - left - badge_width - 6), 12)
+            painter.drawText(detail_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, detail)
+        painter.restore()
+
+
+class ResultBadgeDelegate(QStyledItemDelegate):
+    """The three-pane Result column, painted as a badge (R4). The cell text stays
+    what it was — tests, tooltips and the report read it — but the pixels are the
+    badge's fill, glyph and word rather than plain black type."""
+
+    def paint(self, painter, option, item) -> None:  # noqa: N802 - Qt's name
+        text = (item.data(Qt.ItemDataRole.DisplayRole) or "").strip()
+        kind = text.upper()
+        if kind not in RESULT_STYLES:
+            # The delegate is set on the whole table; cells whose text is not a result
+            # (Step, Actual, Message) keep Fusion's ordinary drawing.
+            super().paint(painter, option, item)
+            return
+        painter.save()
+        painter.fillRect(option.rect, _row_fill(item))
+        height = min(18, option.rect.height() - 4)
+        # Ticket 39 review: the badge takes the width the word needs (see
+        # `badge_width_for`) rather than a fixed 72 px, which squeezed "NOREPORT"
+        # down to its glyph alone. The column is widened to match in `StepTable`.
+        width = max(16, min(option.rect.width() - 8, badge_width_for(text, height)))
+        badge = QRect(
+            option.rect.left() + 4,
+            option.rect.top() + max(2, (option.rect.height() - height) // 2),
+            width,
+            height,
+        )
+        paint_result_badge(painter, badge, kind, word=text)
+        painter.restore()
+
+
+def build_summary(nodes: list[dict], attempts: list[dict], run: Optional[dict] = None, running: bool = False) -> str:
+    """The Summary tab's text: the run's verdict, then one line per Test Step.
+
+    Ticket 39 review: the verdict is the one the engine recorded — the ``result`` and
+    ``end_reason`` on the run row written by ``update_run_end`` — never a recomputation
+    from the step rows. A run that ended PRETEST_FAILED, STOPPED_ON_FAIL or ABORTED is
+    FAIL whatever the steps say, and a step that ran without reporting (``NOREPORT``)
+    does not by itself decide the run: the engine does, and the Summary says what the
+    engine wrote. While the run is still up there is no final result to show, so the
+    tab lists the steps without a verdict line."""
+    verdict = str((run or {}).get("result") or "")
+    if not verdict:
+        # No run row with a result: the run is still going, or never started.
+        verdict = "RUNNING" if running else "NOTRUN"
+    reason = str((run or {}).get("end_reason") or "")
+    lines = [f"Result: {verdict}" + (f" ({reason})" if reason else "")]
+    for node in nodes:
+        if node.get("kind") != "step":
+            continue
+        lines.append(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {node.get('result', '')}")
+    return "\n".join(lines)
+
+
 class RunScreenMixin:
     """The run-side behaviour both layouts repeat, in one place (packet 25a review).
 
@@ -1182,6 +1664,62 @@ class RunScreenMixin:
     #: A finished run whose rows this layout did not read while it was hidden, drawn the moment it
     #: is showing again (packet 25b review).
     _deferred_run_uuid: Optional[str] = None
+
+    #: True once the window has released this layout (ticket 39 review). The one-second header
+    #: timer is stopped before the session's store is closed, and a tick that still arrives finds
+    #: this flag and does nothing: reading a closed store raises `sqlite3.ProgrammingError`, which
+    #: Qt swallows into an event-loop exception at teardown.
+    _released = False
+
+    #: The run row the header last read, and the run it belongs to (ticket 39 review). The header
+    #: timer fires once a second, and the run row's schedule, UUT and Stop-on-Fail do not change
+    #: while the run is up, so it is read once per run and re-read when the run's row changes.
+    _run_row_cache: Optional[dict] = None
+    _run_row_cache_uuid: Optional[str] = None
+
+    def stop_run_timers(self) -> None:
+        """Stop this layout's one-second header timer and mark it released.
+
+        MainWindow calls this from `_release_resources` before it closes the session, so the timer
+        cannot tick after the store is closed (ticket 39 review)."""
+        self._released = True
+        timer = getattr(self, "_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _store_open(self) -> bool:
+        """Whether this layout's session still has a store it can read.
+
+        Ticket 39 review: the header timer ticks once a second. Once the window has released the
+        session — or a test has closed it — every read raises `sqlite3.ProgrammingError: Cannot
+        operate on a closed database` inside the Qt event loop, which Qt swallows and pytest-qt
+        reports as a teardown error. Stopping the timer at release is the fix; this is the guard
+        for every path that reads the store."""
+        session = getattr(self, "session", None)
+        if session is None or getattr(session, "_closed", False):
+            return False
+        store = getattr(session, "store", None)
+        return store is not None and not getattr(store, "_closed", False)
+
+    def _run_row_for_header(self) -> Optional[dict]:
+        """The current run's row, read from the store at most once per run phase.
+
+        The header's identity line and the finished verdict come from the same row every tick, so
+        it is cached rather than re-queried every second (ticket 39 review). `invalidate_run_row`
+        is called when the row changes — a run finishing, a new run starting — and the next read
+        fetches it again."""
+        if self._released or not self._store_open() or self.session.run_uuid is None:
+            return self._run_row_cache
+        run_uuid = self.session.run_uuid
+        if self._run_row_cache is None or self._run_row_cache_uuid != run_uuid:
+            self._run_row_cache = self.session.store.get_test_run(run_uuid)
+            self._run_row_cache_uuid = run_uuid
+        return self._run_row_cache
+
+    def invalidate_run_row(self) -> None:
+        """Forget the cached run row: the next header read fetches the store's current one."""
+        self._run_row_cache = None
+        self._run_row_cache_uuid = None
 
     def set_active(self, active: bool) -> None:
         """Make this the layout that acts, or the one that only mirrors the session.
@@ -1222,6 +1760,31 @@ class RunScreenMixin:
         hidden: a hidden layout has nothing on screen to draw them into (packet 25b review)."""
         self._deferred_run_uuid = run_uuid or None
         self.mark_store_dirty()
+
+    def _clear_deferred_run(self) -> None:
+        """Forget a finished run this layout never drew (ticket 39 review, second pass).
+
+        A deferred read belongs to the run that finished, not to the session: if the Operator starts
+        another run while this layout is hidden, the old uuid is stale, and drawing it when the
+        layout comes back shows the previous run's results over the run that is actually waiting
+        for an answer. A new run clears it, and :meth:`_sync_from_store` checks it against the
+        session's current run as well."""
+        self._deferred_run_uuid = None
+
+    def _deferred_run_is_current(self) -> Optional[str]:
+        """The deferred run uuid, but only while it is still the run the session is on.
+
+        Ticket 39 review, second pass: the guard that makes the deferral safe. A layout hidden
+        through a whole run defers that run; if a new run has started since, the deferred uuid is
+        not what the Operator should see, and drawing it would paint the finished run's rows and
+        close the Step Inputs the current run is waiting on."""
+        run_uuid = self._deferred_run_uuid
+        if run_uuid is None:
+            return None
+        if run_uuid != self.session.run_uuid:
+            self._deferred_run_uuid = None
+            return None
+        return run_uuid
 
     def _sync_from_store(self) -> None:
         """Redraw this layout from the store it mirrors.
@@ -1363,6 +1926,7 @@ class RunScreenMixin:
             self._pre_counts = (done, total)
         else:
             self._post_counts = (done, total)
+            self._post_test_started = True  # the header chip reads POST-TEST (D4)
         self._item_started_at = now
         self._refresh_log()
         self._update_header(now=now)
@@ -1371,10 +1935,20 @@ class RunScreenMixin:
         """A Test Step Attempt — or a Retry of one — has begun.
 
         `node_seq` is the step that started: the Steps tally counts each distinct step once, so a
-        Retry restarts the current-item timer without counting the step twice (packet 14d)."""
+        Retry restarts the current-item timer without counting the step twice (packet 14d). Ticket
+        39 (R4): the current step is the one the Operator must look at, so its row gets the primary
+        emphasis and, in the staged Run view, its collapsed Step Input rows expand to their full
+        controls."""
         now = self._clock()
         self._started_steps.add(node_seq)
+        self._current_seq = node_seq
+        # The status bar's "Current" timer measures the Attempt that just began — a
+        # Retry restarts it without counting the step twice (packet 14d). Without this
+        # the bar kept the previous Action's start time and the pause's timer read wrong.
         self._item_started_at = now
+        self._mark_current_step(node_seq)
+        for widget in self.step_input_widgets().get(node_seq, ()):
+            widget.set_summary(False)
         self._refresh_log()
         self._update_header(now=now)
 
@@ -1394,11 +1968,97 @@ class RunScreenMixin:
     def _attempt_row(self, node_seq: int, attempt_no: int) -> Optional[dict]:
         """The Attempt row a pause was raised on — its result and message, read from the store."""
         run_uuid = self.session.run_uuid
-        if run_uuid is None:
+        if run_uuid is None or not self._store_open():
             return None
         for row in self.session.store.attempts(run_uuid):
             if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
                 return row
+        return None
+
+    # -- the shared run header (ticket 39, R2/D4) --------------------------
+
+    def _run_header_state(self) -> tuple[str, str]:
+        """The chip kind and word for the header (D4 vocabulary): never the internal
+        `STARTED`/`WAITING`/`FINISHED`. INPUT NEEDED while a blocking Step Input waits,
+        STEP FAILED while a Stop-on-Fail pause is pending, PASS/FAIL once the run is
+        finished (the verdict comes from the run row the store wrote, not from a guess)."""
+        if self.state == SessionState.FINISHED:
+            verdict = str((self._run_row_for_header() or {}).get("result") or "")
+            if verdict == "PASS":
+                return "pass", "PASS"
+            if verdict == "FAIL":
+                return "fail", "FAIL"
+            return "notrun", "NOTRUN"
+        if self.state == SessionState.STARTED:
+            if self.session.pause_pending():
+                return "step_failed", "STEP FAILED"
+            if getattr(self, "_waiting_inputs", None):
+                return "input", "INPUT NEEDED"
+            if getattr(self, "_post_test_started", False):
+                return "running", "POST-TEST"
+            return "running", "RUNNING"
+        return "ready", "READY"
+
+    def _refresh_run_header(self, now: Optional[datetime] = None) -> None:
+        """Write the shared header: state chip, Test Schedule and Media Release, the run's
+        identity line (UUT, Project, Operator, Stop-on-Fail, End Reason) and the run timer.
+        Everything is read from the session and the store; the header decides nothing.
+
+        Ticket 39 review: a released layout has nothing left to read — the window closed the
+        store — so a tick that arrives after teardown writes nothing instead of raising against
+        a closed database. The run row is cached (`_run_row_for_header`) rather than queried
+        every second."""
+        header = getattr(self, "run_header", None)
+        if header is None or self._released or not self._store_open():
+            return
+        if now is None:
+            now = self._clock()
+        kind, word = self._run_header_state()
+        header.set_state(kind, word)
+        run = self._run_row_for_header()
+        if run:
+            meta = [
+                f"UUT {run.get('uut_type') or ''} {run.get('uut_serial') or ''}".strip() or "UUT —",
+                f"Project {run['project']}" if run.get("project") else "",
+                f"Operator {run['operator']}" if run.get("operator") else "",
+                "Stop on Fail" if run.get("stop_on_fail") else "Continue on fail",
+            ]
+            if run.get("end_reason"):
+                meta.append(f"End reason: {run['end_reason']}")
+            header.set_run_info(run.get("schedule_name") or "", run.get("media_number") or "", " · ".join(bit for bit in meta if bit))
+        if self._started_at is not None:
+            header.set_timer(_format_elapsed(now - self._started_at))
+
+    def toggle_debug(self) -> None:
+        """Open or close the Debug window (D2): the header button or `Ctrl+D`. The layout
+        that is not on screen does nothing, so the shortcut cannot fight the visible one.
+
+        Ticket 39 review: nothing opens before there is a log to read. During setup the
+        Debug window is an empty window taking bench space, so the shortcut and the
+        button do nothing until the run has recorded a line; a window that is already
+        open always closes."""
+        window = getattr(self, "debug_window", None)
+        if not self.is_active() or window is None:
+            return
+        if not window.isVisible() and not window.rendered_lines():
+            return
+        window.toggle()
+
+    def _update_summary(self, nodes: list[dict], attempts: list[dict]) -> None:
+        """The Summary tab of the Log band (R3), shared by both layouts.
+
+        Ticket 39 review: the verdict line is the run's stored result, not a guess from
+        the step rows, and while the run is still up the tab has no final verdict to
+        print."""
+        pane = getattr(self, "summary_pane", None)
+        if pane is None or not self._store_open():
+            return
+        run = self._run_row_for_header()  # the cached run row, not a query per refresh
+        pane.setText(build_summary(nodes, attempts, run=run, running=self.state == SessionState.STARTED))
+
+    def _mark_current_step(self, node_seq: int) -> None:
+        """Layout hook: emphasise the step that just started (R4). Layouts without a
+        step list that can be emphasised do nothing."""
         return None
 
     def step_input_widgets(self) -> dict[int, list[StepInputWidget]]:
@@ -1417,13 +2077,19 @@ class RunScreenMixin:
         widget = self.input_widget(node_seq, index)
         if widget is not None:
             widget.answer(value)
+        getattr(self, "_waiting_inputs", set()).discard((node_seq, index))
+        self._refresh_run_header()  # the chip leaves INPUT NEEDED the moment the answer lands
 
     def _show_log(self, log_lines: list[dict]) -> None:
-        """The log pane shows INFO and above; the debug window keeps every level (ticket 08)."""
+        """The log pane shows INFO and above; the debug window keeps every level (ticket 08).
+
+        Ticket 39 review: both panes are live, and every refresh is handed the whole log
+        the store has. They are not cleared here — :meth:`LogPane.add_lines` renders only
+        the rows after the highest seq it already drew — because clearing on every line
+        logged threw the Operator back to the top of the log and reset the tail they were
+        reading. A run's own lines start from the clears at its start."""
         info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
-        self.log_pane.clear()
         self.log_pane.add_lines(info_and_above)
-        self.debug_window.clear()
         self.debug_window.add_lines(log_lines)
 
     def _refresh_log(self) -> None:
@@ -1436,6 +2102,8 @@ class RunScreenMixin:
         if not self.is_active():
             self.mark_store_dirty()
             return
+        if not self._store_open():
+            return  # ticket 39 review: the window released the session, so there is nothing to read
         run_uuid = self.session.run_uuid
         self._show_log(self.session.store.log_lines(run_uuid) if run_uuid else [])
 
@@ -1471,7 +2139,9 @@ class MismatchConfirmation(QDialog):
         self._stored_override: Optional[bool] = None
 
         layout = QVBoxLayout(self)
-        header = QLabel(f"<b>{html.escape(schedule_name)}</b><br><span style='color:#666'>{html.escape(release)}</span>")
+        header = QLabel(
+            f"<b>{html.escape(schedule_name)}</b><br><span style='color:{TOKENS['ink_2']}'>{html.escape(release)}</span>"
+        )
         layout.addWidget(header)
         if run_details:  # the mockup's "UUT …, Project …, Operator …" line
             layout.addWidget(QLabel(run_details))

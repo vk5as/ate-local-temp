@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt
 from ate.catalog import _search_chain, definition_mismatches, find_definitions, include_map, list_schedule_rows, module_map
 from ate.engine.lua_host import HostError, LuaHost
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
 
 WRONG_SHA = "0" * 64
@@ -929,15 +930,22 @@ def test_disabling_an_included_child_records_it_notrun(qapp, tmp_path) -> None:
     # The finished list shows the whole tree: header rows (no result) with their children indented,
     # so the two "output on"/"output off" pairs read as two different places. Packet 15d adds the
     # header rollup: every step beneath a header has a Result here, so both read "2/2 done".
+    # Ticket 39 (R4): a step's Result is painted as a badge from the row's result role, not written
+    # into the row text, so the label list below is the tree and the roles are the Results.
     assert rows == [
-        "1.  setup  →  PASS",
+        "1.  setup",
         "2.  channel 1  2/2 done",
-        "  2.1.  output on  →  PASS",
-        "  2.2.  output off  →  NOTRUN",
+        "  2.1.  output on",
+        "  2.2.  output off",
         "3.  channel 2  2/2 done",
-        "  3.1.  output on  →  PASS",
-        "  3.2.  output off  →  PASS",
+        "  3.1.  output on",
+        "  3.2.  output off",
     ]
+    results = [
+        screen.run_view.step_list.item(i).data(STEP_RESULT_ROLE)
+        for i in range(screen.run_view.step_list.count())
+    ]
+    assert results == ["PASS", "", "PASS", "NOTRUN", "", "PASS", "PASS"], results
 
 
 def test_the_paused_run_list_shows_headers_and_indents_children(qapp, tmp_path) -> None:
@@ -972,14 +980,20 @@ def test_the_paused_run_list_shows_headers_and_indents_children(qapp, tmp_path) 
     # Packet 15d's rollup reads live: channel 1's two steps are both recorded, channel 2's failing
     # step has no node row yet (it is written after its last Attempt), so it counts 1 of 2.
     assert rows == [
-        "1.  setup  →  PASS",
+        "1.  setup",
         "2.  channel 1  2/2 done",
-        "  2.1.  output on  →  PASS",
-        "  2.2.  output off  →  PASS",
+        "  2.1.  output on",
+        "  2.2.  output off",
         "3.  channel 2  1/2 done",
-        "  3.1.  output on  →  PASS",
-        "  3.2.  output off  →  FAIL",
+        "  3.1.  output on",
+        "  3.2.  output off",
     ]
+    # The paused step's badge comes from the Attempt the prompt was raised on; the row the delegate
+    # emphasises (R4) is that step's.
+    step_list = screen.run_view.step_list
+    results = [step_list.item(i).data(STEP_RESULT_ROLE) for i in range(step_list.count())]
+    assert results == ["PASS", "", "PASS", "PASS", "", "PASS", "FAIL"], results
+    assert step_list.item(6).data(STEP_EMPHASIS_ROLE) == "failed", results
     assert screen._failed_row is screen.run_view.step_list.item(6)
     screen.run_view.failure_prompt_bar.continue_button.click()
     assert _finish(qapp, session)

@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QSplitter,
     QTableWidget,
     QWidget,
@@ -597,7 +597,8 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     assert screen.table.table.columnSpan(prompt_row, 0) == len(COLUMNS), "the prompt is not spanned across the table"
     assert bar.step_label.text() == "Step 1. FAIL"
     assert screen.table.table.item(row, COLUMNS.index("Result")).text() == "FAIL"
-    assert screen.table.table.item(row, COLUMNS.index("Result")).background().color().name().lower().startswith("#fff0f0")
+    # Ticket 39 (R4): the paused step's row takes the theme's failed tint, not the mockup's hex.
+    assert screen.table.table.item(row, COLUMNS.index("Result")).background().color().name().lower().startswith("#fde8e6")
     other_row = screen.table._step_rows[1]
     assert screen.table.table.item(other_row, COLUMNS.index("Result")).background().color().name().lower() == "#ffffff", "a step not paused is tinted"
     assert screen.status_bar.status_label.text() == "Paused"
@@ -738,9 +739,10 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
     for pane in panes:
         groups: dict = {}
         # PySide6's findChildren takes one type, not a tuple of them: walk every widget in the
-        # pane and keep the four kinds this test looks at.
+        # pane and keep the kinds this test looks at. Ticket 39 (R3): the Log tab's lines are
+        # painted by a read-only mono `QPlainTextEdit`, so it counts as drawn text too.
         for widget in pane.findChildren(QWidget):
-            if not isinstance(widget, (QLabel, QPushButton, QCheckBox, QLineEdit)):
+            if not isinstance(widget, (QLabel, QPushButton, QCheckBox, QLineEdit, QPlainTextEdit)):
                 continue
             if not widget.isVisible():
                 continue
@@ -1001,8 +1003,10 @@ def test_a_mismatch_is_flagged_once_and_the_left_pane_never_scrolls_sideways(qap
     for widget in (
         screen.picker.schedule_list,
         screen.table.table,
-        screen.log_pane.findChild(QScrollArea),
-        screen.debug_window.findChild(QScrollArea),
+        # Ticket 39 (R3): the log is a mono `QPlainTextEdit` now, so the pane is asked for the
+        # widget that scrolls instead of the `QScrollArea` it used to hold.
+        screen.log_pane.text_widget(),
+        screen.debug_window.text_widget(),
     ):
         bar = widget.horizontalScrollBar()
         assert bar.maximum() == 0 or not bar.isVisible(), f"{widget} needs a horizontal scrollbar"

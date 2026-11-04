@@ -43,8 +43,9 @@ from .report.pdf import pdf_sandbox_choice
 from .run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .storage.store import DbLaunchStatus, check_database_at_launch
 from .ui.history_screen import HistoryScreen
-from .ui.run_widgets import load_schedule_steps
+from .ui.run_widgets import DebugWindow, load_schedule_steps
 from .ui.staged_run_screen import StagedRunScreen
+from .ui.theme import TOKENS, apply_theme
 from .ui.three_pane_run_screen import ThreePaneRunScreen
 
 
@@ -81,6 +82,9 @@ class MainWindow(QMainWindow):
         pdf_choice: Optional[Callable[[], str]] = None,
     ) -> None:
         super().__init__()
+        # Ticket 39 (R1): the fixed light design system, applied here as well as in launch()
+        # so a window built without launch() (the tests, for one) still wears it.
+        apply_theme(QApplication.instance())
         self.session = session
         self.config = config
         self.app_log = app_log
@@ -96,10 +100,26 @@ class MainWindow(QMainWindow):
 
         self.history_session = HistorySession(session.store, config=session.config, pdf_choice=pdf_choice)
 
+        # Ticket 39 review (D2): one Debug window for the window, parented to it. A window per
+        # layout meant a layout switch could leave two open, and a parentless window outlived the
+        # main window when the Operator closed ATE — the application kept running with nothing on
+        # screen. Parenting it with the Window flag keeps it a separate window whose lifetime is
+        # the main window's.
+        self.debug_window = DebugWindow(parent=self)
+        if run_screen is not None:
+            # A screen handed in from outside (the tests, mainly) built its own Debug window:
+            # the layouts use the window's one shared window instead.
+            run_screen.debug_window = self.debug_window
+            view = getattr(run_screen, "run_view", None)
+            if view is not None:
+                view.debug_window = self.debug_window
+
         # The two layouts, both bound to this session from the start (packet 25b).
-        self.staged_screen = run_screen if isinstance(run_screen, StagedRunScreen) else StagedRunScreen(session)
+        self.staged_screen = (
+            run_screen if isinstance(run_screen, StagedRunScreen) else StagedRunScreen(session, debug_window=self.debug_window)
+        )
         self.three_pane_screen = (
-            run_screen if isinstance(run_screen, ThreePaneRunScreen) else ThreePaneRunScreen(session)
+            run_screen if isinstance(run_screen, ThreePaneRunScreen) else ThreePaneRunScreen(session, debug_window=self.debug_window)
         )
         self.history_screen = history_screen or HistoryScreen(self.history_session)
         self.run_screens = {"staged": self.staged_screen, "threePane": self.three_pane_screen}
@@ -304,7 +324,7 @@ class MainWindow(QMainWindow):
             if label is None:
                 label = QLabel(self)
                 label.setObjectName("internal_error_label")
-                label.setStyleSheet("color: #b00020; font-weight: bold;")
+                label.setStyleSheet(f"color: {TOKENS['broken_err']}; font-weight: bold;")
                 label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self.statusBar().addWidget(label, 1)
             details = f"Details: {log_path}" if log_path else "The details could not be written to the application log."
@@ -336,6 +356,23 @@ class MainWindow(QMainWindow):
         if self._released:
             return
         self._released = True
+        # The Debug window is a window of its own (D2), so it is closed here explicitly: its
+        # parent being destroyed is not enough to stop a shown top-level window from keeping
+        # the event loop alive (ticket 39 review).
+        windows = [self.debug_window] + [getattr(screen, "debug_window", None) for screen in self.run_screens.values()]
+        for window in windows:
+            if window is not None:
+                try:
+                    window.close()
+                except Exception:  # noqa: BLE001 - closing a window must not stop the release
+                    pass
+        # Ticket 39 review: the layouts' one-second header timers are stopped before the store is
+        # closed. Left running, a tick after this point read the finished run row from a closed
+        # database and raised `sqlite3.ProgrammingError` inside the Qt event loop.
+        for screen in self.run_screens.values():
+            stop = getattr(screen, "stop_run_timers", None)
+            if stop is not None:
+                stop()
         self.session.close()
         if self.exception_log is not None:
             self.exception_log.uninstall()
@@ -523,6 +560,9 @@ def launch(
     session.store.close_interrupted_runs(on_log=session.on_log)  # spec 98, logged by the store itself
 
     app = QApplication.instance() or QApplication([])  # reused when a test already has one
+    # Ticket 39 (R1): the fixed light design system — Fusion, the token palette, the
+    # platform font and one stylesheet — applied once per QApplication.
+    apply_theme(app)
     window = MainWindow(session, config, app_log=app_log, confirm_close=confirm_close, pdf_choice=pdf_choice)
     # PySide6 only prints an exception from a slot and carries on: this is how it reaches the log and
     # the Operator. Queued, because the hook can run on the worker, and so a raising slot has unwound.

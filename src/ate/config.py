@@ -387,6 +387,9 @@ def _validate_and_fill(raw: Any, path: str, hostname: str = "") -> dict[str, Any
 
     # ui.theme and reports.logo are not validated: what they accept is part of the appearance
     # work (packet 33), which has not decided the values yet. Both are stored and read as given.
+    # Ticket 39: `ui.theme` stays parsed and stored (ui_theme) as a reserved key — the accepted
+    # choices ship a fixed light design system only; a dark mode is a later packet, and nothing
+    # in the UI reads this value.
     return result
 
 

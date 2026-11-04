@@ -151,8 +151,12 @@ def test_staged_finished_run_keeps_the_window_size_and_the_status_bar(qapp, tmp_
     assert staged.run_view.isVisible() and staged.run_view.tabs.isVisible(), "the tabs went off-screen"
     _status_bar_inside(window, staged.run_view)
     viewport_finished = staged.run_view.step_list.viewport().height()
-    assert viewport_finished >= viewport_running, (
-        f"the finished step list viewport {viewport_finished} px is smaller than its running height {viewport_running} px"
+    # Ticket 39 (R2): the header's identity line gains the End Reason at FINISHED, which can take
+    # one wrapped line; the packet's rule is that the list never collapses, so the room the header
+    # takes is bounded and the floor still holds.
+    assert viewport_finished >= viewport_running - 12, (
+        f"the finished step list viewport {viewport_finished} px is smaller than its running height "
+        f"{viewport_running} px (the header's identity line may take a line, the list may not collapse)"
     )
     assert viewport_finished >= STEP_LIST_FLOOR, (
         f"the finished step list viewport collapsed to {viewport_finished} px (the 68 px collapse of 10a/29c/29d)"
@@ -178,8 +182,9 @@ def test_three_pane_finished_run_keeps_the_window_size_and_the_status_bar(qapp, 
     assert window.size() == QSize(*WINDOW_SIZE), f"the window grew to {window.size()} after the run finished"
     _status_bar_inside(window, three)
     viewport_finished = three.table.table.viewport().height()
-    assert viewport_finished >= viewport_running, (
-        f"the finished table viewport {viewport_finished} px is smaller than its running height {viewport_running} px"
+    assert viewport_finished >= viewport_running - 12, (
+        f"the finished table viewport {viewport_finished} px is smaller than its running height "
+        f"{viewport_running} px (the header's identity line may take a line, the table may not collapse)"
     )
     window.grab().save(str(tmp_path / "three-pane-finished.png"))
     _finish(window)
@@ -420,7 +425,7 @@ def test_the_log_tab_holds_only_the_current_run(qapp, tmp_path, fake_pdf):
     staged = window.staged_screen
     _fill_and_start(qapp, window, schedule)
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the first run never finished"
-    first_lines = staged.run_view.log_tab.text().splitlines()
+    first_lines = staged.run_view.log_tab.rendered_lines()
     assert len(first_lines) == 20, f"the Log tab did not hold the first run's 20 Attempt lines: {len(first_lines)}"
 
     staged.run_view.new_run_button.click()
@@ -428,11 +433,15 @@ def test_the_log_tab_holds_only_the_current_run(qapp, tmp_path, fake_pdf):
         qapp.processEvents()
     staged.steps_options_stage.run_button.click()
     assert _wait(qapp, lambda: window.session.state == SessionState.STARTED), "the second run never started"
-    assert staged.run_view.log_tab.text() == "", "the finished run's log is still on screen while the new run is up"
+    assert staged.run_view.log_tab.rendered_lines() == [], "the finished run's log is still on screen while the new run is up"
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the second run never finished"
-    second_lines = staged.run_view.log_tab.text().splitlines()
+    second_lines = staged.run_view.log_tab.rendered_lines()
     assert len(second_lines) == 20, f"the Log tab accumulated runs: {len(second_lines)} lines after the second run"
-    assert second_lines == first_lines, "the Log tab is not the current run's own lines"
+    # R3 draws each line with the time it was recorded, so compare the level/source/text columns:
+    # the two runs log the same 20 lines, at different seconds.
+    assert [line[9:] for line in second_lines] == [line[9:] for line in first_lines], (
+        "the Log tab is not the current run's own lines"
+    )
     _finish(window)
 
 
@@ -442,10 +451,10 @@ def test_the_log_and_summary_panes_are_read_only(qapp, tmp_path, fake_pdf):
     staged = window.staged_screen
     _fill_and_start(qapp, window, schedule)
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the run never finished"
-    for pane in (staged.run_view.log_tab, staged.run_view.summary_tab):
+    for pane in (staged.run_view.log_pane.text_widget(), staged.run_view.summary_tab):
         assert pane.isReadOnly(), "the Log/Summary pane is editable"
         pane.setPlainText("typed by the run")  # the run may still write it
-        assert pane.text() == "typed by the run", "a read-only pane cannot be written by the run"
+        assert pane.toPlainText() == "typed by the run", "a read-only pane cannot be written by the run"
     _finish(window)
 
 
@@ -471,7 +480,6 @@ def test_the_bottom_band_grows_with_the_window_not_against_a_ceiling(qapp, tmp_p
     assert finished >= STEP_LIST_FLOOR, f"the step list viewport collapsed to {finished} px"
     log_small = view.log_pane.height()
     tabs_small = view.tabs.height()
-    debug_small = view.debug_window.height()
     _finish(small)
 
     big, schedule = _shown_window(qapp, tmp_path, "staged", TALL_WINDOW)
@@ -485,7 +493,11 @@ def test_the_bottom_band_grows_with_the_window_not_against_a_ceiling(qapp, tmp_p
         f"the log pane did not grow with the window: {big_view.log_pane.height()} px at {TALL_WINDOW} vs {log_small} px at {WINDOW_SIZE}"
     )
     assert big_view.tabs.height() > tabs_small, "the Log/Summary tabs did not grow with the window"
-    assert big_view.debug_window.height() > debug_small, "the debug pane did not grow with the window"
+    # Ticket 39 (D2): Debug is a window of its own, not a band in the view, so it has no share of
+    # the window's height to grow into; it is sized by whoever opens it, and carries no ceiling.
+    debug = big_view.debug_window
+    assert debug.window() is debug, "Debug is still a band inside the Run view rather than a window"
+    assert debug.maximumHeight() == QWIDGETSIZE_MAX, "the Debug window carries a ceiling"
     # The stretch order is what makes the step list dominate the view at both sizes.
     assert view.step_list.viewport().height() > log_small, "the step list is not the view's largest pane"
     assert big_view.step_list.viewport().height() > big_view.log_pane.height(), "the step list is not the view's largest pane"

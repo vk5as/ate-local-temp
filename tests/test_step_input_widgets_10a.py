@@ -40,13 +40,21 @@ from PySide6.QtWidgets import (
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StepInputWidget, StagedRunScreen
+from ate.ui.theme import TOKENS
 from tests._fixtures import assert_no_swallowed_exception
 
-#: The mockup's `.inp.inp-on` (line 54): background and left border, read off the pixels.
-ACTIVE_BG = (255, 246, 204)  # #fff6cc
-ACTIVE_BORDER = (224, 168, 0)  # #e0a800
-#: The mockup's `.err` (line 28).
-ERR_RGB = (183, 28, 28)  # #b71c1c
+
+def _rgb(value: str) -> tuple[int, int, int]:
+    """A palette token as the (red, green, blue) triple a pixel of it paints."""
+    return tuple(int(value[i : i + 2], 16) for i in (1, 3, 5))
+
+
+#: The mockup's `.inp.inp-on` (line 54): background and left border, read off the pixels. The
+#: palette's ask tokens are what the design system paints now (ticket 39, R1).
+ACTIVE_BG = _rgb(TOKENS["ask"])  # was the mockup's #fff6cc
+ACTIVE_BORDER = _rgb(TOKENS["ask_edge"])  # was the mockup's #e0a800
+#: The mockup's `.err` (line 28), now the palette's error red.
+ERR_RGB = _rgb(TOKENS["broken_err"])  # was #b71c1c
 #: `.inp input[type=text] { width: 140px }` and `.inputs { margin-left: 26px }`.
 INPUT_WIDTH = 140
 INDENT = 26
@@ -337,8 +345,12 @@ def _pixels(widget) -> set[tuple[int, int, int]]:
 
 
 def _left_edge(widget) -> int:
-    """How far the row's first control sits from the left of its row — the mockup's 26 px indent."""
-    return widget.pos().x() + min(label.pos().x() for label in widget.findChildren(QLabel))
+    """How far the row's content sits from the left of its row — the mockup's 26 px indent.
+
+    The indent is the widget's own left margin (`.inputs { margin-left: 26px }`); ticket 39 (D3)
+    shows a future step's row as a one-line summary, so it is the margin, not a specific control,
+    that says where the row's content begins."""
+    return widget.pos().x() + widget.layout().contentsMargins().left()
 
 
 def _recorded_inputs(store, run_uuid: str) -> list[tuple[int, str, str]]:
@@ -443,11 +455,16 @@ def test_the_line_edit_is_a_140px_control_in_the_row(qapp, tmp_path):
     controls_widget = widget.findChild(QWidget, "inp_w")
     assert widget.line_edit in widget.controls, "the line edit is not one of the row's controls"
     assert widget.line_edit.parent() is controls_widget, "the line edit is not in the row's control block"
+
+    # Ticket 39 (D3): the run has not reached this step, so the row shows its one-line summary and
+    # the controls are folded away. They open — at the mockup's 140 px — when the run asks.
+    assert widget.summary_label.isVisible(), "a future step's input shows no summary line"
+    assert not widget.line_edit.isVisible(), "the controls of a step not yet reached are open"
+    assert _pump_until(qapp, lambda: widget.line_edit.isEnabled()), "the input never opened"
+    assert widget.line_edit.isVisible(), "the asking line edit stayed folded into the summary"
     assert widget.line_edit.width() == INPUT_WIDTH, f"the line edit is {widget.line_edit.width()} px wide"
-    assert widget.line_edit.isVisible()
 
     # `focusActive`: the waiting input gets the cursor, so Enter submits it.
-    assert _pump_until(qapp, lambda: widget.line_edit.isEnabled()), "the input never opened"
     assert qapp.focusWidget() is widget.line_edit, "the asking line edit did not take focus"
 
 

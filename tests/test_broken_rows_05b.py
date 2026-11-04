@@ -25,10 +25,17 @@ from PySide6.QtWidgets import QLabel, QWidget
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.run_widgets import BROKEN_MARKER
 from ate.ui.staged_run_screen import StagedRunScreen, _broken_row_size_hint, _ROW_MARGIN_X, _wrapped_height
+from ate.ui.theme import TOKENS
 
-#: The mockup's broken-row colours, spelled out here so the assertions name the design directly.
-BROKEN_BG = (255, 245, 245)  # #fff5f5
-BROKEN_ERR = (183, 28, 28)  # #b71c1c
+#: The mockup's broken-row colours as the design system paints them (ticket 39, R1): `#fff5f5` is
+#: the palette's failed-row tint, `#b71c1c` its error red. Read from the tokens so the assertions
+#: move with the palette rather than pinning the mockup's literal hex.
+def _rgb(value: str) -> tuple[int, int, int]:
+    return tuple(int(value[i : i + 2], 16) for i in (1, 3, 5))
+
+
+BROKEN_BG = _rgb(TOKENS["failed_tint"])  # was the mockup's #fff5f5
+BROKEN_ERR = _rgb(TOKENS["broken_err"])  # was the mockup's #b71c1c
 
 GOOD_SRC = """\
 return ScheduleParams("Good schedule", "a schedule that loads and runs")
@@ -271,7 +278,7 @@ def test_broken_rows_are_styled_like_the_mockup(qapp, tmp_path):
     list_widget = _list(screen)
 
     for item in _broken_items(screen):
-        assert item.background().color() == QColor("#fff5f5"), item.text()
+        assert item.background().color() == QColor(TOKENS["failed_tint"]), item.text()
         widget = list_widget.itemWidget(item)
         assert widget is not None, item.text()
         assert BROKEN_BG in _pixels(widget), item.text()
@@ -286,7 +293,9 @@ def test_broken_rows_are_styled_like_the_mockup(qapp, tmp_path):
         assert nearest[0] > nearest[1] and nearest[0] > nearest[2], (
             f"{item.text()} paints {nearest}, which is not red"
         )
-        assert "#b71c1c" in error_label.styleSheet()
+        assert TOKENS["broken_err"] in error_label.styleSheet(), (
+            f"{item.text()} styles its error with {error_label.styleSheet()!r}, not the palette's error red"
+        )
 
     # A usable row keeps its plain look: no error widget, no broken background.
     for item in _usable_items(screen):

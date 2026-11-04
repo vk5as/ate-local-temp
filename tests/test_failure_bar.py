@@ -17,6 +17,8 @@ import time
 from PySide6.QtGui import QColor
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.run_widgets import STEP_EMPHASIS_ROLE
+from ate.ui.theme import TOKENS
 from ate.ui.staged_run_screen import FailurePromptBar, StagedRunScreen
 
 from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
@@ -128,10 +130,13 @@ def _attempts_for(store, run_uuid: str, node_seq: int) -> list:
 
 
 def _highlighted_row(step_list):
-    """The step-list row painted with the pause highlight (or ``None`` when clear)."""
+    """The step-list row the delegate is emphasising for the pending pause (or ``None``).
+
+    Ticket 39 (R4): the highlight is painted by `StepRowDelegate` from the row's emphasis role
+    rather than set as an item background, so the role is what says which row is paused."""
     for i in range(step_list.count()):
         item = step_list.item(i)
-        if item.background().color() == QColor("#fff0f0"):
+        if item.data(STEP_EMPHASIS_ROLE) == "failed":
             return item
     return None
 
@@ -151,17 +156,17 @@ def test_continue_button_keeps_the_run_going(qapp, tmp_path, monkeypatch):
     bar = screen.run_view.failure_prompt_bar
     assert bar.isVisible()
     assert bar.step_label.text() == "Step 1. FAIL"
-    assert bar.message_label.text() == "wrong colour"
+    assert bar.message_label.text() == "wrong colour  Actual Red · Expected Green"
     # The failing step's row is highlighted while paused, and the header reads WAITING.
     assert _highlighted_row(screen.run_view.step_list) is not None
-    assert "WAITING" in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() == "STEP FAILED"
 
     bar.continue_button.click()
     # The bar and the pause's display state are gone the moment the choice is made, not when
     # the run finishes.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
-    assert "WAITING" not in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() != "STEP FAILED"
     _pump_finished(qapp, session)
     _pump_report_written(qapp, session)
 
@@ -199,7 +204,7 @@ def test_retry_button_reruns_the_failed_step_as_attempt_two(qapp, tmp_path, monk
     assert bar.isVisible()
     assert bar.step_label.text() == "Step 1. FAIL"
     assert _highlighted_row(screen.run_view.step_list) is not None
-    assert "WAITING" in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() == "STEP FAILED"
 
     # Answer the re-paused prompt with Continue so the run can end.
     bar.continue_button.click()
@@ -240,7 +245,7 @@ def test_retry_button_passes_the_step_on_second_attempt(qapp, tmp_path, monkeypa
     bar = screen.run_view.failure_prompt_bar
     assert bar.isVisible()
     assert bar.step_label.text() == "Step 1. FAIL"
-    assert "WAITING" in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() == "STEP FAILED"
 
     bar.retry_button.click()
     _pump_finished(qapp, session)
@@ -276,15 +281,15 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     bar = screen.run_view.failure_prompt_bar
     assert bar.isVisible()
     assert bar.step_label.text() == "Step 1. FAIL"
-    assert bar.message_label.text() == "wrong colour"
+    assert bar.message_label.text() == "wrong colour  Actual Red · Expected Green"
     assert _highlighted_row(screen.run_view.step_list) is not None
-    assert "WAITING" in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() == "STEP FAILED"
 
     bar.abort_button.click()
     # The bar and the pause's display state are gone the moment the choice is made.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
-    assert "WAITING" not in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() != "STEP FAILED"
     _pump_finished(qapp, session)
     _pump_report_written(qapp, session)
 
@@ -317,14 +322,14 @@ def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tm
 
     bar = screen.run_view.failure_prompt_bar
     assert bar.isVisible()
-    assert "WAITING" in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() == "STEP FAILED"
 
     # The header's Abort button (not the bar's) ends the paused run.
     screen.run_view.abort_button.click()
     # The bar and the pause's display state are gone the moment the choice is made.
     assert not bar.isVisible()
     assert _highlighted_row(screen.run_view.step_list) is None
-    assert "WAITING" not in screen.run_view.state_header.text()
+    assert screen.run_view.header.state_chip.state_word() != "STEP FAILED"
     _pump_finished(qapp, session)
     _pump_report_written(qapp, session)
 
@@ -389,7 +394,7 @@ def test_bar_paints_red_with_white_labels_offscreen(qapp):
     bar.show()
     img = bar.grab().toImage()
     # A pixel in the bar's top margin is clear of every child widget.
-    assert img.pixelColor(100, 3).name() == "#c62828"
+    assert img.pixelColor(100, 3).name() == TOKENS["failed"]
     # The label text is white: scan the label zone (clear of the light-grey buttons on
     # the right) for bright pixels only white-on-red can produce.
     found_white = False

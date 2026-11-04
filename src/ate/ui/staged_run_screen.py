@@ -22,8 +22,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -41,17 +41,27 @@ from PySide6.QtWidgets import (
 from ate.engine.run_engine import RunEngine
 
 from ..run_session.headless import HeadlessRunSession, SessionState
+from .theme import TOKENS
 from .run_widgets import (
+    DebugWindow,
     FailurePromptBar,
     LogPane,
     MismatchConfirmation,
     RunFieldsForm,
+    RunHeader,
     RunScreenMixin,
     SchedulePicker,
     StatusBar,
     StepEnabler,
     StepInputWidget,
+    StepRowDelegate,
+    STEP_DETAIL_ROLE,
+    STEP_EMPHASIS_ROLE,
+    STEP_RESULT_ROLE,
+    TextPane,
     BROKEN_MARKER,
+    _no_auto_default,
+    build_summary,
     load_schedule_steps,
     _BROKEN_BG,
     _BROKEN_ERR,
@@ -121,6 +131,9 @@ class TestScheduleStage(SchedulePicker):
     def __init__(self, session: HeadlessRunSession) -> None:
         super().__init__(session)
         self.run_button = QPushButton("Run this schedule")
+        # Ticket 39 review: the theme's `#primary` and `#danger` rules need buttons that
+        # actually carry those object names — this is the stage's primary action.
+        self.run_button.setObjectName("primary")
         self.layout().addWidget(self.run_button)
 
 
@@ -164,6 +177,7 @@ class StepsOptionsStage(QWidget):
         # selected schedule's Stop on Fail default once a schedule has been chosen.
         self.stop_on_fail_radio.setChecked(True)
         self.run_button = QPushButton("Start run")
+        self.run_button.setObjectName("primary")
         # The mockup's `.err` line for a run that cannot start (packet 05b review): the screen fills
         # it when `begin_run` is refused, so the Operator sees why instead of a traceback.
         self.error_label = QLabel("")
@@ -311,42 +325,21 @@ class StepsOptionsStage(QWidget):
         self.continue_all_radio.setChecked(not value)
 
 
-class TextPane(QPlainTextEdit):
-    """A scrollable text pane with the ``text``/``setText`` shape the screens and tests use.
-
-    Plain text scrolls, so the Log and Summary tabs keep a small fixed minimum (packet 30b); the
-    QLabel they replaced grew their minimumSizeHint with every line the run wrote. The Operator reads
-    them; the run writes them, so they are read-only (packet 30b review)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setReadOnly(True)
-
-    def text(self) -> str:
-        return self.toPlainText()
-
-    def setText(self, value: str) -> None:
-        self.setPlainText(value)
-
-    def clear(self) -> None:
-        """Empty the pane, so a new run's Log and Summary hold only their own lines (packet 30b)."""
-        self.setPlainText("")
-
-
 class RunView(QWidget):
-    """The view shown while and after a run: state header, live steps, Log/Summary, status bar.
+    """The view shown while and after a run: shared run header, live steps, Log/Summary band, status bar.
 
-    ``state_header`` shows the current :class:`SessionState` plus a live elapsed timer;
-    ``step_list`` lists each step with its per-step Result (the latest step enlarged), with every
-    declared Step Input on its own row under the step that asked for it (ticket 10a);
-    ``failure_bar`` is a full-width bar that surfaces any failing or errored step;
-    ``tabs`` holds the attempt Log and a run Summary; and ``status_bar`` (packet 14d) is the last
-    widget, the mockup's ``statusBar()``: the run's state, the Pre-test / Steps / Post-test tallies
-    and the run and current-item timers. All content is refreshed from the
-    store by :meth:`refresh`, never computed here.
+    ``header`` is the shared :class:`~ate.ui.run_widgets.RunHeader` (ticket 39, R2): the state chip
+    carries the Operator-facing words — RUNNING, INPUT NEEDED, STEP FAILED, POST-TEST, then PASS or
+    FAIL with the End Reason — and the header names the Test Schedule, its Media Release, the UUT,
+    the Operator and the run timer. ``step_list`` lists each step with a painted result badge, the
+    Actual/Expected detail line, and the current or failed step emphasised with a left bar (R4);
+    ``failure_bar`` is a full-width bar that surfaces any failing or errored step; ``tabs`` is the
+    bottom band holding the live Log and the run Summary (R3); ``debug_window`` is the Debug log as
+    its own window, opened by the header's Debug button or ``Ctrl+D`` (D2); and ``status_bar``
+    (packet 14d) is the last widget. All content is refreshed from the store, never computed here.
     """
 
-    def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["StagedRunScreen"] = None) -> None:
+    def __init__(self, session: Optional[HeadlessRunSession] = None, screen: Optional["StagedRunScreen"] = None, debug_window: Optional[DebugWindow] = None) -> None:
         super().__init__()
         self.session = session
         # The layout this view belongs to (packet 25b): a Step Input here answers only while this
@@ -355,7 +348,7 @@ class RunView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self.state_header = QLabel()
+        self.header = RunHeader()
         # Status bar (packet 14d): the shared StatusBar, whose labels the screen reads back.
         self.status_bar = StatusBar()
         self.status_label = self.status_bar.status_label
@@ -372,101 +365,229 @@ class RunView(QWidget):
         # the screen wires it back to the setup stages, which carry their fields over untouched.
         self.new_run_button = QPushButton("New run")
         self.new_run_button.setEnabled(False)
+        # Ticket 39 review: neither of these may be the window's default button. A stray Enter
+        # (a scanner's newline, an Operator pressing Enter to leave a field) must not abort a
+        # run or start a new one.
+        _no_auto_default(self.abort_button, self.new_run_button)
+        self.abort_button.setObjectName("danger")
+        self.new_run_button.setObjectName("primary")
         self.step_list = QListWidget()
+        # R4: step rows are painted by the delegate — badge, detail line, emphasis bar.
+        self.step_list.setItemDelegate(StepRowDelegate())
         # Ticket 10a: each step's Step Input widgets, keyed by the runner seq of the step they
         # belong to, in declaration order. They are built once per run and re-attached whenever the
         # step list is rebuilt, so the answers the Operator gave survive every refresh.
         self.input_widgets: dict[int, list[StepInputWidget]] = {}
+        #: The step-list row index of each step seq, so the current step can be emphasised (R4).
+        self._step_rows: dict[int, int] = {}
+        #: The expanded schedule this Run view is showing, in runner seq order (ticket 39 review).
+        #: The store only has a node row for a step that has already run, so the live view cannot
+        #: build its rows from `store.nodes()` alone: every step that has not run yet, and the Step
+        #: Input widgets sitting under it, would fall off the list mid-run.
+        self._loaded_steps: list[object] = []
         # Full-width failure bar: a fixed-height label that spans the view's width in the layout.
+        # R2: it is hidden while empty — the old always-present 24 px band was the blank strip
+        # the review counted against the header.
         self.failure_bar = QLabel()
         self.failure_bar.setFixedHeight(24)
+        self.failure_bar.hide()
         # The Stop-on-Fail prompt bar (packet 12d): hidden until the session pauses on a failure.
         self.failure_prompt_bar = FailurePromptBar()
 
         self.tabs = QTabWidget()
-        # Packet 30b: a QLabel's minimumSizeHint grows with its text, so a finished 20-step run made
-        # this view's minimum taller than the window and the window grew to fit it. The mockup's Log
-        # and Summary panes scroll (`.pane` with `data-scroll`), so the tabs hold scrollable text
-        # panes with a fixed small minimum instead of unbounded labels.
-        log_tab = TextPane()
-        summary_tab = TextPane()
-        self.tabs.addTab(log_tab, "Log")
-        self.tabs.addTab(summary_tab, "Summary")
-        #: The two panes of the Log/Summary tab: read-only, and emptied when a run starts, so the
+        # R3: one bottom band, Log and Summary. The Log tab is live during the run — every recorded
+        # INFO-and-above line in the mono font, with a time column — instead of the empty tab that
+        # only filled with Attempt lines after FINISHED. The panes scroll, so a long run does not
+        # grow the view's minimum (packet 30b review).
+        self.log_pane = LogPane("")
+        self.summary_tab = TextPane()
+        self.tabs.addTab(self.log_pane, "Log")
+        self.tabs.addTab(self.summary_tab, "Summary")
+        #: The two panes of the Log/Summary band: read-only, and emptied when a run starts, so the
         # text on screen is always the run the Operator is looking at (packets 30b, 30b review).
-        self.log_tab = log_tab
-        self.summary_tab = summary_tab
+        self.log_tab = self.log_pane
+        self.summary_pane = self.summary_tab
+        # Ticket 39 (D2): the Debug log is a separate window, opened from the header (button or
+        # Ctrl+D), not a permanent band stealing height from the steps. It still holds every level.
+        #: Ticket 39 review: MainWindow hands in one window shared by both layouts. Each layout
+        #: owning its own left one open after a layout switch, and the window the Operator was not
+        #: looking at survived closing ATE as an orphan holding the application open.
+        self.debug_window = debug_window if debug_window is not None else DebugWindow()
 
-        # Ticket 08's two log views: the Log pane shows INFO and above; the Debug window is a
-        # separate pane showing every level. Both are filled from session.store.log_lines() in
-        # refresh(), never computed here.
-        self.log_pane = LogPane("Log — INFO and above")
-        self.debug_window = LogPane("Debug — every level")
-
-        # Packet 30b: the mockup's run view is dominated by the step list; the Log/Summary tabs and
-        # the two log panes are the bottom band. Their default preferred sizes each ran close to
-        # 200 px, so together they ate the whole view and the step list collapsed to 68 px. A floor
-        # for the list keeps the steps readable at 1280x800 without the window having to grow.
-        # Packet 30b review: the band's absolute ceilings (tabs 220, log 150, debug 110) capped it at
-        # any window size, so a 1920x1200 window wasted the space below it. The panes now have a
-        # readable floor and share what is left by stretch: bigger window, bigger panes, same floor.
+        # The band's share of the view: steps dominate (R3), the Log/Summary band takes a fixed
+        # share with a readable floor. The step list keeps its 150 px minimum so a finished run
+        # never collapses (10a/29c/29d).
         self.step_list.setMinimumHeight(150)
-        self.tabs.setMinimumHeight(60)
-        self.log_pane.setMinimumHeight(60)
-        self.debug_window.setMinimumHeight(40)
+        self.tabs.setMinimumHeight(140)
+        _STEPS_STRETCH, _BAND_STRETCH = 4, 2
 
-        # The band's share of the view: steps 3, Log/Summary 2, Log 2, Debug 1.
-        _STEPS_STRETCH, _TABS_STRETCH, _LOG_STRETCH, _DEBUG_STRETCH = 3, 2, 2, 1
-
-        # Header row (mockup variant C): the state label grows, the buttons sit at its right —
+        # Header row (mockup variant C): the shared header grows, the buttons sit at its right —
         # Abort while the run is up, New run once it is finished (packet 30b).
         header_row = QHBoxLayout()
-        header_row.addWidget(self.state_header, stretch=1)
+        header_row.addWidget(self.header, stretch=1)
         header_row.addWidget(self.abort_button)
         header_row.addWidget(self.new_run_button)
         layout.addLayout(header_row)
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=_STEPS_STRETCH)
         layout.addWidget(self.failure_prompt_bar)
-        layout.addWidget(self.tabs, stretch=_TABS_STRETCH)
-        layout.addWidget(self.log_pane, stretch=_LOG_STRETCH)
-        layout.addWidget(self.debug_window, stretch=_DEBUG_STRETCH)
+        layout.addWidget(self.tabs, stretch=_BAND_STRETCH)
         # Packet 14d review: the mockup's statusBar() closes the run view, so the bar is the last
-        # widget — under the step list and the Log/Summary tabs — not a header.
+        # widget — under the step list and the Log/Summary band — not a header.
         layout.addWidget(self.status_bar)
 
     def clear_run_text(self) -> None:
         """Empty the Log and Summary panes: a run's view holds only its own lines (packet 30b review).
 
         ``refresh`` appends every Attempt line to the Log pane, so a second run in the same window
-        would otherwise read as one long log."""
+        would otherwise read as one long log. The Debug window belongs to the run too, so it is
+        emptied here as well (ticket 39 review)."""
         self.log_tab.clear()
         self.summary_tab.clear()
+        self.debug_window.clear()
+
+    def _run_row(self) -> Optional[dict]:
+        """The run row the store wrote, or None when this view has no run (a bare RunView)."""
+        if self.session is None or self.session.run_uuid is None:
+            return None
+        return self.session.store.get_test_run(self.session.run_uuid)
+
+    def _run_rows(self, nodes: list[dict], attempts: list[dict], current_seq: Optional[int] = None, paused_seq: Optional[int] = None,
+                  paused_result: str = "", paused_actual: str = "", paused_expected: str = "") -> tuple[list[tuple], Optional[int]]:
+        """Build the step rows the delegate paints: `(text, input widget, is_header, background,
+        font bump, result, detail, emphasis)`.
+
+        Ticket 39 review: the rows are the **loaded schedule**, not the rows the store has written.
+        A Test Step gets its node row only after its last Attempt, so a view built from
+        `store.nodes()` alone loses every step the run has not reached yet — and, with it, the
+        Step Input widgets sitting under those rows, which is exactly the widgets the Operator
+        still has to answer. Each loaded row is then overlaid with whatever the store recorded:
+        a step with no row yet shows no badge, no detail line and no emphasis.
+
+        Attempts are read in attempt-number order, so the detail line of a retried step shows the
+        *latest* Attempt's Actual/Expected rather than whichever row the store returned last
+        (ticket 39 review). ``current_seq`` and ``paused_seq`` carry the R4 emphasis: the step whose
+        Attempt is running and the one a Stop-on-Fail pause is waiting on.
+
+        Ticket 39 review, second pass: the paused step's Result comes from ``paused_result``, or
+        from the Attempt the pause was raised on. The engine writes the step's node row only after
+        the Operator answers, so a refresh drawn while the prompt is up — one the layout makes when
+        the Operator switches to it mid-pause — had no row to read a Result from and painted the
+        failed row with no badge while the prompt bar still said `Step 1. FAIL`."""
+        by_seq = {node["node_seq"]: node for node in nodes if node.get("node_seq") is not None}
+        if self._loaded_steps:
+            # (seq, step number, name, is header, depth, parent seq) from the expanded tree the
+            # layouts loaded when the run started: the same rows every refresh redraws.
+            source = [
+                (seq, getattr(step, "step_no", ""), getattr(step, "name", ""),
+                 bool(getattr(step, "is_header", False)), int(getattr(step, "depth", 0)),
+                 getattr(step, "parent", None))
+                for seq, step in enumerate(self._loaded_steps)
+            ]
+        else:
+            # A view nobody loaded a schedule into (the tests, and a RunView built after the run):
+            # the recorded rows are all there is, and their nesting comes from `parent_node_seq`.
+            recorded_depths = _node_depths(nodes)
+            source = [
+                (node.get("node_seq"), node.get("step_number"), node.get("step_name"),
+                 node.get("kind") != "step", recorded_depths.get(node.get("node_seq"), 0),
+                 node.get("parent_node_seq"))
+                for node in nodes
+            ]
+        depths = {row[0]: row[4] for row in source}
+        children = _children_of_rows(source, lambda row: row[5])
+        is_header = {row[0]: row[3] for row in source}
+        attempt_count: dict[int, int] = {}
+        last_attempt: dict[int, dict] = {}
+        for attempt in sorted(attempts, key=lambda a: int(a.get("attempt_no") or 0)):
+            attempt_count[attempt["node_seq"]] = attempt_count.get(attempt["node_seq"], 0) + 1
+            last_attempt[attempt["node_seq"]] = attempt
+        rows: list[tuple] = []
+        last_step_row = None
+        for seq, number, name, header, _depth, _parent in source:
+            text = _row_label(number, name, depths[seq])
+            self._step_rows[seq] = len(rows)
+            if header:
+                rollup = _rollup_text(seq, children, lambda other: is_header.get(other, True),
+                                     lambda other: (by_seq.get(other) or {}).get("result"))
+                if rollup:
+                    text += f"  {rollup}"
+                rows.append((text, None, True, QColor(_HEADER_BG), 0, "", "", ""))
+                continue
+            node = by_seq.get(seq) or {}
+            tries = attempt_count.get(seq, 0)
+            if tries > 1:
+                text += f"  ({tries} Attempts)"
+            attempt = last_attempt.get(seq) or {}
+            detail = ""
+            if attempt.get("actual") or attempt.get("expected"):
+                detail = f"Actual {attempt.get('actual') or '—'} · Expected {attempt.get('expected') or '—'}"
+            if seq == paused_seq:
+                emphasis = "failed"
+            elif current_seq is not None and seq == current_seq:
+                emphasis = "current"
+            else:
+                emphasis = ""
+            result = node.get("result", "") or ""
+            if seq == paused_seq:
+                result = paused_result or str(attempt.get("pass_fail") or "") or "FAIL"
+                if paused_actual or paused_expected:
+                    detail = f"Actual {paused_actual or '—'} · Expected {paused_expected or '—'}"
+            rows.append((text, None, False, None, 0, result, detail, emphasis))
+            last_step_row = len(rows) - 1
+            for widget in self.input_widgets.get(seq, ()):
+                rows.append(("", widget, False, None, 0, "", "", ""))
+        return rows, last_step_row
+
+    def refresh_rows(self, nodes: list[dict], attempts: list[dict], current_seq: Optional[int] = None, paused_seq: Optional[int] = None,
+                     paused_result: str = "", paused_actual: str = "", paused_expected: str = "") -> None:
+        """Redraw the step rows and the Summary tab while the run is still up.
+
+        Ticket 39 review: the three-pane table shows a finished step's badge, its Actual/Expected
+        line and the running Summary as soon as the store has them; the staged view drew them only
+        at a pause or at FINISHED. Step Inputs are deliberately not touched — a live redraw must
+        not close an input the run is waiting on or re-collapse one the Operator has opened."""
+        rows, _ = self._run_rows(nodes, attempts, current_seq=current_seq, paused_seq=paused_seq,
+                                 paused_result=paused_result, paused_actual=paused_actual, paused_expected=paused_expected)
+        self._render_rows(rows)
+        self.summary_tab.setText(build_summary(nodes, attempts, run=self._run_row(), running=True))
 
     def load_run_steps(self, steps: Iterable[object]) -> None:
         """Build the run's step rows, with each step's declared Step Inputs under it.
 
-        Called when a run starts (ticket 10a) so every input is on screen, inert, before the worker
-        ever asks for one: the spec says every step is listed with its inputs always visible. The
-        widgets are made from the schedule's validated declarations, exactly as the mockup's
-        ``inputsHTML`` renders them."""
+        Called when a run starts (ticket 10a) so every input is on screen before the worker
+        ever asks for one. Ticket 39 (D3): in this Run view a future step's input starts as a
+        one-line muted summary — the controls expand when the step is reached, asked for, or
+        the run ends. Stage 3 and the three-pane layout keep the full controls everywhere.
+        The widgets are made from the schedule's validated declarations, exactly as the
+        mockup's ``inputsHTML`` renders them."""
         for widgets in self.input_widgets.values():
             for widget in widgets:
                 widget.setParent(None)
                 widget.deleteLater()
         self.input_widgets = {}
+        #: Ticket 39 review: this is the complete expanded schedule the run is running, and every
+        #: later refresh redraws these rows over it. Keeping it here is what stops a live refresh
+        #: from trimming the steps the run has not reached, and the Step Input widgets under them,
+        #: out of the list.
+        self._loaded_steps = list(steps)
         # Nothing carries a widget yet (they were deleted just above), so clearing is safe: an item
         # takes its widget with it only when it is destroyed still holding one (packet 10a review).
         self.step_list.clear()
+        self._step_rows = {}
         rows: list[tuple] = []
         for seq, step in enumerate(steps):
             is_header = bool(getattr(step, "is_header", False))
+            self._step_rows[seq] = len(rows)
             rows.append((
                 _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0))),
                 None,
                 is_header,
                 QColor(_HEADER_BG) if is_header else None,
                 0,
+                "",
+                "",
+                "",
             ))
             declarations = getattr(step, "_validated_inputs", None) or []
             if declarations and self.session is not None:
@@ -474,17 +595,20 @@ class RunView(QWidget):
                     StepInputWidget(decl, self.session, seq, owner=self.screen) for decl in declarations
                 ]
                 for widget in self.input_widgets[seq]:
-                    rows.append(("", widget, False, None, 0))
+                    widget.set_summary(True)
+                    rows.append(("", widget, False, None, 0, "", "", ""))
         self._render_rows(rows)
 
     def _render_rows(self, rows: list[tuple]) -> list[QListWidgetItem]:
-        """Draw ``(text, input widget or None, is_header, background, font bump)`` into the step list.
+        """Draw ``(text, input widget or None, is_header, background, font bump, result, detail, emphasis)``
+        into the step list.
 
         Rows are updated in place rather than cleared (packet 10a review): a QListWidgetItem that
         carries a Step Input widget deletes that widget when the item is destroyed, so rebuilding the
         list with ``clear()`` wiped out every answer the Operator had given and left the view painting
         a deleted widget. Every rebuild of a run has the same rows — one per step plus one per
-        declared input — so each row is reused and only its text, background and font change."""
+        declared input — so each row is reused and only its text, background, font and the R4 badge/
+        detail/emphasis roles change."""
         list_widget = self.step_list
         while list_widget.count() > len(rows):
             extra = list_widget.takeItem(list_widget.count() - 1)
@@ -493,21 +617,31 @@ class RunView(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         items: list[QListWidgetItem] = []
-        for index, (text, widget, is_header, background, bump) in enumerate(rows):
+        for index, (text, widget, is_header, background, bump, result, detail, emphasis) in enumerate(rows):
             if index >= list_widget.count():
                 item = QListWidgetItem(text)
                 list_widget.addItem(item)
-                item.setData(Qt.ItemDataRole.UserRole, item.font().pointSize())  # the un-bumped size
+                # The un-bumped size; a pixel-sized app font reports pointSize() == -1,
+                # so fall back to the theme's body size instead of storing -1.
+                size = item.font().pointSize()
+                item.setData(Qt.ItemDataRole.UserRole, size if size > 0 else 13)
             else:
                 item = list_widget.item(index)
                 item.setText(text)
             item.setBackground(background if background is not None else QBrush())
             font = item.font()
             base = item.data(Qt.ItemDataRole.UserRole)
-            font.setPointSize(int(base if base is not None else font.pointSize()) + bump)
+            font.setPointSize(int(base if base is not None and base > 0 else font.pointSize()) + bump)
             font.setBold(is_header or bump > 0)
             item.setFont(font)
-            if widget is not None:
+            # R4: the delegate paints the badge, the Actual/Expected line and the emphasis bar
+            # from these roles; the text itself only names the step.
+            item.setData(STEP_RESULT_ROLE, result)
+            item.setData(STEP_DETAIL_ROLE, detail)
+            item.setData(STEP_EMPHASIS_ROLE, emphasis)
+            if widget is None:
+                item.setSizeHint(QSize(0, 38 if detail else 30))
+            else:
                 # Not selectable: clicking the row itself means nothing; the controls inside it are
                 # the point. The indent is the widget's own left margin (the mockup's `.inputs`).
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -526,62 +660,37 @@ class RunView(QWidget):
         return None
 
     def refresh(self, nodes: list[dict], attempts: list[dict], log_lines: list[dict]) -> None:
-        """Render a finished run's steps, failure bar, and Log/Summary from the store.
+        """Render a finished run's steps, failure bar, and Log/Summary band from the store.
 
         Reads only what the store recorded; it never decides pass/fail itself — a step is
         treated as failed purely when its stored result is ``FAIL`` or ``ERROR``, so this
-        stays a view of data, not a run engine. The two tabs are added in order (Log, then
-        Summary), so they are widgets 0 and 1 here.
-
-        ``log_lines`` feeds the Log pane (INFO and above) and the separate Debug window
-        (every level); DEBUG is filtered out of the Log pane but kept in the debug view.
-        """
-        log_tab = self.tabs.widget(0)
-        summary_tab = self.tabs.widget(1)
-
-        # The run is over: nothing can be asked for any more, so every input closes.
+        stays a view of data, not a run engine. Ticket 39 (R4): every step row carries its
+        Result for the painted badge and its last Attempt's Actual/Expected for the detail
+        line; the step the run ended on is enlarged, but carries no emphasis tint (only the
+        running and paused rows get those). The Summary tab
+        gets the verdict and per-step results; the Log tab holds the run's own recorded
+        lines, live from the start (R3)."""
+        # The run is over: nothing can be asked for any more, so every input closes and
+        # expands back to its full controls (D3: finished states always show them).
         for widgets in self.input_widgets.values():
             for widget in widgets:
                 widget.deactivate()
+                widget.set_summary(False)
         # Packet 15b: header rows show their Step Number and name with no result, and every row is
         # indented by its depth in the expanded tree, as on the Steps & options stage. Packet 15d:
         # header rows get the mockup's `#eef1f5` background and bold name, and a rollup of the
         # steps beneath them — `N/M done`, plus `, K failed` when some failed. Ticket 10a: each step
         # keeps its Step Input rows under it, showing the answers the Operator gave.
-        depths = _node_depths(nodes)
-        children = _children_of_rows(nodes, lambda node: node.get("parent_node_seq"))
-        by_seq = {node["node_seq"]: node for node in nodes}
-        # Attempts per step, from the recorded Attempt rows: a step retried after a pause has more
-        # than one, and the spec's "Retried steps show their Attempts" (packet 25b review) means the
-        # staged list has to say so too, not only the three-pane table.
-        attempt_count: dict[int, int] = {}
-        for attempt in attempts:
-            attempt_count[attempt["node_seq"]] = attempt_count.get(attempt["node_seq"], 0) + 1
-        rows: list[tuple] = []
-        last_step_row = None
-        for node in nodes:
-            text = _row_label(node.get("step_number"), node.get("step_name"), depths[node.get("node_seq")])
-            is_header = node.get("kind") != "step"
-            if not is_header:
-                text += f"  →  {node.get('result', '')}"
-                tries = attempt_count.get(node["node_seq"], 0)
-                if tries > 1:
-                    text += f"  ({tries} Attempts)"
-            else:
-                rollup = _rollup_text(node["node_seq"], children,
-                                     lambda seq: by_seq[seq].get("kind") != "step",
-                                     lambda seq: by_seq[seq].get("result"))
-                if rollup:
-                    text += f"  {rollup}"
-            rows.append((text, None, is_header, QColor(_HEADER_BG) if is_header else None, 0))
-            if not is_header:
-                last_step_row = len(rows) - 1
-                for widget in self.input_widgets.get(node["node_seq"], ()):
-                    rows.append(("", widget, False, None, 0))
-        # The latest step is the current one; enlarge it so the eye lands on where we are.
+        # The row builder is shared with the live refresh: header rollups, the Attempt count,
+        # the detail line from the latest Attempt (sorted by attempt number, not by the order
+        # the store happened to return the rows) and the Step Input rows under each step.
+        rows, last_step_row = self._run_rows(nodes, attempts)
+        # The latest step is the one the run ended on: enlarge it so the eye lands there. Ticket 39
+        # review: it is not the step the run is *on*, so it takes no emphasis tint or left bar —
+        # R4 reserves those for the running and paused rows, and the three-pane table agrees.
         if last_step_row is not None and len(rows) > 1:
-            text, widget, is_header, background, _ = rows[last_step_row]
-            rows[last_step_row] = (text, widget, is_header, background, 2)
+            text, widget, is_header, background, bump, result, detail, _ = rows[last_step_row]
+            rows[last_step_row] = (text, widget, is_header, background, 2, result, detail, "")
         self._render_rows(rows)
 
         failed = any(node.get("result") in ("FAIL", "ERROR") for node in nodes)
@@ -589,36 +698,31 @@ class RunView(QWidget):
             names = [node.get("step_name") or "" for node in nodes if node.get("result") in ("FAIL", "ERROR")]
             self.failure_bar.setText(f"Run FAILED — {len(names)} step(s): {'; '.join(names)}")
             self._apply_failure_style()
+            self.failure_bar.show()
         else:
             self.failure_bar.setText("")
+            self.failure_bar.hide()  # R2: no blank band above the steps on a passed run
 
-        for attempt in attempts:
-            message = attempt.get("msg") or ""
-            log_tab.setPlainText(log_tab.text() + f"{attempt.get('pass_fail', '')}  {message}\n")
-
-        results = [node.get("result", "") for node in nodes if node.get("kind") == "step"]
-        verdict = "FAIL" if failed else ("PASS" if results else "NOTRUN")
-        lines = [f"Result: {verdict}"]
-        for node in nodes:
-            if node.get("kind") != "step":
-                continue
-            lines.append(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {node.get('result', '')}")
-        summary_tab.setPlainText("\n".join(lines))
+        # R3: the band's Summary tab. The verdict is the run row's own result, so the tab,
+        # the header chip and the report never disagree (ticket 39 review). The Log tab is
+        # filled live from the recorded lines.
+        self.summary_tab.setText(build_summary(nodes, attempts, run=self._run_row()))
 
         # The Log pane shows INFO and above; the Debug window keeps every level.
+        # Ticket 39 review: neither pane is cleared here. Both append only the rows after the
+        # highest log seq they have already drawn (`LogPane.add_lines`), so the finished run's
+        # refresh adds the lines the live refresh had not reached yet. Clearing them threw the
+        # Operator back to the top of a log they were reading, and the Debug window is shared by
+        # both layouts, so clearing it here also reset the three-pane view's reading position.
+        # A run's panes are emptied when that run starts (`clear_run_text`, and the three-pane
+        # layout's own start), and nowhere else.
         info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
-        self.log_pane.clear()
         self.log_pane.add_lines(info_and_above)
-        self.debug_window.clear()
         self.debug_window.add_lines(log_lines)
 
     def _apply_failure_style(self) -> None:
         """Give the failure bar its red look via a stylesheet."""
-        self.failure_bar.setStyleSheet("background-color: #b71c1c; color: white;")
-
-
-#: The mockup's ``.flag`` box (amber), used for the mismatch flag line and the confirmation's file list.
-_FLAG_STYLE = "background: #fff3cd; border: 1px solid #e0b100; color: #5c4300; padding: 4px 10px;"
+        self.failure_bar.setStyleSheet(f"background-color: {TOKENS['failed']}; color: {TOKENS['white']}; border-radius: 4px;")
 
 
 class StagedRunScreen(RunScreenMixin, QWidget):
@@ -632,7 +736,15 @@ class StagedRunScreen(RunScreenMixin, QWidget):
     class only arranges the stages (packet 25a review).
     """
 
-    def __init__(self, session: HeadlessRunSession, confirm_choice: Optional[Callable[[MismatchConfirmation], None]] = None, clock: Optional[Callable[[], datetime]] = None) -> None:
+    def __init__(
+        self,
+        session: HeadlessRunSession,
+        confirm_choice: Optional[Callable[[MismatchConfirmation], None]] = None,
+        clock: Optional[Callable[[], datetime]] = None,
+        debug_window: Optional[DebugWindow] = None,
+    ) -> None:
+        """``debug_window`` (ticket 39 review) is the one Debug window the window owns,
+        shared by both layouts so a layout switch cannot leave two of them open."""
         super().__init__()
         self.session = session
         self.state = SessionState.IDLE
@@ -668,11 +780,22 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # The step-list row carrying the pause highlight (packet 12d); ``None`` when no prompt is
         # pending. Dropped before refresh() clears the list, which would delete the item.
         self._failed_row: Optional[QListWidgetItem] = None
+        #: The step a Stop-on-Fail pause is waiting on (ticket 39 review). The live row refresh
+        #: needs it so the failed emphasis stays on the step the prompt is about.
+        self._paused_seq: Optional[int] = None
+        #: What that pause reported — the Result and the measurements the prompt bar shows. The
+        #: engine writes the step's node row only after the choice, so the row refresh has to draw
+        #: the badge and the Actual/Expected line from these (ticket 39 review, second pass).
+        self._paused_result: str = ""
+        self._paused_actual: str = ""
+        self._paused_expected: str = ""
+        #: The step whose Attempt is running: the row the R4 "current" bar marks.
+        self._current_seq: Optional[int] = None
 
         self.uut_operator_stage = UutOperatorStage()
         self.test_schedule_stage = TestScheduleStage(session)
         self.steps_options_stage = StepsOptionsStage(self.session, screen=self)
-        self.run_view = RunView(self.session, screen=self)
+        self.run_view = RunView(self.session, screen=self, debug_window=debug_window)
         # The shared run handlers (packet 25a) read these names on either layout: the Operator's
         # form, the picker, the stop-on-fail pair, the line a refused Start writes on, the Start
         # button and the two log panes. They are the stage widgets themselves, not copies.
@@ -684,6 +807,16 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.start_button = self.steps_options_stage.run_button
         self.log_pane = self.run_view.log_pane
         self.debug_window = self.run_view.debug_window
+        # Ticket 39 (R2, D2, D4): the shared header lives on the Run view. Its chip word comes
+        # from these flags — which blocking Step Inputs are waiting, and whether the Post-test
+        # phase has begun — and Debug is a separate window opened from the header button or Ctrl+D.
+        self.run_header = self.run_view.header
+        self._waiting_inputs: set[tuple[int, int]] = set()
+        self._post_test_started = False
+        #: The step row carrying the "current" emphasis (R4); cleared when the next step starts.
+        self._emphasised_row: Optional[QListWidgetItem] = None
+        self.run_view.header.debug_button.clicked.connect(self.toggle_debug)
+        QShortcut(QKeySequence("Ctrl+D"), self, self.toggle_debug)
         # Disabled until a run starts; _on_state_changed enables it only while STARTED. The session's
         # initial IDLE emit precedes this connection, so set the default here explicitly.
         self.run_view.abort_button.setEnabled(False)
@@ -757,19 +890,34 @@ class StagedRunScreen(RunScreenMixin, QWidget):
     def _sync_from_store(self) -> None:
         """Draw what this layout skipped while it was hidden (packet 25b).
 
-        A finished run whose read was deferred is drawn here from the store, rows and log together;
-        a run still in progress needs only the log lines it did not read, since its step rows were
-        built when it started and its pause is painted by the prompt handler."""
-        run_uuid = self._deferred_run_uuid
+        A finished run whose read was deferred is drawn here from the store, rows and log together.
+        A run still in progress redraws its step rows and its Summary from the store (ticket 39
+        review) before reading the log: a step's badge and its Actual/Expected line appear as soon
+        as the engine records them, the way the three-pane table has always done, and the Step
+        Inputs the run is waiting on are left exactly as they are."""
+        run_uuid = self._deferred_run_is_current()
         self._deferred_run_uuid = None
+        if not self._store_open():
+            return  # ticket 39 review: the window released the session; nothing left to draw
         if run_uuid:
             self.run_view.refresh(
                 self.session.store.nodes(run_uuid),
                 self.session.store.attempts(run_uuid),
                 self.session.store.log_lines(run_uuid),
             )
-        else:
-            self._refresh_log()
+            return
+        live_uuid = self.session.run_uuid
+        if live_uuid and self.state == SessionState.STARTED:
+            self.run_view.refresh_rows(
+                self.session.store.nodes(live_uuid),
+                self.session.store.attempts(live_uuid),
+                current_seq=self._current_seq,
+                paused_seq=self._paused_seq,
+                paused_result=self._paused_result,
+                paused_actual=self._paused_actual,
+                paused_expected=self._paused_expected,
+            )
+        self._refresh_log()
 
     # -- navigation ---------------------------------------------------------
 
@@ -866,6 +1014,12 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             # Packet 30b review: the Log tab appends, so it must be emptied when a run starts or the
             # second run's log reads as the first run's lines plus its own.
             self.run_view.clear_run_text()
+            # Ticket 39 review: this run's header reads its own run row, so any cached row from the
+            # previous run is dropped before the timer starts ticking. A deferred read of the
+            # previous run is dropped with it (ticket 39 review, second pass): the layout would
+            # otherwise paint the finished run when the Operator switched to it mid-run.
+            self.invalidate_run_row()
+            self._clear_deferred_run()
             # Status bar (packet 14d): the run clock starts here and the one-second timer restarts,
             # because a previous run stopped it at FINISHED. No Action or Step has begun yet, so the
             # current-item timer is blank; the Steps tally knows its total from the rows just built.
@@ -876,12 +1030,24 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             self._post_counts = (0, 0)
             self._started_steps = set()
             self._step_total = self._enabled_step_count(steps)
+            # Ticket 39 (D4): a fresh run starts with nothing waiting and no Post-test yet.
+            self._waiting_inputs = set()
+            self._post_test_started = False
+            self._emphasised_row = None
+            self._paused_seq = None
+            self._paused_result = ""
+            self._paused_actual = ""
+            self._paused_expected = ""
+            self._current_seq = None
             self._timer.start(1000)
             self._reveal_run_view()
         elif state == SessionState.FINISHED:
             # Release the finished worker so a new start() captures fresh fields; the next run owns
             # its own engine again.
             self._engine = None
+            # Ticket 39 review: the header's verdict and End Reason come from the finished run row,
+            # so the row cached while the run was up is dropped before it is read again.
+            self.invalidate_run_row()
             # refresh() clears the step list and deletes its items — drop the pause highlight's row
             # reference before that so we never touch a deleted item (packet 12d).
             self._failed_row = None
@@ -931,26 +1097,19 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             self._timer.stop()
 
     def _update_header(self, state: Optional[SessionState] = None, now: Optional[datetime] = None) -> None:
-        """Refresh the header's state label and the status bar's live timers.
+        """Refresh the shared header's chip and the status bar's live timers.
 
         ``now`` is the injectable clock's reading (packet 14d): a test can emit the QTimer's
         ``timeout`` to tick the bar without waiting for real seconds. The status bar updates
-        even while a failure prompt is pending."""
+        even while a failure prompt is pending. Ticket 39 (R2, D4): the state word is the
+        header chip — RUNNING, INPUT NEEDED, STEP FAILED, POST-TEST, then PASS/FAIL — worked
+        out by the shared ``_run_header_state`` from the session and the store, so the
+        ``state`` argument is only a convenience for callers that already have it.
+        """
         if now is None:
             now = self._clock()
         self._update_status_bar(now)
-        if self.run_view.failure_prompt_bar.isVisible():
-            # A failure prompt is pending: the header waits on the Operator, whatever the state
-            # (this also guards the one-second timer while paused) — packet 12d.
-            self.run_view.state_header.setText("WAITING")
-            return
-        if state is None:
-            state = self.state
-        text = f"{state.value}"
-        if self._started_at is not None and state in (SessionState.STARTED, SessionState.FINISHED):
-            delta = now - self._started_at
-            text += f"  ·  {_format_elapsed(delta)}"
-        self.run_view.state_header.setText(text)
+        self._refresh_run_header(now)
 
     def _update_status_bar(self, now: datetime) -> None:
         """Refresh the status bar (packet 14d): the state, the three tallies and both timers.
@@ -989,8 +1148,22 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         attempt = self._attempt_row(node_seq, attempt_no)
         result = str(attempt.get("pass_fail") or "FAIL") if attempt else "FAIL"
         message = str(attempt.get("msg") or "") if attempt else ""
-        self.run_view.failure_prompt_bar.show_prompt(str(getattr(step, "step_no", "") or ""), result, message)
-        self._render_paused_steps(node_seq, result)
+        actual = str(attempt.get("actual") or "") if attempt else ""
+        expected = str(attempt.get("expected") or "") if attempt else ""
+        # Ticket 39 (D1): the bar states the failure in words and shows the Actual/Expected pair,
+        # so the Operator can decide Retry/Continue/Abort without opening the log.
+        self.run_view.failure_prompt_bar.show_prompt(
+            str(getattr(step, "step_no", "") or ""),
+            result,
+            message,
+            actual=actual,
+            expected=expected,
+        )
+        self._paused_seq = node_seq
+        self._paused_result = result
+        self._paused_actual = actual
+        self._paused_expected = expected
+        self._render_paused_steps(node_seq, result, actual, expected)
         self._set_paused_header()
 
     def _step_identity(self, node_seq: int):
@@ -1000,19 +1173,18 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             return steps[node_seq]
         return None
 
-        for row in self.session.store.attempts(run_uuid):
-            if row.get("node_seq") == node_seq and row.get("attempt_no") == attempt_no:
-                return row
-        return None
-
-    def _render_paused_steps(self, node_seq: int, result: str) -> None:
+    def _render_paused_steps(self, node_seq: int, result: str, actual: str = "", expected: str = "") -> None:
         """Rebuild the step list mid-run: done steps from the store, the failing one marked, the rest pending.
 
         Rows normally only exist after FINISHED (refresh), so a pause renders its own list; the
         failing step's row gets the pause highlight and is remembered so the choice can clear it.
         Packet 10a review: the rows are updated in place (``RunView._render_rows``) rather than
         cleared and re-added — destroying an item that carries a Step Input widget deletes that
-        widget, and the pause then painted a dead widget (SIGSEGV while the run is paused)."""
+        widget, and the pause then painted a dead widget (SIGSEGV while the run is paused).
+
+        Ticket 39 review: every row here is the eight-field shape `_render_rows` unpacks. The
+        header row stopped at five, so a pause on a schedule with a Sub-schedule raised
+        ValueError when it tried to paint the list."""
         run_uuid = self.session.run_uuid
         nodes = self.session.store.nodes(run_uuid) if run_uuid else []
         done = {node.get("node_seq"): node for node in nodes if node.get("kind") == "step"}
@@ -1022,13 +1194,15 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         children = _children_of_rows(steps, lambda step: getattr(step, "parent", None))
         rows: list[tuple] = []
         failed_index = None
+        detail = f"Actual {actual or '—'} · Expected {expected or '—'}" if (actual or expected) else ""
         for seq, step in enumerate(steps):
             text = _row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0)))
+            self.run_view._step_rows[seq] = len(rows)
             if getattr(step, "is_header", False):  # a header row has no result, as in the finished list
                 rollup = _rollup_text(seq, children,
                                       lambda index: getattr(steps[index], "is_header", False),
                                       lambda index: done[index].get("result") if index in done else None)
-                rows.append((text + (f"  {rollup}" if rollup else ""), None, True, QColor(_HEADER_BG), 0))
+                rows.append((text + (f"  {rollup}" if rollup else ""), None, True, QColor(_HEADER_BG), 0, "", "", ""))
                 continue
             if seq == node_seq:
                 state = result
@@ -1036,20 +1210,25 @@ class StagedRunScreen(RunScreenMixin, QWidget):
                 state = str(done[seq].get("result", ""))
             else:
                 state = "…"
-            # The pause highlight: a pale red row, cleared once the Operator chooses.
+            # The pause highlight: the delegate paints the failed left bar (R4) from the
+            # emphasis role; the row text only names the step, as in the finished list.
             if seq == node_seq:
                 failed_index = len(rows)
-            rows.append((f"{text}  →  {state}", None, False, QColor("#fff0f0") if seq == node_seq else None, 0))
+            rows.append((text, None, False, None, 0, "" if state == "…" else state,
+                        detail if seq == node_seq else "",
+                        "failed" if seq == node_seq else ""))
             for widget in self.run_view.input_widgets.get(seq, ()):
-                rows.append(("", widget, False, None, 0))
+                rows.append(("", widget, False, None, 0, "", "", ""))
         items = self.run_view._render_rows(rows)
         self._failed_row = items[failed_index] if failed_index is not None else None
+        # The failing step is the point of the pause: scroll it into view (R4).
+        if self._failed_row is not None:
+            self.run_view.step_list.scrollToItem(self._failed_row)
 
     def _set_paused_header(self) -> None:
-        """While a prompt is pending the header goes red and reads WAITING (see _update_header), and
+        """While a prompt is pending the header chip reads STEP FAILED (see _update_header), and
         the status bar says "Paused" (packet 14d) — its timers keep running, because the pause is
         real time the Operator is spending on the run."""
-        self.run_view.state_header.setStyleSheet("background-color: #c62828; color: white;")
         self._phase_text = "Paused"
         self._update_header()
 
@@ -1068,11 +1247,17 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.session.choose(choice)
 
     def _clear_paused_display(self) -> None:
-        """Drop the pause highlight and red header once the Operator has chosen."""
+        """Drop the pause emphasis and the "Paused" status once the Operator has chosen."""
         if self._failed_row is not None:
-            self._failed_row.setBackground(QBrush())
+            self._failed_row.setData(STEP_EMPHASIS_ROLE, "")
             self._failed_row = None
-        self.run_view.state_header.setStyleSheet("")
+        self._paused_seq = None
+        # Ticket 39 review, second pass: the pause's Result and measurements are part of the pause,
+        # so they go with it. Left behind, a later refresh would paint a step that is no longer
+        # waiting with the badge of a failure answered minutes ago.
+        self._paused_result = ""
+        self._paused_actual = ""
+        self._paused_expected = ""
         self._phase_text = "Running"  # the bar is back on the run's state (packet 14d)
         self._update_header()
 
@@ -1112,15 +1297,48 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         if widget is None:
             return
         widget.activate(attempt_no)
+        # Ticket 39 (D4): a blocking input waiting on the Operator is what the header chip
+        # counts as INPUT NEEDED; the answer handler removes it from the set.
+        if widget.declaration.type != "POLL":
+            self._waiting_inputs.add((node_seq, index))
+            self._refresh_run_header()
         # The mockup scrolls the asking row into view so the Operator sees it (packet 10a review).
         if widget.input_item is not None:
             self.run_view.step_list.scrollToItem(widget.input_item)
 
+    def _mark_current_step(self, node_seq: int) -> None:
+        """Ticket 39 (R4): the step whose Attempt just started gets the primary emphasis bar
+        and its row scrolls into view; the previous current step's emphasis is dropped."""
+        view = self.run_view
+        if self._emphasised_row is not None:
+            self._emphasised_row.setData(STEP_EMPHASIS_ROLE, "")
+            self._emphasised_row = None
+        row = view._step_rows.get(node_seq)
+        if row is None:
+            return
+        item = view.step_list.item(row)
+        if item is not None:
+            item.setData(STEP_EMPHASIS_ROLE, "current")
+            self._emphasised_row = item
+            view.step_list.scrollToItem(item)
+
     def _on_step_finished(self, node_seq: int) -> None:
-        """One step's Attempts are done: nothing may answer its POLL any more, so close its widgets."""
+        """One step's Attempt loop ending: nothing may answer its POLL any more, so close its
+        widgets — and any blocking input that ended unanswered stops counting as INPUT NEEDED.
+
+        Ticket 39 review: the store's new rows are drawn straight away, so the finished step gets
+        its badge, its Actual/Expected line and its place in the Summary as it is recorded. The
+        three-pane table has always refreshed on step_finished; the staged view waited for a pause
+        or for FINISHED, which left a passed step sitting in the list with no badge while the run
+        carried on."""
         for widget in self.run_view.input_widgets.get(node_seq, ()):
             if widget.declaration.type == "POLL":
                 widget.deactivate()
+        self._waiting_inputs = {waiting for waiting in self._waiting_inputs if waiting[0] != node_seq}
+        if self.is_active():
+            self._sync_from_store()
+        else:
+            self.mark_store_dirty()  # the hidden layout reads it when it comes back (packet 25b)
 
 
     # -- schedule list ------------------------------------------------------

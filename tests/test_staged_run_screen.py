@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE, RunHeader
 from ate.ui.staged_run_screen import StagedRunScreen
 
 from ._fixtures import write_ate_env
@@ -108,8 +109,9 @@ def test_stages_render_with_required_fields(qapp, tmp_path):
         "StepsOptionsStage",
     ]
 
-    # Run view: state header, live step list, full-width failure bar, Log/Summary tabs.
-    assert isinstance(screen.run_view.state_header, QLabel)
+    # Run view: the shared run header, live step list, full-width failure bar, Log/Summary tabs.
+    # Ticket 39 (R2): the staged Run view uses the same header widget as the three-pane layout.
+    assert isinstance(screen.run_view.header, RunHeader)
     assert isinstance(screen.run_view.step_list, QListWidget)
     assert isinstance(screen.run_view.failure_bar, QLabel)
     assert isinstance(screen.run_view.tabs, QTabWidget)
@@ -212,8 +214,11 @@ def test_steps_show_live_result_after_run(qapp, tmp_path):
     _select_and_start(qapp, screen, "Passing schedule")
     assert _wait_finished(qapp, session)
 
-    texts = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
-    assert any("PASS" in text for text in texts)
+    step_list = screen.run_view.step_list
+    # Ticket 39 (R4): the Result is no longer in the row text — `StepRowDelegate` paints it as a
+    # badge, and the delegate reads it from the row's result role.
+    results = [step_list.item(i).data(STEP_RESULT_ROLE) for i in range(step_list.count())]
+    assert "PASS" in results, results
     # The Run view's failure bar is clear on a passing run.
     assert screen.run_view.failure_bar.text() == ""
 
@@ -233,6 +238,10 @@ def test_current_step_is_enlarged(qapp, tmp_path):
     first = step_list.item(0)
     last = step_list.item(step_list.count() - 1)
     assert last.font().pointSize() > first.font().pointSize()
+    # Ticket 39 review (R4): the run is over, so no row is the step the run is on — the enlarged
+    # last step carries no emphasis tint or left bar, exactly as the three-pane table does.
+    assert not last.data(STEP_EMPHASIS_ROLE), f"the finished run still tints step {last.text()!r}"
+    assert not first.data(STEP_EMPHASIS_ROLE), f"the finished run tints the first row {first.text()!r}"
 
 
 def test_failing_step_surfaces_in_failure_bar_and_run_view(qapp, tmp_path):
@@ -250,8 +259,10 @@ def test_failing_step_surfaces_in_failure_bar_and_run_view(qapp, tmp_path):
     assert "FAIL" in failure_bar or "ERROR" in failure_bar
     assert "LED colour" in failure_bar  # the failing step is named
 
-    texts = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
-    assert any("FAIL" in text for text in texts)
+    step_list = screen.run_view.step_list
+    # R4: the failing step's Result is painted as a badge, read from the row's result role.
+    results = [step_list.item(i).data(STEP_RESULT_ROLE) for i in range(step_list.count())]
+    assert "FAIL" in results, results
 
 
 def test_run_view_is_hidden_until_a_run_starts(qapp, tmp_path):
@@ -326,7 +337,8 @@ def test_log_pane_shows_info_and_above_debug_window_shows_every_level(qapp, tmp_
     debug_window = "\n".join(screen.run_view.debug_window.rendered_lines())
 
     # The Log pane shows INFO and above: an INFO line (ATE.log/print), a WARNING and an ERROR.
-    assert any(line.startswith("INFO") for line in screen.run_view.log_pane.rendered_lines())
+    # R3 draws each line as `HH:MM:SS LEVEL  SOURCE  text`, so the level is the second column.
+    assert any(line.split()[1] == "INFO" for line in screen.run_view.log_pane.rendered_lines())
     assert "WARNING" in log_pane
     assert "ERROR" in log_pane
 

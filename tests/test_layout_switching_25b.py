@@ -21,6 +21,7 @@ from pytestqt.exceptions import capture_exceptions
 from ate.app import launch
 from ate.run_session.headless import SessionState
 from ate.storage.store import RunStore
+from ate.ui.run_widgets import STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 
@@ -379,8 +380,8 @@ def test_a_mid_run_switch_answers_the_input_in_the_new_layout(qapp, tmp_path, fa
     assert three.status_bar.status_label.text() == "Finished"
     shown = staged.input_widget(seq, index)
     assert shown is not None and shown.line_edit.text() == "42"
-    step_rows = [staged.run_view.step_list.item(i).text() for i in range(staged.run_view.step_list.count())]
-    assert any("PASS" in row for row in step_rows), step_rows
+    results = _staged_step_results(staged)
+    assert "PASS" in results, results
 
 
 def test_the_staged_log_shows_what_the_step_logged_before_it_asked(qapp, tmp_path):
@@ -536,6 +537,15 @@ def _staged_step_texts(screen) -> list[str]:
     return [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
 
 
+def _staged_step_results(screen) -> list[str]:
+    """The Result painted on each staged step row (ticket 39, R4).
+
+    The row text names the step only; `StepRowDelegate` draws the badge from the row's result
+    role, so "which step passed" is read from that role rather than from a `→ PASS` suffix."""
+    step_list = screen.run_view.step_list
+    return [step_list.item(i).data(STEP_RESULT_ROLE) for i in range(step_list.count())]
+
+
 def _three_step_results(screen) -> dict[int, tuple[str, str]]:
     """``node_seq -> (Result, Attempts)`` for every step row in the three-pane centre table."""
     results = {}
@@ -567,8 +577,8 @@ def test_a_finished_run_keeps_its_results_across_both_switches(qapp, tmp_path):
     qapp.processEvents()
     staged, three = window.staged_screen, window.three_pane_screen
 
-    rows = _staged_step_texts(staged)
-    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    rows = _staged_step_results(staged)
+    assert "FAIL" in rows and "PASS" in rows, rows
     assert staged.log_pane.rendered_lines(), "the staged log lost the run's log"
 
     window.three_pane_layout_action.trigger()
@@ -581,8 +591,8 @@ def test_a_finished_run_keeps_its_results_across_both_switches(qapp, tmp_path):
 
     window.staged_layout_action.trigger()
     qapp.processEvents()
-    rows = _staged_step_texts(staged)
-    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    rows = _staged_step_results(staged)
+    assert "FAIL" in rows and "PASS" in rows, rows
     assert any("the first step is failing" in line for line in staged.log_pane.rendered_lines()), (
         "the log went empty when staged came back"
     )
@@ -616,15 +626,15 @@ def test_a_finished_run_is_drawn_only_when_the_hidden_layout_comes_back(qapp, tm
     assert any(result == "PASS" for result, _ in _three_step_results(three).values()), (
         "the visible layout lost the run"
     )
-    hidden_rows = _staged_step_texts(staged)
-    assert not any("PASS" in row for row in hidden_rows), (
+    hidden_rows = _staged_step_results(staged)
+    assert "PASS" not in hidden_rows, (
         f"the hidden staged layout read the finished run while it was not showing: {hidden_rows}"
     )
 
     window.staged_layout_action.trigger()
     qapp.processEvents()
-    rows = _staged_step_texts(staged)
-    assert any("FAIL" in row for row in rows) and any("PASS" in row for row in rows), rows
+    rows = _staged_step_results(staged)
+    assert "FAIL" in rows and "PASS" in rows, rows
     assert any("the first step is failing" in line for line in staged.log_pane.rendered_lines())
     _finish(qapp, window)
 
@@ -695,7 +705,7 @@ def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_
     qapp.processEvents()
     assert staged.run_view.failure_prompt_bar.isVisible() is False, "the prompt bar came back with the layout"
     assert staged.run_view.status_bar.status_label.text() != "Paused"
-    assert staged.run_view.state_header.text() != "WAITING"
+    assert staged.run_view.header.state_chip.state_word() != "STEP FAILED"
 
     # One click of Abort on this layout aborts the run.
     window.staged_screen.run_view.abort_button.click()
@@ -1076,7 +1086,7 @@ def test_a_retried_step_shows_its_attempts_on_both_layouts(qapp, tmp_path):
 
     rows = _staged_step_texts(staged)
     assert any("2 Attempts" in row for row in rows), rows
-    assert any("PASS" in row for row in rows), rows
+    assert "PASS" in _staged_step_results(staged), rows
 
     window.three_pane_layout_action.trigger()
     qapp.processEvents()

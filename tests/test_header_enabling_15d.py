@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt
 from ate.catalog import find_definitions, include_map, module_map
 from ate.engine.lua_host import LuaHost
 from ate.run_session.headless import HeadlessRunSession, SessionState
+from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
 
 SHOTS = Path("/tmp/15d-shots")
@@ -361,11 +362,18 @@ def test_the_run_view_header_rows_roll_up_the_steps_beneath_them(qapp, tmp_path)
     rows = [screen.run_view.step_list.item(i).text() for i in range(screen.run_view.step_list.count())]
     assert rows == [
         "2.  channel 1  3/3 done, 1 failed",
-        "  2.1.  output on  →  PASS",
-        "  2.2.  output bad  →  FAIL",
+        "  2.1.  output on",
+        "  2.2.  output bad",
         "  2.3.  nested  1/1 done",
-        "    2.3.1.  deep one  →  PASS",
+        "    2.3.1.  deep one",
     ]
+    # Ticket 39 (R4): the Result is painted as a badge from the row's result role, not written
+    # into the row text (the `→ PASS` suffix of the old list).
+    results = [
+        screen.run_view.step_list.item(i).data(STEP_RESULT_ROLE)
+        for i in range(screen.run_view.step_list.count())
+    ]
+    assert results == ["", "PASS", "FAIL", "", "PASS"], results
     for row in (0, 3):
         item = screen.run_view.step_list.item(row)
         assert item.background().color().name() == "#eef1f5"
@@ -390,11 +398,18 @@ def test_the_paused_run_view_shows_a_partial_rollup(qapp, tmp_path) -> None:
     # above it counts the steps already recorded.
     assert rows == [
         "2.  channel 1  1/3 done",
-        "  2.1.  output on  →  PASS",
-        "  2.2.  output bad  →  FAIL",
+        "  2.1.  output on",
+        "  2.2.  output bad",
         "  2.3.  nested",
-        "    2.3.1.  deep one  →  …",
+        "    2.3.1.  deep one",
     ]
+    # The pause paints the badge from the Attempt the prompt was raised on (the step has no node
+    # row yet), and the step the prompt is waiting on is the one the delegate emphasises.
+    step_list = screen.run_view.step_list
+    results = [step_list.item(i).data(STEP_RESULT_ROLE) for i in range(step_list.count())]
+    emphasis = [step_list.item(i).data(STEP_EMPHASIS_ROLE) for i in range(step_list.count())]
+    assert results == ["", "PASS", "FAIL", "", ""], results
+    assert emphasis[2] == "failed", emphasis
     screen.run_view.failure_prompt_bar.continue_button.click()
     assert _finish(qapp, session)
 

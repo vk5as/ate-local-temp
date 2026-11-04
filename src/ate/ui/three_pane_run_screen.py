@@ -5,7 +5,9 @@ fields, the filterable schedule list with errors and mismatches inline, the Star
 the live `Result` counts; the centre pane is the steps as a table with Result, Attempts, Actual,
 Expected and Message, the Step Inputs under the step that declared them, and — on a Stop-on-Fail
 pause — the Continue/Retry/Abort prompt inline under the failed step with a sticky banner above the
-table; the right pane is the log. The status bar (packet 14d) runs along the bottom of all three.
+table; the right pane is the Log/Summary band (ticket 39, R3), and Debug is its own window opened
+from the shared run header above the panes (R2, D2). The status bar (packet 14d) runs along the
+bottom of all three.
 
 Like the staged screen, this layout holds no run logic: every control is bound to the run session,
 and everything drawn is a row the store already wrote. The widgets themselves are the shared ones in
@@ -19,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QGroupBox,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -39,34 +42,45 @@ from ate.engine.run_engine import RunEngine
 
 from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .run_widgets import (
+    DebugWindow,
     FailurePromptBar,
     LogPane,
     MismatchConfirmation,
+    ResultBadgeDelegate,
     ResultCounts,
     RunFieldsForm,
+    RunHeader,
     RunScreenMixin,
     SchedulePicker,
     StatusBar,
     StepEnabler,
     StepInputWidget,
+    TextPane,
     BROKEN_MARKER,
     _BROKEN_ERR,
+    _CURRENT_BG,
     _FAILED_BG,
     _HEADER_BG,
     _INLINE_PROMPT_STYLE,
     _ROW_BG,
     _STICKY_STYLE,
+    _no_auto_default,
     _rollup_text as rollup_text,
     _row_label as row_label,
     load_schedule_steps,
 )
+from .theme import badge_width_for, mono_font
 
 #: The centre pane's columns. `Enable` carries the step's box (packet 15d); the rest are the mockup's
 #: `.b-thead` cells (prototype line 100).
 COLUMNS = ("Enable", "Step", "Result", "Attempts", "Actual", "Expected", "Message")
 #: Widths that fit the 640 px centre pane of a 1280x800 window: every header word fits, and the
-#: Message column takes whatever is left.
-_COLUMN_WIDTHS = (46, 165, 62, 60, 80, 80, 130)
+#: Message column takes whatever is left. Ticket 39 review: the Result column starts at 78 px,
+#: enough for a "PASS"/"FAIL"/"ERROR" badge beside its glyph, and `StepTable.show_state` widens
+#: it from the font metrics when a longer Result word ("NOREPORT", "FORCED_NOTRUN") appears, so
+#: the word is never dropped in favour of the glyph alone.
+_RESULT_COLUMN_MIN = 78
+_COLUMN_WIDTHS = (46, 150, _RESULT_COLUMN_MIN, 60, 80, 80, 130)
 
 
 class StepTable(QWidget):
@@ -103,6 +117,11 @@ class StepTable(QWidget):
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
+        # R4: the Result column is painted as a badge. Ticket 39 review: the delegate is set
+        # on that column alone rather than on the whole table, so every other cell (Step,
+        # Actual, Message) keeps Fusion's ordinary drawing without the delegate having to
+        # recognise text that is not a result.
+        self.table.setItemDelegateForColumn(2, ResultBadgeDelegate())
         for index, width in enumerate(_COLUMN_WIDTHS):
             self.table.setColumnWidth(index, width)
         # The Message column takes whatever the pane leaves, so the table never has to scroll
@@ -127,6 +146,10 @@ class StepTable(QWidget):
         self._step_rows: dict[int, int] = {}
         self._prompt_rows: dict[int, int] = {}
         self._prompt_bars: dict[int, FailurePromptBar] = {}
+        #: The step whose Attempt is running (R4 emphasis) and the step the pause is on, as
+        #: last drawn — enough to repaint a row's tint without reading the store again.
+        self._current_seq: Optional[int] = None
+        self._paused_in_table: Optional[int] = None
 
     # -- building the rows --------------------------------------------------
 
@@ -230,6 +253,8 @@ class StepTable(QWidget):
         paused_seq: Optional[int] = None,
         paused_result: str = "",
         paused_message: str = "",
+        paused_actual: str = "",
+        paused_expected: str = "",
     ) -> None:
         """Write the recorded Results, Attempts, Actual, Expected and Message into the table.
 
@@ -238,11 +263,13 @@ class StepTable(QWidget):
         highlighted and its inline prompt shown; every other prompt row is hidden."""
         if self.enabler is None:
             return
+        self._paused_in_table = paused_seq
         by_seq = {node["node_seq"]: node for node in nodes if node.get("node_seq") is not None}
         by_step: dict[int, list[dict]] = {}
         for attempt in attempts:
             by_step.setdefault(attempt["node_seq"], []).append(attempt)
 
+        shown_results: list[str] = []
         for seq, row in self._step_rows.items():
             if self.enabler.is_header(seq):
                 rollup = rollup_text(seq, self.enabler.children, self.enabler.is_header,
@@ -255,13 +282,21 @@ class StepTable(QWidget):
             result = paused_result if seq == paused_seq else (node.get("result") if node else "")
             attempts_count = (node.get("attempt_count") if node else 0) or len(tried)
             self._set_cell(row, 2, str(result or ""))
+            shown_results.append(str(result or ""))
             # An unrun step has no Attempt to count: its cell stays blank rather than "0".
             self._set_cell(row, 3, str(attempts_count) if attempts_count else "")
             self._set_cell(row, 4, str(last.get("actual") or "") if last else "")
             self._set_cell(row, 5, str(last.get("expected") or "") if last else "")
             self._set_cell(row, 6, str(last.get("msg") or "") if last else "")
-            self._highlight(row, seq == paused_seq)
-        self._paint_prompt(paused_seq, paused_result, paused_message)
+            self._highlight(row, seq == paused_seq, current=seq == self._current_seq)
+        # Ticket 39 review: the Result column is widened to fit the widest badge the run
+        # actually shows, measured from the badge's own font metrics, so "NOREPORT" and
+        # "FORCED_NOTRUN" keep their words instead of being painted as a glyph alone. The
+        # Message column is the stretch column, so a wide Result column costs it, not the
+        # table's fit in the pane.
+        widest = max((badge_width_for(value) for value in shown_results if value), default=_RESULT_COLUMN_MIN)
+        self.table.setColumnWidth(2, max(_RESULT_COLUMN_MIN, widest + 8))
+        self._paint_prompt(paused_seq, paused_result, paused_message, paused_actual, paused_expected)
 
     def _set_cell(self, row: int, column: int, text: str) -> None:
         """Write one cell, reusing the item that is already there."""
@@ -272,18 +307,38 @@ class StepTable(QWidget):
         else:
             item.setText(text)
 
-    def _highlight(self, row: int, paused: bool) -> None:
-        """Give a paused step's row the mockup's `.b-row.failed-hl` tint; clear it otherwise.
+    def _highlight(self, row: int, paused: bool, current: bool = False) -> None:
+        """Tint a step row: the failed red for the step a pause is waiting on (packet 12d),
+        the primary tint for the step whose Attempt is running (ticket 39, R4).
 
         An unset `QColor` paints the cell black rather than leaving it alone, so clearing means
         putting the plain row colour back."""
+        fill = QColor(_FAILED_BG) if paused else (QColor(_CURRENT_BG) if current else QColor(_ROW_BG))
         for column in range(self.table.columnCount()):
             item = self.table.item(row, column)
             if item is None:
                 continue
-            item.setBackground(QColor(_FAILED_BG) if paused else QColor(_ROW_BG))
+            item.setBackground(fill)
+        # The emphasized step's name is bold as well, so the tint is not the only cue.
+        name = self.table.item(row, 1)
+        if name is not None:
+            font = QFont(name.font())
+            font.setBold(bool(paused or current))
+            name.setFont(font)
 
-    def _paint_prompt(self, seq: Optional[int], result: str, message: str) -> None:
+    def mark_current(self, node_seq: Optional[int]) -> None:
+        """Ticket 39 (R4): the step whose Attempt just started takes the primary tint and a
+        bold name; every other step row goes back to plain (a paused one keeps its red)."""
+        if self.enabler is None:
+            return
+        self._current_seq = node_seq
+        for seq, row in self._step_rows.items():
+            if self.enabler.is_header(seq):
+                continue
+            self._highlight(row, seq == self._paused_in_table, current=seq == node_seq)
+
+    def _paint_prompt(self, seq: Optional[int], result: str, message: str,
+                      actual: str = "", expected: str = "") -> None:
         """Show the inline prompt under the paused step, and the sticky banner above the table."""
         for other, row in self._prompt_rows.items():
             if other == seq:
@@ -302,7 +357,8 @@ class StepTable(QWidget):
             self._prompt_bars[seq] = bar
             self.table.setCellWidget(row, 0, bar)
         number = getattr(self._rows[seq], "step_no", "") if 0 <= seq < len(self._rows) else ""
-        bar.show_prompt(str(number or ""), result, message)
+        # Ticket 39 (D1): the prompt states the measurements as well as the message.
+        bar.show_prompt(str(number or ""), result, message, actual=actual, expected=expected)
         self.table.setRowHeight(row, bar.sizeHint().height())
         self.table.setRowHidden(row, False)
         self.banner.setText(f"Step {number} {result}: choose Continue, Retry or Abort below")
@@ -310,9 +366,12 @@ class StepTable(QWidget):
 
     def clear_pause(self) -> None:
         """Drop the inline prompt and the banner once the Operator has answered."""
+        self._paused_in_table = None
         self._paint_prompt(None, "", "")
-        for row in self._step_rows.values():
-            self._highlight(row, False)
+        for seq, row in self._step_rows.items():
+            if self.enabler is not None and self.enabler.is_header(seq):
+                continue
+            self._highlight(row, False, current=seq == self._current_seq)
 
     def close_inputs(self) -> None:
         """Close every Step Input: nothing is being asked for, so nothing can be answered."""
@@ -362,7 +421,11 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         session: HeadlessRunSession,
         confirm_choice: Optional[Callable[[MismatchConfirmation], None]] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        debug_window: Optional[DebugWindow] = None,
     ) -> None:
+        """``debug_window`` (ticket 39 review) is the window's one shared Debug window: both
+        layouts use it, so switching layouts never leaves a second one open and closing the
+        main window closes it with the rest of the application."""
         super().__init__()
         self.session = session
         self.state = SessionState.IDLE
@@ -385,7 +448,14 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._paused_seq: Optional[int] = None
         self._paused_result = ""
         self._paused_message = ""
+        self._paused_actual = ""
+        self._paused_expected = ""
         self._steps: list[object] = []
+        # Ticket 39 (D4): state the header chip needs — which blocking Step Inputs are waiting,
+        # whether the Post-test phase has begun, and which step's Attempt is running.
+        self._waiting_inputs: set[tuple[int, int]] = set()
+        self._post_test_started = False
+        self._current_seq: Optional[int] = None
 
         # -- the three panes -----------------------------------------------
         self.picker = SchedulePicker(session, inline_mismatches=True)
@@ -402,15 +472,29 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet(f"color: {_BROKEN_ERR}; font-size: 12px;")
         self.start_button = QPushButton("Start")
+        self.start_button.setObjectName("primary")
         self.abort_button = QPushButton("Abort")
+        self.abort_button.setObjectName("danger")
         self.abort_button.setEnabled(False)
         # Packet 30b review: variant B's finished header offers "New run". The three-pane layout has
         # no run header of its own — its Start and Abort sit in the setup pane — so the next run is
         # offered there, with the same semantics as the staged button.
         self.new_run_button = QPushButton("New run")
         self.new_run_button.setEnabled(False)
+        # Ticket 39 review: Abort and New run must not be the window's Enter-key default. A stray
+        # Enter from a scanner, or an Operator pressing Enter to leave a field, would end a run or
+        # start one they did not mean.
+        _no_auto_default(self.abort_button, self.new_run_button)
         self.counts = ResultCounts()
         self.counts.hide()
+
+        # Ticket 39 (R2, D2): the shared run header above the panes — state chip, schedule,
+        # UUT/Operator, run timer — and Debug as its own window opened from the header.
+        self.run_header = RunHeader()
+        #: One Debug window for the window (ticket 39 review): MainWindow passes the same one to
+        # both layouts. Left as a separate instance per layout, a layout switch opened a second
+        # window and closing ATE left the layouts' parentless windows behind.
+        self.debug_window = debug_window if debug_window is not None else DebugWindow()
 
         left = QWidget()
         # A low floor, not a demand: at 1280x800 the pane gets 320 px, and a bigger minimum would
@@ -431,13 +515,20 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         left_layout.addWidget(self.counts)
 
         self.table = StepTable(session, screen=self)
-        self.log_pane = LogPane("Log — INFO and above")
-        self.debug_window = LogPane("Debug — every level")
+        # R3: the right pane is the Log/Summary band — Log live from the start, Summary the
+        # verdict and per-step results. Debug is not a pane any more (D2): it is its own
+        # window, opened from the header's button or Ctrl+D.
+        self.log_pane = LogPane("")
+        self.summary_pane = TextPane()
+        self.summary_pane.setObjectName("summary_text")
+        self.summary_pane.setFont(mono_font(12))
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.log_pane, "Log")
+        self.tabs.addTab(self.summary_pane, "Summary")
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.addWidget(self.log_pane, stretch=2)
-        right_layout.addWidget(self.debug_window, stretch=1)
+        right_layout.addWidget(self.tabs, stretch=1)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(left)
@@ -450,8 +541,12 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.status_bar = StatusBar()
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
+        root.addWidget(self.run_header)
         root.addWidget(self.splitter, stretch=1)
         root.addWidget(self.status_bar)
+
+        self.run_header.debug_button.clicked.connect(self.toggle_debug)
+        QShortcut(QKeySequence("Ctrl+D"), self, self.toggle_debug)
 
         # Prefill Project from config's `defaultProject` (spec 08). The Station name is not a
         # Project and never lands in this field.
@@ -531,7 +626,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.table.set_checkable(True)
         self.counts.set_counts({})
         self.counts.hide()
-        self._show_log([])
+        self.log_pane.clear()
+        self.debug_window.clear()
+        self.summary_pane.clear()
         self.table.banner.hide()
 
     def _apply_stop_on_fail(self, value: bool) -> None:
@@ -583,22 +680,46 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self._started_at = self._clock()
             self._item_started_at = None
             self._phase_text = "Running"
+            # Ticket 39 review: the header reads the run row, so a new run starts from a fresh one.
+            # Ticket 39 review, second pass: a deferred read of the run that finished before this one
+            # goes with it, so the layout that was hidden through it shows the run that is running.
+            self.invalidate_run_row()
             self._pre_counts = (0, 0)
             self._post_counts = (0, 0)
             self._started_steps = set()
             self._step_total = self._enabled_step_count(steps)
+            # Ticket 39 (D4): a fresh run starts with nothing waiting and no Post-test yet.
+            self._waiting_inputs = set()
+            self._post_test_started = False
+            self._current_seq = None
             self._timer.start(1000)
             # A new run tallies from nothing: the previous run's numbers stay on the grid otherwise
             # (packet 25a review), and the log panes start empty too.
             self.counts.set_counts({})
-            self._show_log([])
+            # Ticket 39 review: the live panes append rather than rewrite, so a new run starts by
+            # emptying them — the log the Operator sees is the run they are looking at (30b).
+            self.log_pane.clear()
+            self.debug_window.clear()
+            self.summary_pane.clear()
             self.counts.show()
         elif state == SessionState.FINISHED:
             self._engine = None
+            # Ticket 39 review: the finished verdict and End Reason are read from the run row, so
+            # the row cached while the run was up is dropped before it is read again.
+            self.invalidate_run_row()
             self._paused_seq = None
             self._paused_result = ""
             self._paused_message = ""
+            # Ticket 39 review: the pause's Actual/Expected pair is part of the pause state, so
+            # it is emptied with the rest of it. Left behind, a later deferred read would paint
+            # a finished run's row with the measurements of a pause that was answered long ago.
+            self._paused_actual = ""
+            self._paused_expected = ""
             self.table.clear_pause()
+            # Ticket 39 review: the run is over, so no step is "the one running" any more. Without
+            # this the last step's row kept the primary tint after FINISHED, which reads as though
+            # the run were still on it (R4 tints only the running and paused rows).
+            self.table.mark_current(None)
             # Nothing can be asked for any more, so every Step Input closes: a widget left live
             # after FINISHED answers against a released engine (packet 25a review).
             self.table.close_inputs()
@@ -609,6 +730,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
                 log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
                 self.table.show_state(nodes, attempts)
                 self._show_log(log_lines)
+                self._update_summary(nodes, attempts)
                 self._update_counts(nodes)
             else:
                 # The layout that is not showing defers the read and draws it when it comes back
@@ -630,7 +752,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self._timer.stop()
 
     def _update_header(self, state: Optional[SessionState] = None, now: Optional[datetime] = None) -> None:
-        """Refresh the status bar's timers (packet 14d)."""
+        """Refresh the status bar's timers (packet 14d) and the shared header's chip (ticket 39, R2)."""
         if now is None:
             now = self._clock()
         self.status_bar.set_progress(
@@ -643,17 +765,20 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self._item_started_at,
             now,
         )
+        self._refresh_run_header(now)
 
     def _sync_from_store(self) -> None:
-        """Redraw the table, the counts and the log from whatever the store has recorded so far."""
+        """Redraw the table, the counts, the log and the summary from whatever the store has recorded."""
         self._deferred_run_uuid = None
         run_uuid = self.session.run_uuid
-        if not run_uuid:
+        if not run_uuid or not self._store_open():
             return
         nodes = self.session.store.nodes(run_uuid)
         attempts = self.session.store.attempts(run_uuid)
-        self.table.show_state(nodes, attempts, self._paused_seq, self._paused_result, self._paused_message)
+        self.table.show_state(nodes, attempts, self._paused_seq, self._paused_result,
+                              self._paused_message, self._paused_actual, self._paused_expected)
         self._update_counts(nodes)
+        self._update_summary(nodes, attempts)
         self._show_log(self.session.store.log_lines(run_uuid))
 
     def _update_counts(self, nodes: list[dict]) -> None:
@@ -677,6 +802,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         attempt = self._attempt_row(node_seq, attempt_no)
         result = str(attempt.get("pass_fail") or "FAIL") if attempt else "FAIL"
         message = str(attempt.get("msg") or "") if attempt else ""
+        # Ticket 39 (D1): the inline prompt carries the Attempt's Actual/Expected too.
+        self._paused_actual = str(attempt.get("actual") or "") if attempt else ""
+        self._paused_expected = str(attempt.get("expected") or "") if attempt else ""
         self._paused_seq = node_seq
         self._paused_result = result
         self._paused_message = message
@@ -694,6 +822,8 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._paused_seq = None
         self._paused_result = ""
         self._paused_message = ""
+        self._paused_actual = ""
+        self._paused_expected = ""
         self.table.clear_pause()
         self._phase_text = "Running"
         if self.is_active():
@@ -714,6 +844,8 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._paused_seq = None
         self._paused_result = ""
         self._paused_message = ""
+        self._paused_actual = ""
+        self._paused_expected = ""
         self.table.clear_pause()
         self._phase_text = "Running"
         self._sync_from_store()
@@ -726,12 +858,18 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         """The centre pane's Step Input widgets, keyed by the seq of the step that declared them."""
         return self.table.input_widgets
 
+    def _mark_current_step(self, node_seq: int) -> None:
+        """Ticket 39 (R4): tint the row of the step whose Attempt just started and bold its
+        name. The layout mirrors the session even while hidden, so this runs either way."""
+        self.table.mark_current(node_seq)
+
     def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
         """The worker is waiting on this step's n-th input, so its widget becomes live.
 
         The ask is also when the log pane is most worth reading: whatever the step logged before it
         blocked is already in the store, and the Operator needs it to decide what to type
-        (packet 25a review)."""
+        (packet 25a review). Ticket 39 (D4): a blocking input waiting on the Operator is what the
+        header chip counts as INPUT NEEDED."""
         if self.is_active():
             self._refresh_log()
         else:
@@ -739,12 +877,16 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         widget = self.input_widget(node_seq, index)
         if widget is not None:
             widget.activate(attempt_no)
+            if widget.declaration.type != "POLL":
+                self._waiting_inputs.add((node_seq, index))
+                self._refresh_run_header()
 
     def _on_step_finished(self, node_seq: int) -> None:
         """One step's Attempts are done: close its POLL widgets and redraw the run so far."""
         for widget in self.table.input_widgets.get(node_seq, ()):
             if widget.declaration.type == "POLL":
                 widget.deactivate()
+        self._waiting_inputs = {waiting for waiting in self._waiting_inputs if waiting[0] != node_seq}
         # The pane that is not showing does not read the store for rows nobody is looking at: it
         # marks itself dirty and syncs once when the Operator switches to it (packet 25b review).
         if not self.is_active():
