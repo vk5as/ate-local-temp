@@ -695,9 +695,15 @@ class StepEnabler:
 class ResultCounts(QWidget):
     """The live `Result` tallies the left pane shows while a run is up (spec line 48).
 
-    The mockup's ``counts()``: one row per Result value — PASS, FAIL, ERROR, SKIPPED, NOTRUN,
+    The mockup's ``counts()``: one tally per Result value — PASS, FAIL, ERROR, SKIPPED, NOTRUN,
     FORCED_NOTRUN, NOREPORT — with the number of steps that recorded it. The widget only writes the
-    numbers it is handed; the screen counts them from the store's node rows."""
+    numbers it is handed; the screen counts them from the store's node rows.
+
+    Ticket 39 CI (Actions run 41754197618): seven stacked tally rows made the setup pane's natural
+    minimum 661 px, and that pane is the tallest thing in the three-pane window — its floor was
+    771 px, and the window's 792 px with a run finished, which is over 800 px on Windows' taller
+    Segoe UI metrics (the runners resized the window to 1280x821). Two tallies per row keeps every
+    Result on screen and gives the layout the room it was short of."""
 
     RESULT_KEYS = ("PASS", "FAIL", "ERROR", "SKIPPED", "NOTRUN", "FORCED_NOTRUN", "NOREPORT")
 
@@ -708,12 +714,13 @@ class ResultCounts(QWidget):
         grid.setContentsMargins(8, 8, 8, 8)
         self.count_labels: dict[str, QLabel] = {}
         for index, key in enumerate(self.RESULT_KEYS):
+            row, pair = divmod(index, 2)
             name = QLabel(key)
             name.setObjectName(f"count_{key}")
             count = QLabel("0")
             count.setObjectName(f"count_{key}_value")
-            grid.addWidget(name, index, 0)
-            grid.addWidget(count, index, 1)
+            grid.addWidget(name, row, pair * 2)
+            grid.addWidget(count, row, pair * 2 + 1)
             self.count_labels[key] = count
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

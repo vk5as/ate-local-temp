@@ -37,27 +37,38 @@ below in the same way:
     drew that run when the Operator switched to it, even when a new run was already running and
     waiting for an input.
 
+The third pass (the first public CI run, Actions run 41754197618) found one more, on the Windows
+runners only:
+
+13. The layouts' natural minimum was 26-29 px taller where Segoe UI is drawn than where the Linux
+    runner's fallback font is, so a window asked for 1280x800 grew to 1280x821 after a run finished
+    and the window at launch wanted 493x773, over a 1366x768 netbook.
+
 Everything here is offscreen and against real sessions; the two pixel checks grab the widget
 itself, so they read what a person sees rather than what a role holds.
 """
 
+import re
 import sqlite3
+import sys
 import time
 
 import json
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QFontMetrics
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QPushButton
 
 from ate.app import launch
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
+from ate.ui import theme, run_widgets, three_pane_run_screen
 from ate.ui.run_widgets import (
     STEP_DETAIL_ROLE,
     STEP_EMPHASIS_ROLE,
     STEP_RESULT_ROLE,
     FailurePromptBar,
+    ResultCounts,
     RunStateChip,
     StepRowDelegate,
     load_schedule_steps,
@@ -82,6 +93,9 @@ from ._fixtures import add_long_schedule, write_ate_env
 
 #: The screen size the review measured against: a Station on a netbook.
 NETBOOK = (1366, 768)
+#: The window both layouts are built for. CI's Windows runners grew it to 1280x821 with a finished
+#: three-pane run (Actions run 41754197618), so the layouts are measured against it as well.
+TARGET_WINDOW = (1280, 800)
 
 
 def _find_item(list_widget, substring):
@@ -372,6 +386,150 @@ def test_the_window_still_fits_a_1366x768_screen(qapp, tmp_path):
     assert all(b.sizeHint().height() < 32 for b in history_buttons), "History's buttons are bench-sized"
 
 
+def _fonts_drawn_px_taller(px: int):
+    """Increase shared theme fonts and stylesheet sizes, returning what to put back.
+
+    Segoe UI on the Windows runners measures a 13 px line about 2 px taller than the fallback the
+    Linux runner uses, and that is what grew the window past its size in Actions run 41754197618:
+    with the layouts as they were then, this same 2 px bump reproduces the growth on Linux (the
+    finished three-pane window's floor goes from 792 px to 838 px). Patching the theme before the
+    window is built exercises those size hints — `apply_theme` takes the
+    application font from `ui_font` and installs `STYLESHEET`, and a font set on a widget after
+    that is overridden by the stylesheet's own `font-size` rules.
+    """
+    def taller(base):
+        def build(*args, **kwargs) -> QFont:
+            font = base(*args, **kwargs)
+            font.setPixelSize(font.pixelSize() + px)
+            return font
+
+        return build
+
+    original = (
+        theme.ui_font,
+        theme.mono_font,
+        theme.STYLESHEET,
+        run_widgets.ui_font,
+        run_widgets.mono_font,
+        three_pane_run_screen.mono_font,
+    )
+    theme.ui_font = run_widgets.ui_font = taller(theme.ui_font)
+    theme.mono_font = run_widgets.mono_font = three_pane_run_screen.mono_font = taller(theme.mono_font)
+    theme.STYLESHEET = re.sub(r"font-size: (\d+)px", lambda m: f"font-size: {int(m.group(1)) + px}px", theme.STYLESHEET)
+    return original
+
+
+def _restore_theme(original) -> None:
+    """Put the patched theme back; the caller re-applies it to `qapp`, which pytest-qt shares across
+    the whole session."""
+    (theme.ui_font, theme.mono_font, theme.STYLESHEET, run_widgets.ui_font, run_widgets.mono_font, three_pane_run_screen.mono_font) = original
+
+
+def _settle_window_layout(qapp, window) -> None:
+    """Wait for stable geometry rather than relying on a machine's event-pump speed."""
+    deadline = time.monotonic() + 5.0
+    previous = None
+    stable_since = time.monotonic()
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        geometry = (window.size(), window.minimumSizeHint(), window.stack.currentWidget().size())
+        now = time.monotonic()
+        if geometry != previous:
+            previous, stable_since = geometry, now
+        elif now - stable_since >= 0.05:
+            return
+        time.sleep(0.005)
+    raise AssertionError("the window layout did not settle within five seconds")
+
+
+def test_the_window_still_fits_1280x800_when_the_platform_font_is_taller(qapp, tmp_path):
+    """Defect 13: the layouts' natural floor was 26-29 px higher on Windows than on Linux.
+
+    The first public CI run of this packet (Actions run 41754197618) failed three tests on both
+    Windows runners and nothing on Linux, all for the same reason. A window asked to be 1280x800
+    had to be 1280x821 to hold a finished three-pane run, and the window at launch wanted 493x773,
+    taller than the 1366x768 netbook a Station sits on; Linux measured the identical layouts at
+    792 px and 493x747. The gap is the font: the runners draw Segoe UI at 13 px, whose line height
+    is about 2 px more than the fallback this runner uses, and every text row the setup pane and
+    the History filters stack adds it to the window's minimum.
+
+    Both layouts are measured with shared theme fonts 2 px taller on Linux, or 1 px taller on
+    Windows where Segoe UI already supplies the larger metrics. Inline styles are unchanged. The
+    window still fits 1280x800 and still fits the netbook, so the growth the runners saw has room
+    here as well. Against the layouts as CI ran them this test fails: the finished three-pane
+    window needs 838 px."""
+    bump = 1 if sys.platform == "win32" else 2
+    original = _fonts_drawn_px_taller(bump)
+    # apply_theme has already styled this QApplication, so the patched theme goes on by hand.
+    qapp.setFont(theme.ui_font(13))
+    qapp.setStyleSheet(theme.STYLESHEET)
+    try:
+        env = write_ate_env(tmp_path)
+        RunStore(env["db"])
+        schedule = add_long_schedule(tmp_path, steps=20, fail_at=99)
+        config = tmp_path / "tall-font.json"
+        data = json.loads(env["config"].read_text(encoding="utf-8"))
+        data["ui"] = {"layout": "threePane"}
+        config.write_text(json.dumps(data), encoding="utf-8", newline="\n")
+        outcome = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[])
+        window = outcome.window
+        window.resize(*TARGET_WINDOW)
+        window.show()
+        _settle_window_layout(qapp, window)
+
+        at_launch = window.minimumSizeHint()
+        assert at_launch.width() <= NETBOOK[0] and at_launch.height() <= NETBOOK[1], (
+            f"with taller fonts the window at launch needs {at_launch.width()}x{at_launch.height()}, "
+            "over the 1366x768 screen CI measured"
+        )
+
+        screen = window.three_pane_screen
+        for key, value in (
+            ("operator", "Ada Lovelace"),
+            ("project", "PSU-200 Production"),
+            ("uut_type", "PowerSupply"),
+            ("serial", "PS-1"),
+        ):
+            getattr(screen.fields, f"{key}_edit").setText(value)
+        picker = screen.picker.schedule_list
+        for index in range(picker.count()):
+            item = picker.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == schedule:
+                picker.setCurrentItem(item)
+                break
+        screen.start_button.click()
+        assert _wait_finished(qapp, window.session), "the run never finished"
+        _settle_window_layout(qapp, window)
+
+        grown = window.minimumSizeHint()
+        assert grown.width() <= TARGET_WINDOW[0] and grown.height() <= TARGET_WINDOW[1], (
+            f"a finished three-pane run needs {grown.width()}x{grown.height()} with fonts {bump} px taller: "
+            "it would force a 1280x800 Station window to grow, as it did on the Windows runners"
+        )
+        assert window.size() == QSize(*TARGET_WINDOW), f"the window resized itself to {window.size()}"
+
+        # The two-per-row tallies are what bought the room, so check nothing was lost with them.
+        assert screen.counts.isVisible(), "the finished run's tallies are gone from the setup pane"
+        for key in ResultCounts.RESULT_KEYS:
+            assert screen.counts.count_labels[key].text().isdigit(), f"the {key} tally draws nothing"
+        assert screen.left_pane.minimumSizeHint().height() < screen.left_pane.height(), (
+            "the setup pane's natural minimum is taller than the pane the window gives it"
+        )
+
+        window.set_layout("staged")
+        _settle_window_layout(qapp, window)
+        staged = window.staged_screen.minimumSizeHint()
+        assert staged.width() <= TARGET_WINDOW[0] and staged.height() <= TARGET_WINDOW[1], (
+            f"the staged layout needs {staged.width()}x{staged.height()} with fonts {bump} px taller"
+        )
+        window.close()
+        qapp.processEvents()
+    finally:
+        _restore_theme(original)
+        qapp.setFont(theme.ui_font(13))
+        qapp.setStyleSheet(theme.STYLESHEET)
+
+
 def test_a_finished_refresh_appends_to_the_log_it_was_reading(qapp, tmp_path):
     """Defect 6: the finished run's refresh adds the lines the live refresh had not reached.
 
@@ -405,19 +563,23 @@ def test_a_finished_refresh_appends_to_the_log_it_was_reading(qapp, tmp_path):
     assert log_pane.rendered_lines() == before, "the finished refresh rewrote the Log pane"
     assert bar.value() == where, f"the finished refresh moved the reader from {where} to {bar.value()}"
     assert screen.run_view.debug_window.rendered_lines(), "the shared Debug window was emptied"
-def _readable_ink(image, origin, rect):
+def _readable_ink(image, origin, rect, *, detail=False):
     """The ink a painted row actually draws, and its contrast against the row's fill.
 
     The row's own background is the most common colour in the text area; the ink is the
-    most common colour that is not it. Anti-aliasing leaves only a handful of pixels of each
-    blend, so a colour with ten or more pixels is a glyph, not an edge."""
+    highest-contrast glyph coverage. Font hinting can distribute ink over many colours,
+    so requiring ten identical pixels discards genuine strokes on some runners. Measure
+    title and detail separately, and convert logical widget positions to device pixels."""
     counts: dict[str, int] = {}
-    for y in range(rect.top() + 2, rect.bottom() - 2):
-        for x in range(rect.left() + 6, rect.left() + 90):
-            colour = QColor(image.pixel(origin.x() + x, origin.y() + y)).name()
+    scale = image.devicePixelRatio()
+    top = rect.top() + (22 if detail else 4)
+    bottom = min(rect.bottom() - 1, rect.top() + (34 if detail else 22))
+    for y in range(round((origin.y() + top) * scale), round((origin.y() + bottom) * scale)):
+        for x in range(round((origin.x() + rect.left() + 6) * scale), round((origin.x() + rect.left() + 90) * scale)):
+            colour = QColor(image.pixel(x, y)).name()
             counts[colour] = counts.get(colour, 0) + 1
     fill = max(counts, key=counts.get)
-    inks = {colour: count for colour, count in counts.items() if colour != fill and count >= 10}
+    inks = {colour: count for colour, count in counts.items() if colour != fill}
     if not inks:
         return fill, fill, 1.0
     ink = max(inks, key=lambda colour: contrast(colour, fill))
@@ -443,6 +605,7 @@ def test_a_selected_step_row_is_readable_in_every_state(qapp):
     failed.setData(STEP_EMPHASIS_ROLE, "failed")
     failed.setData(STEP_RESULT_ROLE, "FAIL")
     for item in (plain, current, failed):
+        item.setFont(ui_font(13))
         # The height the Run view gives a step row: 30 px, or 38 px when it carries the
         # Actual/Expected line (`RunView._render_rows` sets exactly these hints).
         item.setSizeHint(QSize(0, 38 if item.data(STEP_DETAIL_ROLE) else 30))
@@ -458,12 +621,19 @@ def test_a_selected_step_row_is_readable_in_every_state(qapp):
         origin = list_widget.viewport().pos()
         fill, ink, ratio = _readable_ink(image, origin, list_widget.visualItemRect(item))
         assert ratio >= 4.5, f"{item.text()!r}: {ink} on {fill} is {ratio:.2f}:1"
-        # A pale tint never carries white ink, whatever the selection state.
-        if fill in (TOKENS["primary_tint"], TOKENS["failed_tint"]):
-            assert ink == TOKENS["ink"], f"{item.text()!r} draws {ink} on the pale {fill}"
-        else:
-            assert fill == TOKENS["primary"], f"{item.text()!r} was not filled with the selection colour"
-            assert ink == TOKENS["white"], f"{item.text()!r} draws {ink} on solid {fill}"
+        expected_fill = (
+            TOKENS["failed_tint"] if item is failed else
+            TOKENS["primary_tint"] if item is current else TOKENS["primary"]
+        )
+        assert fill == expected_fill, f"{item.text()!r} has the wrong fill: {fill}"
+        if item.data(STEP_DETAIL_ROLE):
+            detail_fill, detail_ink, detail_ratio = _readable_ink(
+                image, origin, list_widget.visualItemRect(item), detail=True,
+            )
+            assert detail_fill == expected_fill
+            assert detail_ratio >= 4.5, (
+                f"{item.text()!r} detail: {detail_ink} on {detail_fill} is {detail_ratio:.2f}:1"
+            )
 
 
 def _chip_word_width(chip) -> tuple[int, int]:

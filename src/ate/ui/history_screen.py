@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -139,8 +140,14 @@ class HistoryScreen(QWidget):
     # -- filters -------------------------------------------------------------
 
     def _build_filters(self, parent: QVBoxLayout) -> None:
-        """UUT Type, serial, result, End Reason, date range and Project — each bound to ``set_filters``."""
-        # ``parent`` is the controls layout already installed in __init__; add labels/inputs directly.
+        """UUT Type, serial, result, End Reason, date range and Project — each bound to ``set_filters``.
+
+        ``parent`` is the controls layout already installed in __init__. The filters sit in a grid,
+        two per row, caption beside input: History is the screen that decides the window's natural
+        minimum (the Run screens and History share one QStackedWidget), and seven caption-over-input
+        rows stacked 367 px of minimum height on top of the table and the summary panel — enough, on
+        Windows' font metrics, to make the window 493x773 and refuse to fit a 1366x768 netbook.
+        Nothing is hidden or shortened: the same seven captions and seven inputs, in the same order."""
 
         self.uut_type_combo = QComboBox()
         self.serial_edit = QLineEdit()
@@ -155,6 +162,11 @@ class HistoryScreen(QWidget):
             combo.addItem("", "…")  # empty option clears the filter
             combo.currentIndexChanged.connect(self._on_filter_changed)  # picking a value narrows the table (spec: Filters)
 
+        filters = QGridLayout()
+        filters.setContentsMargins(0, 0, 0, 0)
+        # The space the window has to spare goes to the inputs, not between a caption and its field.
+        filters.setColumnStretch(1, 1)
+        filters.setColumnStretch(3, 1)
         rows = [
             ("UUT Type", self.uut_type_combo),
             ("Serial", self.serial_edit),
@@ -164,9 +176,11 @@ class HistoryScreen(QWidget):
             ("To", self.date_to_edit),
             ("Project", self.project_combo),
         ]
-        for caption, widget in rows:
-            parent.addWidget(QLabel(caption))
-            parent.addWidget(widget)
+        for index, (caption, widget) in enumerate(rows):
+            row, pair = divmod(index, 2)
+            filters.addWidget(QLabel(caption), row, pair * 2)
+            filters.addWidget(widget, row, pair * 2 + 1)
+        parent.addLayout(filters)
 
     def _read_filters(self) -> dict[str, str]:
         """The current filter mapping from the input widgets (empty options clear their column)."""
