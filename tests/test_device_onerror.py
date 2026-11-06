@@ -8,6 +8,7 @@ closed Device fails the same way, a second close succeeds, and a bad param never
 
 import re
 import socket
+from contextlib import contextmanager
 
 from PySide6.QtCore import QCoreApplication
 
@@ -52,13 +53,21 @@ def _step_error(store, ru: str) -> str:
     return attempt["msg"]
 
 
-def _dead_port() -> int:
-    """A loopback port with nothing listening, so a connect is refused."""
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+@contextmanager
+def _dead_port():
+    """A loopback port nothing listens on, held open for the whole connect attempt.
+
+    A TCP connect to a port that is bound but never `listen()`ed on is refused: Linux answers the
+    SYN with an RST immediately, Windows stays silent until its SYN retries run out (about 2 s),
+    which is still inside the 5 s connect timeout these tests set. Picking a port and closing the
+    socket straight away leaves a gap in which another pytest-xdist worker can bind it and answer
+    the connect, which is what makes a "refused" test flake under `-n auto` (packet 44 review)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    try:
+        yield sock.getsockname()[1]
+    finally:
+        sock.close()
 
 
 def test_read_uses_its_own_handler_with_result_and_args(app: QCoreApplication) -> None:
@@ -133,17 +142,18 @@ def test_no_handler_raises_with_file_line_function_and_device(app: QCoreApplicat
 def test_open_failure_goes_through_open_handler(app: QCoreApplication) -> None:
     """A refused connect calls open's onError with ``{ok = false, err}`` and the open params; its
     non-nil return is what ATE.open returns."""
-    store, ru = _run(app, f"""
+    with _dead_port() as port:
+        store, ru = _run(app, f"""
         local d = {_open('function(res, args) calls[#calls + 1] = tostring(res.ok).."|"..args.host; return "no device" end')}
-        ATE.report(Result.PASS, d.." "..table.concat(calls, ","))""", port=_dead_port())
+        ATE.report(Result.PASS, d.." "..table.concat(calls, ","))""", port=port)
 
     assert _step_message(store, ru) == "no device false|127.0.0.1"
 
 
 def test_open_failure_without_handler_errors_the_step(app: QCoreApplication) -> None:
     """A refused connect with no onError raises, naming ATE.open and the host and port."""
-    port = _dead_port()
-    store, ru = _run(app, f"""
+    with _dead_port() as port:
+        store, ru = _run(app, f"""
         local d = {_open()}
         ATE.report(Result.PASS, "carried on")""", port=port)
 

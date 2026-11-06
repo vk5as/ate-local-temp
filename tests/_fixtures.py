@@ -951,6 +951,27 @@ def write_ate_env(tmp_path: Path) -> dict[str, Path]:
     return {"config": config_path, "defs_dir": defs_dir, "db": db, "reports_dir": reports_dir}
 
 
+def fill_operator_fields(screen, operator: str = "Ada", uut_type: str = "PSU-200", serial: str = "PS-1") -> None:
+    """Type the four fields a Test Run cannot start without (packet 41).
+
+    Project comes from the fixture's `defaultProject`, so only Operator, UUT Type and Serial have
+    to be typed. A test that starts a run through a layout now needs them: the Start control is
+    disabled, and `begin_run` refuses, while any of the four is blank. The gating tests leave some
+    of them empty on purpose."""
+    screen.fields.operator_edit.setText(operator)
+    screen.fields.uut_type_edit.setText(uut_type)
+    screen.fields.serial_edit.setText(serial)
+
+
+def fill_run_fields(window) -> None:
+    """Type the required fields on both layouts of a launched MainWindow (packet 41).
+
+    A window holds a staged and a three-pane screen over the same session, and a test can switch
+    layouts halfway through, so both get the same Operator, UUT Type and Serial."""
+    for screen in window.run_screens.values():
+        fill_operator_fields(screen)
+
+
 def read_run_row(store, run_uuid: str) -> dict:
     """Return a recorded run row as a dict (or ``None``)."""
     return store.get_test_run(run_uuid)
@@ -1177,6 +1198,233 @@ def add_logging_input_schedule(tmp_path: Path) -> str:
     )
     _append_file(defs, "logging_input.tslua", source)
     return "Logging input schedule"
+
+
+def add_grouped_log_schedule(tmp_path: Path) -> str:
+    """Add a schedule whose log lines belong to a Pre-test Action, three steps and a Post-test Action.
+
+    Packet 40a: step 1 logs at INFO and DEBUG and then blocks on an INTEGER input, so the panes can be
+    read while the step is still running; step 2 runs silently; step 3 is disabled and must still be
+    listed with "No output." The Pre- and Post-test Actions each log one line.
+    """
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Grouped log schedule", "pre/post actions, a logging step, a silent step, a disabled step")\n'
+        "  :setPreTestAction(function() ATE.log(Log.INFO, \"pretest warmup\") end)\n"
+        "  :setPostTestAction(function() ATE.log(Log.INFO, \"posttest teardown\") end)\n"
+        "  :setSchedule({\n"
+        '    StepParams("supply"):setStepNo("1.")\n'
+        '      :setInputs({ [1] = { desc = "voltage", type = "INTEGER" } })\n'
+        "      :setAction(function()\n"
+        '        ATE.log(Log.INFO, "measuring the supply")\n'
+        '        ATE.log(Log.DEBUG, "probe chatter")\n'
+        "        ATE.input(1)\n"
+        '        ATE.report(Result.PASS, "supply ok")\n'
+        "      end),\n"
+        '    StepParams("silent step"):setStepNo("2.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "nothing logged") end),\n'
+        '    StepParams("disabled step"):setStepNo("3."):setEnable(false)\n'
+        '      :setAction(function() ATE.log(Log.INFO, "never runs") end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "grouped_log.tslua", source)
+    return "Grouped log schedule"
+
+
+def add_bulky_log_schedule(tmp_path: Path) -> str:
+    """Add a schedule whose single Test Step logs 5,000 lines, then waits for the latch.
+
+    Packet 40a review, item 3: this is the chatty run the Log pane has to survive — 5,000 rows
+    written one at a time by the worker, each announced on ``log_appended``. The step then waits
+    on ``ATE_LATCH_OPEN`` so the test can look at the pane while the run is still up, and the wait
+    is bounded so an unreleased latch ends in a few seconds."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Bulky log schedule", "one step that logs 5000 lines, then waits")\n'
+        "  :setPreTestAction(function() ATE.log(Log.INFO, \"pretest warmup\") end)\n"
+        "  :setPostTestAction(function() ATE.log(Log.INFO, \"posttest teardown\") end)\n"
+        "  :setSchedule({\n"
+        '    StepParams("stream"):setStepNo("1.")\n'
+        '      :setAction(function()\n'
+        '        for i = 1, 5000 do\n'
+        '          ATE.log(Log.INFO, "burst line " .. i)\n'
+        '        end\n'
+        '        for _ = 1, 200 do\n'
+        '          if os.getenv("ATE_LATCH_OPEN") then break end\n'
+        '          ATE.sleep(0.05)\n'
+        '        end\n'
+        '        ATE.report(Result.PASS, "streamed")\n'
+        '      end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "bulky_log.tslua", source)
+    return "Bulky log schedule"
+
+
+def add_latched_log_schedule(tmp_path: Path) -> str:
+    """Add a schedule whose logging step then waits for ``latch`` to exist.
+
+    Packet 40a review, item 1: a live-log test that keeps a step open with an input ask proves
+    nothing, because the ask itself repaints the pane. Here the step logs at INFO and DEBUG and then
+    waits on a latch the test releases — no Step Input, no state change, nothing else that could
+    move the Log pane while the step is still blocked. The wait is bounded (200 slices of 0.05 s),
+    so a test that never releases the latch ends in a few seconds instead of hanging the suite."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Latched log schedule", "a step that logs, then waits for a latch")\n'
+        "  :setPreTestAction(function() ATE.log(Log.INFO, \"pretest warmup\") end)\n"
+        "  :setPostTestAction(function() ATE.log(Log.INFO, \"posttest teardown\") end)\n"
+        "  :setSchedule({\n"
+        '    StepParams("supply"):setStepNo("1.")\n'
+        '      :setAction(function()\n'
+        '        ATE.sleep(0.3)\n'
+        '        ATE.log(Log.INFO, "measuring the supply")\n'
+        '        ATE.log(Log.DEBUG, "probe chatter")\n'
+        '        for _ = 1, 200 do\n'
+        '          if os.getenv("ATE_LATCH_OPEN") then break end\n'
+        '          ATE.sleep(0.05)\n'
+        '        end\n'
+        '        ATE.log(Log.INFO, "latch released")\n'
+        '        ATE.report(Result.PASS, "supply ok")\n'
+        '      end),\n'
+        '    StepParams("silent step"):setStepNo("2.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "nothing logged") end),\n'
+        '    StepParams("disabled step"):setStepNo("3."):setEnable(false)\n'
+        '      :setAction(function() ATE.log(Log.INFO, "never runs") end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "latched_log.tslua", source)
+    return "Latched log schedule"
+
+
+def add_phased_latch_schedule(tmp_path: Path) -> str:
+    """Add a schedule whose Pre- and Post-test Actions each log, then wait on a latch.
+
+    Packet 40a review, item 4: the Action's own row is only written when the Action ends, so a line
+    emitted *while* an Action is running has an `action_seq` and no Action row to match it. These
+    two blocked Actions make the test able to look at the pane at exactly that moment: the line must
+    already sit under `── Pre-test ──` (or `── Post-test ──`), never transiently in another group."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Phased latch schedule", "Pre- and Post-test Actions that log, then wait")\n'
+        "  :setPreTestAction(function()\n"
+        '    ATE.log(Log.INFO, "pretest action running")\n'
+        '    for _ = 1, 200 do\n'
+        '      if os.getenv("PRE_LATCH_OPEN") then break end\n'
+        '      ATE.sleep(0.05)\n'
+        '    end\n'
+        "  end)\n"
+        "  :setPostTestAction(function()\n"
+        '    ATE.log(Log.INFO, "posttest action running")\n'
+        '    for _ = 1, 200 do\n'
+        '      if os.getenv("POST_LATCH_OPEN") then break end\n'
+        '      ATE.sleep(0.05)\n'
+        '    end\n'
+        "  end)\n"
+        "  :setSchedule({\n"
+        '    StepParams("work"):setStepNo("1.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "worked") end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "phased_latch.tslua", source)
+    return "Phased latch schedule"
+
+
+def add_steady_log_schedule(tmp_path: Path) -> str:
+    """Add a schedule whose one step logs a line every 30 ms for about a second, then ends.
+
+    Packet 40a fix 2, item 3: a steady stream is the case a restarted single-shot timer never refreshed
+    for. The test watches the pane while the step is still logging."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Steady log schedule", "one step that logs every 30 ms for about a second")\n'
+        "  :setSchedule({\n"
+        '    StepParams("stream"):setStepNo("1.")\n'
+        "      :setAction(function()\n"
+        "        for i = 1, 33 do\n"
+        '          ATE.log(Log.INFO, "steady line " .. i)\n'
+        "          ATE.sleep(0.03)\n"
+        "        end\n"
+        '        ATE.report(Result.PASS, "streamed")\n'
+        "      end),\n"
+        "  })\n"
+    )
+    _append_file(defs, "steady_log.tslua", source)
+    return "Steady log schedule"
+
+
+def add_quiet_latched_schedule(tmp_path: Path) -> str:
+    """Add a schedule with a silent Pre-test Action, then a silent step that waits on a latch.
+
+    Packet 40a fix 2, item 5: nothing is logged, so the only thing that can change the pane is the
+    run's own state. The Pre-test waits on ``PRE_LATCH_OPEN`` (so the empty log can be read with every
+    step still unreached), and the first step waits silently on ``ATE_LATCH_OPEN`` once it has started."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Quiet latched schedule", "a silent Pre-test, then a silent step that waits")\n'
+        "  :setPreTestAction(function()\n"
+        '    for _ = 1, 200 do\n'
+        '      if os.getenv("PRE_LATCH_OPEN") then break end\n'
+        '      ATE.sleep(0.05)\n'
+        "    end\n"
+        "  end)\n"
+        "  :setSchedule({\n"
+        '    StepParams("quiet"):setStepNo("1.")\n'
+        "      :setAction(function()\n"
+        '        for _ = 1, 200 do\n'
+        '          if os.getenv("ATE_LATCH_OPEN") then break end\n'
+        '          ATE.sleep(0.05)\n'
+        "        end\n"
+        '        ATE.report(Result.PASS, "quiet ok")\n'
+        "      end),\n"
+        '    StepParams("after"):setStepNo("2.")\n'
+        '      :setAction(function() ATE.report(Result.PASS, "after ok") end),\n'
+        "  })\n"
+    )
+    _append_file(defs, "quiet_latched.tslua", source)
+    return "Quiet latched schedule"
+
+
+def add_plain_log_schedule(tmp_path: Path) -> str:
+    """Add a schedule with no Pre-test or Post-test Action: one step that logs one line.
+
+    Packet 40a fix 2, item 5: run after a schedule that has Actions, on the same screen, to prove the
+    previous run's Action phase does not leak into this one's log."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Plain log schedule", "one step, no Pre- or Post-test Action")\n'
+        "  :setSchedule({\n"
+        '    StepParams("plain"):setStepNo("1.")\n'
+        '      :setAction(function()\n'
+        '        ATE.log(Log.INFO, "plain line")\n'
+        '        ATE.report(Result.PASS, "plain ok")\n'
+        "      end),\n"
+        "  })\n"
+    )
+    _append_file(defs, "plain_log.tslua", source)
+    return "Plain log schedule"
+
+
+def add_open_device_log_schedule(tmp_path: Path, port: int) -> str:
+    """Add a schedule that opens a loopback TCP Device and leaves it open, logging around it.
+
+    Packet 40a: the run-end teardown closes the leftover Device with a WARNING the store owns to
+    nobody (`node_seq` and `action_seq` both null), which is the run-level group the Log pane must
+    show separately from the step's own lines."""
+    defs = tmp_path / "defs"
+    source = (
+        'return ScheduleParams("Open device log schedule", "a step that leaves a Device open")\n'
+        "  :setSchedule({\n"
+        '    StepParams("open"):setStepNo("1.")\n'
+        "      :setAction(function()\n"
+        '        ATE.log(Log.INFO, "opening the device")\n'
+        '        ATE.open(DeviceType.TCP, {host="127.0.0.1", port=%d, timeout=5, readTerm="", writeTerm=""})\n'
+        '        ATE.report(Result.PASS, "opened")\n'
+        "      end),\n"
+        "  })\n"
+    ) % port
+    _append_file(defs, "open_device_log.tslua", source)
+    return "Open device log schedule"
 
 
 def add_failing_poll_schedule(tmp_path: Path) -> str:

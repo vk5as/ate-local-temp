@@ -31,6 +31,7 @@ import io
 import json
 import os
 import pkgutil
+import queue
 import re
 import shutil
 import sqlite3
@@ -1563,6 +1564,7 @@ def test_the_manuals_script_says_so_when_an_input_is_never_answered(tmp_path: Pa
         "--release", str(scratch_release(tmp_path)),
         "--schedule", "Scratch: a release of my own",
         "--choice", "RETRY",
+        "--timeout", "2",
     ])
     assert proc.returncode == 1, proc.stdout[-400:]
     assert "never finished" in proc.stderr, proc.stderr[-400:]
@@ -1708,7 +1710,10 @@ def test_the_developer_runner_closes_its_session_when_the_run_fails(tmp_path: Pa
 #: The driver the abort tests run in their own process: a headless session on a scratch release,
 #: an Abort asked for a moment after the run starts, the step results printed. A schedule that
 #: never returns cannot be watched from inside pytest, so these tests run it as a subprocess they
-#: can kill, and read the database the killed process left behind.
+#: can kill, and read the database the killed process left behind. `started_marker` is a file the
+#: step itself is told to write: the driver will not ask for the abort until it is there. The
+#: driver then prints `abort requested` on stdout, which is what a test that measures "this run
+#: never ends" waits for before it starts timing.
 ABORT_DRIVER = r"""
 import sys, time
 from pathlib import Path
@@ -1757,6 +1762,10 @@ with bench_env(peers), pdf_stub():
     time.sleep(float(abort_after))
     t0 = time.monotonic()
     session.request_abort()
+    # The "never ends" measurement starts at this line: the first step has started, the marker the
+    # step was told to write has appeared, and the abort has been asked for. Before it, a run that
+    # never reached a step looks exactly like a run that never ends (packet 44 review).
+    print("abort requested while the first step is still running", flush=True)
     while SessionState.FINISHED not in states and time.monotonic() - t0 < 60:
         app.processEvents()
         time.sleep(0.02)
@@ -1821,7 +1830,8 @@ def _run_abort_probe(
     driver = tmp_path / "abort_driver.py"
     driver.write_text(ABORT_DRIVER, encoding="utf-8", newline="\n")
     return subprocess.run(
-        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", str(abort_after), str(started_marker or "")],
+        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", str(abort_after),
+         str(started_marker or "")],
         capture_output=True, text=True, timeout=timeout, cwd=str(ROOT),
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
     )
@@ -1880,27 +1890,99 @@ def test_a_coroutine_loop_runs_to_completion_after_an_abort(tmp_path: Path) -> N
     assert "the coroutine finished on its own" in proc.stdout, proc.stdout
 
 
+class _TimedLines:
+    """The lines a driver subprocess prints, read by a thread so a deadline is a deadline.
+
+    ``readline()`` blocks until a line arrives: a driver that prints nothing left the test parked on
+    it, and the deadline was only checked between lines, so the wait ran past it while the process
+    stayed alive (packet 44 review). The thread puts every line into a queue and the test waits on
+    the queue for the time left; a pipe that closes puts ``None``, so "the driver said nothing" is a
+    result the test can report rather than a block. ``collected`` is everything read so far, which is
+    what a failure message needs."""
+
+    def __init__(self, stream: io.TextIOWrapper) -> None:
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self.collected: list[str] = []
+
+        def _pump() -> None:
+            for line in stream:
+                self.collected.append(line)
+                self._queue.put(line)
+            self._queue.put(None)
+
+        threading.Thread(target=_pump, daemon=True, name="driver-stdout").start()
+
+    def read_until(self, wanted: str, deadline: float) -> str | None:
+        """The next line containing ``wanted``, or None if the deadline passes or stdout ends."""
+        while True:
+            try:
+                line = self._queue.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return None
+            if line is None:
+                return None
+            if wanted in line:
+                return line
+
+
 def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
     """``while true do end`` in a coroutine outruns every timeout the driver has."""
-    release = scratch_release(tmp_path, ABORT_SCHEDULE % "local run = coroutine.wrap(function() while true do end end) run()", name="abort")
+    # The step writes a file the moment it is inside the coroutine, so the test can tell "this run
+    # never ends" from "this run never even started a step".
+    marker = tmp_path / "inside-the-coroutine"
+    action = (
+        "local run = coroutine.wrap(function() "
+        f"os.execute({_marker_command(marker)!r}) "
+        "while true do end end) run()"
+    )
+    release = scratch_release(tmp_path, ABORT_SCHEDULE % action, name="abort")
     work = tmp_path / "station"
     work.mkdir()
     driver = tmp_path / "abort_driver.py"
     driver.write_text(ABORT_DRIVER, encoding="utf-8", newline="\n")
-    proc = subprocess.Popen(
-        [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", "0.4"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(ROOT),
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-    )
-    try:
-        proc.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
-        row = _open_run_row(work / "ate.db")
-        assert row and row["ended_at"] is None, f"the run row should still be open: {row}"
-        return
-    raise AssertionError(f"the unbounded coroutine loop ended after {proc.returncode}: {proc.stdout}")
+    # stderr to a file, not a pipe: nothing here reads the pipe, and a driver that prints more than
+    # the pipe's buffer would block on it (packet 44 review).
+    errlog = tmp_path / "driver-stderr.txt"
+    with errlog.open("w", encoding="utf-8") as errfile:
+        proc = subprocess.Popen(
+            [sys.executable, str(driver), str(ROOT), str(release), str(work), "Abort probe", "0.4", str(marker)],
+            stdout=subprocess.PIPE, stderr=errfile, text=True, cwd=str(ROOT),
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        )
+        try:
+            lines = _TimedLines(proc.stdout)
+            # The driver will not ask for the abort until the marker exists, and prints `abort requested`
+            # when it does. Timing has to start after that line: a run that has not reached its first
+            # step also "has not ended", and the driver's own 10 s startup check used to be inside the
+            # measured window (packet 44 review). The deadline here is only for that startup, and it is
+            # roomy; the wait is on the queue, so a silent driver stops at the deadline instead of
+            # blocking on a line that never comes.
+            if lines.read_until("abort requested", time.monotonic() + 40) is None:
+                raise AssertionError(
+                    f"the driver never aborted a step that had reached the coroutine: "
+                    f"marker={marker.exists()} stdout={lines.collected} "
+                    f"stderr={errlog.read_text()[-300:]}"
+                )
+            try:
+                # From here the only thing that could end the run is the engine reaching into the
+                # coroutine. The bounded-loop sibling of this test finishes in under 2 s, so 5 s is
+                # enough to call it "never ending" (packet 44: the old 20 s wait was a fixed deadline,
+                # not work).
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                row = _open_run_row(work / "ate.db")
+                assert row and row["ended_at"] is None, f"the run row should still be open: {row}"
+            else:
+                raise AssertionError(
+                    f"the unbounded coroutine loop ended after {proc.returncode}: "
+                    f"{lines.collected} {errlog.read_text()[-300:]}"
+                )
+        finally:
+            # Every path out of here leaves the driver dead: the killed process is waited for, so
+            # no probe is left running when the test reports (packet 44 review).
+            proc.kill()
+            proc.wait(timeout=10)
+            proc.stdout.close()
 
 
 #: The command the abort probe waits on. On a POSIX shell the interpreter's own one-liner is the
@@ -1910,11 +1992,20 @@ def test_an_unbounded_coroutine_loop_never_ends_the_run(tmp_path: Path) -> None:
 #: `python" -c "import time; ...` and cmd exits 1 in a few milliseconds. subprocess builds the
 #: command line with the embedded quotes escaped, which is why the same string measured 3.03 s on
 #: the same Windows runner (packet 35b, CI 41407051552). `ping` needs no quotes at all.
+def _marker_command(marker: Path) -> str:
+    """A shell command that writes a marker file: cmd.exe has `echo`, POSIX shells `printf`. Only the
+    file's existence matters - the driver waits for it, and the driver's own `os.execute` reaches the
+    shell through C `system()` on Windows, which is why the quoting rules below apply."""
+    if sys.platform == "win32":
+        return f'echo started > "{marker}"'
+    return f'printf started > "{marker}"'
+
+
 def _hold_command(started_marker: Path | None = None) -> str:
     if sys.platform == "win32":
-        marker = f'echo started > "{started_marker}" && ' if started_marker else ""
+        marker = f"{_marker_command(started_marker)} && " if started_marker else ""
         return marker + "ping -n 4 127.0.0.1 >NUL"
-    marker = f'printf started > "{started_marker}"; ' if started_marker else ""
+    marker = f"{_marker_command(started_marker)}; " if started_marker else ""
     return marker + f'"{sys.executable}" -c "import time; time.sleep(3)"'
 
 

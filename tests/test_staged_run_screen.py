@@ -28,10 +28,10 @@ from PySide6.QtWidgets import (
 )
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
-from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE, RunHeader
+from ate.ui.run_widgets import LogPane, STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE, RunHeader
 from ate.ui.staged_run_screen import StagedRunScreen
 
-from ._fixtures import write_ate_env
+from ._fixtures import fill_operator_fields, write_ate_env
 
 
 def _rows_for(store, run_uuid: str) -> dict[int, tuple[str, str]]:
@@ -88,6 +88,7 @@ def test_stages_render_with_required_fields(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     assert screen.session is session
 
@@ -109,14 +110,14 @@ def test_stages_render_with_required_fields(qapp, tmp_path):
         "StepsOptionsStage",
     ]
 
-    # Run view: the shared run header, live step list, full-width failure bar, Log/Summary tabs.
+    # Run view: the shared run header, live step list, full-width failure bar, Log band.
     # Ticket 39 (R2): the staged Run view uses the same header widget as the three-pane layout.
+    # Packet 42 (issue #3): the band has no Summary tab, and with one pane it has no tab bar.
     assert isinstance(screen.run_view.header, RunHeader)
     assert isinstance(screen.run_view.step_list, QListWidget)
     assert isinstance(screen.run_view.failure_bar, QLabel)
-    assert isinstance(screen.run_view.tabs, QTabWidget)
-    tab_labels = [screen.run_view.tabs.tabText(i) for i in range(screen.run_view.tabs.count())]
-    assert "Log" in tab_labels and "Summary" in tab_labels
+    assert isinstance(screen.run_view.log_pane, LogPane)
+    assert not screen.run_view.findChildren(QTabWidget), "the one-pane band still carries a tab bar"
 
 
 def test_project_prefills_from_config_default_project(qapp, tmp_path):
@@ -129,6 +130,7 @@ def test_project_prefills_from_config_default_project(qapp, tmp_path):
     config_path = tmp_path / "project-config.json"
     config_path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     screen = StagedRunScreen(HeadlessRunSession(config_path))
+    fill_operator_fields(screen)
     assert screen.uut_operator_stage.project_edit.text() == "PSU-200 Production", screen.uut_operator_stage.project_edit.text()
     assert "BENCH-03" not in screen.uut_operator_stage.project_edit.text()
 
@@ -138,6 +140,7 @@ def test_selecting_schedule_and_running_reaches_started_then_finished(qapp, tmp_
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     states: list[SessionState] = []
     session.state_changed.connect(states.append)
@@ -169,6 +172,7 @@ def test_steps_radio_reflects_the_schedule_stop_on_fail_default(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen._advance(1)  # to the Test Schedule stage
     item = _find_item(screen.test_schedule_stage.schedule_list, "Stop on fail false schedule")
@@ -192,6 +196,7 @@ def test_steps_radio_defaults_to_stop_on_fail_when_schedule_unsets_it(qapp, tmp_
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen._advance(1)
     item = _find_item(screen.test_schedule_stage.schedule_list, "Failing schedule")
@@ -208,6 +213,7 @@ def test_steps_show_live_result_after_run(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -228,6 +234,7 @@ def test_current_step_is_enlarged(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -249,6 +256,7 @@ def test_failing_step_surfaces_in_failure_bar_and_run_view(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -270,6 +278,7 @@ def test_run_view_is_hidden_until_a_run_starts(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     assert screen.run_view.isVisible() is False
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
@@ -284,6 +293,7 @@ def test_new_run_keeps_previously_entered_fields(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     # Run 1 with Operator and Project entered.
     screen.uut_operator_stage.operator_edit.setText("Ada")
@@ -298,15 +308,16 @@ def test_new_run_keeps_previously_entered_fields(qapp, tmp_path):
     assert screen.uut_operator_stage.operator_edit.text() == "Ada"
     assert screen.uut_operator_stage.project_edit.text() == "Power board"
 
-    # Blank the Operator, then start a new run — its value must still carry over (nothing cleared).
+    # A new run starts from the same fields: nothing is cleared between runs. Packet 41 is why the
+    # Operator cannot leave one blank to prove the point — a blank field refuses the run instead.
     screen._advance(1)  # back to stage 0 after FINISHED
-    screen.uut_operator_stage.operator_edit.setText("")
     _select_and_start(qapp, screen, "Failing schedule")
     assert _wait_finished(qapp, session)
 
     row2 = session.store.get_test_run(session.run_uuid)
     assert row2 is not None and row2["operator"] == "Ada"  # carried over, not dropped
     assert row2["project"] == "Power board"
+    assert row2["uut_type"] == "PSU-200" and row2["uut_serial"] == "PS-1"
 
 
 def test_stop_on_fail_is_prefilled_true(qapp, tmp_path):
@@ -314,6 +325,7 @@ def test_stop_on_fail_is_prefilled_true(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     assert screen.steps_options_stage.stop_on_fail_radio.isChecked() is True
 
 
@@ -327,6 +339,7 @@ def test_log_pane_shows_info_and_above_debug_window_shows_every_level(qapp, tmp_
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -352,6 +365,7 @@ def test_debug_line_shown_only_in_debug_window(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -371,7 +385,7 @@ def test_debug_line_shown_only_in_debug_window(qapp, tmp_path):
     all_lines = session.store.log_lines(run_uuid)
 
     # Re-render with the injected DEBUG line present (the FINISHED refresh already ran).
-    screen.run_view.refresh(nodes, attempts, all_lines)
+    screen.run_view.refresh(nodes, attempts)
 
     assert "a debug message" in "\n".join(screen.run_view.debug_window.rendered_lines())
     assert "a debug message" not in "\n".join(screen.run_view.log_pane.rendered_lines())
@@ -392,6 +406,7 @@ def test_staged_run_records_blocking_input_value(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)  # to the Test Schedule stage
@@ -433,6 +448,7 @@ def test_abort_button_between_steps_records_error_notrun_and_aborted(qapp, tmp_p
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     # The Abort control exists on the Run view and is disabled until a run starts.
     assert isinstance(screen.run_view.abort_button, QPushButton)

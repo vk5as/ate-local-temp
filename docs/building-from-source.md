@@ -569,6 +569,25 @@ that test's `MANUALS` table, and nothing else.
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen pytest -q
 ```
 
+The suite is big (about 1840 tests) and most of it is Qt and Test Run work that has to be
+done in sequence inside one test. It runs in parallel with `pytest-xdist`, which the `test`
+extra installs:
+
+```bash
+PYTHONPATH=src QT_QPA_PLATFORM=offscreen pytest -q -n auto   # or -n 3 on a 3-core machine
+```
+
+Every test passes both ways, and none needs to be kept serial, so there is no `-m serial` pass and
+no `serial` marker — but the suite is not free of shared state. Each `pytest -n` worker is its own
+process with its own `QApplication`, so Qt state is not shared across workers; tests write their
+files under their own `tmp_path` and open ephemeral ports. The fixed paths that do exist are the
+reviewer screenshots: the tests kept for a human to look at grab into fixed `/tmp/*-shots`
+directories (six fixed ones, plus wherever `ATE_30B_SHOTS` points for the opt-in 30b set). Within one run that
+is harmless, since the names inside each directory are distinct, but two suites running at the
+same time overwrite each other's screenshots. CI uses
+`-n auto` on Linux; the Windows jobs stay serial until a parallel run
+has been shown clean on a Windows runner (packet 44).
+
 The wheel test builds a wheel from a clean copy into a temporary directory and takes a few
 seconds. The only test marked `slow` is the one that installs the wheel into a fresh venv
 from PyPI: `pytest -m "not slow"` deselects just that one.

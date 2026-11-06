@@ -20,6 +20,7 @@ from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 from ate.ui.history_screen import HistoryScreen
 from ate.ui.staged_run_screen import StagedRunScreen
+from ._fixtures import fill_operator_fields
 
 # The helper whose checksum the .atedef records wrongly, and the schedule that requires it.
 HELPER_SRC = "-- packet 06c: a helper whose bytes changed after the release was cut\nreturn { name = 'helper', value = 42 }\n"
@@ -230,12 +231,14 @@ def test_the_schedule_list_flags_a_mismatched_schedule(qapp, tmp_path):
     env = _write_release(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     texts = [screen.test_schedule_stage.schedule_list.item(i).text() for i in range(screen.test_schedule_stage.schedule_list.count())]
     assert any(t.startswith("⚠ ") and "Checksum schedule" in t for t in texts)
 
     clean = _write_release(tmp_path / "clean", mismatch=False)
     clean_session = HeadlessRunSession(clean["config"])
     clean_screen = StagedRunScreen(clean_session)
+    fill_operator_fields(clean_screen)
     texts = [clean_screen.test_schedule_stage.schedule_list.item(i).text() for i in range(clean_screen.test_schedule_stage.schedule_list.count())]
     assert all(not t.startswith("⚠ ") for t in texts)
 
@@ -245,6 +248,7 @@ def test_selecting_a_mismatched_schedule_shows_the_flag_line(qapp, tmp_path):
     env = _write_release(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = screen.test_schedule_stage.schedule_list
     item = next(list_widget.item(i) for i in range(list_widget.count()) if "Checksum schedule" in list_widget.item(i).text())
     list_widget.setCurrentItem(item)
@@ -258,6 +262,7 @@ def test_start_with_a_mismatch_shows_the_confirmation(qapp, tmp_path):
     env = _write_release(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     asked: list[object] = []
 
     def choose(dialog):
@@ -283,6 +288,7 @@ def test_cancel_on_the_confirmation_starts_nothing(qapp, tmp_path):
     env = _write_release(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     def choose(dialog):
         dialog.cancel_button.click()
@@ -298,6 +304,7 @@ def test_ok_with_the_box_unticked_runs_without_storing(qapp, tmp_path):
     env = _write_release(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     def choose(dialog):
         dialog.store_checkbox.setChecked(False)
@@ -314,6 +321,7 @@ def test_a_clean_schedule_starts_without_the_confirmation(qapp, tmp_path):
     env = _write_release(tmp_path, mismatch=False)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     def choose(dialog):  # pragma: no cover - must never be reached
         raise AssertionError("the confirmation appeared without a mismatch")
@@ -330,6 +338,7 @@ def test_always_and_never_confirm_without_a_checkbox(qapp, tmp_path):
         env = _write_release(tmp_path / setting, setting=setting)
         session = HeadlessRunSession(env["config"])
         screen = StagedRunScreen(session)
+        fill_operator_fields(screen)
         seen: list[object] = []
 
         def choose(dialog, stored=stored):
@@ -363,6 +372,7 @@ def test_a_sibling_schedules_mismatch_does_not_flag_this_schedule(qapp, tmp_path
     assert [m[0] for m in session.pending_mismatches()] == ["other.tslua"]
 
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     rows = [screen.test_schedule_stage.schedule_list.item(i).text()
             for i in range(screen.test_schedule_stage.schedule_list.count())]
     assert any(r.startswith("⚠ Other schedule") for r in rows), rows

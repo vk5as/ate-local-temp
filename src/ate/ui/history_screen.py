@@ -123,6 +123,10 @@ class HistoryScreen(QWidget):
         self._summary_fields = QLabel("")
         self._result_counts = QLabel("")
         self._mismatches = QLabel("")
+        # Packet 40b (issue #3): the detail panel can hold long lists of result counts and
+        # mismatched files; they wrap inside the panel rather than being cut at its edge.
+        for label in (self._summary_fields, self._result_counts, self._mismatches):
+            label.setWordWrap(True)
         summary_layout.addWidget(QLabel("Run"))
         summary_layout.addWidget(self._summary_fields)
         summary_layout.addWidget(QLabel("Result counts"))
@@ -318,7 +322,9 @@ class HistoryScreen(QWidget):
         running = row in self._row_to_uuid and self._row_running.get(row, False)
         if not running:
             return
-        # An open run has no report to open or regenerate yet. "Show all runs" / "New run" are left enabled.
+        # An open run has no report to open or regenerate yet. "Show all runs" is left enabled;
+        # "New run for this UUT" is held by the run itself (packet 41 review), see
+        # :meth:`set_run_in_progress`.
         self.open_report_button.setEnabled(False)
         self.regenerate_button.setEnabled(False)
         export_log = getattr(self, "export_log_button", None)
@@ -330,7 +336,9 @@ class HistoryScreen(QWidget):
 
         When History is disabled during a run the table and action bar are disabled and "A Test Run is in
         progress" is shown; when it becomes available again they are restored, and any still-selected open
-        run has its report actions re-disabled by :meth:`_update_actions_for_selected`."""
+        run has its report actions re-disabled by :meth:`_update_actions_for_selected`. "New run for this
+        UUT" is off while a run is in progress even then: starting one is not possible until the run
+        ends (packet 41 review)."""
         self.session.set_run_in_progress(active)
         if not self.session.available():
             self.table_view.setEnabled(False)
@@ -340,6 +348,10 @@ class HistoryScreen(QWidget):
         else:
             self.table_view.setEnabled(True)
             self._actions_bar.setEnabled(True)
+            # Packet 41 review: "New run for this UUT" used to do nothing silently while a run was
+            # going — the Run screen's own New run is held by the run, so History offers nothing
+            # for the same reason instead of answering with silence.
+            self.new_run_button.setEnabled(not active)
             self._status_label.setText("")
             self._status_label.setVisible(False)
             self._update_actions_for_selected()

@@ -34,7 +34,7 @@ from ate.report.pdf import PDF_SANDBOXED, PDF_SKIPPED, PDF_UNSANDBOXED, pdf_sand
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.storage.store import RunStore
 
-from ._fixtures import PASSING, recording_pdf_helper, write_ate_env
+from ._fixtures import PASSING, recording_pdf_helper, fill_run_fields, write_ate_env
 
 ATE_ENTRY = Path(__file__).resolve().parents[1] / "packaging" / "pyinstaller" / "ate_entry.py"
 
@@ -613,6 +613,7 @@ def test_the_run_screen_is_finished_when_the_pdf_question_is_asked(tmp_path, mon
     )
     window = outcome.window
     session = window.session
+    fill_run_fields(window)  # packet 41: New run is only offered when the required fields are filled
     session.select_schedule("Passing schedule")
     session.set_operator("Ada")
     session.set_project("Power board")

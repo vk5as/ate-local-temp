@@ -143,6 +143,8 @@ MISMATCH_RUN_CODE = (
     "from ate.ui.staged_run_screen import StagedRunScreen\n"
     "session = HeadlessRunSession(sys.argv[1])\n"
     "screen = StagedRunScreen(session)\n"
+    "f = screen.uut_operator_stage\n"  # packet 41: Start needs all four required fields typed
+    "f.operator_edit.setText('Ada'); f.uut_type_edit.setText('PSU-200'); f.serial_edit.setText('PS-1')\n"
     "screen._refresh_schedule_list()\n"
     "lw = screen.test_schedule_stage.schedule_list\n"
     "item = next(lw.item(i) for i in range(lw.count()) if 'Mismatch schedule' in lw.item(i).text())\n"

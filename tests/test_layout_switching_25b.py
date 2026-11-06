@@ -25,7 +25,7 @@ from ate.ui.run_widgets import STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 
-from ._fixtures import WRITES_PDF, _append_file, add_logging_input_schedule, fake_pdf_helper, write_ate_env
+from ._fixtures import WRITES_PDF, _append_file, add_logging_input_schedule, fake_pdf_helper, fill_run_fields, write_ate_env
 
 SHOTS = Path("/tmp/25b-r2-shots")
 FIELDS = ("operator", "project", "uut_type", "serial")
@@ -178,6 +178,7 @@ def test_the_layout_not_showing_is_inert_from_launch(qapp, tmp_path, layout):
     schedule = add_logging_input_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path, ui={"layout": layout})
     window = outcome.window
+    fill_run_fields(window)
     window.show()  # a widget that is not visible cannot take the focus at all
     qapp.processEvents()
     shown = window.run_screens[layout]
@@ -240,6 +241,7 @@ def test_default_config_launches_the_staged_screen(qapp, tmp_path):
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     assert isinstance(window.run_screen, StagedRunScreen), alerts
     assert window.stack.currentWidget() is window.run_screen
     assert window.staged_layout_action.isChecked()
@@ -252,6 +254,7 @@ def test_ui_layout_three_pane_launches_the_three_pane_screen(qapp, tmp_path):
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path, ui={"layout": "threePane"})
     window = outcome.window
+    fill_run_fields(window)
     assert isinstance(window.run_screen, ThreePaneRunScreen), alerts
     assert window.stack.currentWidget() is window.run_screen
     assert window.three_pane_layout_action.isChecked()
@@ -276,6 +279,7 @@ def test_the_view_menu_switches_layouts_before_a_run_and_carries_the_fields(qapp
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     staged = window.staged_screen
 
     _fill_fields(staged, {"operator": "Ada", "project": "Board A", "uut_type": "PowerSupply", "serial": "PS-77"})
@@ -317,6 +321,7 @@ def test_history_is_still_reachable_after_a_layout_switch(qapp, tmp_path):
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.three_pane_layout_action.trigger()
     qapp.processEvents()
     window.history_action.trigger()
@@ -337,6 +342,7 @@ def test_a_mid_run_switch_answers_the_input_in_the_new_layout(qapp, tmp_path, fa
     schedule = add_logging_input_schedule(tmp_path)  # logs before it blocks, so the log panes have lines
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     asked, _ = _pick_and_start(qapp, window, schedule)
     assert asked, "the step announced its inputs"
     seq = asked[0][0]
@@ -392,6 +398,7 @@ def test_the_staged_log_shows_what_the_step_logged_before_it_asked(qapp, tmp_pat
     schedule = add_logging_input_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     asked, _ = _pick_and_start(qapp, window, schedule)
     assert _wait(qapp, lambda: any(a[2] == 1 for a in asked)), "the step is waiting for its input"
     staged = window.staged_screen
@@ -408,6 +415,7 @@ def test_the_hidden_layout_ignores_its_own_clicks(qapp, tmp_path, fake_pdf):
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     asked, _ = _pick_and_start(qapp, window, "Blocking input schedule")
     seq, attempt, index = asked[0]
     window.three_pane_layout_action.trigger()
@@ -445,6 +453,7 @@ def test_a_pause_switch_shows_the_prompt_in_the_new_layout_and_continue_resumes(
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     _asked, prompts = _pick_and_start(qapp, window, "Fail then pass schedule")
@@ -478,6 +487,7 @@ def test_allow_layout_switch_false_disables_the_switch(qapp, tmp_path):
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path, ui={"allowLayoutSwitch": False})
     window = outcome.window
+    fill_run_fields(window)
     assert window.staged_layout_action.isEnabled() is False
     assert window.three_pane_layout_action.isEnabled() is False
     window.three_pane_layout_action.trigger()
@@ -495,6 +505,7 @@ def test_a_switch_never_writes_the_config(qapp, tmp_path):
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     before = env["config"].read_text(encoding="utf-8")
     window.three_pane_layout_action.trigger()
     qapp.processEvents()
@@ -562,6 +573,7 @@ def test_a_finished_run_keeps_its_results_across_both_switches(qapp, tmp_path):
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     asked, prompts = _pick_and_start(qapp, window, schedule)
@@ -608,6 +620,7 @@ def test_a_finished_run_is_drawn_only_when_the_hidden_layout_comes_back(qapp, tm
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     staged, three = window.staged_screen, window.three_pane_screen
@@ -676,6 +689,7 @@ def test_a_pause_answered_in_one_layout_leaves_no_prompt_in_the_other(qapp, tmp_
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     staged, three = window.staged_screen, window.three_pane_screen
@@ -723,6 +737,7 @@ def test_the_mirror_case_pause_answered_in_staged_leaves_the_three_pane_clean(qa
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     _asked, prompts = _pick_and_start(qapp, window, schedule)
@@ -754,6 +769,7 @@ def test_the_waiting_input_has_the_focus_after_a_mid_run_switch(qapp, tmp_path):
     schedule = add_logging_input_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     asked, _ = _pick_and_start(qapp, window, schedule)
@@ -795,6 +811,7 @@ def test_a_step_box_on_the_hidden_layout_does_not_change_the_run(qapp, tmp_path)
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     staged, three = window.staged_screen, window.three_pane_screen
@@ -827,6 +844,7 @@ def test_a_hidden_staged_layouts_prompt_and_abort_answer_nothing(qapp, tmp_path)
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     three, staged = window.three_pane_screen, window.staged_screen
@@ -860,6 +878,7 @@ def test_a_hidden_three_pane_layouts_prompt_and_abort_answer_nothing(qapp, tmp_p
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path, ui={"layout": "threePane"})
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     three, staged = window.three_pane_screen, window.staged_screen
@@ -892,6 +911,7 @@ def test_an_answer_given_before_the_prompt_is_drawn_leaves_no_prompt(qapp, tmp_p
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     session = window.session
@@ -925,6 +945,7 @@ def test_what_the_worker_queued_before_a_close_reaches_no_closed_store(qapp, tmp
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     session = window.session
@@ -953,6 +974,7 @@ def test_abort_on_the_visible_layout_answers_a_pending_pause_with_abort(qapp, tm
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     _pick_and_start(qapp, window, schedule)
@@ -996,6 +1018,7 @@ def test_a_hidden_layout_defers_its_store_reads_until_it_is_showing(qapp, tmp_pa
     schedule = _add_pause_and_block_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     three = window.three_pane_screen
@@ -1075,6 +1098,7 @@ def test_a_retried_step_shows_its_attempts_on_both_layouts(qapp, tmp_path):
     RunStore(env["db"])
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     staged, three = window.staged_screen, window.three_pane_screen
@@ -1113,6 +1137,7 @@ def test_the_two_review_shots_are_saved(qapp, tmp_path):
     # Shot 1: finish in staged, switch to three-pane.
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()
     qapp.processEvents()
     asked, prompts = _pick_and_start(qapp, window, schedule)
@@ -1159,6 +1184,7 @@ def test_the_three_screenshot_states_are_saved_for_review(qapp, tmp_path, fake_p
     schedule = add_logging_input_schedule(tmp_path)
     outcome, _ = _launch(env, tmp_path)
     window = outcome.window
+    fill_run_fields(window)
 
     menu_image = _menu_shot(window)
     assert menu_image.width() == 1280 and menu_image.height() == 800

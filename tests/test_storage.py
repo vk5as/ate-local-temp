@@ -185,6 +185,68 @@ def test_log_lines_batch_round_trip_through_store(tmp_path) -> None:
     assert run_line["node_seq"] is None and run_line["attempt_no"] is None and run_line["action_seq"] is None
 
 
+def test_log_lines_after_returns_only_the_new_rows(tmp_path) -> None:
+    """`log_lines_after(run, seq)` reads only the rows recorded after ``seq`` (packet 40a review).
+
+    The live Log pane fetches the new rows rather than the whole log on every notification, so this
+    window has to be exact: nothing already drawn, nothing not yet written, nothing from another run."""
+    store = RunStore(tmp_path / "ate.db")
+    run_uuid = new_uuid7()
+    store.insert_log_lines(run_uuid, 0, [{"level": "info", "source": "schedule", "text": f"line {i}"} for i in range(3)])
+    assert [ln["seq"] for ln in store.log_lines_after(run_uuid, -1)] == [0, 1, 2]  # nothing drawn yet: every row
+
+    store.insert_log_lines(run_uuid, 0, [{"level": "info", "source": "schedule", "text": "line 3"},
+                                         {"level": "debug", "source": "schedule", "text": "line 4"}])
+    tail = store.log_lines_after(run_uuid, 2)
+    assert [(ln["seq"], ln["text"]) for ln in tail] == [(3, "line 3"), (4, "line 4")]
+    assert store.log_lines_after(run_uuid, 4) == []  # nothing newer than the last row drawn
+
+    other = new_uuid7()
+    store.insert_log_lines(other, 0, [{"level": "info", "source": "ate", "text": "another run"}])
+    assert store.log_lines_after(run_uuid, 4) == []  # another run's rows never leak into the window
+
+
+def test_log_lines_tail_reads_only_the_newest_rows_per_level(tmp_path) -> None:
+    """`log_lines_tail(run, limit, min_level)` is the recovery read: the newest rows, oldest first.
+
+    Packet 40a fix 2, item 2: a pane that (re)draws reads at most ``limit`` rows of its own level
+    filter, never the whole log, and `log_line_counts` says how many older rows that left out."""
+    store = RunStore(tmp_path / "ate.db")
+    run_uuid = new_uuid7()
+    levels = ["INFO", "DEBUG", "INFO", "WARNING", "DEBUG", "ERROR"]
+    store.insert_log_lines(run_uuid, 0, [{"level": lv, "source": "schedule", "text": f"row {i}"} for i, lv in enumerate(levels)])
+    other = new_uuid7()
+    store.insert_log_lines(other, 0, [{"level": "INFO", "source": "ate", "text": "another run"}])
+
+    assert [ln["seq"] for ln in store.log_lines_tail(run_uuid, 3)] == [3, 4, 5]  # the newest three, oldest first
+    assert [ln["seq"] for ln in store.log_lines_tail(run_uuid, 99)] == [0, 1, 2, 3, 4, 5]
+    assert store.log_lines_tail(run_uuid, 0) == []
+    assert [ln["seq"] for ln in store.log_lines_tail(run_uuid, 2, min_level="INFO")] == [3, 5]  # INFO and above
+    assert [ln["seq"] for ln in store.log_lines_tail(run_uuid, 99, min_level="WARNING")] == [3, 5]
+    assert all(ln["run_uuid"] == run_uuid for ln in store.log_lines_tail(run_uuid, 99))
+    assert store.log_lines_tail(other, 99)[0]["text"] == "another run"
+
+    # Rows older than seq 3 that the INFO-and-above tail leaves out: seq 0 and 2 (INFO) — 2 of them.
+    counts = store.log_line_counts(run_uuid, 3, min_level="INFO")
+    assert sum(row["count"] for row in counts) == 2
+    assert sum(row["count"] for row in store.log_line_counts(run_uuid, 3)) == 3  # DEBUG too
+
+
+def test_log_lines_after_can_leave_debug_rows_out_in_the_store(tmp_path) -> None:
+    """`log_lines_after(run, seq, min_level="INFO")` never hands a DEBUG row to the Log tab (packet 40a fix 2).
+
+    The Log tab keeps its own read cursor; DEBUG-only rows must not come back to it on every refresh."""
+    store = RunStore(tmp_path / "ate.db")
+    run_uuid = new_uuid7()
+    store.insert_log_lines(run_uuid, 0, [{"level": "INFO", "source": "schedule", "text": "info 0"}])
+    store.insert_log_lines(run_uuid, 0, [{"level": "DEBUG", "source": "schedule", "text": f"debug {i}"} for i in range(5)])
+    rows = store.log_lines_after(run_uuid, 0, min_level="INFO")
+    assert rows == [] and all(ln["level"] != "DEBUG" for ln in rows)
+    store.insert_log_lines(run_uuid, 0, [{"level": "WARNING", "source": "ate", "text": "warn"}])
+    assert [ln["text"] for ln in store.log_lines_after(run_uuid, 0, min_level="INFO")] == ["warn"]
+    assert len(store.log_lines_after(run_uuid, 0)) == 6  # the Debug window's read keeps every level
+
+
 def test_media_release_and_run_file_round_trip_through_store(tmp_path) -> None:
     """A Media Release (seq 0) and its file-used rows survive a write/read cycle."""
     store = RunStore(tmp_path / "ate.db")

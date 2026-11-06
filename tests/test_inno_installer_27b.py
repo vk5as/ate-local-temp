@@ -46,7 +46,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -292,6 +291,13 @@ def _stub_bundle(directory: Path, version: str) -> Path:
     exe = bundle / ("ate.exe" if os.name == "nt" else "ate")
     executable_stub(exe, f"print({version!r})\n")
     return bundle
+
+
+def _no_iscc_path(tmp_path: Path) -> str:
+    """A PATH with nothing in it, so the wrapper cannot find a real `iscc` on it."""
+    empty = tmp_path / "no-iscc"
+    empty.mkdir()
+    return str(empty)
 
 
 def _dry_run(bundle: Path, env: dict[str, str] | None = None, cwd: str | None = None, extra: list[str] | None = None) -> str:
@@ -546,7 +552,7 @@ def test_comments_are_stripped_before_the_section_checks() -> None:
 def test_dry_run_prints_the_command_without_signing(tmp_path: Path) -> None:
     bundle = _stub_bundle(tmp_path, "0.0.0-dev")
     out = tmp_path / "release"
-    output = _dry_run(bundle, env=dict(os.environ, ISCC="", PATH=tempfile.mkdtemp()),
+    output = _dry_run(bundle, env=dict(os.environ, ISCC="", PATH=_no_iscc_path(tmp_path)),
                       extra=["--dist", str(bundle.parent), "--out", str(out)])
     assert "iscc" in output.lower()
     assert "/DAppVersion=0.0.0-dev" in output
@@ -567,7 +573,7 @@ def test_dry_run_paths_are_absolute(tmp_path: Path) -> None:
     compiler would look for `packaging\\windows\\dist\\ate`. The same for `--out`.
     """
     bundle = _stub_bundle(tmp_path, "0.0.0-dev")
-    env = dict(os.environ, ISCC="", PATH=tempfile.mkdtemp())
+    env = dict(os.environ, ISCC="", PATH=_no_iscc_path(tmp_path))
 
     output = _dry_run(bundle, env=env, cwd=str(tmp_path), extra=["--dist", "dist"])
     source = re.search(r"/DSourceDir=(\S+)", output).group(1)
@@ -588,7 +594,7 @@ def test_dry_run_paths_are_absolute(tmp_path: Path) -> None:
 def test_dry_run_with_a_certificate_configures_signing(tmp_path: Path) -> None:
     bundle = _stub_bundle(tmp_path, "1.2.3-rc1")
     secret = "super-secret-signing-password"
-    env = dict(os.environ, ISCC="", PATH=tempfile.mkdtemp(),
+    env = dict(os.environ, ISCC="", PATH=_no_iscc_path(tmp_path),
                ATE_SIGN_CERT="C:\\certs\\ate.pfx", ATE_SIGN_PASSWORD=secret)
     output = _dry_run(bundle, env=env)
     assert "/DSignEnabled" in output, "a configured certificate must turn signing on"

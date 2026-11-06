@@ -19,6 +19,7 @@ from ate.engine.lua_host import LuaHost
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
+from ._fixtures import fill_operator_fields
 
 SHOTS = Path("/tmp/15d-shots")
 
@@ -151,6 +152,7 @@ def _failing_release(tmp_path: Path, stop_on_fail: bool = False) -> Path:
 def _open_screen(session: HeadlessRunSession, schedule: str) -> StagedRunScreen:
     """A StagedRunScreen sitting on the Steps & options stage for ``schedule``."""
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
     schedules = screen.test_schedule_stage.schedule_list

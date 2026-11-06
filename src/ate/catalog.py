@@ -267,8 +267,18 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def _empty_definition(atedef_path: Path, error: str) -> Definition:
-    """A structurally unusable definition with no usable fields (e.g. unparseable JSON)."""
-    return Definition(path=Path(atedef_path).parent, media_number="", name="", version="", atedef_path=atedef_path)
+    """A structurally unusable definition with no usable fields (e.g. unparseable JSON).
+
+    The defect is carried in `broken`, like every other structural one: a file the scan cannot parse
+    has no schedules to offer and no checksums to verify, and Start has to be able to say so."""
+    return Definition(
+        path=Path(atedef_path).parent,
+        media_number="",
+        name="",
+        version="",
+        atedef_path=atedef_path,
+        broken=error,
+    )
 
 
 def read_definition(atedef_path: str | Path) -> Definition:
@@ -611,7 +621,7 @@ def _schedule_summaries(definition: Definition) -> list[tuple[str, str, str]]:
             host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
             schedule_name = host.schedule.name
             description = host.schedule.description
-        except HostError as exc:
+        except (HostError, OSError) as exc:
             print(f"WARNING: {file_entry.rel_path}: {exc}")
             continue
         summaries.append((schedule_name, description, definition.media_number))
@@ -644,15 +654,14 @@ def _release_label(definition: Definition) -> str:
     return definition.media_number
 
 
-def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
-    """Return one row per visible schedule across all Media Releases, runnable and broken.
+def schedule_rows(definitions: list[Definition]) -> list[ScheduleRow]:
+    """The picker rows of a catalogue scan already read (packet 43).
 
-    The full picker view the Operator sees: usable schedules (``error=None``), schedules that raised
-    while loading within an otherwise-usable release (``error=<load error>``), and each broken Media
-    Release once with its defect. Broken definitions are never offered to start.
-    """
+    :func:`list_schedule_rows` is exactly this over a fresh scan. A layout that keeps one scan derives
+    its rows, its ⚠ flags and its release labels from that one list of definitions, so a Rescan walks
+    the Test Definition directories once instead of three times."""
     rows: list[ScheduleRow] = []
-    for definition in find_definitions(*directories):
+    for definition in definitions:
         release = _release_label(definition)
         if definition.broken:
             rows.append(ScheduleRow(media_number=definition.media_number, error=definition.broken,
@@ -672,12 +681,25 @@ def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
                         release=release,
                     )
                 )
-            except HostError as exc:
+            except (HostError, OSError) as exc:
                 # The schedule never loaded, so its ScheduleParams name is unknown: the file is
                 # the only way to name the row (packet 05b).
                 rows.append(ScheduleRow(media_number=definition.media_number, error=str(exc),
                                         release=release, file=file_entry.rel_path))
     return rows
+
+
+def list_schedule_rows(*directories: str | Path) -> list[ScheduleRow]:
+    """Return one row per visible schedule across all Media Releases, runnable and broken.
+
+    The full picker view the Operator sees: usable schedules (``error=None``), schedules that raised
+    while loading within an otherwise-usable release (``error=<load error>``), and each broken Media
+    Release once with its defect. Broken definitions are never offered to start.
+
+    A layout that already holds a scan derives its rows from it with :func:`schedule_rows` instead of
+    walking the directories again (packet 43).
+    """
+    return schedule_rows(find_definitions(*directories))
 
 
 def resolve_schedule_path(definition: Definition, schedule_name: str) -> Path | None:
@@ -692,7 +714,7 @@ def resolve_schedule_path(definition: Definition, schedule_name: str) -> Path | 
         full = definition.path / file_entry.rel_path
         try:
             host = LuaHost(full, modules=module_map(definition), includes=include_map(definition))
-        except HostError:
+        except (HostError, OSError):
             continue
         if host.schedule.name == schedule_name:
             return full
@@ -796,14 +818,14 @@ def include_map(definition: Definition) -> IncludeMap:
     return IncludeMap(definition)
 
 
-def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
-    """Return the usable Media Release whose loaded schedules include ``schedule_name`` (or ``None``).
+def find_schedule(definitions: list[Definition], schedule_name: str) -> Optional[tuple[Definition, Path, LuaHost]]:
+    """Find ``(definition, path, loaded host)`` for ``schedule_name`` in an already-scanned list.
 
-    Like :func:`resolve_schedule` but returns the whole :class:`Definition`, so a caller can read the
-    release's module map alongside the resolved schedule. Broken releases and schedules that fail to
-    load are skipped, matching :func:`resolve_schedule`.
-    """
-    for definition in find_definitions(*directories):
+    Packet 43: selecting a schedule searches the scan the picker holds rather than walking the
+    Test Definition directories again. Nothing here scans: it only loads the visible schedules of
+    each usable release, one at a time, until a loaded schedule answers to the name. ``None`` when
+    the list holds no runnable schedule with that name."""
+    for definition in definitions:
         if definition.broken:
             continue
         # Load each schedule with its own release's module map so a load-time require still resolves,
@@ -816,11 +838,24 @@ def resolve_schedule_definition(*directories: str | Path, schedule_name: str) ->
             full = definition.path / file_entry.rel_path
             try:
                 host = LuaHost(full, modules=modules, includes=includes)
-            except HostError:
+            except (HostError, OSError):
+                # A schedule whose file has gone since the scan cannot load; the held scan still
+                # lists its row until the Operator rescans (packet 43).
                 continue
             if host.schedule.name == schedule_name:
-                return definition
+                return definition, full, host
     return None
+
+
+def resolve_schedule_definition(*directories: str | Path, schedule_name: str) -> Definition | None:
+    """Return the usable Media Release whose loaded schedules include ``schedule_name`` (or ``None``).
+
+    Like :func:`resolve_schedule` but returns the whole :class:`Definition`, so a caller can read the
+    release's module map alongside the resolved schedule. Broken releases and schedules that fail to
+    load are skipped, matching :func:`resolve_schedule`.
+    """
+    found = find_schedule(find_definitions(*directories), schedule_name)
+    return found[0] if found is not None else None
 
 
 # --- checksum mismatches ------------------------------------------------------
@@ -834,9 +869,83 @@ def _loaded_schedule_paths(definition: Definition, path: Path) -> set[Path]:
     it cannot run, so there is nothing to flag."""
     try:
         host = LuaHost(path, modules=module_map(definition), includes=include_map(definition))
-    except HostError:
+    except (HostError, OSError):
         return set()
     return {Path(loaded) for loaded, kind, _ in host._files_used if kind == "tslua"}
+
+
+def _rehashed_copy(member: Definition) -> Definition:
+    """A copy of one release with every listed file's checksum taken from the bytes on disk now.
+
+    Used when a Test Definition's own `.atedef` cannot be read: the scan's file list is kept and only
+    the computed hashes are redone. A file that has gone is recorded with no computed hash."""
+    files: list[FileEntry] = []
+    for entry in member.files:
+        full = Path(entry.rel_path) if Path(entry.rel_path).is_absolute() else member.path / entry.rel_path
+        try:
+            computed = _sha256_bytes(full.read_bytes())
+        except OSError:
+            computed = None
+        files.append(
+            FileEntry(
+                rel_path=entry.rel_path,
+                expected_sha256=entry.expected_sha256,
+                computed_sha256=computed,
+                is_schedule=entry.is_schedule,
+                hidden=entry.hidden,
+                module_name=entry.module_name,
+            )
+        )
+    return Definition(
+        path=member.path,
+        media_number=member.media_number,
+        name=member.name,
+        version=member.version,
+        format_version=member.format_version,
+        files=tuple(files),
+        dependencies=member.dependencies,
+        broken=member.broken,
+        atedef_path=member.atedef_path,
+    )
+
+
+def refresh_definition(definition: Definition) -> Definition:
+    """Re-read one Test Definition from disk, without walking the catalogue (packet 43 review).
+
+    The held scan is what the picker shows; the run-start decision is not. Reading the selected
+    release's `.atedef` again and hashing its files as they are now means Start asks about a file the
+    Operator edited after the last Rescan and stays silent about one they fixed, and the confirmation,
+    the store answer and the engine's definition are the same read, so they agree. Every release
+    already resolved in the chain is re-read the same way from its own `.atedef`: one file per
+    release, never a search of the Test Definition directories."""
+    refreshed: dict[Path, Definition] = {}
+
+    def rebuild(member: Definition) -> Definition:
+        # Keyed by the `.atedef` file, not the directory that holds it: two Test Definitions in one
+        # directory are two releases with different file lists, and keying on the directory handed
+        # a dependency back as a copy of the release it was read from (packet 43 review fix).
+        key = member.atedef_path or member.path
+        if key in refreshed:
+            return refreshed[key]
+        try:
+            copy = read_definition(member.atedef_path) if member.atedef_path else _rehashed_copy(member)
+        except ATEError:
+            copy = _rehashed_copy(member)
+        refreshed[key] = copy
+        copy.chain = tuple(rebuild(m) for m in member.chain)
+        return copy
+
+    return rebuild(definition)
+
+
+def chain_defects(definition: Definition) -> list[Definition]:
+    """Every release in a refreshed chain that disk no longer gives a readable definition for.
+
+    A `.atedef` corrupted after the scan reads back with ``broken`` set and no files: its checksums are
+    gone, so a run from it would record nothing and verify nothing. Start must refuse that rather than
+    run with the checksum check silently dropped (packet 43 review fix 3). A release with no
+    ``mediaNumber`` is unusable for the same reason: nothing owns the files it lists."""
+    return [member for member in _search_chain(definition) if member.broken or not member.media_number]
 
 
 def definition_mismatches(
@@ -866,14 +975,13 @@ def definition_mismatches(
     ]
 
 
-def list_schedule_mismatches(*directories: str | Path) -> dict[str, list[tuple[str, Optional[str], str, str]]]:
-    """Map every visible schedule name to the checksum mismatches a run of it can load.
+def schedule_mismatches(definitions: list[Definition]) -> dict[str, list[tuple[str, Optional[str], str, str]]]:
+    """The ⚠ flags of a catalogue scan already read (packet 43).
 
-    Schedules with nothing to flag are absent from the map, so the Run screen only prefixes the rows
-    it finds here with ⚠ (ticket 06c). Broken definitions contribute nothing: their schedules cannot
-    run, so there is nothing to confirm."""
+    :func:`list_schedule_mismatches` is this over a fresh scan; a layout that holds one scan derives
+    its flags from it, so a Rescan does not walk the Test Definition directories a second time."""
     flags: dict[str, list[tuple[str, Optional[str], str, str]]] = {}
-    for definition in find_definitions(*directories):
+    for definition in definitions:
         if definition.broken:
             continue
         if not definition_mismatches(definition):
@@ -883,3 +991,12 @@ def list_schedule_mismatches(*directories: str | Path) -> dict[str, list[tuple[s
             if mismatches:
                 flags[name] = mismatches
     return flags
+
+
+def list_schedule_mismatches(*directories: str | Path) -> dict[str, list[tuple[str, Optional[str], str, str]]]:
+    """Map every visible schedule name to the checksum mismatches a run of it can load.
+
+    Schedules with nothing to flag are absent from the map, so the Run screen only prefixes the rows
+    it finds here with ⚠ (ticket 06c). Broken definitions contribute nothing: their schedules cannot
+    run, so there is nothing to confirm."""
+    return schedule_mismatches(find_definitions(*directories))

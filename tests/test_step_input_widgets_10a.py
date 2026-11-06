@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StepInputWidget, StagedRunScreen
 from ate.ui.theme import TOKENS
-from tests._fixtures import assert_no_swallowed_exception
+from tests._fixtures import assert_no_swallowed_exception, fill_operator_fields
 
 
 def _rgb(value: str) -> tuple[int, int, int]:
@@ -195,7 +195,7 @@ from PySide6.QtWidgets import QApplication
 
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
-from tests._fixtures import WRITES_PDF, fake_pdf_helper
+from tests._fixtures import WRITES_PDF, fake_pdf_helper, fill_operator_fields
 
 import ate.report.pdf_job
 ate.report.pdf_job.pdf_helper_command = fake_pdf_helper(WRITES_PDF)
@@ -223,6 +223,7 @@ config_path.write_text(json.dumps(config), encoding="utf-8", newline="\\n")
 app = QApplication([])
 session = HeadlessRunSession(config_path)
 screen = StagedRunScreen(session)
+fill_operator_fields(screen)
 screen.resize(1280, 800)
 screen.uut_operator_stage.operator_edit.setText("Ada")
 screen._advance(1)
@@ -364,6 +365,7 @@ def _recorded_inputs(store, run_uuid: str) -> list[tuple[int, str, str]]:
 def test_every_declared_input_has_a_widget_under_its_step(qapp, tmp_path):
     """Each Step Input type renders the widget kind the mockup's inputHTML uses."""
     screen = StagedRunScreen(HeadlessRunSession(_write_env(tmp_path, {"all.tslua": ALL_TYPES})["config"]))
+    fill_operator_fields(screen)
     _select(screen, "Widget types schedule")
 
     widgets = screen.steps_options_stage.input_widgets[0]
@@ -418,6 +420,7 @@ def test_inputs_sit_as_rows_under_the_step_that_declared_them(qapp, tmp_path):
     description, so any text would be painted twice — and the indent comes from the widget's own
     left margin, the mockup's `.inputs { margin-left: 26px }`."""
     screen = StagedRunScreen(HeadlessRunSession(_write_env(tmp_path, {"all.tslua": ALL_TYPES})["config"]))
+    fill_operator_fields(screen)
     _select(screen, "Widget types schedule")
     screen._reveal_run_view()
     screen.show()
@@ -446,6 +449,7 @@ def test_the_line_edit_is_a_140px_control_in_the_row(qapp, tmp_path):
     env = _write_env(tmp_path, {"blocking.tslua": BLOCKING_INTEGER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Voltage check schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -473,6 +477,7 @@ def test_radio_and_checkbox_controls_open_and_close_with_the_step(qapp, tmp_path
     env = _write_env(tmp_path, {"all.tslua": ALL_TYPES})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Widget types schedule")
     screen._reveal_run_view()
     screen.show()
@@ -500,6 +505,7 @@ def test_blocking_input_is_answered_through_its_widget(qapp, tmp_path):
     env = _write_env(tmp_path, {"blocking.tslua": BLOCKING_INTEGER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Voltage check schedule")
 
     widget = screen.run_view.input_widget(0, 1)
@@ -549,6 +555,7 @@ def test_the_answered_widget_survives_the_end_of_the_run(qapp, tmp_path):
     env = _write_env(tmp_path, {"blocking.tslua": BLOCKING_INTEGER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Voltage check schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -576,6 +583,7 @@ def test_an_out_of_range_integer_shows_the_error_and_is_not_submitted(qapp, tmp_
     env = _write_env(tmp_path, {"blocking.tslua": BLOCKING_INTEGER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Voltage check schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -623,6 +631,7 @@ return ScheduleParams("Radio schedule", "a RADIOBUT answered by picking one")
     env = _write_env(tmp_path, {"radio.tslua": src})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Radio schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -654,6 +663,7 @@ def test_the_second_blocking_input_stays_inert_until_its_own_call_waits(qapp, tm
     env = _write_env(tmp_path, {"two.tslua": TWO_BLOCKING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Two reads schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -686,6 +696,7 @@ def test_a_poll_button_stays_live_for_the_whole_of_its_step(qapp, tmp_path):
     env = _write_env(tmp_path, {"poll.tslua": POLL_WHILE_WAITING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Poll while waiting")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -737,6 +748,7 @@ def test_a_run_finishes_even_when_a_poll_is_never_clicked(qapp, tmp_path):
     env = _write_env(tmp_path, {"poll.tslua": POLL_WHILE_WAITING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Poll while waiting")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -760,6 +772,7 @@ def test_the_asked_row_is_scrolled_into_view(qapp, tmp_path):
     env = _write_env(tmp_path, {"long.tslua": LONG_LAST_INPUT})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     _select(screen, "Long schedule")
     screen._reveal_run_view()
@@ -788,6 +801,7 @@ def test_the_session_refuses_an_answer_for_a_step_that_is_not_asking(qapp, tmp_p
     env = _write_env(tmp_path, {"two.tslua": TWO_BLOCKING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Two reads schedule")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -829,6 +843,7 @@ def test_the_session_refuses_a_poll_click_that_is_not_open(qapp, tmp_path):
     env = _write_env(tmp_path, {"poll.tslua": POLL_WHILE_WAITING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Poll while waiting")
     screen.steps_options_stage.run_button.click()
     screen.show()
@@ -864,6 +879,7 @@ def test_a_widget_click_for_a_closed_input_is_shown_not_crashed(qapp, tmp_path):
     env = _write_env(tmp_path, {"poll.tslua": POLL_WHILE_WAITING})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     _select(screen, "Poll while waiting")
     screen.steps_options_stage.run_button.click()
     screen.show()

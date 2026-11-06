@@ -824,7 +824,12 @@ def test_packaging_writes_only_where_it_was_told(tmp_path: Path) -> None:
     `finally: shutil.rmtree(stage)` in `_deb` and the leftover is visible here.
     """
     def snapshot() -> set[str]:
-        return {str(p.relative_to(REPO)) for p in REPO.rglob("*") if ".git" not in p.parts}
+        # Bytecode is left out: under pytest-xdist another worker compiles modules while this test
+        # runs, and a fresh `__pycache__` entry is that worker's import, not something packaging wrote.
+        return {
+            str(p.relative_to(REPO)) for p in REPO.rglob("*")
+            if ".git" not in p.parts and "__pycache__" not in p.parts and p.suffix != ".pyc"
+        }
 
     before = snapshot()
     _package(_fake_bundle(tmp_path), tmp_path / "out", tmpdir=tmp_path)

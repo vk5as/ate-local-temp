@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.staged_run_screen import StagedRunScreen
 
-from ._fixtures import write_ate_env
+from ._fixtures import fill_operator_fields, write_ate_env
 
 
 def _drain_report(qapp, session) -> None:
@@ -77,6 +77,7 @@ def test_untick_default_on_step_records_disabled_notrun(qapp, tmp_path) -> None:
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -113,6 +114,7 @@ def test_boxes_stay_enabled_and_selectable_with_check_state(qapp, tmp_path) -> N
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -155,6 +157,7 @@ def test_boxes_lock_while_a_run_is_up_and_unlock_after_reselect(qapp, tmp_path) 
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -210,6 +213,7 @@ def test_same_schedule_reselction_carries_overrides_and_seeds_boxes(qapp, tmp_pa
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
@@ -247,6 +251,7 @@ def test_different_schedule_selection_clears_overrides_and_uses_defaults(qapp, t
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
 
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)

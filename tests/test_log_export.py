@@ -16,7 +16,6 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import tempfile
 
 import pytest
 
@@ -261,7 +260,7 @@ def test_owner_filter(export_run) -> None:
     assert "left open at end of run" in run[0].text
 
 
-def test_combined_filters(export_run) -> None:
+def test_combined_filters(export_run, tmp_path: Path) -> None:
     """Checkbox 2 — the groups intersect: a line is exported only when all ticked groups allow it."""
     store, row = export_run
     uuid = row["run_uuid"]
@@ -273,7 +272,7 @@ def test_combined_filters(export_run) -> None:
     assert [r.owner for r in only_run] == ["Run"]
 
     # A contradiction selects nothing: export_log reports 0 and writes header-only files.
-    td = tempfile.mkdtemp()
+    td = tmp_path
     for fmt, name in (("csv", "r.csv"), ("jsonl", "r.jsonl"), ("text", "r.txt")):
         path = Path(td) / name
         assert export_log(store, uuid, path, fmt, levels={"DEBUG"}, sources={"device"}) == 0
@@ -287,9 +286,9 @@ def test_combined_filters(export_run) -> None:
     assert len(text_lines) == 6  # header only, no log lines
 
 
-def test_export_log_rejects_unknown_format(export_run) -> None:
+def test_export_log_rejects_unknown_format(export_run, tmp_path: Path) -> None:
     store, row = export_run
-    td = tempfile.mkdtemp()
+    td = tmp_path
     with pytest.raises(ValueError, match="unknown export format"):
         export_log(store, row["run_uuid"], Path(td) / "r.docx", "docx")
 
@@ -297,12 +296,12 @@ def test_export_log_rejects_unknown_format(export_run) -> None:
 # --- Checkbox 3: the three writers, byte-for-byte ----------------------------------------
 
 
-def test_csv_output(export_run) -> None:
+def test_csv_output(export_run, tmp_path: Path) -> None:
     """Checkbox 3 — CSV: UTF-8 with BOM, a header row of the field names, minimal quoting, no
     filter record; the multi-line print's newline stays in one (quoted) cell."""
     store, row = export_run
     uuid = row["run_uuid"]
-    td = tempfile.mkdtemp()
+    td = tmp_path
     path = Path(td) / "run.csv"
     assert export_log(store, uuid, path, "csv") == 11
 
@@ -326,12 +325,12 @@ def test_csv_output(export_run) -> None:
     assert '"print line' in text
 
 
-def test_jsonl_output(export_run) -> None:
+def test_jsonl_output(export_run, tmp_path: Path) -> None:
     """Checkbox 3 — JSON Lines: one object per line, the field names above, blanks are null,
     Step Number a string, Attempt a number, and the multi-line print is one physical line."""
     store, row = export_run
     uuid = row["run_uuid"]
-    td = tempfile.mkdtemp()
+    td = tmp_path
     path = Path(td) / "run.jsonl"
     assert export_log(store, uuid, path, "jsonl") == 11
 
@@ -355,13 +354,13 @@ def test_jsonl_output(export_run) -> None:
     assert objs[3]["text"] == "print line\neight line two"
 
 
-def test_text_output(export_run) -> None:
+def test_text_output(export_run, tmp_path: Path) -> None:
     """Checkbox 3 — Text: a header naming the run, the UUT and the filters (none), then one line
     per log line in the spec's layout, with the continuation of the multi-line print indented
     under its text and each Step owner written as ``Step <Step Number>#<attempt>``."""
     store, row = export_run
     uuid = row["run_uuid"]
-    td = tempfile.mkdtemp()
+    td = tmp_path
     path = Path(td) / "run.txt"
     assert export_log(store, uuid, path, "text") == 11
 

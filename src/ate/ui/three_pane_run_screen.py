@@ -5,9 +5,9 @@ fields, the filterable schedule list with errors and mismatches inline, the Star
 the live `Result` counts; the centre pane is the steps as a table with Result, Attempts, Actual,
 Expected and Message, the Step Inputs under the step that declared them, and — on a Stop-on-Fail
 pause — the Continue/Retry/Abort prompt inline under the failed step with a sticky banner above the
-table; the right pane is the Log/Summary band (ticket 39, R3), and Debug is its own window opened
-from the shared run header above the panes (R2, D2). The status bar (packet 14d) runs along the
-bottom of all three.
+table; the right pane is the Log band (ticket 39, R3; packet 42 removed the Summary tab it used to
+share), and Debug is its own window opened from the shared run header above the panes (R2, D2). The
+status bar (packet 14d) runs along the bottom of all three.
 
 Like the staged screen, this layout holds no run logic: every control is bound to the run session,
 and everything drawn is a row the store already wrote. The widgets themselves are the shared ones in
@@ -20,7 +20,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QRect, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSplitter,
-    QTabWidget,
+    QStyle,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -42,6 +43,7 @@ from ate.engine.run_engine import RunEngine
 
 from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 from .run_widgets import (
+    _IncrementalRowFit,
     DebugWindow,
     FailurePromptBar,
     LogPane,
@@ -55,8 +57,7 @@ from .run_widgets import (
     StatusBar,
     StepEnabler,
     StepInputWidget,
-    TextPane,
-    BROKEN_MARKER,
+    WrappedTextDelegate,
     _BROKEN_ERR,
     _CURRENT_BG,
     _FAILED_BG,
@@ -69,7 +70,7 @@ from .run_widgets import (
     _row_label as row_label,
     load_schedule_steps,
 )
-from .theme import badge_width_for, mono_font
+from .theme import badge_width_for
 
 #: The centre pane's columns. `Enable` carries the step's box (packet 15d); the rest are the mockup's
 #: `.b-thead` cells (prototype line 100).
@@ -81,6 +82,15 @@ COLUMNS = ("Enable", "Step", "Result", "Attempts", "Actual", "Expected", "Messag
 #: the word is never dropped in favour of the glyph alone.
 _RESULT_COLUMN_MIN = 78
 _COLUMN_WIDTHS = (46, 150, _RESULT_COLUMN_MIN, 60, 80, 80, 130)
+#: Height of a step row holding only single-line text: the table's own default row height.
+#: Wrapping only makes a row taller than this when a cell's wrapped lines need it (packet 40b);
+#: a row is never made shorter.
+SHORT_STEP_ROW_HEIGHT = 30
+#: Reserve the inline cell's horizontal padding and frame inside the viewport.
+_INLINE_PROMPT_VIEWPORT_INSET = 20
+#: The columns that carry wrapping text. Enable holds a widget and Result is painted as a
+#: badge, so neither needs a text measurement.
+_TEXT_COLUMNS = (1, 4, 5, 6)
 
 
 class StepTable(QWidget):
@@ -116,6 +126,8 @@ class StepTable(QWidget):
         self.banner.hide()
 
         self.table = QTableWidget(0, len(COLUMNS))
+        # A wrapped prompt can exceed the viewport: every part must be scrollable.
+        self.table.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         self.table.setHorizontalHeaderLabels(COLUMNS)
         # R4: the Result column is painted as a badge. Ticket 39 review: the delegate is set
         # on that column alone rather than on the whole table, so every other cell (Step,
@@ -124,14 +136,28 @@ class StepTable(QWidget):
         self.table.setItemDelegateForColumn(2, ResultBadgeDelegate())
         for index, width in enumerate(_COLUMN_WIDTHS):
             self.table.setColumnWidth(index, width)
-        # The Message column takes whatever the pane leaves, so the table never has to scroll
-        # sideways and a spanned row (an input, a prompt) always has the full width.
+        # The Message column takes the remaining pane width. The fixed columns still
+        # require horizontal scrolling in windows narrower than 1280 px.
         self.table.horizontalHeader().setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
-        # Rows are named by their Step cell, not by a row number: a visible vertical header would
-        # print a number beside every step, input and prompt row (packet 25a review).
+        # Rows are named by their Step cell, not by a row number: a visible vertical header
+        # would print a number beside every step, input and prompt row (packet 25a review).
         self.table.verticalHeader().setVisible(False)
-        # Text is clipped by its own cell rather than running into the neighbour (`.cell { ellipsis }`).
-        self.table.setWordWrap(False)
+        # Packet 40b (issue #3): the Actual, Expected, Message and step-name cells word-wrap
+        # and the rows grow to fit them (``_fit_rows``), and the table is read-only: it mirrors
+        # what the engine wrote, and an Operator must never be able to rewrite a result in it.
+        # The Enable column is a cell widget, so ``NoEditTriggers`` leaves its boxes clickable.
+        # The text columns take :class:`WrappedTextDelegate`: the default delegate wraps only at
+        # spaces, so a 300-character device id in an 80 px column ran out of the cell.
+        self.table.setWordWrap(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        for column in _TEXT_COLUMNS:
+            self.table.setItemDelegateForColumn(column, WrappedTextDelegate())
+        self.refit_passes = 0
+        self._width_fit = _IncrementalRowFit(self.table, self._fit_width_row)
+        self._refit_timer = self._width_fit._timer
+        self._refit_timer.timeout.disconnect()
+        self._refit_timer.timeout.connect(self._refit_now)
+        self.table.horizontalHeader().sectionResized.connect(self.refit_all)
 
         layout.addWidget(self.schedule_label)
         layout.addWidget(self.banner)
@@ -146,6 +172,12 @@ class StepTable(QWidget):
         self._step_rows: dict[int, int] = {}
         self._prompt_rows: dict[int, int] = {}
         self._prompt_bars: dict[int, FailurePromptBar] = {}
+        #: Per step row, the cell texts and column widths the last measurement saw: a row is
+        #: measured only when one of them changes (packet 40b performance fix).
+        self._row_sizes: dict[int, tuple] = {}
+        #: How many rows the last ``_fit_rows`` pass actually measured, kept so a test can
+        #: check that an update of one row does not re-measure the whole table.
+        self.measured_rows = 0
         #: The step whose Attempt is running (R4 emphasis) and the step the pause is on, as
         #: last drawn — enough to repaint a row's tint without reading the store again.
         self._current_seq: Optional[int] = None
@@ -193,6 +225,7 @@ class StepTable(QWidget):
             self.checks[seq] = box
 
             name = QTableWidgetItem(row_label(getattr(step, "step_no", ""), getattr(step, "name", ""), int(getattr(step, "depth", 0))))
+            name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if is_header:
                 name.setBackground(QColor(_HEADER_BG))
                 font = QFont(name.font())
@@ -224,6 +257,8 @@ class StepTable(QWidget):
                 row += 1
 
         table.setRowCount(row)
+        self._row_sizes.clear()  # a new schedule: every row is measured again
+        self._fit_rows()
         self.schedule_label.setText(
             f"{self.session.selected_schedule or ''}" if self.session is not None else ""
         )
@@ -296,13 +331,135 @@ class StepTable(QWidget):
         # table's fit in the pane.
         widest = max((badge_width_for(value) for value in shown_results if value), default=_RESULT_COLUMN_MIN)
         self.table.setColumnWidth(2, max(_RESULT_COLUMN_MIN, widest + 8))
+        self._fit_rows(text_only=True)
         self._paint_prompt(paused_seq, paused_result, paused_message, paused_actual, paused_expected)
 
+    def refit_all(self) -> None:
+        """Cancel stale width work and schedule visible rows plus a bounded chunk."""
+        if getattr(self, "_width_fit", None) is not None:
+            self._width_fit.restart()
+
+    def _fit_width_row(self, row):
+        if row in self._row_sizes:
+            self._fit_rows((row,))
+
+    def _refit_now(self) -> None:
+        self.refit_passes += 1
+        self._width_fit.tick()
+
+    def _cell_width(self, row: int, column: int) -> int:
+        """How wide Qt paints this cell — the section less the grid line drawn inside it.
+
+        `columnWidth()` is the section's width, but the delegate is handed
+        `visualRect(index)`, which is one grid line narrower. Measuring the wrap against the
+        wider number under-counts the lines: a 60 px column measured at 60 px sized the row
+        for 244 px while the text painted in the 59 px cell needed 252 (40b review, second round)."""
+        return max(1, self.table.visualRect(self.table.model().index(row, column)).width())
+
+    def _row_signature(self, row: int) -> tuple:
+        """What the row's text columns are measured against: their text, font and width.
+
+        A row is re-measured when any of them changes, which is what makes an update of one
+        step measure one row instead of the table (packet 40b performance fix).
+
+        The font is the whole font, not its bold flag and point size: a pixel size (13 px on a
+        9 pt font) or a family change leaves the point size alone, and the row then keeps the
+        height measured for the old type — 198 px of row for text that needs 781 (40b review,
+        second round)."""
+        table = self.table
+        parts = []
+        for column in _TEXT_COLUMNS:
+            item = table.item(row, column)
+            if item is None:
+                continue
+            font = item.font()
+            parts.append((self._cell_width(row, column), item.text(), font.key(), font.pixelSize()))
+        return tuple(parts)
+
+    def _fit_rows(self, rows=None, *, text_only=False) -> int:
+        """Size each step row to the wrapped text its cells hold (packet 40b).
+
+        The height comes from the cell delegate's own `sizeHint` at the width the cell is
+        painted in, which is the same measurement the delegate uses to draw. A row with
+        only short lines keeps ``SHORT_STEP_ROW_HEIGHT``, and a row that had grown shrinks
+        back when its column widens or its text is replaced.
+
+        Rows whose text, font and cell widths are unchanged since the last pass are not
+        measured at all: ``show_state`` runs after every Attempt, and measuring 1,000 rows
+        each time cost a second. Returns how many rows were measured, also kept in
+        ``measured_rows``."""
+        table = self.table
+        measured = 0
+        for row in (self._step_rows.values() if rows is None else rows):
+            signature = self._row_signature(row)
+            previous = self._row_sizes.get(row)
+            if previous == signature:
+                continue
+            # Attempts must not synchronously drain unrelated width work mid-drag.
+            if text_only and previous is not None and tuple(part[1:] for part in previous) == tuple(part[1:] for part in signature):
+                continue
+            self._row_sizes[row] = signature
+            measured += 1
+            height = SHORT_STEP_ROW_HEIGHT
+            for column in _TEXT_COLUMNS:
+                item = table.item(row, column)
+                if item is None:
+                    continue
+                delegate = table.itemDelegateForColumn(column) or table.itemDelegate()
+                option = QStyleOptionViewItem()
+                option.rect = QRect(0, 0, self._cell_width(row, column), SHORT_STEP_ROW_HEIGHT)
+                option.text = item.text()
+                option.font = item.font()
+                hint = delegate.sizeHint(option, table.model().index(row, column))
+                height = max(height, hint.height())
+            table.setRowHeight(row, height)
+        self.measured_rows = measured
+        return measured
+
+    def _prompt_row_height(self, seq: int) -> int:
+        """How tall the prompt row has to be for the bar it holds (40b fix).
+
+        The style's content rectangle supplies the cell padding. Clamp that width to
+        the viewport before measuring, so a span wider than the visible columns cannot
+        place controls offscreen. This also works before Qt lays out the cell widget.
+        """
+        bar = self._prompt_bars.get(seq)
+        if bar is None:
+            return SHORT_STEP_ROW_HEIGHT
+        # Column spans can exceed the viewport in a narrow window. Keep the prompt's
+        # controls accessible without horizontal scrolling.
+        bar.setMaximumWidth(max(1, self.table.viewport().width() - _INLINE_PROMPT_VIEWPORT_INSET))
+        span = self.table.visualRect(self.table.model().index(self._prompt_rows[seq], 0))
+        option = QStyleOptionViewItem()
+        option.initFrom(self.table)
+        option.rect = span
+        content = self.table.style().subElementRect(QStyle.SubElement.SE_ItemViewItemText, option, self.table)
+        pad_y = max(0, content.top() - span.top())
+        width = max(1, min(content.width(), bar.maximumWidth()))
+        bar.sync_height_at(width)
+        return max(SHORT_STEP_ROW_HEIGHT, bar.heightForWidth(width) + 2 * pad_y)
+
+    def _fit_prompt_rows(self) -> None:
+        """Give a shown inline prompt the height its wrapped message needs (packet 40b fix)."""
+        if getattr(self, "_fitting_prompt", False):
+            return
+        self._fitting_prompt = True
+        try:
+            for seq, row in self._prompt_rows.items():
+                if not self.table.isRowHidden(row):
+                    self.table.setRowHeight(row, self._prompt_row_height(seq))
+        finally:
+            self._fitting_prompt = False
+
     def _set_cell(self, row: int, column: int, text: str) -> None:
-        """Write one cell, reusing the item that is already there."""
+        """Write one cell, reusing the item that is already there.
+
+        A fresh item is created without `ItemIsEditable`: the table mirrors what the store
+        wrote and the Operator can never rewrite a result in it (packet 40b, issue #3)."""
         item = self.table.item(row, column)
         if item is None:
             item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, column, item)
         else:
             item.setText(text)
@@ -354,12 +511,18 @@ class StepTable(QWidget):
         if bar is None:
             bar = FailurePromptBar(_INLINE_PROMPT_STYLE)
             bar.choice_made.connect(self.prompt_choice.emit)
+            bar.geometry_changed.connect(self._fit_prompt_rows)
             self._prompt_bars[seq] = bar
             self.table.setCellWidget(row, 0, bar)
         number = getattr(self._rows[seq], "step_no", "") if 0 <= seq < len(self._rows) else ""
         # Ticket 39 (D1): the prompt states the measurements as well as the message.
         bar.show_prompt(str(number or ""), result, message, actual=actual, expected=expected)
-        self.table.setRowHeight(row, bar.sizeHint().height())
+        # Packet 40b review: the row must be as tall as the bar's *wrapped* message. A
+        # word-wrapping label grows its own hint, but `sizeHint()` is the bar laid out at its
+        # preferred width — the spanned row is narrower than that, and the last lines of a
+        # long Actual were cut off by the row boundary. `_prompt_row_height` measures the row
+        # against the bar as Qt actually lays it out in the row.
+        self.table.setRowHeight(row, self._prompt_row_height(seq))
         self.table.setRowHidden(row, False)
         self.banner.setText(f"Step {number} {result}: choose Continue, Retry or Abort below")
         self.banner.show()
@@ -480,6 +643,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         # no run header of its own — its Start and Abort sit in the setup pane — so the next run is
         # offered there, with the same semantics as the staged button.
         self.new_run_button = QPushButton("New run")
+        # Packet 41 review: like the staged layout's New run, this is a run control, so the theme's
+        # `#primary` rule (and its `:disabled` fade) has to reach it by object name.
+        self.new_run_button.setObjectName("primary")
         self.new_run_button.setEnabled(False)
         # Ticket 39 review: Abort and New run must not be the window's Enter-key default. A stray
         # Enter from a scanner, or an Operator pressing Enter to leave a field, would end a run or
@@ -515,20 +681,15 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         left_layout.addWidget(self.counts)
 
         self.table = StepTable(session, screen=self)
-        # R3: the right pane is the Log/Summary band — Log live from the start, Summary the
-        # verdict and per-step results. Debug is not a pane any more (D2): it is its own
-        # window, opened from the header's button or Ctrl+D.
-        self.log_pane = LogPane("")
-        self.summary_pane = TextPane()
-        self.summary_pane.setObjectName("summary_text")
-        self.summary_pane.setFont(mono_font(12))
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self.log_pane, "Log")
-        self.tabs.addTab(self.summary_pane, "Summary")
+        # R3: the right pane is the Log band — live from the start. Packet 42 (issue #3): the
+        # Summary tab repeated the centre table's verdict and per-step results, so it is gone, and
+        # a pane with no tab bar holds the log directly and says what it is. Debug is not a pane
+        # any more (D2): it is its own window, opened from the header's button or Ctrl+D.
+        self.log_pane = LogPane("Log", "INFO and above")
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.addWidget(self.tabs, stretch=1)
+        right_layout.addWidget(self.log_pane, stretch=1)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(left)
@@ -553,7 +714,10 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         if self.session.config is not None:
             self.fields.project_edit.setText(self.session.config.default_project or "")
         # A Test Run cannot start with an empty Project, so the field gates Start (packet 30a r3).
-        self.fields.project_edit.textChanged.connect(self._update_start_button)
+        # Packet 41: the other three required fields gate it as well. Packet 41 fix2: typing in any of
+        # them is also the input change that drops a refusal the Start path wrote.
+        for edit in (self.fields.project_edit, self.fields.operator_edit, self.fields.uut_type_edit, self.fields.serial_edit):
+            edit.textChanged.connect(self._start_inputs_changed)
 
         # The picker owns the selection: it records it on the session and this screen follows it.
         self.picker.selection_changed.connect(self._on_selection)
@@ -572,6 +736,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.session.input_asked.connect(self._on_input_asked)
         self.session.input_answered.connect(self._on_input_answered)
         self.session.step_finished.connect(self._on_step_finished)
+        # Packet 40a: the worker announces every recorded log line on this signal; the pane reads
+        # the new rows from the store the moment they land, not when the step ends.
+        self.session.log_appended.connect(self._on_log_appended)
 
         self.picker.refresh()
         self._update_start_button()
@@ -599,7 +766,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         if self._carrying_over:
             # MainWindow re-rendered this picker as part of a layout switch (packet 25b): the table
             # keeps whatever the run in view put in it, and the setup preview is carried over by hand.
-            self._update_start_button()
+            self._start_inputs_changed()
             return
         if not name:
             self.table.load_steps([])
@@ -609,7 +776,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self.table.load_steps(self._steps)
             self.table.set_checkable(self.session.state in (SessionState.IDLE, SessionState.SELECTING))
             self._apply_stop_on_fail(self.session.stop_on_fail)
-        self._update_start_button()
+        self._start_inputs_changed()
 
     def start_new_run(self) -> None:
         """The three-pane "New run" (packet 30b review): unlock the session and show the setup.
@@ -617,18 +784,27 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         The setup pane is always on screen here, so the layout change is the schedule's step list:
         the centre pane goes back to the picked schedule's editable boxes instead of the finished
         run's results, and the tallies and log start from nothing. Nothing the Operator typed is
-        cleared (spec 37)."""
-        schedule = self.new_run()
+        cleared (spec 37).
+
+        Packet 41 review: with nothing picked there is no schedule to prepare, so the run on screen
+        stays as it is. A direct call to this method must not empty the table, the counts and the
+        log for a schedule nobody chose. Packet 42 review, item 4: "stays as it is" includes the
+        Enable boxes — the rows on screen belong to a run that is over and there is no schedule to
+        apply them to, so they are locked until one is picked."""
+        if not self.new_run():
+            return
+        schedule = self.session.selected_schedule
         if not schedule:
+            self.table.set_checkable(False)
             return
         self._steps = load_schedule_steps(self.session, schedule)
         self.table.load_steps(self._steps)
         self.table.set_checkable(True)
         self.counts.set_counts({})
         self.counts.hide()
+        self._stop_log_timer()  # a read queued by the run just finished must not refill the panes
         self.log_pane.clear()
         self.debug_window.clear()
-        self.summary_pane.clear()
         self.table.banner.hide()
 
     def _apply_stop_on_fail(self, value: bool) -> None:
@@ -637,19 +813,21 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.continue_all_radio.setChecked(not value)
 
     def _update_start_button(self) -> None:
-        """Start is available only for a runnable schedule and a non-empty Project.
+        """Start is available only while :meth:`can_start` says a run can begin.
 
         A broken row carries no name, so it can never be the selection a run starts from (packet
-        05b); a blank Project refuses the run too (spec 08). The reason goes on the error line."""
-        runnable = self.picker.selected_name() is not None
-        project = self.fields.project_edit.text().strip()
-        self.start_button.setEnabled(runnable and bool(project) and self.state != SessionState.STARTED)
-        if runnable:
-            self.error_label.setText(
-                "" if project else f"{BROKEN_MARKER} Project is required before a Test Run can start"
-            )
-        else:
-            self.error_label.setText("")
+        05b); a blank Project refuses the run too (spec 08); and packet 41 adds the other three
+        required fields and the rule that no run may already be going. The reason goes on the
+        error line."""
+        can_start = self.can_start()
+        self.start_button.setEnabled(can_start)
+        # New run returns to setup so missing fields can be repaired.
+        self.new_run_button.setEnabled(self.state == SessionState.FINISHED)
+        self._show_error(self._start_problem(), "start")
+
+    def _refresh_start_state(self) -> None:
+        """This layout's Start refresh, under the mixin's one name (packet 41 fix2)."""
+        self._update_start_button()
 
     def _request_abort(self) -> None:
         """Abort the run: answer a pending prompt, or stop at the next step boundary."""
@@ -687,6 +865,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self._pre_counts = (0, 0)
             self._post_counts = (0, 0)
             self._started_steps = set()
+            self._reset_live_log_state()  # the Action the last run ended in is not this run's (packet 40a fix 2)
             self._step_total = self._enabled_step_count(steps)
             # Ticket 39 (D4): a fresh run starts with nothing waiting and no Post-test yet.
             self._waiting_inputs = set()
@@ -697,10 +876,13 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             # (packet 25a review), and the log panes start empty too.
             self.counts.set_counts({})
             # Ticket 39 review: the live panes append rather than rewrite, so a new run starts by
-            # emptying them — the log the Operator sees is the run they are looking at (30b).
+            # emptying them — the log the Operator sees is the run they are looking at (30b). The
+            # coalesced log read still pending (packet 40a review, item 3) is cancelled with them:
+            # it was started for the run just finished, and firing later would refill these panes
+            # with that run's lines.
+            self._stop_log_timer()
             self.log_pane.clear()
             self.debug_window.clear()
-            self.summary_pane.clear()
             self.counts.show()
         elif state == SessionState.FINISHED:
             self._engine = None
@@ -727,10 +909,9 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             if self.is_active():
                 nodes = self.session.store.nodes(run_uuid) if run_uuid else []
                 attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-                log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
                 self.table.show_state(nodes, attempts)
-                self._show_log(log_lines)
-                self._update_summary(nodes, attempts)
+                self._reset_live_log_state()  # the run is over: no Action is running any more (packet 40a fix 2)
+                self._refresh_log()
                 self._update_counts(nodes)
             else:
                 # The layout that is not showing defers the read and draws it when it comes back
@@ -741,12 +922,21 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
             self.table.clear_pause()
             self._paused_seq = None
 
-        # Step boxes: editable in setup, locked while a run is up (packet 11b).
-        self.table.set_checkable(state in (SessionState.IDLE, SessionState.SELECTING))
+        # Step boxes: editable in setup, locked while a run is up (packet 11b). Packet 42 review,
+        # item 4: they are also locked when nothing is picked — a SELECTING session with no schedule
+        # still has the finished run's rows in the table, and ticking those boxes edits a run that
+        # is over rather than the next one.
+        self.table.set_checkable(
+            state in (SessionState.IDLE, SessionState.SELECTING) and bool(self.session.selected_schedule)
+        )
         self.abort_button.setEnabled(state == SessionState.STARTED)
-        # Packet 30b review: the next run is offered once this one is over.
+        # Packet 30b review: the next run is offered once this one is over. Packet 41: a run in
+        # progress is the only thing that holds New run back; an incomplete setup is a message on
+        # the error line, not a lock on the button.
         self.new_run_button.setEnabled(state == SessionState.FINISHED)
-        self._update_start_button()
+        # Packet 41 fix2: the session moving state is an input change too, so a refusal written
+        # against the old state is dropped before Start is re-checked.
+        self._start_inputs_changed()
         self._update_header(state)
         if state == SessionState.FINISHED:
             self._timer.stop()
@@ -768,7 +958,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self._refresh_run_header(now)
 
     def _sync_from_store(self) -> None:
-        """Redraw the table, the counts, the log and the summary from whatever the store has recorded."""
+        """Redraw the table, the counts and the log from whatever the store has recorded."""
         self._deferred_run_uuid = None
         run_uuid = self.session.run_uuid
         if not run_uuid or not self._store_open():
@@ -778,8 +968,7 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         self.table.show_state(nodes, attempts, self._paused_seq, self._paused_result,
                               self._paused_message, self._paused_actual, self._paused_expected)
         self._update_counts(nodes)
-        self._update_summary(nodes, attempts)
-        self._show_log(self.session.store.log_lines(run_uuid))
+        self._refresh_log()
 
     def _update_counts(self, nodes: list[dict]) -> None:
         """The live Result tallies: every step Result the store has recorded, by value.
@@ -862,6 +1051,10 @@ class ThreePaneRunScreen(RunScreenMixin, QWidget):
         """Ticket 39 (R4): tint the row of the step whose Attempt just started and bold its
         name. The layout mirrors the session even while hidden, so this runs either way."""
         self.table.mark_current(node_seq)
+
+    def _loaded_schedule_steps(self) -> list[object]:
+        """The steps this layout loaded for the run: the rows the centre table was built from."""
+        return list(self._steps)
 
     def _on_input_asked(self, node_seq: int, attempt_no: int, index: int) -> None:
         """The worker is waiting on this step's n-th input, so its widget becomes live.

@@ -104,6 +104,20 @@ jobs:
         # when the run is long, and --tb=short keeps that summary readable. `--durations=20` reports the
         # slowest tests, which is how a hang is told apart from a merely slow suite.
         #
+        # Linux runs the suite in parallel with pytest-xdist (packet 44): five local `-n 3` runs
+        # were clean, and `-n auto` takes the runner's own CPU count. Windows stays serial: no
+        # parallel failure was seen here, but none of these tests were run on a Windows runner
+        # with xdist, and a Qt-offscreen flake that only appears there would turn a green job
+        # into a red one nobody can reproduce.
+        #
+        # The flags are an array splatted with `@`, not one string in a variable: pwsh hands a
+        # variable to a native command as a single argv element, so `pytest ... $workers` with
+        # `$workers = "-n auto"` gives pytest one argument `-n auto`, which xdist reads as
+        # `invalid parse_numprocesses value: ' auto'` and exits 4. Building the array is also what
+        # keeps Windows from passing an empty `""` argument when the parallel flag is not added.
+        # The OS test uses `-eq`, not `==`: PowerShell has no `==` operator, and `if (a == b)` is a
+        # ParserError that stops the step before pytest is ever reached (packet 44 review).
+        #
         # `faulthandler_timeout=300` makes pytest dump the traceback of every thread when a single
         # test runs for five minutes: that stack is what identifies a modal `QMessageBox.exec()`
         # waiting for a click nobody can give. `faulthandler_exit_on_timeout=true` then ends the
@@ -120,7 +134,9 @@ jobs:
         # process with __fastfail (0xC0000409), and the bare step reports only "exit code 1".
         shell: pwsh
         run: |
-          pytest -v -rfEs --tb=short -o log_cli=false --durations=20 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true
+          $pytestArgs = @('-v', '-rfEs', '--tb=short', '-o', 'log_cli=false', '--durations=20', '-o', 'faulthandler_timeout=300', '-o', 'faulthandler_exit_on_timeout=true')
+          if ('${{ matrix.os }}' -eq 'ubuntu-latest') { $pytestArgs += @('-n', 'auto') }
+          pytest @pytestArgs
           $code = $LASTEXITCODE
           "pytest exit code: {0} (0x{0:X8})" -f $code
           exit $code

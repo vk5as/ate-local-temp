@@ -1,9 +1,9 @@
-\chapter{The run engine: one worker, eight signals}\label{ch:engine}
+\chapter{The run engine: one worker, nine signals}\label{ch:engine}
 
 \texttt{RunEngine} is a \texttt{QThread} subclass in
 \texttt{src/\allowbreak{}ate/\allowbreak{}engine/\allowbreak{}run\_\allowbreak{}engine.py}. Its \texttt{run()} method is the worker: it inserts the
 \texttt{test\_run} row, walks the expanded step tree, and closes the run. Everything the screen knows
-about the run arrives through the eight signals the class declares.
+about the run arrives through the nine signals the class declares.
 
 \section{The worker's lifetime, and why it owns itself}
 
@@ -67,7 +67,7 @@ recorded \texttt{INTERRUPTED} and \texttt{FINISHED} is still announced.
     run's result and End Reason.
 \end{enumerate}
 
-\section{The eight signals}
+\section{The nine signals}
 
 Every one of these is emitted on the worker and delivered to the main thread, where the receiver's own
 event loop runs the slot. \texttt{tests/\allowbreak{}test\_\allowbreak{}signal\_\allowbreak{}threads\_\allowbreak32a.py} drives a real run with a
@@ -94,6 +94,8 @@ new signal has to be added to that test.
 \texttt{action\_started} & \texttt{"pre"}/\texttt{"post"}, completed, total & a Pre- or Post-test Action
   is about to run, so the status bar can say \texttt{Pre-test n/total} \\
 \texttt{step\_started} & node seq & an Attempt is about to run, again on each Retry \\
+\texttt{log\_lines\_recorded} & the run key & as soon as a batch of log rows lands in the store, so a
+  layout can paint the newest lines while the worker is still running (packet 40a) \\
 \bottomrule
 \end{longtable}
 \endgroup

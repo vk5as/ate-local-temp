@@ -607,12 +607,12 @@ def test_close_then_open_again_gives_a_new_device(app: QCoreApplication) -> None
 def test_open_on_a_port_that_is_not_there_is_a_device_failure(app: QCoreApplication) -> None:
     """A port pyserial cannot open is handled like a refused TCP connect: open's onError gets
     ``{ok = false, err}`` and open returns whatever the handler gives back."""
-    port = _dead_port()
-    # open_call is deliberately left open: the handler argument below closes the call.
-    open_call = (f'ATE.open(DeviceType.SERIAL, {{port="socket://127.0.0.1:{port}", baud=9600, dataBits=8, '
-                 'stopBits=1, parity=Parity.NONE, flowControl=FlowControl.NONE, timeout=1, '
-                 'readTerm="", writeTerm=""}')
-    store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
+    with _dead_port() as port:
+        # open_call is deliberately left open: the handler argument below closes the call.
+        open_call = (f'ATE.open(DeviceType.SERIAL, {{port="socket://127.0.0.1:{port}", baud=9600, dataBits=8, '
+                     'stopBits=1, parity=Parity.NONE, flowControl=FlowControl.NONE, timeout=1, '
+                     'readTerm="", writeTerm=""}')
+        store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
     StepParams("io"):setStepNo("1.")
       :setAction(function()
         local calls = {{}}
@@ -625,11 +625,11 @@ def test_open_on_a_port_that_is_not_there_is_a_device_failure(app: QCoreApplicat
 
 
 def test_open_failure_without_a_handler_errors_the_step_naming_the_port(app: QCoreApplication) -> None:
-    port = _dead_port()
-    open_call = (f'ATE.open(DeviceType.SERIAL, {{port="socket://127.0.0.1:{port}", baud=9600, dataBits=8, '
-                 'stopBits=1, parity=Parity.NONE, flowControl=FlowControl.NONE, timeout=1, '
-                 'readTerm="", writeTerm=""})')
-    store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
+    with _dead_port() as port:
+        open_call = (f'ATE.open(DeviceType.SERIAL, {{port="socket://127.0.0.1:{port}", baud=9600, dataBits=8, '
+                     'stopBits=1, parity=Parity.NONE, flowControl=FlowControl.NONE, timeout=1, '
+                     'readTerm="", writeTerm=""})')
+        store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
     StepParams("io"):setStepNo("1.")
       :setAction(function()
         {open_call}

@@ -26,6 +26,7 @@ from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.run_widgets import BROKEN_MARKER
 from ate.ui.staged_run_screen import StagedRunScreen, _broken_row_size_hint, _ROW_MARGIN_X, _wrapped_height
 from ate.ui.theme import TOKENS
+from ._fixtures import fill_operator_fields
 
 #: The mockup's broken-row colours as the design system paints them (ticket 39, R1): `#fff5f5` is
 #: the palette's failed-row tint, `#b71c1c` its error red. Read from the tokens so the assertions
@@ -106,7 +107,9 @@ def _write_env(tmp_path: Path) -> dict[str, Path]:
 
 def _screen(tmp_path: Path) -> StagedRunScreen:
     """The real Run screen, built from the fixture config."""
-    return StagedRunScreen(HeadlessRunSession(_write_env(tmp_path)["config"]))
+    screen = StagedRunScreen(HeadlessRunSession(_write_env(tmp_path)["config"]))
+    fill_operator_fields(screen)  # packet 41: no run starts with a required field left blank
+    return screen
 
 
 def _list(screen: StagedRunScreen):
@@ -236,6 +239,7 @@ def test_a_broken_row_cannot_be_selected_or_started(qapp, tmp_path):
     env = _write_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     broken = _broken_items(screen)
     assert broken, "the fixture has broken rows to test"
@@ -382,6 +386,7 @@ def test_rescan_picks_up_a_file_broken_after_the_first_scan(qapp, tmp_path):
     """Rescan reloads the catalog, so a Test Definition added after launch shows up broken."""
     env = _write_env(tmp_path)
     screen = StagedRunScreen(HeadlessRunSession(env["config"]))
+    fill_operator_fields(screen)
     assert len(_texts(screen)) == 5
 
     late = {
@@ -403,6 +408,7 @@ def test_the_good_schedule_still_starts_a_run(qapp, tmp_path):
     env = _write_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
 
     good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
@@ -514,6 +520,7 @@ def test_a_broken_current_row_never_begins_a_run(qapp, tmp_path):
     env = _write_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     broken = _broken_items(screen)
 
@@ -535,6 +542,7 @@ def test_a_broken_current_row_never_begins_a_run(qapp, tmp_path):
 def test_a_long_error_wraps_and_the_row_grows_to_fit_it(qapp, tmp_path):
     """At a 640 px list the `.err` line wraps and the row is tall enough for every wrapped line."""
     screen = StagedRunScreen(HeadlessRunSession(_write_long_error_env(tmp_path)))
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     list_widget.setFixedWidth(640)
     screen.test_schedule_stage.rescan_button.click()  # rebuild the rows at the new list width
@@ -603,6 +611,7 @@ def test_a_hidden_or_broken_current_row_clears_the_stale_notes(qapp, tmp_path):
     env = _write_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
     list_widget.setCurrentItem(good)
@@ -629,6 +638,7 @@ def test_the_mismatch_flag_clears_when_the_picked_row_is_hidden(qapp, tmp_path):
     """The ⚠ line belongs to the schedule that is picked; hide it and the line goes with it."""
     session = HeadlessRunSession(_write_flagged_env(tmp_path))
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     list_widget.setCurrentItem(_usable_items(screen)[0])
     flagged = screen.test_schedule_stage.mismatch_label.text()
@@ -649,6 +659,7 @@ def test_stage_two_start_reports_a_schedule_that_broke_after_picking(qapp, tmp_p
     env = _write_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     list_widget = _list(screen)
     good = next(i for i in _usable_items(screen) if "Good schedule" in i.text())
     list_widget.setCurrentItem(good)
@@ -693,6 +704,7 @@ def test_picker_screenshot_is_saved_for_the_mockup_comparison(qapp, tmp_path):
 def test_picker_r2_screenshot_shows_a_wrapped_error_at_640_px(qapp, tmp_path):
     """The picker at a 640 px list width with a load error long enough to wrap, saved for review."""
     screen = StagedRunScreen(HeadlessRunSession(_write_long_error_env(tmp_path)))
+    fill_operator_fields(screen)
     screen.resize(700, 460)
     list_widget = _list(screen)
     list_widget.setFixedWidth(640)

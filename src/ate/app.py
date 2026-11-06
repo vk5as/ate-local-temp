@@ -14,7 +14,8 @@ Launch sequence (each step reuses the module that already does it):
 5. open the main window: the Run screen in the layout `ui.layout` names (staged, or threePane) —
    both layouts are built and bound to the session so the View menu's Layout group can switch them
    for this session without touching a run (packet 25b) — the History screen reachable from the View
-   menu, and the Run view's debug window inside the Run screen.
+   menu, and the Run view's debug window inside the Run screen. Showing the window also colours its
+   native title bar to match the run header on Windows (issue #3); off Windows that is a no-op.
 
 Both dialogs are injectable (`prompt`, `alert`) so tests never block on a real
 :class:`~PySide6.QtWidgets.QMessageBox`, and `exec_=False` returns the window instead of entering
@@ -24,6 +25,8 @@ the event loop.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.wintypes
 import sys
 import time
 from dataclasses import dataclass
@@ -57,6 +60,93 @@ class LaunchOutcome:
     code: int
     window: Optional[QMainWindow] = None
     app: Optional[QApplication] = None
+
+
+#: The dwmapi.h attribute IDs, spelled out because ctypes has no names for them.
+DWMWA_BORDER_COLOR = 34
+DWMWA_CAPTION_COLOR = 35
+DWMWA_TEXT_COLOR = 36
+
+#: Which attribute takes which palette token: the frame matches the run header it sits above.
+TITLE_BAR_ATTRIBUTES = ((DWMWA_CAPTION_COLOR, "head"), (DWMWA_TEXT_COLOR, "head_ink"), (DWMWA_BORDER_COLOR, "head"))
+
+#: dwmapi, opened once per process. None until the first Windows window asks for it.
+_dwm = None
+
+#: `DwmSetWindowAttribute(HWND, DWORD attribute, void* value, DWORD size) -> HRESULT`, spelled out
+#: because ctypes guesses a bare Python int as a 32-bit C int: a window handle with bit 32 set
+#: (64-bit Qt, or a handle handed back by a 64-bit Windows) would reach the DWM truncated.
+#: HRESULT is a 32-bit LONG, and `c_long` is 32 bits on Windows, the only platform this call runs on.
+DWM_ATTRIBUTE_TYPES = (ctypes.wintypes.HWND, ctypes.wintypes.DWORD, ctypes.wintypes.LPCVOID, ctypes.wintypes.DWORD)
+
+
+def _dwm_set_window_attribute(hwnd: int, attribute: int, value: int) -> int:
+    """Set one attribute of a native window through `DwmSetWindowAttribute`, returning the HRESULT.
+
+    The value is a `COLORREF` (`0x00bbggrr`) passed by reference, which is what the API wants:
+    the plain integer would be read as a pointer. The handle is declared as `HWND`, not left as a
+    bare int, so its high half is not thrown away on the way in. Declaring the types on every call
+    costs one attribute write and keeps the seam patchable: a test that swaps in its own DLL object
+    still gets a typed call."""
+    global _dwm
+    if _dwm is None:
+        _dwm = ctypes.WinDLL("dwmapi.dll")
+    call = _dwm.DwmSetWindowAttribute
+    call.argtypes = DWM_ATTRIBUTE_TYPES
+    call.restype = ctypes.c_long
+    colour = ctypes.c_uint32(value)
+    return call(hwnd, attribute, ctypes.byref(colour), ctypes.sizeof(colour))
+
+
+def _colorref(token: str) -> int:
+    """A palette token (`#rrggbb`) as the DWM reads a colour: `0x00bbggrr`."""
+    red, green, blue = (int(token[i:i + 2], 16) for i in (1, 3, 5))
+    return (blue << 16) | (green << 8) | red
+
+
+def apply_windows_title_bar(
+    window: QMainWindow,
+    *,
+    set_attribute: Optional[Callable[[int, int, int], int]] = None,
+    log: Optional[Callable[[str, str, str], None]] = None,
+) -> None:
+    """Blend the native title bar with the run header's navy (issue #3, decided 2026-11-05).
+
+    Only Windows has a DWM frame to paint, and only Windows 11 understands these attributes:
+    Windows 10 answers with an error HRESULT. Both are swallowed — nothing here may stop a
+    launch, and nothing is logged louder than DEBUG. The colours are the theme's `head` and
+    `head_ink` tokens, so the frame matches the header the window is showing.
+
+    ``set_attribute`` and ``log`` are seams: the CI runs on Linux, where the DWM is not there,
+    so the tests hand in their own recorder instead of ctypes."""
+    if sys.platform != "win32":
+        return  # Linux and macOS have no DWM frame; their window managers are left alone.
+    setter = set_attribute or _dwm_set_window_attribute
+
+    def note(message: str) -> None:
+        if log is None:
+            return
+        try:
+            log("DEBUG", "ui", message)
+        except Exception:  # noqa: BLE001 - a log that cannot be written is not a reason to fail
+            pass
+
+    try:
+        hwnd = int(window.winId())
+    except Exception as exc:  # noqa: BLE001 - no native window: nothing to colour
+        note(f"title bar colour skipped, no window handle: {exc}")
+        return
+    for attribute, token in TITLE_BAR_ATTRIBUTES:
+        try:
+            result = setter(hwnd, attribute, _colorref(TOKENS[token]))
+        except Exception as exc:  # noqa: BLE001 - dwmapi may not be there, or may refuse outright
+            note(f"title bar attribute {attribute} failed: {exc}")
+            continue
+        if result != 0:
+            # Windows 10 gets here: the attribute is not supported on that frame. An HRESULT is a
+            # signed 32-bit value, so ctypes hands back 0x80070057 as a negative number; masking it
+            # prints the hex Windows writes.
+            note(f"title bar attribute {attribute} refused (HRESULT {result & 0xFFFFFFFF:#010x})")
 
 
 class MainWindow(QMainWindow):
@@ -167,6 +257,22 @@ class MainWindow(QMainWindow):
         # History's "New run for this UUT" comes back to the Run screen with the fields filled in.
         self.history_screen.new_run_requested.connect(self._new_run_from_history)
 
+    # -- the native frame ---------------------------------------------------
+
+    def showEvent(self, event) -> None:
+        """Colour the title bar every time this window is shown (issue #3).
+
+        The DWM attributes belong to the native window Qt built, so a window whose handle is
+        recreated — hidden and shown again — needs them set again; setting them on every show is
+        cheap and idempotent. Nothing else is touched: the Debug window and the dialogs keep
+        Qt's own frame, and off Windows the call does nothing at all. A title bar that cannot
+        be coloured is never a reason for a launch to fail."""
+        super().showEvent(event)
+        try:
+            apply_windows_title_bar(self, log=self.app_log.log if self.app_log is not None else None)
+        except Exception:  # noqa: BLE001 - the frame is decoration; the window still shows
+            pass
+
     # -- layout switching ---------------------------------------------------
 
     def set_layout(self, layout: str) -> None:
@@ -213,7 +319,9 @@ class MainWindow(QMainWindow):
         are copied across, and the target's steps preview is loaded for a run not yet started. A View
         switch is not an Operator action on the run, so nothing here writes to the session: the picker
         is re-rendered with its ``_carrying_over`` flag up, which is what stops it from re-selecting
-        the schedule and moving a FINISHED session back to SELECTING (packet 30b review)."""
+        the schedule and moving a FINISHED session back to SELECTING (packet 30b review). A refusal
+        the Start path wrote is carried over too, so both layouts show the same state (packet 41
+        fix2 review)."""
         for name in ("operator_edit", "project_edit", "uut_type_edit", "serial_edit"):
             src = getattr(source.fields, name, None)
             dst = getattr(target.fields, name, None)
@@ -250,6 +358,15 @@ class MainWindow(QMainWindow):
         stop_on_fail = source.stop_on_fail_radio.isChecked()
         target.stop_on_fail_radio.setChecked(stop_on_fail)
         target.continue_all_radio.setChecked(not stop_on_fail)
+        # Move the refusal and its ownership together. The hidden layout must not retain a copy
+        # that a later switch could revive after the Operator repairs the current inputs.
+        target._refusal = source._refusal
+        if target._refusal:
+            target._show_error("", "start")
+            target._show_error(target._refusal, "refused")
+        source._refusal = ""
+        source._show_error("", "refused")
+        target._refresh_start_state()
 
     # -- navigation ---------------------------------------------------------
 
@@ -278,17 +395,12 @@ class MainWindow(QMainWindow):
     def _new_run_from_history(self, prefill: dict) -> None:
         """Switch to the Run screen prefilled from History's "New run for this UUT".
 
-        This is the same New run as the run header's button (packet 30b review): after a run the
-        staged layout shows the finished run, not the setup stages, so filling the stage-1 edits
-        would land on hidden widgets. The layout is put back to its setup first and the session is
-        moved FINISHED → SELECTING by re-selecting the schedule; only then are the fields written,
-        so the Operator lands on the visible, prefilled stage 1 (or the three-pane setup pane) with
-        Start live. The Run screen reads its widgets at Start, so prefilling only the session would
-        be re-applied empty by the first Start (30a review item 8): UUT Type, serial and Project go
-        into the first-stage edits, and the Test Schedule picker is made current, which selects it on
-        the session through the screen's own wiring."""
+        Prefill first, then use the layout's New run path to show stage 1 or the editable
+        three-pane setup. Only an in-progress run blocks returning to setup; missing fields can
+        be repaired there before Start."""
+        if self.session.state == SessionState.STARTED:
+            return
         self.show_run()
-        self.run_screen.start_new_run()
         # Either layout carries the same fields; the staged one keeps them in its first stage.
         stage = getattr(self.run_screen, "uut_operator_stage", None) or self.run_screen.fields
         setters = {
@@ -310,6 +422,8 @@ class MainWindow(QMainWindow):
                 if item.data(Qt.ItemDataRole.UserRole) == schedule:
                     picker.setCurrentItem(item)  # _on_schedule_selected selects it on the session
                     break
+
+        self.run_screen.start_new_run()
 
     # -- something went wrong -------------------------------------------------
 

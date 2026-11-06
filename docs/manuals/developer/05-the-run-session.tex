@@ -16,7 +16,7 @@ becomes \texttt{STARTED}.
 \texttt{STARTED} is announced on the calling thread before the worker starts, so a screen can paint the
 run view before the first signal arrives. The worker's queued signals then move the state.
 
-\section{The nine signals}
+\section{The ten signals}
 
 \begin{itemize}
   \item \texttt{state\_changed}, \texttt{input\_asked}, \texttt{step\_finished}, \texttt{failure\_prompt},
@@ -27,6 +27,9 @@ run view before the first signal arrives. The worker's queued signals then move 
     a number, a string or a list of labels.
   \item \texttt{report\_written} (HTML path, PDF path): fired exactly once per finished run, with an
     empty second path when there is no PDF --- because the render was skipped, or because it failed.
+  \item \texttt{log\_appended} (run key): forwarded from the engine's \texttt{log\_lines\_recorded},
+    fired the moment log rows are in the store so a layout can show them while the run is still going
+    (packet 40a).
 \end{itemize}
 
 That last one is worth the space it takes. The report is written after \texttt{FINISHED} is announced,

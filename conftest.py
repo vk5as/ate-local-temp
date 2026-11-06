@@ -41,6 +41,7 @@ if os.name == "nt" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
 # ``QApplication`` binding does not accept a ``platform=`` kwarg, so we construct it with an empty
 # argument list and rely on that env var instead.
 import pytest  # noqa: E402
+from shiboken6 import delete, isValid  # noqa: E402
 
 from PySide6.QtCore import QObject, QThread, qInstallMessageHandler  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
@@ -136,12 +137,13 @@ def _release_files_module(_release_files_session):
 
 
 @pytest.fixture(autouse=True)
-def _release_files(_release_files_module, tmp_path_factory):
+def _release_files(_release_files_module, tmp_path_factory, qapp):
     """Release what this test opened, and fail it if a file under pytest's temp directory stays open.
 
     Linux will happily delete an open file, so without this check a handle that only Windows would
     refuse to give up is invisible until CI runs there. Files of stores still open for an enclosing
     scope are that scope's, and are excluded."""
+    outer_widgets = set(qapp.topLevelWidgets())
     root = tmp_path_factory.getbasetemp()
     before = _fixtures.open_files_under(root)
     marks = len(_opened), len(_fixtures.temp_directories)
@@ -153,6 +155,13 @@ def _release_files(_release_files_module, tmp_path_factory):
         for suffix in ("", "-wal", "-shm")
     }
     _release_since(*marks)
+    # Closing sessions joins their workers but does not destroy their parentless windows.
+    # Do that here on the GUI thread: otherwise a later worker's cyclic GC hands stale
+    # widget trees to Shiboken's deferred deletion queue, which can segfault while painting.
+    # Keep enclosing fixtures' windows and Qt-owned popups; destroy only new parentless roots.
+    for widget in qapp.topLevelWidgets():
+        if isValid(widget) and widget.parent() is None and widget not in outer_widgets:
+            delete(widget)
     leaked = _fixtures.open_files_under(root) - before - outer
     assert not leaked, f"still open after the test closed everything it opened: {sorted(leaked)}"
 

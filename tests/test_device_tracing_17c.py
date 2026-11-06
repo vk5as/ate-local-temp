@@ -285,8 +285,8 @@ def test_a_refused_open_is_traced_as_a_failed_open(app: QCoreApplication) -> Non
 
     The timeout is well above the 2 s Windows spends retrying a closed port before it says refused:
     with less, the connect times out first and the line is true but says "timed out"."""
-    port = _dead_port()
-    source = r"""
+    with _dead_port() as port:
+        source = r"""
 return ScheduleParams("trace") :setSchedule({
   StepParams("io"):setStepNo("1.")
     :setAction(function()
@@ -295,7 +295,7 @@ return ScheduleParams("trace") :setSchedule({
     end),
 })
 """
-    store, ru = _run(app, source, port, trace=True)
+        store, ru = _run(app, source, port, trace=True)
 
     texts = [ln["text"] for ln in _trace(store, ru)]
     assert len(texts) == 1, texts

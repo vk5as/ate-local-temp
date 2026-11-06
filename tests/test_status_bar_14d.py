@@ -2,7 +2,7 @@
 and time in the current action or step.
 
 The bar lives in :class:`~ate.ui.staged_run_screen.RunView` as the last widget of the view, under
-the step list and the Log/Summary tabs like the mockup's ``statusBar()``. The screen refreshes it
+the step list and the Log band like the mockup's ``statusBar()``. The screen refreshes it
 from its one-second QTimer and from the engine's ``action_started`` / ``step_started`` signals
 relayed through the session. The screen's clock is injectable so these tests never sleep: the
 clock below advances one second on every call, and a timer tick is simulated by emitting the
@@ -23,7 +23,7 @@ from ate.run_session.headless import HeadlessRunSession
 from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.theme import STYLESHEET
 
-from ._fixtures import _sha256, write_ate_env
+from ._fixtures import _sha256, fill_operator_fields, write_ate_env
 from .test_staged_run_screen import _find_item, _wait_finished
 
 # A schedule with Pre-test and Post-test Actions around two steps, the first of which blocks on an
@@ -106,7 +106,7 @@ def _screen(tmp_path: Path, clock) -> tuple[HeadlessRunSession, StagedRunScreen]
 
 def _start(qapp, screen: StagedRunScreen, name: str) -> None:
     """Select ``name`` in the picker and Start it through the Steps & options stage."""
-    screen.uut_operator_stage.operator_edit.setText("Ada")
+    fill_operator_fields(screen)  # packet 41: a run cannot start with any required field blank
     screen._advance(1)
     item = _find_item(screen.test_schedule_stage.schedule_list, name)
     screen.test_schedule_stage.schedule_list.setCurrentItem(item)
@@ -156,13 +156,13 @@ def _pump_until(qapp, predicate, timeout: float = 10.0) -> bool:
 
 
 def test_status_bar_is_the_last_widget_of_the_run_view(qapp, tmp_path):
-    """The bar sits at the bottom: after the step list, the failure bar and the Log/Summary tabs."""
+    """The bar sits at the bottom: after the step list, the failure bar and the Log band."""
     _, screen = _screen(tmp_path, SteppingClock())
     layout = screen.run_view.layout()
     widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
     assert widgets[-1] is screen.run_view.status_bar, "the status bar is not the view's last widget"
     assert widgets.index(screen.run_view.status_bar) > widgets.index(screen.run_view.step_list)
-    assert widgets.index(screen.run_view.status_bar) > widgets.index(screen.run_view.tabs)
+    assert widgets.index(screen.run_view.status_bar) > widgets.index(screen.run_view.log_pane)
     assert screen.run_view.status_bar.objectName() == "status_bar", "the bar is not the widget the theme styles"
     assert screen.run_view.status_bar.testAttribute(Qt.WidgetAttribute.WA_StyledBackground), (
         "the bar opts into stylesheet backgrounds, so the theme's rules paint it"
@@ -195,6 +195,7 @@ def test_counters_move_through_the_run_without_clobbering_the_state(qapp, tmp_pa
     _add_schedule(env, "pre_post_blocking.tslua", PRE_POST_BLOCKING)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session, clock=SteppingClock())
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
 
     snapshots: list[tuple[str, tuple[int, int], tuple[int, int], tuple[int, int]]] = []
@@ -234,6 +235,7 @@ def test_steps_counter_counts_only_started_enabled_steps(qapp, tmp_path):
     _add_schedule(env, "sub_pre_post.tslua", SUB_PRE_POST, {"inner.tslua": SUB_INNER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session, clock=SteppingClock())
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
 
     started: list[int] = []
@@ -255,6 +257,7 @@ def test_pretest_and_posttest_totals_count_every_action_of_both_instances(qapp, 
     _add_schedule(env, "sub_pre_post.tslua", SUB_PRE_POST, {"inner.tslua": SUB_INNER})
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session, clock=SteppingClock())
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
 
     actions: list[tuple[str, int, int]] = []
@@ -342,6 +345,7 @@ def test_total_time_advances(qapp, tmp_path):
     clock = SteppingClock()
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session, clock=clock)
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
 
     _start(qapp, screen, "Pre post blocking")
@@ -377,6 +381,7 @@ def test_live_qtimer_advances_the_run_label_without_any_manual_emit(qapp, qtbot,
     _add_schedule(env, "pre_post_blocking.tslua", PRE_POST_BLOCKING)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)  # the real wall clock, not an injected one
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
 
     _start(qapp, screen, "Pre post blocking")
@@ -398,6 +403,7 @@ def test_current_item_timer_resets_on_each_action_and_step(qapp, tmp_path):
     _add_schedule(env, "pre_post_blocking.tslua", PRE_POST_BLOCKING)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session, clock=SteppingClock())
+    fill_operator_fields(screen)
     screen._refresh_schedule_list()
     snapshots: list[tuple[int, int]] = []
     session.action_started.connect(

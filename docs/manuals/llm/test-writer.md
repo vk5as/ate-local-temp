@@ -1299,6 +1299,8 @@ def main() -> int:
     parser.add_argument("--project", default="Manual example")
     parser.add_argument("--uut-type", default="Example board")
     parser.add_argument("--uut-serial", default="RUN-0001")
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="give up on a run that never finishes after this many seconds (default 60)")
     args = parser.parse_args()
 
     release = Path(args.release).resolve()
@@ -1350,6 +1352,7 @@ def main() -> int:
                     project=args.project,
                     uut_type=args.uut_type,
                     uut_serial=args.uut_serial,
+                    timeout=args.timeout,
                 )
         except TimeoutError as exc:
             print(f"FAILED: {exc}", file=sys.stderr)

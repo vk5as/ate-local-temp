@@ -724,11 +724,21 @@ def test_a_write_the_peer_never_reads_times_out_on_time() -> None:
     assert elapsed < 1.0, f"a 0.5 s write took {elapsed:.2f} s"
 
 
-def _closed_port() -> int:
-    """A loopback port nothing listens on: bound once to pick it, then released."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+@contextlib.contextmanager
+def _closed_port():
+    """A loopback port nothing listens on: bound, never listened on, and held for the connect.
+
+    A connect to a bound port with no listener is refused - Linux with an immediate RST, Windows
+    only after its SYN retries, roughly 2 s, well inside the 5 s connect timeout this file's opens
+    use. Picking a port and closing the socket immediately leaves a window in which another
+    pytest-xdist worker can bind it and answer the connect, so the port stays bound for the whole
+    attempt (packet 44 review)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    try:
+        yield sock.getsockname()[1]
+    finally:
+        sock.close()
 
 
 @pytest.mark.parametrize("resource, expected", [
@@ -743,8 +753,9 @@ def test_a_resource_pyvisa_cannot_open_fails_through_onerror(app: QCoreApplicati
     step decides, with no traceback and no "opened" device.
 
     The timeout outlasts the 2 s Windows spends retrying a closed port before it says refused."""
-    resource = resource.replace("__CLOSED__", str(_closed_port()))
-    store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
+    with _closed_port() as closed:
+        resource = resource.replace("__CLOSED__", str(closed))
+        store, ru = _run_with_peer(app, f"""return ScheduleParams("x") :setSchedule({{
     StepParams("io"):setStepNo("1.")
       :setAction(function()
         local calls = 0
@@ -754,11 +765,11 @@ def test_a_resource_pyvisa_cannot_open_fails_through_onerror(app: QCoreApplicati
       end),
   }})""", 0)
 
-    message = _step_message(store, ru)
-    assert message.startswith("1 false "), message
-    assert expected in message, message
-    errors_logged = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR"]
-    assert not errors_logged, f"an open failure is not an isolated error: {errors_logged!r}"
+        message = _step_message(store, ru)
+        assert message.startswith("1 false "), message
+        assert expected in message, message
+        errors_logged = [ln for ln in store.log_lines(ru) if ln["level"] == "ERROR"]
+        assert not errors_logged, f"an open failure is not an isolated error: {errors_logged!r}"
 
 
 def _fails_like_pyvisa_py_on_windows(status=constants.StatusCode.error_timeout):
@@ -772,11 +783,12 @@ def _fails_like_pyvisa_py_on_windows(status=constants.StatusCode.error_timeout):
 
 def test_a_refused_connect_pyvisa_py_reports_as_a_timeout_is_named_a_refusal() -> None:
     """On Windows pyvisa-py never sees the refusal; the Operator must not read -1073807339."""
-    driver = VisaDriver(manager_factory=_fails_like_pyvisa_py_on_windows())
-    with pytest.raises(OSError) as refused:
-        driver.open({"resource": f"TCPIP0::127.0.0.1::{_closed_port()}::SOCKET", "timeout": 5,
-                     "readTerm": "", "writeTerm": ""})
-    assert str(refused.value).endswith("could not connect: connection refused"), refused.value
+    with _closed_port() as closed:
+        driver = VisaDriver(manager_factory=_fails_like_pyvisa_py_on_windows())
+        with pytest.raises(OSError) as refused:
+            driver.open({"resource": f"TCPIP0::127.0.0.1::{closed}::SOCKET", "timeout": 5,
+                         "readTerm": "", "writeTerm": ""})
+        assert str(refused.value).endswith("could not connect: connection refused"), refused.value
 
 
 def test_a_connect_that_really_times_out_still_says_so(monkeypatch) -> None:

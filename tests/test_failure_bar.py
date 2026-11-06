@@ -21,7 +21,7 @@ from ate.ui.run_widgets import STEP_EMPHASIS_ROLE
 from ate.ui.theme import TOKENS
 from ate.ui.staged_run_screen import FailurePromptBar, StagedRunScreen
 
-from ._fixtures import WRITES_PDF, fake_pdf_helper, write_ate_env
+from ._fixtures import WRITES_PDF, fake_pdf_helper, fill_operator_fields, write_ate_env
 
 SCHEDULE = "Fail then pass schedule"
 RETRY_SCHEDULE = "Passes on retry schedule"
@@ -148,6 +148,7 @@ def test_continue_button_keeps_the_run_going(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, SCHEDULE)
     _pump_prompts(qapp, prompts, 1)
@@ -189,6 +190,7 @@ def test_retry_button_reruns_the_failed_step_as_attempt_two(qapp, tmp_path, monk
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, SCHEDULE)
     _pump_prompts(qapp, prompts, 1)
@@ -237,6 +239,7 @@ def test_retry_button_passes_the_step_on_second_attempt(qapp, tmp_path, monkeypa
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, RETRY_SCHEDULE)
     _pump_prompts(qapp, prompts, 1)
@@ -274,6 +277,7 @@ def test_abort_button_ends_the_run_stopped_on_fail(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, SCHEDULE)
     _pump_prompts(qapp, prompts, 1)
@@ -316,6 +320,7 @@ def test_header_abort_while_prompt_pending_ends_the_run_stopped_on_fail(qapp, tm
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, SCHEDULE)
     _pump_prompts(qapp, prompts, 1)
@@ -355,6 +360,7 @@ def test_second_click_on_a_hidden_bar_does_not_answer_again(qapp, tmp_path, monk
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts = _latch_prompts(session)
     _select_and_start(qapp, screen, SCHEDULE)
     _pump_prompts(qapp, prompts, 1)

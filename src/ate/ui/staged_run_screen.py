@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QStackedWidget,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +43,7 @@ from ..run_session.headless import HeadlessRunSession, SessionState
 from .theme import TOKENS
 from .run_widgets import (
     DebugWindow,
+    draw_log_panes,
     FailurePromptBar,
     LogPane,
     MismatchConfirmation,
@@ -58,10 +58,9 @@ from .run_widgets import (
     STEP_DETAIL_ROLE,
     STEP_EMPHASIS_ROLE,
     STEP_RESULT_ROLE,
-    TextPane,
-    BROKEN_MARKER,
     _no_auto_default,
-    build_summary,
+    _RefitStepRows,
+    _step_row_height,
     load_schedule_steps,
     _BROKEN_BG,
     _BROKEN_ERR,
@@ -118,7 +117,15 @@ class UutOperatorStage(RunFieldsForm):
     def __init__(self) -> None:
         super().__init__()
         self.next_button = QPushButton("Next")
-        self.layout().addWidget(self.next_button, 4, 1)
+        # Packet 41 review: a greyed Next on this stage says nothing about why — the line that names
+        # the field still missing is on the Steps stage, which the Operator cannot reach until every
+        # field is filled. The stage's own error line (`#run_error`, the theme's error style) sits
+        # beside the button and says it.
+        self.next_hint_label = QLabel("")
+        self.next_hint_label.setObjectName("run_error")
+        self.next_hint_label.setWordWrap(True)
+        self.layout().addWidget(self.next_hint_label, 4, 0, 1, 2)
+        self.layout().addWidget(self.next_button, 5, 1)
         self.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
 
 
@@ -134,6 +141,13 @@ class TestScheduleStage(SchedulePicker):
         # Ticket 39 review: the theme's `#primary` and `#danger` rules need buttons that
         # actually carry those object names — this is the stage's primary action.
         self.run_button.setObjectName("primary")
+        # Packet 41 fix2 review: when this button greys out, the reason is written on stage 3's
+        # error line, which is not on screen while stage 2 is showing. Say it here too, in the same
+        # `#run_error` style as the fields stage's Next hint.
+        self.run_hint_label = QLabel("")
+        self.run_hint_label.setObjectName("run_error")
+        self.run_hint_label.setWordWrap(True)
+        self.layout().addWidget(self.run_hint_label)
         self.layout().addWidget(self.run_button)
 
 
@@ -156,6 +170,7 @@ class StepsOptionsStage(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.step_list = QListWidget()
+        self.step_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         # Checkboxes are per step (packet 11b): each row is checkable and a toggle is one call
         # into session.toggle_node — the widget holds no logic of its own. Packet 15d: a header row
         # has no toggle of its own; clicking it sets every step beneath it, one call per step.
@@ -326,15 +341,16 @@ class StepsOptionsStage(QWidget):
 
 
 class RunView(QWidget):
-    """The view shown while and after a run: shared run header, live steps, Log/Summary band, status bar.
+    """The view shown while and after a run: shared run header, live steps, Log band, status bar.
 
     ``header`` is the shared :class:`~ate.ui.run_widgets.RunHeader` (ticket 39, R2): the state chip
     carries the Operator-facing words — RUNNING, INPUT NEEDED, STEP FAILED, POST-TEST, then PASS or
     FAIL with the End Reason — and the header names the Test Schedule, its Media Release, the UUT,
     the Operator and the run timer. ``step_list`` lists each step with a painted result badge, the
     Actual/Expected detail line, and the current or failed step emphasised with a left bar (R4);
-    ``failure_bar`` is a full-width bar that surfaces any failing or errored step; ``tabs`` is the
-    bottom band holding the live Log and the run Summary (R3); ``debug_window`` is the Debug log as
+    ``failure_bar`` is a full-width bar that surfaces any failing or errored step; ``log_pane`` is
+    the bottom band holding the live Log (R3; packet 42 removed the Summary tab the band used to
+    share with the Log, and a band with one pane has no tab bar); ``debug_window`` is the Debug log as
     its own window, opened by the header's Debug button or ``Ctrl+D`` (D2); and ``status_bar``
     (packet 14d) is the last widget. All content is refreshed from the store, never computed here.
     """
@@ -372,8 +388,14 @@ class RunView(QWidget):
         self.abort_button.setObjectName("danger")
         self.new_run_button.setObjectName("primary")
         self.step_list = QListWidget()
+        self.step_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         # R4: step rows are painted by the delegate — badge, detail line, emphasis bar.
         self.step_list.setItemDelegate(StepRowDelegate())
+        # Packet 40b: a wrapped Actual/Expected detail needs more rows on a narrower list, so
+        # the rows are re-measured when the list is resized. The filter is on the viewport:
+        # the list widget's own Resize lands before Qt has worked out the viewport's new
+        # width, and measuring the rows against the old one clips the last line (40b review).
+        self._row_fit = _RefitStepRows(self)
         # Ticket 10a: each step's Step Input widgets, keyed by the runner seq of the step they
         # belong to, in declaration order. They are built once per run and re-attached whenever the
         # step list is rebuilt, so the answers the Operator gave survive every refresh.
@@ -394,19 +416,16 @@ class RunView(QWidget):
         # The Stop-on-Fail prompt bar (packet 12d): hidden until the session pauses on a failure.
         self.failure_prompt_bar = FailurePromptBar()
 
-        self.tabs = QTabWidget()
-        # R3: one bottom band, Log and Summary. The Log tab is live during the run — every recorded
-        # INFO-and-above line in the mono font, with a time column — instead of the empty tab that
-        # only filled with Attempt lines after FINISHED. The panes scroll, so a long run does not
-        # grow the view's minimum (packet 30b review).
-        self.log_pane = LogPane("")
-        self.summary_tab = TextPane()
-        self.tabs.addTab(self.log_pane, "Log")
-        self.tabs.addTab(self.summary_tab, "Summary")
-        #: The two panes of the Log/Summary band: read-only, and emptied when a run starts, so the
-        # text on screen is always the run the Operator is looking at (packets 30b, 30b review).
+        # R3: one bottom band. The Log is live during the run — every recorded INFO-and-above line
+        # in the mono font, with a time column — instead of the empty tab that only filled with
+        # Attempt lines after FINISHED. The pane scrolls, so a long run does not grow the view's
+        # minimum (packet 30b review). Packet 42 (issue #3): the Summary tab repeated the step
+        # table's verdict and per-step results, so it is gone; a band with one pane has no tab bar,
+        # so the pane names itself, as the mockup's variant B right pane does.
+        self.log_pane = LogPane("Log", "INFO and above")
+        #: The band's pane: read-only, and emptied when a run starts, so the text on screen is
+        # always the run the Operator is looking at (packets 30b, 30b review).
         self.log_tab = self.log_pane
-        self.summary_pane = self.summary_tab
         # Ticket 39 (D2): the Debug log is a separate window, opened from the header (button or
         # Ctrl+D), not a permanent band stealing height from the steps. It still holds every level.
         #: Ticket 39 review: MainWindow hands in one window shared by both layouts. Each layout
@@ -414,11 +433,11 @@ class RunView(QWidget):
         #: looking at survived closing ATE as an orphan holding the application open.
         self.debug_window = debug_window if debug_window is not None else DebugWindow()
 
-        # The band's share of the view: steps dominate (R3), the Log/Summary band takes a fixed
+        # The band's share of the view: steps dominate (R3), the Log band takes a fixed
         # share with a readable floor. The step list keeps its 150 px minimum so a finished run
         # never collapses (10a/29c/29d).
         self.step_list.setMinimumHeight(150)
-        self.tabs.setMinimumHeight(140)
+        self.log_pane.setMinimumHeight(140)
         _STEPS_STRETCH, _BAND_STRETCH = 4, 2
 
         # Header row (mockup variant C): the shared header grows, the buttons sit at its right —
@@ -431,26 +450,19 @@ class RunView(QWidget):
         layout.addWidget(self.failure_bar)
         layout.addWidget(self.step_list, stretch=_STEPS_STRETCH)
         layout.addWidget(self.failure_prompt_bar)
-        layout.addWidget(self.tabs, stretch=_BAND_STRETCH)
+        layout.addWidget(self.log_pane, stretch=_BAND_STRETCH)
         # Packet 14d review: the mockup's statusBar() closes the run view, so the bar is the last
-        # widget — under the step list and the Log/Summary band — not a header.
+        # widget — under the step list and the Log band — not a header.
         layout.addWidget(self.status_bar)
 
     def clear_run_text(self) -> None:
-        """Empty the Log and Summary panes: a run's view holds only its own lines (packet 30b review).
+        """Empty the Log pane and the Debug window: a run's view holds only its own lines (packet 30b review).
 
         ``refresh`` appends every Attempt line to the Log pane, so a second run in the same window
         would otherwise read as one long log. The Debug window belongs to the run too, so it is
         emptied here as well (ticket 39 review)."""
         self.log_tab.clear()
-        self.summary_tab.clear()
         self.debug_window.clear()
-
-    def _run_row(self) -> Optional[dict]:
-        """The run row the store wrote, or None when this view has no run (a bare RunView)."""
-        if self.session is None or self.session.run_uuid is None:
-            return None
-        return self.session.store.get_test_run(self.session.run_uuid)
 
     def _run_rows(self, nodes: list[dict], attempts: list[dict], current_seq: Optional[int] = None, paused_seq: Optional[int] = None,
                   paused_result: str = "", paused_actual: str = "", paused_expected: str = "") -> tuple[list[tuple], Optional[int]]:
@@ -541,16 +553,15 @@ class RunView(QWidget):
 
     def refresh_rows(self, nodes: list[dict], attempts: list[dict], current_seq: Optional[int] = None, paused_seq: Optional[int] = None,
                      paused_result: str = "", paused_actual: str = "", paused_expected: str = "") -> None:
-        """Redraw the step rows and the Summary tab while the run is still up.
+        """Redraw the step rows while the run is still up.
 
-        Ticket 39 review: the three-pane table shows a finished step's badge, its Actual/Expected
-        line and the running Summary as soon as the store has them; the staged view drew them only
-        at a pause or at FINISHED. Step Inputs are deliberately not touched — a live redraw must
+        Ticket 39 review: the three-pane table shows a finished step's badge and its Actual/Expected
+        line as soon as the store has them; the staged view drew them only at a pause or at
+        FINISHED. Step Inputs are deliberately not touched — a live redraw must
         not close an input the run is waiting on or re-collapse one the Operator has opened."""
         rows, _ = self._run_rows(nodes, attempts, current_seq=current_seq, paused_seq=paused_seq,
                                  paused_result=paused_result, paused_actual=paused_actual, paused_expected=paused_expected)
         self._render_rows(rows)
-        self.summary_tab.setText(build_summary(nodes, attempts, run=self._run_row(), running=True))
 
     def load_run_steps(self, steps: Iterable[object]) -> None:
         """Build the run's step rows, with each step's declared Step Inputs under it.
@@ -640,7 +651,9 @@ class RunView(QWidget):
             item.setData(STEP_DETAIL_ROLE, detail)
             item.setData(STEP_EMPHASIS_ROLE, emphasis)
             if widget is None:
-                item.setSizeHint(QSize(0, 38 if detail else 30))
+                # Packet 40b: a multiline or long detail wraps into more lines, and the row
+                # grows to show all of them; a single line is still the 38 px it always was.
+                item.setSizeHint(QSize(0, _step_row_height(result, detail, self.step_list.viewport().width())))
             else:
                 # Not selectable: clicking the row itself means nothing; the controls inside it are
                 # the point. The indent is the widget's own left margin (the mockup's `.inputs`).
@@ -659,17 +672,16 @@ class RunView(QWidget):
                 return widget
         return None
 
-    def refresh(self, nodes: list[dict], attempts: list[dict], log_lines: list[dict]) -> None:
-        """Render a finished run's steps, failure bar, and Log/Summary band from the store.
+    def refresh(self, nodes: list[dict], attempts: list[dict]) -> None:
+        """Render a finished run's steps, failure bar, and Log band from the store.
 
         Reads only what the store recorded; it never decides pass/fail itself — a step is
         treated as failed purely when its stored result is ``FAIL`` or ``ERROR``, so this
         stays a view of data, not a run engine. Ticket 39 (R4): every step row carries its
         Result for the painted badge and its last Attempt's Actual/Expected for the detail
         line; the step the run ended on is enlarged, but carries no emphasis tint (only the
-        running and paused rows get those). The Summary tab
-        gets the verdict and per-step results; the Log tab holds the run's own recorded
-        lines, live from the start (R3)."""
+        running and paused rows get those). The Log band and the Debug window are drawn from the store
+        through the bounded recovery read (packet 40a fix 2, item 2): at most the newest rows per level."""
         # The run is over: nothing can be asked for any more, so every input closes and
         # expands back to its full controls (D3: finished states always show them).
         for widgets in self.input_widgets.values():
@@ -703,22 +715,22 @@ class RunView(QWidget):
             self.failure_bar.setText("")
             self.failure_bar.hide()  # R2: no blank band above the steps on a passed run
 
-        # R3: the band's Summary tab. The verdict is the run row's own result, so the tab,
-        # the header chip and the report never disagree (ticket 39 review). The Log tab is
-        # filled live from the recorded lines.
-        self.summary_tab.setText(build_summary(nodes, attempts, run=self._run_row()))
+        # The verdict is the run row's own result, so the header chip and the report never
+        # disagree (ticket 39 review); the band's Log is filled live from the recorded lines.
+        # Packet 42 (issue #3): the Summary tab that used to sit beside the Log here is gone —
+        # it repeated the step table above it.
+        # The Log pane shows INFO and above; the Debug window keeps every level. Both are drawn from
+        # the store's newest rows (draw_log_panes), grouped by the layout's step rows (packet 40a).
+        if self.session is not None and self.session.run_uuid:
+            group_rows = self.screen._log_group_rows() if self.screen is not None else nodes
+            actions = self.session.store.actions(self.session.run_uuid)
+            # The same context the layout's own recovery read passes (packet 40a fix 3, item 3): without
+            # it a finished run's steps say "Not run yet." where the three-pane layout says "Not run.".
+            context = self.screen._log_panes_context(group_rows, actions) if self.screen is not None else {}
+            draw_log_panes(self.log_pane, self.debug_window, self.session.store, self.session.run_uuid, group_rows, actions,
+                           live_phase=context.get("live_phase"), run_finished=context.get("run_finished", False),
+                           started_steps=context.get("started_steps", set()))
 
-        # The Log pane shows INFO and above; the Debug window keeps every level.
-        # Ticket 39 review: neither pane is cleared here. Both append only the rows after the
-        # highest log seq they have already drawn (`LogPane.add_lines`), so the finished run's
-        # refresh adds the lines the live refresh had not reached yet. Clearing them threw the
-        # Operator back to the top of a log they were reading, and the Debug window is shared by
-        # both layouts, so clearing it here also reset the three-pane view's reading position.
-        # A run's panes are emptied when that run starts (`clear_run_text`, and the three-pane
-        # layout's own start), and nowhere else.
-        info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
-        self.log_pane.add_lines(info_and_above)
-        self.debug_window.add_lines(log_lines)
 
     def _apply_failure_style(self) -> None:
         """Give the failure bar its red look via a stylesheet."""
@@ -836,7 +848,16 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         if self.session.config is not None:
             self.uut_operator_stage.project_edit.setText(self.session.config.default_project or "")
         # A Test Run cannot start with an empty Project, so the field gates Start (packet 30a r3).
-        self.uut_operator_stage.project_edit.textChanged.connect(self._update_run_button)
+        # Packet 41: so do the other three required fields — every one of them re-checks Start.
+        # Packet 41 fix2: a keystroke here is also the input change that drops a refusal the Start
+        # path wrote (packet 05b), so the line stops blaming a schedule the Operator moved on from.
+        for edit in (
+            self.uut_operator_stage.project_edit,
+            self.uut_operator_stage.operator_edit,
+            self.uut_operator_stage.uut_type_edit,
+            self.uut_operator_stage.serial_edit,
+        ):
+            edit.textChanged.connect(self._start_inputs_changed)
 
         # Bind to the session's observable state — the single source of run truth.
         self.session.state_changed.connect(self._on_state_changed)
@@ -860,10 +881,13 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         self.session.input_answered.connect(self._on_input_answered)
         # A step's Attempt loop ending closes its POLL widgets: they are live only while it runs.
         self.session.step_finished.connect(self._on_step_finished)
+        # Packet 40a: every recorded log line is announced here, so the Log tab and the Debug window
+        # show it while the step that emitted it is still running.
+        self.session.log_appended.connect(self._on_log_appended)
 
         # The picker records the selection on the session itself (packets 05b, 06c); this screen
         # only follows it to decide whether Start is available.
-        self.test_schedule_stage.selection_changed.connect(lambda *_seen: self._update_run_button())
+        self.test_schedule_stage.selection_changed.connect(lambda *_seen: self._start_inputs_changed())
 
         # Wire navigation and start; each button only advances or begins a run, never decides results.
         self.uut_operator_stage.next_button.clicked.connect(lambda: self._advance(1))
@@ -877,6 +901,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
 
         # Populate the schedule list once at construction; rescan reloads it.
         self._refresh_schedule_list()
+        # Stage 1 starts with three fields blank, so Next and both Run buttons start disabled.
+        self._update_run_button()
 
         # A one-second timer keeps the header's elapsed time live without polling the worker.
         self._timer = QTimer(self)
@@ -891,7 +917,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         """Draw what this layout skipped while it was hidden (packet 25b).
 
         A finished run whose read was deferred is drawn here from the store, rows and log together.
-        A run still in progress redraws its step rows and its Summary from the store (ticket 39
+        A run still in progress redraws its step rows from the store (ticket 39
         review) before reading the log: a step's badge and its Actual/Expected line appear as soon
         as the engine records them, the way the three-pane table has always done, and the Step
         Inputs the run is waiting on are left exactly as they are."""
@@ -900,11 +926,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         if not self._store_open():
             return  # ticket 39 review: the window released the session; nothing left to draw
         if run_uuid:
-            self.run_view.refresh(
-                self.session.store.nodes(run_uuid),
-                self.session.store.attempts(run_uuid),
-                self.session.store.log_lines(run_uuid),
-            )
+            self.run_view.refresh(self.session.store.nodes(run_uuid), self.session.store.attempts(run_uuid))
             return
         live_uuid = self.session.run_uuid
         if live_uuid and self.state == SessionState.STARTED:
@@ -922,7 +944,13 @@ class StagedRunScreen(RunScreenMixin, QWidget):
     # -- navigation ---------------------------------------------------------
 
     def _advance(self, index: int) -> None:
-        """Move to another setup stage without starting a run."""
+        """Move to another setup stage without starting a run.
+
+        Packet 41: nothing forward leaves the fields stage until Project, Operator, UUT Type and
+        Serial are all filled — the Next button, Enter in a field and a direct call all come
+        through here. Back is always allowed: an Operator on a later stage can always return."""
+        if index > self.steps_stack.currentIndex() and not self.fields.fields_filled():
+            return
         self.steps_stack.setCurrentIndex(index)
 
     def _begin_run_from_selection(self) -> None:
@@ -939,7 +967,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             return
         steps = self._load_schedule_steps(name)
         self.steps_options_stage.load_steps(steps)
-        self.steps_stack.setCurrentIndex(2)
+        self._advance(2)
 
     def _load_schedule_steps(self, schedule_name: str) -> list[object]:
         """Load the expanded steps of ``schedule_name`` for preview (no execution)."""
@@ -966,8 +994,12 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         the selected schedule; Start then captures them again (``begin_run`` never clears fields).
         The session is put back to SELECTING first (packet 30b review): a finished session leaves the
         step boxes locked and the options shut, and re-selecting the same schedule is the Operator
-        action that unlocks them for the next run."""
-        self.new_run()
+        action that unlocks them for the next run.
+
+        Only a run in progress blocks returning to setup; the Operator can repair missing fields
+        there before starting another run."""
+        if not self.new_run():
+            return
         self.steps_stack.setCurrentIndex(0)
         self.steps_stack.show()
         self.run_view.hide()
@@ -1012,7 +1044,10 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             steps = self._load_schedule_steps(self.session.selected_schedule or "")
             self.run_view.load_run_steps(steps)
             # Packet 30b review: the Log tab appends, so it must be emptied when a run starts or the
-            # second run's log reads as the first run's lines plus its own.
+            # second run's log reads as the first run's lines plus its own. A coalesced read still
+            # waiting (packet 40a review, item 3) belongs to the run just finished, so it is
+            # cancelled first: fired later, it would paint those lines back onto the empty tab.
+            self._stop_log_timer()
             self.run_view.clear_run_text()
             # Ticket 39 review: this run's header reads its own run row, so any cached row from the
             # previous run is dropped before the timer starts ticking. A deferred read of the
@@ -1029,6 +1064,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
             self._pre_counts = (0, 0)
             self._post_counts = (0, 0)
             self._started_steps = set()
+            self._reset_live_log_state()  # the Action the last run ended in is not this run's (packet 40a fix 2)
             self._step_total = self._enabled_step_count(steps)
             # Ticket 39 (D4): a fresh run starts with nothing waiting and no Post-test yet.
             self._waiting_inputs = set()
@@ -1057,8 +1093,8 @@ class StagedRunScreen(RunScreenMixin, QWidget):
                 # Read results from the store (never compute them here) and refresh the view.
                 nodes = self.session.store.nodes(run_uuid) if run_uuid else []
                 attempts = self.session.store.attempts(run_uuid) if run_uuid else []
-                log_lines = self.session.store.log_lines(run_uuid) if run_uuid else []
-                self.run_view.refresh(nodes, attempts, log_lines)
+                self._reset_live_log_state()  # the run is over: no Action is running any more (packet 40a fix 2)
+                self.run_view.refresh(nodes, attempts)
             else:
                 # The layout that is not showing defers the read and draws it when it comes back
                 # (packet 25b review); meanwhile every input it holds is closed, since nothing can
@@ -1085,9 +1121,15 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         # locked until it ends; checkable again only for the next run's setup.
         self.steps_options_stage.set_checkable(state in (SessionState.IDLE, SessionState.SELECTING))
 
+        # Packet 41: a run in progress takes Start away, and it comes back when the run is over.
+        # Packet 41 fix2: the session moving state is an input change, so a refusal written against
+        # the state that just ended is dropped before Start is re-checked.
+        self._start_inputs_changed()
         # The Abort button is only meaningful while a run is in progress.
         self.run_view.abort_button.setEnabled(state == SessionState.STARTED)
-        # Packet 30b: the New run button offers the next run once this one is over.
+        # Packet 30b: the New run button offers the next run once this one is over. Packet 41: the
+        # only thing that holds it back is a run still in progress — a blank field or a broken
+        # schedule is a message on the error line, not a lock, and Start says so when it is tried.
         self.run_view.new_run_button.setEnabled(state == SessionState.FINISHED)
 
         self._update_header(state)
@@ -1306,6 +1348,10 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         if widget.input_item is not None:
             self.run_view.step_list.scrollToItem(widget.input_item)
 
+    def _loaded_schedule_steps(self) -> list[object]:
+        """The steps the Run view painted: every scheduled row, run or not (packet 40a)."""
+        return list(self.run_view._loaded_steps)
+
     def _mark_current_step(self, node_seq: int) -> None:
         """Ticket 39 (R4): the step whose Attempt just started gets the primary emphasis bar
         and its row scrolls into view; the previous current step's emphasis is dropped."""
@@ -1327,7 +1373,7 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         widgets — and any blocking input that ended unanswered stops counting as INPUT NEEDED.
 
         Ticket 39 review: the store's new rows are drawn straight away, so the finished step gets
-        its badge, its Actual/Expected line and its place in the Summary as it is recorded. The
+        its badge and its Actual/Expected line as it is recorded. The
         three-pane table has always refreshed on step_finished; the staged view waited for a pause
         or for FINISHED, which left a passed step sitting in the list with no badge while the run
         carried on."""
@@ -1356,17 +1402,28 @@ class StagedRunScreen(RunScreenMixin, QWidget):
         return self.test_schedule_stage.selected_name()
 
     def _update_run_button(self) -> None:
-        """Start is enabled only while a runnable schedule is the current selection.
+        """Start and the fields stage's Next follow :meth:`can_start`.
 
-        The Steps stage's Start button follows the same rule (packet 05b review): the picked
-        schedule can break between stages — a Rescan finds a bad file — and `begin_run` would then
-        raise out of the button's handler. A blank Project keeps Start away too (spec 08: a Test
-        Run cannot start with an empty Project), with the reason on the stage's error line."""
-        runnable = self._selected_schedule_name() is not None
-        project = self.uut_operator_stage.project_edit.text().strip()
-        self.test_schedule_stage.run_button.setEnabled(runnable and bool(project))
-        self.steps_options_stage.run_button.setEnabled(runnable and bool(project))
-        if runnable:
-            self.steps_options_stage.error_label.setText(
-                "" if project else f"{BROKEN_MARKER} Project is required before a Test Run can start"
-            )
+        The picked schedule can break between stages — a Rescan finds a bad file — and `begin_run`
+        would then raise out of the button's handler (packet 05b review). Packet 41 adds the other
+        two conditions: every required field must be filled, and no run may already be going. The
+        fields stage's Next is disabled while any field is blank, so the Operator cannot even reach
+        a Start that would be refused; the stage's own error line names the field still missing.
+        Packet 41 fix2: the schedule stage carries the reason as well, because its "Run this
+        schedule" greys out while the line that explains it sits on the stage behind it.
+        """
+        can_start = self.can_start()
+        filled = self.fields.fields_filled()
+        self.uut_operator_stage.next_button.setEnabled(filled)
+        self.uut_operator_stage.next_hint_label.setText("" if filled else self._fields_problem())
+        self.test_schedule_stage.run_button.setEnabled(can_start)
+        self.test_schedule_stage.run_hint_label.setText("" if can_start else self._start_problem())
+        self.steps_options_stage.run_button.setEnabled(can_start)
+        # New run returns to setup so missing fields can be repaired.
+        self.run_view.new_run_button.setEnabled(self.state == SessionState.FINISHED)
+        # Only the refresh's own message: a refusal the Start path wrote stays where it is.
+        self._show_error(self._start_problem(), "start")
+
+    def _refresh_start_state(self) -> None:
+        """This layout's Start refresh, under the mixin's one name (packet 41 fix2)."""
+        self._update_run_button()

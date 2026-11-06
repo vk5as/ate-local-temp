@@ -226,14 +226,14 @@ def _run_every_signal(qapp, tmp_path, monkeypatch, before_start=lambda engine: N
 
 
 def test_every_worker_signal_is_emitted_on_the_worker_and_lands_on_the_main_thread(qapp, tmp_path, monkeypatch) -> None:
-    """All eight signals, every slot shape, and the session's and the engine's own slots."""
+    """All nine signals, every slot shape, and the session's and the engine's own slots."""
     main = threading.get_ident()
     result = _run_every_signal(qapp, tmp_path, monkeypatch)
 
     assert result["worker"] and main not in result["worker"], "the schedule did not run on a worker thread"
     worker = result["worker"][0]
 
-    assert len(ENGINE_SIGNALS) == 8, ENGINE_SIGNALS
+    assert len(ENGINE_SIGNALS) == 9, ENGINE_SIGNALS
     emitted_on_worker = {name for name, thread, _args in result["sent"] if thread == worker}
     assert emitted_on_worker == set(ENGINE_SIGNALS), (
         f"not emitted on the worker: {sorted(set(ENGINE_SIGNALS) - emitted_on_worker)}; the delivery check proves nothing for those"
@@ -296,6 +296,7 @@ def test_the_values_every_signal_really_sends(qapp, tmp_path, monkeypatch) -> No
         "prompt_answered": (int, int, str),
         "action_started": (str, int, int),
         "step_started": (int,),
+        "log_lines_recorded": (str,),
     }
     session_declared = {
         "state_changed": (SessionState,),
@@ -307,6 +308,7 @@ def test_the_values_every_signal_really_sends(qapp, tmp_path, monkeypatch) -> No
         "action_started": (str, int, int),
         "step_started": (int,),
         "report_written": (str, str),
+        "log_appended": (str,),
     }
     for sent, table in ((result["sent"], declared), (result["session_sent"], session_declared)):
         for name, _thread, args in sent:

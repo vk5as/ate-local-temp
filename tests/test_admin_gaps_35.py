@@ -1632,7 +1632,7 @@ def test_a_run_that_times_out_still_closes_its_session(tmp_path: Path) -> None:
                 newline="\n",
             )
             with pytest.raises(TimeoutError):
-                run_examples.run_schedule(config, "Scratch: hang", release_dir=Path(tmp))
+                run_examples.run_schedule(config, "Scratch: hang", release_dir=Path(tmp), timeout=2.0)
             _logs_are_closed(Path(tmp), opened)
     finally:
         run_examples.HeadlessRunSession = real

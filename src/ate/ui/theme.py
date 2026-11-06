@@ -325,7 +325,14 @@ QPushButton#primary, QPushButton#danger {{
   padding: 6px 14px;
 }}
 QPushButton#primary {{ background: {TOKENS['primary']}; color: {TOKENS['white']}; border-color: {TOKENS['primary']}; font-weight: 600; }}
+/* Packet 41: a Start button that cannot be clicked reads as faded, not broken: the primary's own
+   tint at the disabled ink, so it still looks like the run control, just not live. */
+QPushButton#primary:disabled {{ background: {TOKENS['primary_tint']}; color: {TOKENS['ink_disabled']}; border-color: {TOKENS['line_strong']}; }}
 QPushButton#danger {{ border: 2px solid {TOKENS['danger_ink']}; color: {TOKENS['danger_ink']}; background: {TOKENS['surface']}; }}
+/* Packet 41 fix2 review: the object-name rule outranks the plain `QPushButton:disabled` one below,
+   so a disabled Abort kept its red outline and looked clickable. It fades like every other button
+   that cannot be pressed. */
+QPushButton#danger:disabled {{ background: {TOKENS['subtle']}; color: {TOKENS['ink_disabled']}; border-color: {TOKENS['line_strong']}; }}
 QPushButton:disabled {{ background: {TOKENS['subtle']}; color: {TOKENS['ink_disabled']}; border-color: {TOKENS['line_strong']}; }}
 QListWidget, QTableWidget {{ background: {TOKENS['surface']}; border: 1px solid {TOKENS['line_strong']}; }}
 QTableWidget {{ gridline-color: {TOKENS['line']}; }}
@@ -338,8 +345,6 @@ QHeaderView::section {{
   border: none;
   border-bottom: 1px solid {TOKENS['line']};
 }}
-QTabWidget::pane {{ border: 1px solid {TOKENS['line_strong']}; }}
-QTabBar::tab {{ padding: 6px 12px; font-size: 12px; }}
 #run_header {{ background: {TOKENS['head']}; padding: 8px 16px; }}
 #run_header QLabel {{ color: {TOKENS['head_ink']}; font-size: 12px; background: transparent; border: none; }}
 #run_title {{ color: {TOKENS['white']}; font-size: 15px; font-weight: 600; }}
@@ -348,6 +353,8 @@ QTabBar::tab {{ padding: 6px 12px; font-size: 12px; }}
 #status_bar {{ background: {TOKENS['subtle']}; border-top: 1px solid {TOKENS['line_strong']}; padding: 3px 10px; }}
 #status_bar QLabel {{ background: transparent; border: none; padding: 0; color: {TOKENS['ink']}; font-size: 12px; }}
 #log_text, #debug_text {{ font-size: 12px; }}
+#log_title {{ color: {TOKENS['ink']}; font-size: 12px; font-weight: 600; }}
+#log_note {{ color: {TOKENS['ink_2']}; font-size: 11px; }}
 #run_error, #schedule_error, #input_error {{ color: {TOKENS['broken_err']}; font-size: 12px; }}
 #schedule_mismatch {{ color: {TOKENS['amber_ink']}; font-size: 12px; }}
 #input_value, #muted {{ color: {TOKENS['ink_2']}; font-size: 12px; }}

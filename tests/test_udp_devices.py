@@ -576,7 +576,8 @@ def test_seam_a_peer_that_is_not_listening_never_fails_the_device(app: QCoreAppl
         ATE.report(Result.PASS, ok .. " " .. refused .. " " .. tostring(r) .. " " .. tostring(c.ok))
       end),
   })"""
-    store, ru = _run_with_peer_limited(app, source, _dead_port())
+    with _dead_port() as port:
+        store, ru = _run_with_peer_limited(app, source, port)
 
     _ok, _refused, read, closed = _step_message(store, ru).split(" ")
     assert read == "timeout", f"the device is not failed, so the read just times out: {read!r}"

@@ -22,6 +22,7 @@ from ate.engine.lua_host import HostError, LuaHost
 from ate.run_session.headless import HeadlessRunSession, SessionState
 from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE
 from ate.ui.staged_run_screen import StagedRunScreen
+from ._fixtures import fill_operator_fields
 
 WRONG_SHA = "0" * 64
 
@@ -885,6 +886,7 @@ def test_run_screen_lists_children_indented_under_their_header(qapp, tmp_path) -
     root = _channel_release(tmp_path)
     session = HeadlessRunSession(_config(tmp_path, root))
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
     item = next(screen.test_schedule_stage.schedule_list.item(i)
@@ -912,6 +914,7 @@ def test_disabling_an_included_child_records_it_notrun(qapp, tmp_path) -> None:
     root = _channel_release(tmp_path)
     session = HeadlessRunSession(_config(tmp_path, root))
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.uut_operator_stage.operator_edit.setText("Ada")
     screen._advance(1)
     item = next(screen.test_schedule_stage.schedule_list.item(i)
@@ -961,6 +964,7 @@ def test_the_paused_run_list_shows_headers_and_indents_children(qapp, tmp_path) 
     _write_files(directory, files)
     session = HeadlessRunSession(_config(tmp_path, root))
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompts: list = []
     session.failure_prompt.connect(lambda node_seq, attempt_no: prompts.append((node_seq, attempt_no)))
     screen.uut_operator_stage.operator_edit.setText("Ada")

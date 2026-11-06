@@ -213,6 +213,23 @@ def _create_schema(path: str) -> None:
         engine.dispose()
 
 
+#: Log levels from the least to the most severe. ``min_level`` keeps that level and the ones after it.
+LOG_LEVEL_ORDER = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+
+def _levels_from(min_level: Optional[str]) -> Optional[list[str]]:
+    """The levels a ``min_level`` filter keeps (None keeps every level).
+
+    A level the run log never uses is a caller's mistake, not an empty filter: it raises with the name
+    given rather than the bare `'TRACE' is not in list` that ``list.index`` leaves behind."""
+    if min_level is None:
+        return None
+    level = min_level.upper()
+    if level not in LOG_LEVEL_ORDER:
+        raise ValueError(f"unknown log level: {min_level}")
+    return list(LOG_LEVEL_ORDER[LOG_LEVEL_ORDER.index(level):])
+
+
 def _now_iso() -> str:
     """UTC now as ISO-8601 text with milliseconds (e.g. ``2026-10-23T12:34:56.789+00:00``)."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -831,6 +848,63 @@ class RunStore:
         return [
             {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
         ]
+
+    def log_lines_after(self, run_uuid: str, seq: int, min_level: Optional[str] = None) -> list[dict]:
+        """Return this run's recorded log lines whose ``seq`` is greater than ``seq``.
+
+        Packet 40a review: the live Log pane only needs the rows that landed since its last read,
+        so a chatty run does not fetch (and re-render) the whole log on every notification. A pane
+        that has drawn nothing passes ``-1`` and gets every row, exactly like :meth:`log_lines`.
+        ``min_level`` filters in the store (packet 40a fix 2), so a pane that keeps INFO and above
+        never receives the DEBUG rows at all."""
+        stmt = (
+            log_line.select()
+            .where(log_line.c.run_uuid == run_uuid)
+            .where(log_line.c.seq > seq)
+        )
+        levels = _levels_from(min_level)
+        if levels is not None:
+            stmt = stmt.where(log_line.c.level.in_(levels))
+        rows = self._run(stmt.order_by(log_line.c.seq))  # recorded order
+        return [
+            {str(c.name): value for c, value in zip(log_line.columns, row)} for row in rows
+        ]
+
+    def log_lines_tail(self, run_uuid: str, limit: int, min_level: Optional[str] = None) -> list[dict]:
+        """Return the newest ``limit`` recorded log lines, oldest first (packet 40a fix 2, item 2).
+
+        The recovery read of the Run log: activation, restore and run start draw at most ``limit``
+        rows, never the whole log. ``min_level`` keeps that level and every more severe one
+        (`"INFO"` is everything but DEBUG); ``None`` keeps every level."""
+        stmt = log_line.select().where(log_line.c.run_uuid == run_uuid)
+        levels = _levels_from(min_level)
+        if levels is not None:
+            stmt = stmt.where(log_line.c.level.in_(levels))
+        rows = self._run(stmt.order_by(log_line.c.seq.desc()).limit(max(int(limit), 0)))
+        return [
+            {str(c.name): value for c, value in zip(log_line.columns, row)} for row in reversed(rows)
+        ]
+
+    def log_line_counts(self, run_uuid: str, before_seq: int, *, min_level: Optional[str] = None, action_seq: Optional[int] = None) -> list[dict]:
+        """Count the recorded log lines older than ``before_seq``, per owner (packet 40a fix 2).
+
+        Each entry is ``{"node_seq", "action_seq", "count"}`` for one owner (a step node, a Pre-/Post-test
+        instance, or the run as a whole when both are None). The live Log pane uses it to say how many
+        lines the newest-rows window left out ("… N earlier lines not shown"). ``min_level`` and
+        ``action_seq`` narrow the count the same way the tail read does."""
+        count = func.count().label("count")
+        stmt = (
+            select(log_line.c.node_seq, log_line.c.action_seq, count)
+            .where(log_line.c.run_uuid == run_uuid)
+            .where(log_line.c.seq < before_seq)
+        )
+        levels = _levels_from(min_level)
+        if levels is not None:
+            stmt = stmt.where(log_line.c.level.in_(levels))
+        if action_seq is not None:
+            stmt = stmt.where(log_line.c.action_seq == action_seq)
+        rows = self._run(stmt.group_by(log_line.c.node_seq, log_line.c.action_seq))
+        return [{"node_seq": node, "action_seq": action, "count": int(n)} for node, action, n in rows]
 
     # -- reads --------------------------------------------------------------
 

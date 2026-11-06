@@ -71,7 +71,7 @@ blocking input and records the thread each slot ran on.
 | `src/ate/engine/__init__.py` | the run engine package: flow control and the Lua host |
 | `src/ate/engine/lua_host.py` | the sandbox, the `ATE` table, the schedule builders, the Device registry |
 | `src/ate/engine/operator_input.py` | `OperatorInput`: the channel a blocking `ATE.input(n)` waits on |
-| `src/ate/engine/run_engine.py` | `RunEngine`: the QThread worker, its eight signals, the abort flag |
+| `src/ate/engine/run_engine.py` | `RunEngine`: the QThread worker, its nine signals, the abort flag |
 | `src/ate/engine/step_inputs.py` | parsing and validating Step Input declarations |
 | `src/ate/errors.py` | the exception types ATE raises |
 | `src/ate/exception_log.py` | the hook that puts an uncaught exception in the log and in front of the Operator |
@@ -132,7 +132,7 @@ run each enabled step's Action once per Attempt, one `attempt` row each; pause o
 until the Operator answers; run the Post-test Actions, which run even after an abort (spec story 84); record
 the Media Release chain and every file used, close open Devices, and write the result and End Reason.
 
-### The eight signals `RunEngine` declares
+### The nine signals `RunEngine` declares
 
 | Signal | Arguments | When it is emitted |
 |---|---|---|
@@ -144,6 +144,7 @@ the Media Release chain and every file used, close open Devices, and write the r
 | `prompt_answered` | node_seq, attempt_no, choice | the pause is over: when answered, and again when the worker moves on |
 | `action_started` | `"pre"`/`"post"`, completed, total | a Pre- or Post-test Action is about to run |
 | `step_started` | node_seq | an Attempt is about to run, again on each Retry |
+| `log_lines_recorded` | run_uuid | a batch of log rows just landed in the store, so a pane can paint them while the run is still going (packet 40a) |
 
 `prompt_answered` is emitted twice on purpose (packet 25b): the screen clears its prompt as soon as the
 answer is given, and a `failure_prompt` still queued behind it must not leave an answered prompt painted.
@@ -201,7 +202,7 @@ and forwards the engine's signals.
 `_map_run_status`; `STARTED` is announced on the calling thread before the worker starts, so a screen
 can paint the run view before the first signal arrives.
 
-### The nine signals `HeadlessRunSession` declares
+### The ten signals `HeadlessRunSession` declares
 
 | Signal | Arguments | Where it comes from |
 |---|---|---|
@@ -214,6 +215,7 @@ can paint the run view before the first signal arrives.
 | `action_started` | `"pre"`/`"post"`, completed, total | forwarded from the engine |
 | `step_started` | node_seq | forwarded from the engine |
 | `report_written` | html_path, pdf_path | once per finished run; the second path is empty when there is no PDF |
+| `log_appended` | run_uuid | forwarded from the engine's `log_lines_recorded` the moment log rows are in the store |
 
 What the session enforces, not the screen:
 

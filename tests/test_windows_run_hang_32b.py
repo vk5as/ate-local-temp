@@ -22,7 +22,7 @@ from ate.ui.staged_run_screen import StagedRunScreen
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 from tests import _fixtures as fixtures_module
 from tests.test_three_pane_run_screen_25a import _pick, _settle, _start_staged_run, _wait_finished
-from tests._fixtures import WRITES_PDF, describe_stuck_runs, fake_pdf_helper, temp_directory, write_ate_env
+from tests._fixtures import WRITES_PDF, describe_stuck_runs, fake_pdf_helper, fill_operator_fields, temp_directory, write_ate_env
 
 
 def _schedule(steps: int, *, first_action: str = 'ATE.report(Result.PASS, "ok")', stop_on_fail: bool = True) -> str:
@@ -356,6 +356,7 @@ def test_the_screen_takes_a_click_and_an_abort_in_either_order(qapp, tmp_path, m
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = screen_class(session)
+    fill_operator_fields(screen)  # packet 41: Start is disabled while a required field is blank
     prompted, answered = [], []
     session.failure_prompt.connect(lambda *pause: prompted.append(pause))
     session.prompt_answered.connect(lambda *pause: answered.append(pause))
@@ -405,6 +406,7 @@ def test_the_report_shows_no_choice_for_a_pause_an_abort_ended(qapp, tmp_path, m
     monkeypatch.setattr("ate.report.pdf_job.pdf_helper_command", fake_pdf_helper(WRITES_PDF))
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     prompted = []
     session.failure_prompt.connect(lambda *pause: prompted.append(pause))
     screen.show()

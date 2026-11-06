@@ -16,6 +16,7 @@ from ate.engine.lua_host import HostError, LuaHost
 from ate.engine.run_engine import RunEngine
 from ate.report.html import write_report
 from ate.storage.store import RunStore
+from ate.ui.run_widgets import draw_log_panes
 from ate.ui.staged_run_screen import RunView, StepsOptionsStage
 
 from ._fixtures import _drive, _sha256
@@ -46,6 +47,18 @@ return ScheduleParams("Header schedule", "a header row among two steps")
       :setInclude("sub.tslua"):setPrefix("2."),
     StepParams("last"):setStepNo("3.")
       :setAction(function() ATE.report(Result.PASS, "ok too", "1", "1") end),
+  })
+"""
+
+# An unnamed Step that logs: the Log band's heading for it is what packet 42 must not render as
+# "None", and the grouped render needs real log rows under the step to say anything at all.
+UNNAMED_STEP_LOGS = """\
+return ScheduleParams("Unnamed logging schedule", "a step with no Step Name that logs")
+  :setSchedule({
+    StepParams("first"):setStepNo("1.")
+      :setAction(function() ATE.log(Log.INFO, "the named step runs") end),
+    StepParams():setStepNo("2.")
+      :setAction(function() ATE.log(Log.INFO, "the step nobody named runs") ATE.report(Result.PASS, "ok", "1", "1") end),
   })
 """
 
@@ -385,13 +398,34 @@ def test_run_screen_step_list_shows_no_none_for_an_unnamed_step(qapp) -> None:
 
 
 def test_run_view_rows_of_an_unnamed_step_have_no_none(qapp, tmp_path) -> None:
-    """The finished-run step rows and the Summary tab leave an unnamed step blank."""
+    """The finished-run step rows leave an unnamed step blank (packet 42: the Summary tab is gone).
+
+    The Log band is not read here: a view with no session has no run to draw, so its pane holds
+    nothing and a "no None" check on it would prove nothing. The band's own heading is tested by
+    :func:`test_the_log_band_headings_of_an_unnamed_step_show_no_none`, which feeds the pane the
+    rows a real run wrote."""
     store, run_uuid = _run(NAMED_AND_UNNAMED, tmp_path, qapp)
     view = RunView()
-    view.refresh(store.nodes(run_uuid), store.attempts(run_uuid), [])
+    view.refresh(store.nodes(run_uuid), store.attempts(run_uuid))
     rows = [view.step_list.item(i).text() for i in range(view.step_list.count())]
     assert "None" not in " ".join(rows)
-    assert "None" not in view.tabs.widget(1).text()
+
+
+def test_the_log_band_headings_of_an_unnamed_step_show_no_none(qapp, tmp_path) -> None:
+    """The Log band labels a step with no Step Name by its number, never "None" (packet 42 review).
+
+    With the Summary tab gone the band's heading is the only label the pane carries, so it is drawn
+    from the rows a real run recorded, through the same grouped render the layouts use."""
+    store, run_uuid = _run(UNNAMED_STEP_LOGS, tmp_path, qapp)
+    nodes = store.nodes(run_uuid)
+    view = RunView()
+    view.refresh(nodes, store.attempts(run_uuid))
+    draw_log_panes(view.log_pane, view.debug_window, store, run_uuid, nodes, store.actions(run_uuid), run_finished=True)
+    lines = view.log_pane.rendered_lines()
+    heading = next((line for line in lines if line.startswith("── Step 2")), "")
+    assert heading == "── Step 2:  ──", f"the Log band headed the nameless step {heading!r}"
+    text = view.log_pane.text_widget().toPlainText()
+    assert "None" not in text, f"the Log band wrote a nameless step as None: {text}"
 
 
 def test_report_of_an_unnamed_step_shows_no_none(qapp, tmp_path) -> None:

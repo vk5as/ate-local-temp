@@ -30,7 +30,7 @@ from ate.storage.store import SCHEMA_VERSION, RunStore
 from ate.ui.history_screen import HistoryScreen
 from ate.ui.staged_run_screen import StagedRunScreen
 
-from ._fixtures import WRITES_PDF, assert_no_swallowed_exception, fake_pdf_helper, write_ate_env
+from ._fixtures import WRITES_PDF, assert_no_swallowed_exception, fake_pdf_helper, fill_operator_fields, fill_run_fields, write_ate_env
 
 
 @pytest.fixture
@@ -77,6 +77,7 @@ def test_bare_launch_builds_a_main_window_with_the_run_screen(qapp, tmp_path):
 
     assert outcome.code == 0, alerts
     window = outcome.window
+    fill_run_fields(window)
     assert isinstance(window, QMainWindow)
     assert __version__ in window.windowTitle(), "the title carries the version"
     assert isinstance(window.run_screen, StagedRunScreen)
@@ -114,6 +115,7 @@ def test_history_switch_shows_the_history_screen(qapp, tmp_path):
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     assert window.history_action.isEnabled()
     window.history_action.trigger()
     qapp.processEvents()
@@ -193,6 +195,7 @@ def test_history_is_disabled_during_a_run_when_the_config_forbids_it(qapp, tmp_p
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path, ui={"allowHistoryDuringRun": False})
     window = outcome.window
+    fill_run_fields(window)
     assert window.history_action.isEnabled()  # not running yet
 
     with blocking_run(qapp, window) as asked:
@@ -212,6 +215,7 @@ def test_history_stays_available_during_a_run_by_default(qapp, tmp_path, fake_pd
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     with blocking_run(qapp, window) as asked:
         assert window.history_action.isEnabled()
         window.show_history()
@@ -567,6 +571,7 @@ def test_first_stage_fields_have_visible_buddy_labels(qapp, tmp_path):
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     window.show()  # offscreen: widgets report visible only once the window is shown
     qapp.processEvents()
     stage = window.run_screen.uut_operator_stage
@@ -608,6 +613,7 @@ def test_an_empty_project_keeps_start_disabled_and_refuses_the_run(qapp, tmp_pat
     assert outcome.code == 0, alerts
     screen = outcome.window.run_screen
     stage = screen.uut_operator_stage
+    fill_operator_fields(screen)  # packet 41: the other three required fields are typed here
     assert stage.project_edit.text() == "", stage.project_edit.text()
 
     rows = screen.test_schedule_stage.schedule_list
@@ -638,6 +644,7 @@ def test_new_run_from_history_returns_to_a_prefilled_run_screen(qapp, tmp_path, 
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     with blocking_run(qapp, window) as asked:
         _finish_run(qapp, window, asked)
 
@@ -677,6 +684,7 @@ def test_history_screen_shows_in_progress_state_when_history_is_forbidden(qapp, 
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path, ui={"allowHistoryDuringRun": False})
     window = outcome.window
+    fill_run_fields(window)
     screen = window.history_screen
     assert screen.table_view.isEnabled()
 
@@ -697,6 +705,7 @@ def test_history_screen_stays_usable_during_a_run_when_allowed(qapp, tmp_path, f
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     screen = window.history_screen
     with blocking_run(qapp, window):
         qapp.processEvents()
@@ -714,6 +723,7 @@ def test_close_without_a_run_closes_store_and_app_log(qapp, tmp_path):
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     store, app_log = window.session.store, window.app_log
     window.close()
     qapp.processEvents()
@@ -743,6 +753,7 @@ def test_close_during_a_run_asks_and_aborts_when_confirmed(qapp, tmp_path, fake_
     db_path = env["db"]
     outcome, alerts = _launch(env, tmp_path=tmp_path, confirm_close=lambda message: False)
     window = outcome.window
+    fill_run_fields(window)
     _start_a_blocking_run(qapp, window)
     qapp.processEvents()
     try:
@@ -789,6 +800,7 @@ def test_a_test_that_dies_mid_run_still_aborts_its_run(qapp, tmp_path, fake_pdf)
     RunStore(env["db"])
     outcome, alerts = _launch(env, tmp_path=tmp_path)
     window = outcome.window
+    fill_run_fields(window)
     with pytest.raises(RuntimeError):
         with blocking_run(qapp, window):
             raise RuntimeError("simulated test failure")

@@ -53,7 +53,7 @@ version = {attr = "ate._version.__version__"}
 # without them. PyYAML is here because tests/test_release_ci_27c.py parses
 # .github/workflows/release.yml rather than grepping it.
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-qt", "PyYAML>=6", "setuptools>=64", "build>=1.0"]
+test = ["pytest>=7", "pytest-qt", "pytest-xdist>=3.5", "PyYAML>=6", "setuptools>=64", "build>=1.0"]
 
 [project.scripts]
 ate = "ate.cli:main"
@@ -78,6 +78,10 @@ addopts = "-ra"
 # pytest-qt picks a binding by probing. This project ships one, so pin it: a stray
 # PyQt6 in the venv cannot quietly take over.
 qt_api = "pyside6"
+# Keep /tmp from filling: passing tests leave nothing behind, only failures keep their
+# tmp_path, and only the most recent one (packet 44).
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 markers = [
     "slow: seconds of work or a network; deselect with -m 'not slow'",
     "build: builds the frozen bundle with PyInstaller; skipped unless ATE_BUILD_TESTS=1",

@@ -148,7 +148,7 @@ def test_staged_finished_run_keeps_the_window_size_and_the_status_bar(qapp, tmp_
     assert window.size() == QSize(*WINDOW_SIZE), f"the window grew to {window.size()} after the run finished"
     # The mockup's finished state (variant C) is the run view alone: no setup stage stacked above it.
     assert not staged.steps_stack.isVisible(), "the setup stages reappeared above the finished run view"
-    assert staged.run_view.isVisible() and staged.run_view.tabs.isVisible(), "the tabs went off-screen"
+    assert staged.run_view.isVisible() and staged.run_view.log_pane.isVisible(), "the log band went off-screen"
     _status_bar_inside(window, staged.run_view)
     viewport_finished = staged.run_view.step_list.viewport().height()
     # Ticket 39 (R2): the header's identity line gains the End Reason at FINISHED, which can take
@@ -426,7 +426,9 @@ def test_the_log_tab_holds_only_the_current_run(qapp, tmp_path, fake_pdf):
     _fill_and_start(qapp, window, schedule)
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the first run never finished"
     first_lines = staged.run_view.log_tab.rendered_lines()
-    assert len(first_lines) == 20, f"the Log tab did not hold the first run's 20 Attempt lines: {len(first_lines)}"
+    # Packet 40a: the pane also draws one heading per Test Step, so count the recorded lines only.
+    first_log_lines = [line for line in first_lines if not line.startswith("── ")]
+    assert len(first_log_lines) == 20, f"the Log tab did not hold the first run's 20 Attempt lines: {len(first_log_lines)}"
 
     staged.run_view.new_run_button.click()
     for _ in range(100):
@@ -436,36 +438,36 @@ def test_the_log_tab_holds_only_the_current_run(qapp, tmp_path, fake_pdf):
     assert staged.run_view.log_tab.rendered_lines() == [], "the finished run's log is still on screen while the new run is up"
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the second run never finished"
     second_lines = staged.run_view.log_tab.rendered_lines()
-    assert len(second_lines) == 20, f"the Log tab accumulated runs: {len(second_lines)} lines after the second run"
+    second_log_lines = [line for line in second_lines if not line.startswith("── ")]
+    assert len(second_log_lines) == 20, f"the Log tab accumulated runs: {len(second_log_lines)} lines after the second run"
     # R3 draws each line with the time it was recorded, so compare the level/source/text columns:
     # the two runs log the same 20 lines, at different seconds.
-    assert [line[9:] for line in second_lines] == [line[9:] for line in first_lines], (
+    assert [line[9:] for line in second_log_lines] == [line[9:] for line in first_log_lines], (
         "the Log tab is not the current run's own lines"
     )
     _finish(window)
 
 
-def test_the_log_and_summary_panes_are_read_only(qapp, tmp_path, fake_pdf):
-    """The Operator reads the Log and Summary; the run writes them."""
+def test_the_log_band_is_read_only(qapp, tmp_path, fake_pdf):
+    """The Operator reads the Log band; the run writes it (packet 42: the Summary pane is gone)."""
     window, schedule = _shown_window(qapp, tmp_path, "staged")
     staged = window.staged_screen
     _fill_and_start(qapp, window, schedule)
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the run never finished"
-    for pane in (staged.run_view.log_pane.text_widget(), staged.run_view.summary_tab):
-        assert pane.isReadOnly(), "the Log/Summary pane is editable"
+    for pane in (staged.run_view.log_pane.text_widget(),):
+        assert pane.isReadOnly(), "the Log band's pane is editable"
         pane.setPlainText("typed by the run")  # the run may still write it
         assert pane.toPlainText() == "typed by the run", "a read-only pane cannot be written by the run"
     _finish(window)
 
 
 def test_the_bottom_band_grows_with_the_window_not_against_a_ceiling(qapp, tmp_path, fake_pdf):
-    """Packet 30b review: the tabs, log and debug panes had absolute ceilings (220/150/110).
+    """Packet 30b review: the band, the log and the debug panes had absolute ceilings (220/150/110).
 
     They now have floors and stretch factors, so a taller window gives them more room while the
     step list keeps its floor and the 1280x800 window keeps its size."""
     small, schedule = _shown_window(qapp, tmp_path, "staged")
     view = small.staged_screen.run_view
-    assert view.tabs.maximumHeight() == QWIDGETSIZE_MAX, "the tabs still carry a ceiling"
     assert view.log_pane.maximumHeight() == QWIDGETSIZE_MAX, "the log pane still carries a ceiling"
     assert view.debug_window.maximumHeight() == QWIDGETSIZE_MAX, "the debug window still carries a ceiling"
     assert view.step_list.minimumHeight() == STEP_LIST_FLOOR, "the step list lost its floor"
@@ -478,8 +480,7 @@ def test_the_bottom_band_grows_with_the_window_not_against_a_ceiling(qapp, tmp_p
     running = view.step_list.viewport().height()
     finished = view.step_list.viewport().height()
     assert finished >= STEP_LIST_FLOOR, f"the step list viewport collapsed to {finished} px"
-    log_small = view.log_pane.height()
-    tabs_small = view.tabs.height()
+    band_small = view.log_pane.height()
     _finish(small)
 
     big, schedule = _shown_window(qapp, tmp_path, "staged", TALL_WINDOW)
@@ -489,17 +490,17 @@ def test_the_bottom_band_grows_with_the_window_not_against_a_ceiling(qapp, tmp_p
     for _ in range(200):
         qapp.processEvents()
     assert big.size() == QSize(*TALL_WINDOW), f"the finished run grew the tall window to {big.size()}"
-    assert big_view.log_pane.height() > log_small, (
-        f"the log pane did not grow with the window: {big_view.log_pane.height()} px at {TALL_WINDOW} vs {log_small} px at {WINDOW_SIZE}"
+    # Packet 42 (issue #3): the band is the Log pane alone now, so it is the thing that grows.
+    assert big_view.log_pane.height() > band_small, (
+        f"the Log band did not grow with the window: {big_view.log_pane.height()} px at {TALL_WINDOW} vs {band_small} px at {WINDOW_SIZE}"
     )
-    assert big_view.tabs.height() > tabs_small, "the Log/Summary tabs did not grow with the window"
     # Ticket 39 (D2): Debug is a window of its own, not a band in the view, so it has no share of
     # the window's height to grow into; it is sized by whoever opens it, and carries no ceiling.
     debug = big_view.debug_window
     assert debug.window() is debug, "Debug is still a band inside the Run view rather than a window"
     assert debug.maximumHeight() == QWIDGETSIZE_MAX, "the Debug window carries a ceiling"
     # The stretch order is what makes the step list dominate the view at both sizes.
-    assert view.step_list.viewport().height() > log_small, "the step list is not the view's largest pane"
+    assert view.step_list.viewport().height() > band_small, "the step list is not the view's largest pane"
     assert big_view.step_list.viewport().height() > big_view.log_pane.height(), "the step list is not the view's largest pane"
     _finish(big)
 
@@ -582,3 +583,67 @@ def test_30b_review_screenshots(qapp, tmp_path, fake_pdf):
     assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED), "the run never finished"
     shot(window, "staged-finished-1920x1200.png")
     _finish(window)
+
+
+@pytest.mark.parametrize("layout", ("staged", "threePane"))
+@pytest.mark.parametrize("different", (False, True))
+@pytest.mark.parametrize("blank_operator", (False, True))
+def test_history_new_run_prefills_before_returning_to_setup(qapp, tmp_path, fake_pdf, monkeypatch, layout, different, blank_operator):
+    window, schedule = _shown_window(qapp, tmp_path, layout)
+    try:
+        _fill_and_start(qapp, window, schedule)
+        assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+        screen = window.run_screen
+        if blank_operator:
+            screen.fields.operator_edit.setText("")  # setup must remain reachable to repair this
+        screen._refusal = "× old session refusal"
+        screen._show_error(screen._refusal, "refused")
+        prefill = {"project": FIELDS["project"], "uut_type": FIELDS["uut_type"],
+                   "uut_serial": FIELDS["serial"], "schedule_name": schedule}
+        if different:
+            prefill.update(project="Another project", uut_type="Another type", uut_serial="Other serial")
+        start_new_run = screen.start_new_run
+
+        def return_to_setup():
+            assert screen.fields.project_edit.text() == prefill["project"], "History must prefill before returning to setup"
+            assert screen.fields.uut_type_edit.text() == prefill["uut_type"]
+            assert screen.fields.serial_edit.text() == prefill["uut_serial"]
+            start_new_run()
+
+        monkeypatch.setattr(screen, "start_new_run", return_to_setup)
+        window.show_history()
+        window._new_run_from_history(prefill)
+        qapp.processEvents()
+        assert window.session.state == SessionState.SELECTING, "History must return to setup even with a blank Operator"
+        assert screen.fields.project_edit.text() == prefill["project"]
+        assert screen.fields.uut_type_edit.text() == prefill["uut_type"]
+        assert screen.fields.serial_edit.text() == prefill["uut_serial"]
+        assert screen.fields.operator_edit.text() == ("" if blank_operator else FIELDS["operator"])
+        assert screen._refusal == ""
+        assert window.stack.currentWidget() is screen
+        if layout == "staged":
+            assert screen.steps_stack.isVisible() and screen.steps_stack.currentIndex() == 0, "History must show stage 1"
+        else:
+            assert screen.counts.isHidden()
+            assert all(box.isEnabled() for box in screen.table.checks.values())
+    finally:
+        _finish(window)
+
+
+@pytest.mark.parametrize("layout", ("staged", "threePane"))
+def test_history_new_run_cannot_change_an_in_progress_run(qapp, tmp_path, fake_pdf, layout):
+    window, _ = _shown_window(qapp, tmp_path, layout)
+    try:
+        _fill_and_start(qapp, window, "Blocking input schedule")
+        assert window.session.state == SessionState.STARTED
+        screen = window.run_screen
+        window._new_run_from_history({"project": "Other project", "uut_serial": "Other serial"})
+        assert screen.fields.project_edit.text() == FIELDS["project"], "History must not prefill during a run"
+        assert screen.fields.serial_edit.text() == FIELDS["serial"]
+        assert window.session.state == SessionState.STARTED
+        if layout == "staged":
+            assert screen.run_view.isVisible() and not screen.steps_stack.isVisible()
+    finally:
+        window.session.request_abort()
+        assert _wait(qapp, lambda: window.session.state == SessionState.FINISHED)
+        _finish(window)

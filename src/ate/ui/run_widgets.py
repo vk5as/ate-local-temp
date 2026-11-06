@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import html
 
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, QRect, QRectF, QSize, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QRect, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
+    QBoxLayout,
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -36,6 +39,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyledItemDelegate,
     QStyle,
+    QStyleOptionViewItem,
     QGroupBox,
     QVBoxLayout,
     QWidget,
@@ -58,8 +62,7 @@ from .theme import (
 from ate.dialogs import dismiss_if_headless
 from ate.engine.step_inputs import StepInput, value_error
 
-from ..catalog import find_definitions, include_map, list_schedule_mismatches, list_schedule_rows, module_map, resolve_schedule_definition, resolve_schedule_path
-from ..engine.lua_host import LuaHost
+from ..catalog import find_definitions, schedule_mismatches, schedule_rows
 from ..run_session.headless import HeadlessRunSession, SessionError, SessionState
 
 
@@ -85,6 +88,72 @@ def _format_log_line(line: dict) -> str:
     return f"{when:<9} {level:<7} {source:<8} {line.get('text', '')}"
 
 
+#: The note a grouped step shows while it has recorded no line (packet 40a).
+NO_OUTPUT_NOTE = "No output."
+#: A Test Step the worker has not started yet (packet 40a review, item 5): "No output." would read
+#: as though the step ran and said nothing.
+NOT_YET_NOTE = "Not run yet."
+#: A Test Step this run will never execute — disabled, skipped, or left after a Stop-on-Fail end.
+NOT_RUN_NOTE = "Not run."
+#: The three run-level groups the grouping draws (packet 40a).
+PRE_GROUP_HEADING = "── Pre-test ──"
+POST_GROUP_HEADING = "── Post-test ──"
+RUN_GROUP_HEADING = "── Run ──"
+#: Every note a group can carry before it has a line of its own.
+NOTES = (NO_OUTPUT_NOTE, NOT_YET_NOTE, NOT_RUN_NOTE)
+RUN_GROUP_KEY = ("run",)
+PRE_GROUP_KEY = ("pre",)
+POST_GROUP_KEY = ("post",)
+#: The most rows a Log pane (or the Debug window) keeps, the newest ones (packet 40a fix 2, item 1).
+#: A test lowers it to exercise the window; the pane and the store read both use this value.
+LOG_PANE_LIMIT = 5000
+#: Rows removed below the cap at a batch trim, keeping appends cheap between trims.
+LOG_PANE_SLACK = LOG_PANE_LIMIT // 10
+#: Export log on the History screen provides the full persisted log.
+LOG_TRIM_NOTICE = "Earlier lines are not shown. The full log is in the run record: use Export log on the History screen."
+
+
+def _dropped_note(count: int) -> str:
+    """The line a group shows under its heading when its earlier lines were left out of the window."""
+    return f"… {count} earlier {'line' if count == 1 else 'lines'} not shown"
+
+
+def _step_note(key: tuple, node: Optional[dict], run_finished: bool, started: set) -> str:
+    """What a group with no line yet says (packet 40a review, item 5).
+
+    A Pre-/Post-test Action with no line says "No output.". A Test Step says "Not run." when its
+    own row is recorded NOTRUN (disabled, skipped, or never reached), "No output." when it ran or
+    is running and logged nothing, and "Not run yet." while the run is still up and the step has
+    not started — never a silent-looking "No output." for a step that has not been touched."""
+    if key[0] != "step":
+        return NO_OUTPUT_NOTE
+    result = (node or {}).get("result")
+    if result == "NOTRUN":
+        return NOT_RUN_NOTE
+    if result:
+        return NO_OUTPUT_NOTE  # the step ran, and said nothing
+    enabled = (node or {}).get("enabled")
+    if enabled is not None and not enabled:
+        # Disabled: the store keeps `:setEnable(false)` as 0, so `is False` never matches a stored row.
+        # A row that says nothing about enabling (None) is not taken as disabled.
+        return NOT_RUN_NOTE  # it will never run, from the start of the run (packet 40a fix 2, item 5)
+    if run_finished:
+        return NOT_RUN_NOTE  # the run ended without ever reaching this step
+    if key[1] in started:
+        return NO_OUTPUT_NOTE  # the Attempt is in flight and has not logged yet
+    return NOT_YET_NOTE
+
+
+def _step_heading(node: dict, position: int) -> str:
+    """The Log pane's label for one scheduled Test Step: `── Step 3: Measure supply ──`.
+
+    Built from the run's node rows, so it shows the Step Number the Operator sees in the step
+    list; rows without a number count in their schedule position instead."""
+    number = str(node.get("step_number") or "").strip().rstrip(".")
+    name = str(node.get("step_name") or "").strip()
+    return f"── Step {number or position + 1}: {name} ──"
+
+
 def _no_auto_default(*buttons: QPushButton) -> None:
     """Take away a button's Enter-key default (ticket 39 review, D6).
 
@@ -99,94 +168,403 @@ def _no_auto_default(*buttons: QPushButton) -> None:
         button.setDefault(False)
 
 
-class TextPane(QPlainTextEdit):
-    """A scrollable text pane with the ``text``/``setText`` shape the screens and tests use.
-
-    Plain text scrolls, so the Log and Summary tabs keep a small fixed minimum (packet 30b); the
-    QLabel they replaced grew their minimumSizeHint with every line the run wrote. The Operator reads
-    them; the run writes them, so they are read-only (packet 30b review)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setReadOnly(True)
-
-    def text(self) -> str:
-        return self.toPlainText()
-
-    def setText(self, value: str) -> None:
-        self.setPlainText(value)
-
-    def clear(self) -> None:
-        """Empty the pane, so a new run's Log and Summary hold only their own lines (packet 30b)."""
-        self.setPlainText("")
-
-
 class LogPane(QWidget):
     """A scrollable pane that renders recorded log lines under a header label.
 
-    Both the Run view's live Log tab (ticket 08, made live by 25a) and the Debug
+    Both the Run band's live Log (ticket 08, made live by 25a) and the Debug
     window are instances of this: one is fed ``INFO``-and-above lines, the other
     every level. It never decides what to show — :meth:`add_lines` only renders
     whatever store rows it is handed, in seq order. Ticket 39 (R3): the lines are
     drawn by one read-only monospace ``QPlainTextEdit``, not a ``QListWidget``
     inside a ``QScrollArea`` — the old list-in-scroll-area nested two vertical
     scrollbars and drew the padded ``LEVEL  SOURCE`` columns in a proportional
-    font that made them line up in name only. ``title`` is empty for a pane
-    whose name is on the tab it sits in.
+    font that made them line up in name only. ``title`` is the name written above the
+    lines: since packet 42 the Run band has no tab bar, so its pane says "Log" itself,
+    with ``note`` ("INFO and above") beside it as the mockup's variant B does. A pane
+    whose title is empty — the old tab-named pane — shows no heading at all.
+
+    Packet 40a fix 2, item 1 and fix 3, item 1: a pane keeps its newest rows, at most
+    :data:`LOG_PANE_LIMIT`. Overflow trims to limit minus slack in one batch. Older rows are counted, not drawn: the first line says so,
+    and a group whose earlier lines were dropped says how many under its heading.
     """
 
-    def __init__(self, title: str) -> None:
+    def __init__(self, title: str = "", note: str = "") -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        #: The heading row the band carries now that its tab bar is gone: the pane's name on
+        #: the left, the level it shows muted on the right. Both are painted by the theme
+        #: (`#log_title`, `#log_note`), not by an inline style.
+        self._header = QWidget()
+        header = QHBoxLayout(self._header)
+        header.setContentsMargins(6, 2, 6, 2)
         self._title = QLabel(title)
-        self._title.setStyleSheet("font-weight: bold;")
-        if not title:
-            self._title.hide()
+        self._title.setObjectName("log_title")
+        self._note = QLabel(note)
+        self._note.setObjectName("log_note")
+        header.addWidget(self._title)
+        header.addStretch(1)
+        header.addWidget(self._note)
+        if not title and not note:
+            self._header.hide()
         self._text = QPlainTextEdit()
         self._text.setObjectName("log_text")
         self._text.setReadOnly(True)
         self._text.setFont(mono_font(12))
-        layout.addWidget(self._title)
+        layout.addWidget(self._header)
         layout.addWidget(self._text, stretch=1)
         #: The highest log ``seq`` this pane has drawn, or -1 when it holds nothing.
-        #: A live refresh is handed the whole run log, so this is what says which of
-        #: those rows are new (ticket 39 review).
         self._last_seq = -1
+        #: The grouping the pane is drawing, in display order: [key, heading, drawn lines].
+        self._groups: list[list] = []
+        #: The rows the pane keeps (at most LOG_PANE_LIMIT, newest last) and the group each is drawn in.
+        self._rows: list[dict] = []
+        self._row_keys: list[tuple] = []
+        #: Rows left out per group: older than the kept window, so not drawn (packet 40a fix 2, item 1).
+        self._dropped: dict[tuple, int] = {}
+        #: The note each group with no line showed when it was last drawn, so a change is noticed.
+        self._notes: dict[tuple, str] = {}
+        #: What the notes are read from: steps by node_seq, whether the run is over, the started steps.
+        self._note_inputs: tuple[dict, bool, set] = ({}, False, set())
+        #: What the row keys were computed under: the live Action and the Action rows (packet 40a fix 2, item 4).
+        self._signature: Optional[tuple] = None
+        #: How many times the pane replaced its whole text rather than appending (item 3).
+        self._full_renders = 0
+        # Document block -> stable anchor key, retained until the drawing is replaced.
+        self._drawn_block_keys: dict[int, tuple] = {}
+        self._wanted_block_keys: dict[int, tuple] = {}
 
     def clear(self) -> None:
         """Remove every rendered line."""
         self._text.clear()
+        self._drawn_block_keys = {}
         self._last_seq = -1
+        self._groups = []
+        self._rows = []
+        self._row_keys = []
+        self._dropped = {}
+        self._notes = {}
+        self._signature = None
 
-    def add_lines(self, lines: Iterable[dict]) -> None:
-        """Render ``lines`` (each a log_line dict) as level/source/text rows in seq order.
+    def last_seq(self) -> int:
+        """The highest log ``seq`` this pane has drawn, or -1 when it holds nothing."""
+        return self._last_seq
 
-        Ticket 39 review: the Log tab is live, and every refresh is passed the whole
-        log the store has recorded. Only the rows after the highest seq already drawn
-        are added, and they are appended rather than the pane rewritten — rewriting
-        it reset the view to the top of the log every time a line was logged. So the
-        Operator's place in the log survives a refresh: reading the middle stays where
-        it was, and reading the end follows the end.
-        """
-        new: list[str] = []
-        highest = self._last_seq
-        for line in sorted(lines, key=lambda ln: ln.get("seq", 0)):
-            seq = int(line.get("seq") or 0)
+    def is_drawn(self) -> bool:
+        """Whether the pane has its grouping: False until the first full render, and after :meth:`clear`."""
+        return bool(self._groups)
+
+    def full_render_count(self) -> int:
+        """How many times this pane has replaced its whole text (packet 40a review, item 3)."""
+        return self._full_renders
+
+    def held_rows(self) -> int:
+        """How many log rows the pane is drawing (packet 40a fix 3, item 1).
+
+        At most :data:`LOG_PANE_LIMIT`; overflow trims to limit minus slack."""
+        return len(self._rows)
+
+    def add_lines(
+        self,
+        lines: Iterable[dict],
+        nodes: list[dict] | None = None,
+        actions: list[dict] | None = None,
+        live_phase: Optional[str] = None,
+        run_finished: bool = False,
+        started_steps: set | None = None,
+        dropped: dict | None = None,
+    ) -> None:
+        """Render ``lines`` (log_line dicts) in seq order, grouped under step headings (packet 40a).
+
+        With the run's tree rows (``nodes``, and its ``actions``) the lines are drawn under one
+        label per scheduled Test Step, in schedule order: Pre-test first, then the steps, then the
+        Post-test Actions, then the run's own lines. A step that ran and said nothing says "No
+        output.", "Not run yet." while the run is still up and has not reached it, "Not run." once the
+        run is over and it never ran. This is the full-render path: activation, restore and run start,
+        which hand over the newest rows the store holds (see :func:`draw_log_panes`). ``dropped`` counts
+        the rows older than ``lines`` per group, which the caller left out of the window. The live path
+        is :meth:`append_rows`."""
+        rows = sorted(lines, key=lambda ln: ln.get("seq", 0))
+        actions = actions or []
+        steps, step_seqs = self._steps(nodes or [])
+        self._note_inputs = ({n.get("node_seq"): n for n in steps}, run_finished, started_steps or set())
+        self._rows = rows
+        self._row_keys = [self._row_key(row, step_seqs, actions, live_phase) for row in rows]
+        self._dropped = {key: count for key, count in (dropped or {}).items() if count}
+        self._drop_oldest()
+        self._signature = self._signature_of(actions, live_phase)
+        if rows:
+            self._last_seq = max(self._last_seq, max(int(r.get("seq") or 0) for r in rows))
+        self._groups = self._group_model(self._rows, self._row_keys, steps, actions, live_phase)
+        self._redraw()
+
+    def append_rows(
+        self,
+        rows: Iterable[dict],
+        nodes: list[dict],
+        actions: list[dict] | None = None,
+        live_phase: Optional[str] = None,
+        run_finished: bool = False,
+        started_steps: set | None = None,
+    ) -> None:
+        """Fold in rows recorded since the pane last drew, without rebuilding its text (packet 40a review, item 3).
+
+        A row that only extends the group at the bottom goes in with ``appendPlainText``. Anything
+        else — a row ahead of the tail, a note that changed (a step started, the run ended), an Action
+        that began or ended, rows that pushed older ones out of the window — rebuilds the grouping from
+        the rows the pane holds, which is bounded by :data:`LOG_PANE_LIMIT`. Nothing is read from the store here."""
+        rows = sorted(rows, key=lambda ln: ln.get("seq", 0))
+        actions = actions or []
+        if not self._groups:
+            return self.add_lines(rows, nodes, actions, live_phase, run_finished, started_steps)
+        steps, step_seqs = self._steps(nodes)
+        self._note_inputs = ({n.get("node_seq"): n for n in steps}, run_finished, started_steps or set())
+        rebuild = False
+        signature = self._signature_of(actions, live_phase)
+        if signature != self._signature:
+            # The Action rows or the live phase moved: every key may have changed, and so may the groups.
+            self._signature = signature
+            self._row_keys = [self._row_key(row, step_seqs, actions, live_phase) for row in self._rows]
+            rebuild = True
+        index = {group[0]: i for i, group in enumerate(self._groups)}
+        touched: set[int] = set()
+        tail: list[str] = []
+        tail_seqs: list[int] = []
+        repaint = False
+        for row in rows:
+            seq = int(row.get("seq") or 0)
             if seq <= self._last_seq:
                 continue
-            new.append(_format_log_line(line))
-            highest = max(highest, seq)
+            self._last_seq = seq
+            key = self._row_key(row, step_seqs, actions, live_phase)
+            self._rows.append(row)
+            self._row_keys.append(key)
+            i = index.get(key)
+            if i is None:
+                rebuild = True  # a group nobody had drawn yet: the grouping is rebuilt below
+                continue
+            group = self._groups[i]
+            touched.add(i)
+            if not group[2]:
+                repaint = True  # the note in front of this line is replaced by the line
+            line = _format_log_line(row)
+            group[2].append(line)
+            tail.append(line)
+            tail_seqs.append(seq)
+        if self._drop_oldest():
+            rebuild = True
+        if rebuild:
+            self._groups = self._group_model(self._rows, self._row_keys, steps, actions, live_phase)
+            return self._redraw()
+        if repaint or touched - {len(self._groups) - 1} or self._notes_moved():
+            return self._redraw()
+        if tail:
+            self._append(tail, tail_seqs)
+
+    def _drop_oldest(self) -> bool:
+        """On overflow, trim to limit minus slack in one batch, never drawing above the cap."""
+        if len(self._rows) <= LOG_PANE_LIMIT:
+            return False
+        slack = min(LOG_PANE_SLACK, LOG_PANE_LIMIT // 10)
+        low_water = max(1, LOG_PANE_LIMIT - slack)
+        excess = len(self._rows) - low_water
+        gone = Counter(self._row_keys[:excess])
+        del self._rows[:excess]
+        del self._row_keys[:excess]
+        for key, count in gone.items():
+            self._dropped[key] = self._dropped.get(key, 0) + count
+        return True
+
+    @staticmethod
+    def _signature_of(actions: list[dict], live_phase: Optional[str]) -> tuple:
+        """What a row's group depends on besides the row: the live phase and the Action rows."""
+        return (live_phase, tuple((a.get("seq"), a.get("phase"), a.get("instance_seq")) for a in actions))
+
+    def _note_for(self, key: tuple) -> str:
+        """The note a group with no line shows right now (packet 40a fix 2, item 5)."""
+        if key[0] != "step":
+            return NO_OUTPUT_NOTE
+        by_seq, run_finished, started = self._note_inputs
+        return _step_note(key, by_seq.get(key[1]), run_finished, started)
+
+    def _notes_moved(self) -> bool:
+        """Whether a group with no line now says something other than what the pane drew.
+
+        A step that started, or a run that ended, changes the note of a step with no output even when no
+        log row arrives (item 5). Checked against the groups the pane holds, never the store."""
+        for group in self._groups:
+            if group[2] or self._dropped.get(group[0]):
+                continue
+            if self._note_for(group[0]) != self._notes.get(group[0]):
+                return True
+        return False
+
+    def _render(self) -> list[str]:
+        """The text the pane shows, top to bottom: the notice, then each group's heading, notes and lines."""
+        out: list[str] = []
+        self._wanted_block_keys = {}
+
+        def draw(text: str, anchor: tuple) -> None:
+            for offset, line in enumerate(text.split("\n")):
+                self._wanted_block_keys[len(out)] = (*anchor, offset)
+                out.append(line)
+
+        rows_by_group: dict[tuple, list[dict]] = {}
+        for row, key in zip(self._rows, self._row_keys):
+            rows_by_group.setdefault(key, []).append(row)
+        if self._dropped:
+            draw(LOG_TRIM_NOTICE, ("notice",))
+        self._notes = {}
+        for key, heading, lines in self._groups:
+            draw(heading, ("heading", key))
+            dropped = self._dropped.get(key, 0)
+            if dropped:
+                draw(_dropped_note(dropped), ("note", key))
+            if lines:
+                for row in rows_by_group.get(key, []):
+                    draw(_format_log_line(row), ("row", key, int(row.get("seq") or 0)))
+            elif not dropped:
+                self._notes[key] = self._note_for(key)
+                draw(self._notes[key], ("note", key))
+        return out
+
+    def _redraw(self) -> None:
+        """Show the grouping the pane holds: append when the drawn text is its prefix, else repaint."""
+        wanted = self._render()
+        drawn = self._text.toPlainText().splitlines()
+        if wanted == drawn:
+            return
+        if drawn and wanted[:len(drawn)] == drawn:
+            self._append(wanted[len(drawn):])  # only the tail grew: the drawing position is untouched
+        else:
+            self._repaint(wanted)  # a group moved, or a note or the notice changed: redraw the whole text
+        self._drawn_block_keys = self._wanted_block_keys.copy()
+
+    def _repaint(self, wanted: list[str]) -> None:
+        """Replace the pane's whole text, keeping the Operator's place in it (ticket 39 review)."""
+        bar = self._text.verticalScrollBar()
+        reading_the_tail = bar.value() >= bar.maximum()
+        top_block = self._text.firstVisibleBlock().blockNumber()
+        anchor = self._drawn_block_keys.get(top_block)
+        self._text.setPlainText("\n".join(wanted))
+        if reading_the_tail:
+            bar.setValue(bar.maximum())
+        else:
+            blocks = {key: block for block, key in self._wanted_block_keys.items()}
+            target = blocks.get(anchor)
+            if target is None and anchor and anchor[0] == "row":
+                # A trimmed row moves to the next kept row in its group. If the
+                # group was emptied, its heading still records the omitted output.
+                target = next((block for block, key in self._wanted_block_keys.items()
+                               if key[0] == "row" and key[1] == anchor[1]
+                               and key[2] >= anchor[2]), None)
+                if target is None:
+                    target = blocks.get(("heading", anchor[1], 0))
+            if target is None:
+                target = next((blocks[key] for block, key in self._drawn_block_keys.items()
+                               if block >= top_block and key in blocks), 0)
+            # QPlainTextEdit scrolls in visual lines, including wrapped document blocks.
+            block = self._text.document().begin()
+            visual_line = 0
+            while block.isValid() and block.blockNumber() < target:
+                visual_line += max(1, block.layout().lineCount())
+                block = block.next()
+            bar.setValue(visual_line)
+        self._full_renders += 1
+
+    def _append(self, new: list[str], seqs: list[int] | None = None) -> None:
+        """Add lines at the end of the pane without disturbing the scroll (ticket 39 review)."""
         if not new:
             return
         bar = self._text.verticalScrollBar()
         reading_the_tail = bar.value() >= bar.maximum()
         where = bar.value()
+        first_block = self._text.document().blockCount()
         self._text.appendPlainText("\n".join(new))
-        # Appending can scroll to the new text; put the view back unless the Operator
-        # was already at the end, in which case the tail is what they want to see.
+        if seqs is not None:
+            for line, seq in zip(new, seqs):
+                group_key = self._row_keys[-1]
+                for offset, _ in enumerate(line.split("\n")):
+                    self._drawn_block_keys[first_block] = ("row", group_key, seq, offset)
+                    first_block += 1
+        # Appending can scroll to the new text; put the view back unless the Operator was already
+        # at the end, in which case the tail is what they want to see.
         bar.setValue(bar.maximum() if reading_the_tail else min(where, bar.maximum()))
-        self._last_seq = highest
+
+    @staticmethod
+    def _steps(nodes: list[dict]) -> tuple[list[dict], set]:
+        """The scheduled Test Steps in schedule order, and their ``node_seq`` set."""
+        steps = sorted((n for n in nodes if n.get("kind") == "step"), key=lambda n: n.get("node_seq", 0))
+        return steps, {n.get("node_seq") for n in steps}
+
+    @staticmethod
+    def _row_key(row: dict, step_seqs: set, actions: list[dict], live_phase: Optional[str]) -> tuple:
+        """Which group a log row belongs to (packet 40a, fix 2 item 4: decided by row order, not by time).
+
+        A row owned by a step (`node_seq`) goes under that step. A row with an `action_seq` belongs to a
+        Pre-/Post-test Action of that schedule instance. ``action_seq`` names the instance, not one
+        Action: an instance has a Pre-test Action and a Post-test Action, and each may have several. The
+        engine writes an Action's row when the Action ends, after every line it logged, and both the
+        log rows and the Action rows number from the run's one counter (``seq``). So the Action that owns
+        a line is the first Action row of its instance written after it. A line with no such row belongs
+        to the Action running now, whose phase the session announced (``live_phase``). Only when no
+        phase is known does a line after a Pre-test row count as Post-test. Everything else (ATE
+        warnings, device-close warnings) goes in the `── Run ──` group."""
+        node_seq = row.get("node_seq")
+        if node_seq in step_seqs:
+            return ("step", node_seq)
+        action_seq = row.get("action_seq")
+        if action_seq is None:
+            return RUN_GROUP_KEY
+        seq = int(row.get("seq") or 0)
+        owned = sorted((a for a in actions if a.get("instance_seq") == action_seq), key=lambda a: int(a.get("seq") or 0))
+        for action in owned:
+            if int(action.get("seq") or 0) > seq:
+                return (action.get("phase"),)
+        if live_phase in ("pre", "post"):
+            return (live_phase,)
+        before = [a for a in owned if int(a.get("seq") or 0) < seq]
+        if before and before[-1].get("phase") == "pre":
+            return ("post",)
+        return RUN_GROUP_KEY
+
+    def _group_model(
+        self, rows: list[dict], keys: list[tuple], steps: list[dict], actions: list[dict], live_phase: Optional[str]
+    ) -> list[list]:
+        """One group per phase and scheduled Test Step, in display order (packet 40a).
+
+        Pre-test first, then the steps in schedule order, then the Post-test Actions, then the run's
+        own lines. A group with no line carries a note instead of disappearing, so every scheduled step
+        is listed even when it never ran (disabled, skipped, or never reached after a Stop-on-Fail end).
+        A group whose lines have all fallen out of the window (packet 40a fix 3, item 2) keeps its
+        heading and its "… N earlier lines not shown" note: the Operator still sees that the group
+        logged, and how much of it is off screen."""
+        groups: list[list] = []
+        if self._phase_seen("pre", actions, live_phase, keys) or PRE_GROUP_KEY in self._dropped:
+            groups.append([PRE_GROUP_KEY, PRE_GROUP_HEADING, []])
+        for position, step in enumerate(steps):
+            groups.append([("step", step.get("node_seq")), _step_heading(step, position), []])
+        if self._phase_seen("post", actions, live_phase, keys) or POST_GROUP_KEY in self._dropped:
+            groups.append([POST_GROUP_KEY, POST_GROUP_HEADING, []])
+        index = {group[0]: i for i, group in enumerate(groups)}
+        for row, key in zip(rows, keys):
+            if key not in index:
+                groups.append([key, RUN_GROUP_HEADING, []])
+                index[key] = len(groups) - 1
+            groups[index[key]][2].append(_format_log_line(row))
+        for key in self._dropped:  # every line of this group is outside the window
+            if key not in index:
+                groups.append([key, RUN_GROUP_HEADING, []])
+                index[key] = len(groups) - 1
+        return groups
+
+    @staticmethod
+    def _phase_seen(phase: str, actions: list[dict], live_phase: Optional[str], keys: list[tuple]) -> bool:
+        """Whether a Pre-/Post-test group deserves to be drawn (packet 40a review, item 4).
+
+        It does when an Action row of that phase has been recorded, when the session announced that
+        phase's Action is running, or when a recorded line already belongs to it."""
+        return any(a.get("phase") == phase for a in actions) or live_phase == phase or (phase,) in keys
 
     def rendered_lines(self) -> list[str]:
         """Return the pane's lines in order (for inspection and tests)."""
@@ -199,6 +577,7 @@ class LogPane(QWidget):
         ``QPlainTextEdit`` replaced: the accessor is what lets a test ask the pane for the widget
         that actually scrolls, rather than digging for a child by object name."""
         return self._text
+
 
 
 class DebugWindow(LogPane):
@@ -232,6 +611,53 @@ class DebugWindow(LogPane):
             self.hide()
         else:
             self.show()
+
+
+def trimmed_counts(store: Any, run_uuid: str, before_seq: int, min_level: Optional[str], nodes: list[dict],
+                   actions: list[dict], live_phase: Optional[str] = None) -> dict[tuple, int]:
+    """How many rows older than ``before_seq`` a pane's window left out, per group (packet 40a fix 2, item 1).
+
+    Read from the store with COUNTs, never by reading the rows: a step's count is its node_seq's, the
+    run's is the rows with no owner, and an Action instance's is split into its Pre-test part (the rows
+    before the instance's last Pre-test Action row) and its Post-test part. Only the recovery path asks,
+    when the window is full."""
+    steps, step_seqs = LogPane._steps(nodes)
+    counts: dict[tuple, int] = {}
+    per_instance: dict[int, int] = {}
+    for row in store.log_line_counts(run_uuid, before_seq, min_level=min_level):
+        if row["action_seq"] is not None:
+            per_instance[row["action_seq"]] = per_instance.get(row["action_seq"], 0) + row["count"]
+            continue
+        key = ("step", row["node_seq"]) if row["node_seq"] in step_seqs else RUN_GROUP_KEY
+        counts[key] = counts.get(key, 0) + row["count"]
+    for instance, total in per_instance.items():
+        pre_ends = [int(a.get("seq") or 0) for a in actions if a.get("instance_seq") == instance and a.get("phase") == "pre"]
+        if pre_ends:
+            pre = sum(row["count"] for row in store.log_line_counts(
+                run_uuid, min(before_seq, max(pre_ends)), min_level=min_level, action_seq=instance))
+        else:
+            pre = total if live_phase == "pre" else 0
+        for key, part in ((PRE_GROUP_KEY, pre), (POST_GROUP_KEY, total - pre)):
+            if part:
+                counts[key] = counts.get(key, 0) + part
+    return counts
+
+
+def draw_log_panes(log_pane: LogPane, debug_window: LogPane, store: Any, run_uuid: str, nodes: list[dict],
+                   actions: list[dict], **context: Any) -> None:
+    """Full render of both log panes from the newest rows the store holds (packet 40a fix 2, item 2).
+
+    The recovery path: activation, restore, run start and a pane with nothing drawn. Each pane reads at
+    most :data:`LOG_PANE_LIMIT` rows of its own level filter — the Log tab INFO and above, the Debug window
+    every level — and the rows it left out are counted per group, never read. Recovery keeps exactly
+    the newest limit rows when available; the live window is a suffix of that recovery window.
+    Each group counts all its stored rows minus the rows held in that pane."""
+    for pane, min_level in ((log_pane, "INFO"), (debug_window, None)):
+        rows = store.log_lines_tail(run_uuid, LOG_PANE_LIMIT, min_level=min_level)
+        dropped: dict[tuple, int] = {}
+        if rows and len(rows) >= LOG_PANE_LIMIT:
+            dropped = trimmed_counts(store, run_uuid, rows[0]["seq"], min_level, nodes, actions, context.get("live_phase"))
+        pane.add_lines(rows, nodes, actions, dropped=dropped, **context)
 
 
 class StatusBar(QWidget):
@@ -358,6 +784,13 @@ _PROMPT_BUTTON_FONT_PX = 15
 _PROMPT_BUTTON_PAD_X = 18
 _PROMPT_BUTTON_PAD_Y = 6
 _PROMPT_BUTTON_BORDER = 1
+#: The bar's own box (packet 40b): the padding, the spacing between items, the extra gap
+#: before Abort (D6) and the buttons' `min-height`. `FailurePromptBar.heightForWidth` needs
+#: these to work out how much of the bar's width is left for the message.
+_PROMPT_MARGIN_X = 16
+_PROMPT_MARGIN_Y = 10
+_PROMPT_SPACING = 12
+_PROMPT_ABORT_SPACING = 16
 
 #: The mockup's `.b-inline-prompt`: a red-outlined box hugging the failed step. Three equal
 #: buttons (D6): Retry is not the primary, and Abort's separation is spacing, not colour.
@@ -400,20 +833,125 @@ def _short_error(error: str, release_dir: Optional[Path]) -> str:
     return line
 
 
-def _wrapped_height(text: str, font, width: int) -> int:
-    """How tall word-wrapped `text` is when squeezed into `width` pixels with ``font``."""
+def _wrap_lines(text: str, font, width: int) -> list[str]:
+    """The lines word wrap would draw for `text` squeezed into `width` pixels with ``font``.
+
+    Embedded newlines are kept as line breaks; each resulting chunk is then broken at word
+    boundaries the way Qt's own word wrap does, and breaks inside a word when the word alone
+    is wider than the column: a 300-character device id, path or hex dump has no spaces to
+    break at, and Qt paints it as one line that runs out of the cell (packet 40b review)."""
     metrics = QFontMetrics(font)
-    lines = 0
+    width = max(1, width)
+    lines = []
     for chunk in (text.splitlines() or [""]):
         used = ""
         for word in chunk.split():
-            if used and metrics.horizontalAdvance(f"{used} {word}") > width:
-                lines += 1
-                used = word
-            else:
-                used = f"{used} {word}" if used else word
-        lines += 1
-    return lines * metrics.lineSpacing()
+            if used and metrics.horizontalAdvance(f"{used} {word}") <= width:
+                used = f"{used} {word}"
+                continue
+            if used:
+                lines.append(used)
+                used = ""
+            # the word alone does not fit either: split it where the column ends it
+            while len(word) > 1 and metrics.horizontalAdvance(word) > width:
+                lo, hi = 1, len(word)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if metrics.horizontalAdvance(word[:mid]) <= width:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                lines.append(word[:lo])
+                word = word[lo:]
+            used = word
+        lines.append(used)
+    return lines
+
+
+def _wrapped_height(text: str, font, width: int) -> int:
+    """How tall word-wrapped `text` is when squeezed into `width` pixels with ``font``."""
+    return len(_wrap_lines(text, font, width)) * QFontMetrics(font).lineSpacing()
+
+
+class WrappedTextDelegate(QStyledItemDelegate):
+    """Paint a step-table cell wrapped inside the cell (packet 40b).
+
+    Qt's own cell drawing wraps only at spaces: an 80 px Actual column holding a 300-character
+    hex dump paints one line that runs out of the cell, and it measures the wrap against the
+    whole column width rather than the 74 px rect the style leaves for the text, so a row sized
+    for 80 px clips the last line. This delegate draws the text itself with Qt's wrap — word
+    boundaries only, with a token that is by itself wider than the column cut where the column
+    ends it — and measures :meth:`sizeHint` with the same call at the same rect, so what is
+    drawn and what the row is sized for are the same lines. The model keeps the raw text, so
+    tooltips, copy and the tests still see the value the engine wrote."""
+
+    #: The gap the style leaves between the cell edge and the text inside it: ink in an 80 px
+    #: column starts 3 px in, so the text rect is the column minus 3 px on each side.
+    TEXT_MARGIN = 3
+    #: Wrap at word boundaries only. `TextWrapAnywhere` adds "break the line wherever it runs
+    #: out", which cuts ordinary words in half: a 74 px Actual column read "c/hannel",
+    #: "wi/ndow", "me/asured" (40b review, second round). A token with no space in it is cut
+    #: by :meth:`_wrapped_text` before Qt ever sees it, because word wrap alone leaves such a
+    #: token as one line running out of the cell.
+    WRAP_FLAGS = Qt.TextFlag.TextWordWrap
+
+    def _wrapped_text(self, text: str, font, width: int) -> str:
+        """`text` broken into the exact lines this cell paints at `width` px.
+
+        The same :func:`_wrap_lines` the row height is measured with, and the same rule the
+        tests' reference render uses: break at a space, and break inside a word only when that
+        word alone is wider than the column."""
+        return "\n".join(_wrap_lines(text, font, max(1, width)))
+
+    def _text_rect(self, option) -> QRect:
+        """The rect inside the cell that the text is drawn in."""
+        rect = option.rect
+        return QRect(rect.left() + self.TEXT_MARGIN, rect.top() + self.TEXT_MARGIN,
+                     max(1, rect.width() - 2 * self.TEXT_MARGIN),
+                     max(1, rect.height() - 2 * self.TEXT_MARGIN))
+
+    def _font(self, item, option):
+        """The font this cell is painted in: the item's own, or the table's."""
+        font = item.data(Qt.ItemDataRole.FontRole) if hasattr(item, "data") else None
+        return font if font is not None else option.font
+
+    def _ink_pen(self, option) -> QColor:
+        """The colour the text is drawn in: the palette's, or the highlight's on a selected cell."""
+        palette = option.palette
+        if option.state & QStyle.StateFlag.State_Selected:
+            return palette.highlightedText().color()
+        return palette.text().color()
+
+    def paint(self, painter, option, item) -> None:  # noqa: N802 - Qt's name
+        # The style draws the background, the icon and the border; the text is drawn here, so the
+        # style is handed an option with no text — left to itself it elides a long value to one
+        # line. The item keeps the raw value, so the cell still reads as the engine wrote it.
+        adjusted = QStyleOptionViewItem(option)
+        self.initStyleOption(adjusted, item)
+        text = adjusted.text or ""
+        adjusted.text = ""
+        style = option.widget.style() if option.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, adjusted, painter, option.widget)
+        painter.save()
+        font = self._font(item, adjusted)
+        rect = self._text_rect(adjusted)
+        painter.setFont(font)
+        painter.setPen(self._ink_pen(adjusted))
+        painter.drawText(rect,
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | self.WRAP_FLAGS,
+                         self._wrapped_text(text, font, rect.width()))
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt's name
+        """The cell's height at its own width: the wrapped lines plus the style's margins."""
+        hint = super().sizeHint(option, index)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        rect = self._text_rect(option)
+        font = self._font(index, option)
+        needed = QFontMetrics(font).boundingRect(
+            QRect(rect.left(), rect.top(), rect.width(), 10000), self.WRAP_FLAGS,
+            self._wrapped_text(text, font, rect.width())).height()
+        return QSize(hint.width(), max(hint.height(), needed + 2 * self.TEXT_MARGIN))
 
 
 def _broken_row_size_hint(widget: QWidget, width: int) -> QSize:
@@ -554,19 +1092,16 @@ def load_schedule_steps(session: HeadlessRunSession, schedule_name: str) -> list
 
     Both layouts preview the same tree: the header rows and the Test Steps beneath them, in runner
     seq order, each carrying its own Step Number, name, depth and validated Step Input
-    declarations. No schedule is executed here — the LuaHost only loads the file."""
+    declarations. No schedule is executed here — the LuaHost only loads the file. Packet 43: the
+    schedule is looked up through the scan the session holds, so previewing a pick never walks
+    the whole catalogue again."""
     config = session.config
     if config is None or not schedule_name:
         return []
-    definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=schedule_name)
-    if definition is None:
+    found = session.schedule_for(schedule_name)
+    if found is None:
         return []
-    modules = module_map(definition)  # packet 06a: forward the release's require'd module map
-    path = resolve_schedule_path(definition, schedule_name)
-    if path is None:
-        return []
-    host = LuaHost(path, modules=modules, includes=include_map(definition))
-    return list(host.tree)
+    return list(found[2].tree)
 
 
 def _short_sha(value: Optional[str]) -> str:
@@ -736,6 +1271,11 @@ class ResultCounts(QWidget):
         return {key: int(self.count_labels[key].text() or 0) for key in self.RESULT_KEYS}
 
 
+#: Each required field's name as the Operator sees it (packet 41): when Start is refused, the
+#: error line names the fields that are still blank, so they must read like the labels do.
+_FIELD_LABELS = {"project": "Project", "operator": "Operator", "uut_type": "UUT Type", "serial": "Serial"}
+
+
 class RunFieldsForm(QWidget):
     """The Operator's four required fields: Project, Operator, UUT Type and Serial.
 
@@ -773,6 +1313,26 @@ class RunFieldsForm(QWidget):
             layout.addWidget(label, index, 0)
             layout.addWidget(edit, index, 1)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+    #: The fields a Test Run cannot start without, in the mockup's order (packet 41). Each name
+    #: is what the error line shows; `blank_fields` reads it back from the matching `<name>_edit`.
+    REQUIRED_FIELDS: tuple[str, ...] = ("project", "operator", "uut_type", "serial")
+
+    def blank_fields(self) -> list[str]:
+        """The labels of the required fields that are empty, or hold only spaces.
+
+        Packet 41: an Operator who types a space has not filled the field, so the check strips
+        before it decides. The `required` placeholders on the edits are what shows which ones are
+        still missing."""
+        return [
+            _FIELD_LABELS[name]
+            for name in self.REQUIRED_FIELDS
+            if not getattr(self, f"{name}_edit").text().strip()
+        ]
+
+    def fields_filled(self) -> bool:
+        """True when Project, Operator, UUT Type and Serial all have something typed in."""
+        return not self.blank_fields()
 
 
 class SchedulePicker(QWidget):
@@ -833,8 +1393,11 @@ class SchedulePicker(QWidget):
 
         # Both the selection and the current item are watched: a broken row cannot be selected, yet
         # it can still be made current, and then nothing stale may be left showing (05b review).
+        # One click fires both signals, so the handler remembers the selection state it last acted on
+        # and ignores the second signal of the same change (packet 43 review).
         self.schedule_list.itemSelectionChanged.connect(self._on_selection)
         self.schedule_list.currentItemChanged.connect(self._on_selection)
+        self._handled_selection: tuple = ()
         self.filter_edit.textChanged.connect(self.render)
         self.rescan_button.clicked.connect(self.refresh)
 
@@ -868,9 +1431,15 @@ class SchedulePicker(QWidget):
         config = self.session.config
         if config is None:
             return
-        self._rows = list(list_schedule_rows(*config.test_definition_dirs))
-        self._mismatch_flags = list_schedule_mismatches(*config.test_definition_dirs)
         definitions = find_definitions(*config.test_definition_dirs)
+        # Packet 43: the scan made here is the scan the session keeps. Selecting a row from now on
+        # reads these rows and the schedules they name — no walk of the Test Definition
+        # directories until the Operator presses Rescan and refresh runs again.
+        self.session.set_catalog_scan(definitions)
+        # Packet 43 review fix: the rows and the ⚠ flags come from that same scan. Asking the catalog
+        # for each of them walked the directories two more times per Rescan.
+        self._rows = list(schedule_rows(definitions))
+        self._mismatch_flags = schedule_mismatches(definitions)
         # "MR-10422 · PSU-200 Tests 2.3.0", as the mockup names a release in the flag and the dialog.
         self._release_labels = {d.media_number: f"{d.media_number} · {d.name} {d.version}" for d in definitions}
         # Where each Media Release is on disk: a load error's absolute path is written relative to it.
@@ -966,15 +1535,27 @@ class SchedulePicker(QWidget):
         return item
 
     def _on_selection(self) -> None:
-        """Record the newly selected schedule on the session, or clear the picker.
+        """Record the newly selected schedule on the session, or clear the picker — once per change.
 
         The exact name is read back from the row's user data (set when the list was built), so this
         hands the session precisely what the Operator picked; ``select_schedule`` then moves the
         session to SELECTING while idle. A broken row carries no user data, so it can never reach the
         session: the previous choice is dropped, the notes and the mismatch flag are emptied, and
-        Start stays disabled (packet 05b review)."""
+        Start stays disabled (packet 05b review).
+
+        One click changes the current item and the selection together, so Qt fires both signals and
+        this handler ran twice per click (packet 43 review): the session was handed the schedule twice
+        and the layout loaded its steps twice. The state last acted on — the current row, its name and
+        the rows actually selected — is remembered, so the second signal of that one change does
+        nothing; an arrow key moves the current item and counts as a selection like a click. A
+        selection that was dropped and re-made on the same row is a different state, so picking a row
+        again after deselecting it selects again (packet 43 review fix 2)."""
         item = self.schedule_list.currentItem()
         name = (item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+        state = (id(item), name, tuple(id(row) for row in self.schedule_list.selectedItems()))
+        if state == self._handled_selection:
+            return  # the other signal of the same selection change
+        self._handled_selection = state
         if name:
             self._set_notes(item.text() or (item.data(Qt.ItemDataRole.UserRole + 2) or ""))
             # Flag the mismatch under the picker as soon as the schedule is picked (ticket 06c) —
@@ -1014,6 +1595,25 @@ class SchedulePicker(QWidget):
             self.session.clear_selection()
 
 
+class _SyncPromptBarHeight(QObject):
+    """Keep the prompt bar as tall as the message it is showing (packet 40b fix).
+
+    `setWordWrap` makes the label wrap but leaves the bar at the buttons' height, so the bar
+    clips its own text. The height the wrapped message needs only exists once the bar has a
+    width, which is exactly what the Resize event reports: each time the layout gives the
+    bar a width, the bar re-measures its height against it."""
+
+    def __init__(self, bar: "FailurePromptBar") -> None:
+        super().__init__(bar)
+        self._bar = bar
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt's name
+        if event.type() == QEvent.Type.Resize:
+            self._bar.sync_height_at(watched.width())
+            self._bar.geometry_changed.emit()
+        return False
+
+
 class FailurePromptBar(QWidget):
     """The Stop-on-Fail prompt shown while a failed step awaits the Operator's choice.
 
@@ -1027,6 +1627,7 @@ class FailurePromptBar(QWidget):
     hugging the failed step (three-pane inline)."""
 
     choice_made = Signal(str)
+    geometry_changed = Signal()
 
     def __init__(self, style: str = "") -> None:
         super().__init__()
@@ -1034,14 +1635,19 @@ class FailurePromptBar(QWidget):
         # (packet 12d review): opt it into styled backgrounds, and give the labels their own
         # colour rule because a stylesheet `color` does not cascade to child QLabels.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(12)
+        layout = QGridLayout(self)
+        layout.setContentsMargins(_PROMPT_MARGIN_X, _PROMPT_MARGIN_Y, _PROMPT_MARGIN_X, _PROMPT_MARGIN_Y)
+        layout.setSpacing(_PROMPT_SPACING)
 
         self.step_label = QLabel()
         self.step_label.setObjectName("prompt_step")
         self.message_label = QLabel()
         # The message grows to fill whatever width the labels leave, like the mockup's .grow.
+        # Packet 40b (issue #3): the Actual/Expected the prompt carries can be long and
+        # multiline, so the label wraps inside the bar instead of running off its edge — and
+        # :meth:`heightForWidth` makes the bar as tall as that wrapped text, because a
+        # wrapping label in a bar sized for the buttons still clips it (40b review).
+        self.message_label.setWordWrap(True)
         self.message_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self.continue_button = QPushButton("Continue")
@@ -1069,32 +1675,119 @@ class FailurePromptBar(QWidget):
         )
         self.retry_button.setObjectName("retry")
         self.abort_button.setObjectName("abort")
-        # R6/D6, second pass: the three buttons are the same width. Left to their own size hints
-        # they measured 106 px ("Continue"), 78 px ("Retry") and 79 px ("Abort"), so the bar read as
-        # one wide button and two narrow ones. The width is measured from the bar's own 15 px font
-        # and its padding rather than taken from `sizeHint()`, which is still the unstyled 61 px
-        # before the widget is first polished.
-        button_width = max(
-            QFontMetrics(ui_font(_PROMPT_BUTTON_FONT_PX)).horizontalAdvance(button.text())
-            + 2 * (_PROMPT_BUTTON_PAD_X + _PROMPT_BUTTON_BORDER)
-            for button in (self.continue_button, self.retry_button, self.abort_button)
+        # Polish before consulting style hints: all controls keep the widest label's
+        # text and padding, even when the bar must put them in a column.
+        controls = (self.continue_button, self.retry_button, self.abort_button)
+        for button in controls:
+            button.ensurePolished()
+        self._button_width = max(
+            max(button.sizeHint().width(), button.minimumSizeHint().width(), 80,
+                QFontMetrics(ui_font(_PROMPT_BUTTON_FONT_PX)).horizontalAdvance(button.text())
+                + 2 * (_PROMPT_BUTTON_PAD_X + _PROMPT_BUTTON_BORDER))
+            for button in controls
         )
-        for button in (self.continue_button, self.retry_button, self.abort_button):
-            button.setFixedWidth(button_width)
+        for button in controls:
+            button.setFixedWidth(self._button_width)
 
         self.continue_button.clicked.connect(lambda: self._on_choice("CONTINUE"))
         self.retry_button.clicked.connect(lambda: self._on_choice("RETRY"))
         self.abort_button.clicked.connect(lambda: self._on_choice("ABORT"))
 
-        layout.addWidget(self.step_label)
-        layout.addWidget(self.message_label)
-        layout.addWidget(self.continue_button)
-        layout.addWidget(self.retry_button)
-        layout.addSpacing(16)  # Abort is set apart from the two Continue/Retry peers (D6)
-        layout.addWidget(self.abort_button)
+        self._buttons = QWidget(self)
+        buttons = QHBoxLayout(self._buttons)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(0)
+        buttons.addWidget(self.continue_button)
+        buttons.addSpacing(_PROMPT_SPACING)
+        buttons.addWidget(self.retry_button)
+        buttons.addSpacing(_PROMPT_SPACING + _PROMPT_ABORT_SPACING)
+        buttons.addWidget(self.abort_button)
+        buttons.addStretch()
+        self._buttons_vertical = False
+        self._stacked = None
+        self._arrange(self.width())
 
         # Only shown while a prompt is pending; the layout shows it via show_prompt.
+        # The bar's height must follow its wrapped message, and that height only exists once
+        # the bar has a width — the Resize event is when the width is known (packet 40b fix).
+        self.installEventFilter(_SyncPromptBarHeight(self))
         self.hide()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt's name
+        """The bar's height depends on its width: the message label wraps (packet 40b)."""
+        return True
+
+    def _needs_stack(self, width: int) -> bool:
+        # Reserve a useful message column rather than squeezing Actual/Expected
+        # into a sliver beside three fixed-width controls.
+        return width < (2 * _PROMPT_MARGIN_X + self.step_label.sizeHint().width()
+                        + 240 + self._horizontal_button_width() + 2 * _PROMPT_SPACING)
+
+    def _horizontal_button_width(self) -> int:
+        return 3 * self._button_width + 2 * _PROMPT_SPACING + _PROMPT_ABORT_SPACING
+
+    def _vertical_buttons(self, width: int) -> bool:
+        return width - 2 * _PROMPT_MARGIN_X < self._horizontal_button_width()
+
+    def _arrange(self, width: int) -> None:
+        vertical = self._vertical_buttons(width)
+        if vertical != self._buttons_vertical:
+            self._buttons_vertical = vertical
+            self._buttons.layout().setDirection(
+                QBoxLayout.Direction.TopToBottom if vertical else QBoxLayout.Direction.LeftToRight
+            )
+        stacked = self._needs_stack(width)
+        if stacked == self._stacked:
+            return
+        self._stacked = stacked
+        layout = self.layout()
+        for widget in (self.step_label, self.message_label, self._buttons):
+            layout.removeWidget(widget)
+        if stacked:
+            layout.addWidget(self.step_label, 0, 0, 1, 3)
+            layout.addWidget(self.message_label, 1, 0, 1, 3)
+            layout.addWidget(self._buttons, 2, 0, 1, 3)
+        else:
+            layout.addWidget(self.step_label, 0, 0)
+            layout.addWidget(self.message_label, 0, 1)
+            layout.addWidget(self._buttons, 0, 2)
+        layout.setColumnStretch(1, 1)
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        """Measure the same message width and control rows used by the responsive layout."""
+        self.step_label.ensurePolished()
+        self.message_label.ensurePolished()
+        stacked = self._needs_stack(width)
+        label_width = width - 2 * _PROMPT_MARGIN_X
+        if not stacked:
+            label_width -= (self.step_label.sizeHint().width()
+                            + self._horizontal_button_width() + 2 * _PROMPT_SPACING)
+        label_height = self.message_label.heightForWidth(max(40, label_width))
+        if label_height < 0:
+            label_height = _wrapped_height(self.message_label.text(), self.message_label.font(),
+                                           max(40, label_width))
+        button_height = max(button.sizeHint().height() for button in
+                            (self.continue_button, self.retry_button, self.abort_button))
+        if self._vertical_buttons(width):
+            button_height = 3 * button_height + 2 * _PROMPT_SPACING + _PROMPT_ABORT_SPACING
+        if stacked:
+            content = (self.step_label.sizeHint().height() + label_height
+                       + button_height + 2 * _PROMPT_SPACING)
+        else:
+            content = max(button_height, label_height, self.step_label.sizeHint().height())
+        return max(content + 2 * _PROMPT_MARGIN_Y,
+                   self.layout().totalHeightForWidth(width) if stacked == self._stacked else 0)
+
+    def sync_height_at(self, width: int) -> None:
+        """Arrange and measure the prompt at the width it will actually receive."""
+        if width > 0:
+            self._arrange(width)
+            self.setMinimumHeight(self.heightForWidth(width))
+            self.updateGeometry()
+
+    def sync_height(self) -> None:
+        """Re-measure the bar's height against the width it currently has."""
+        self.sync_height_at(self.width() if self.width() > 0 else self.sizeHint().width())
 
     def show_prompt(self, step_number: str, result: str, message: str, actual: str = "", expected: str = "") -> None:
         """Show the bar naming the failed step and its message, for the Operator to answer.
@@ -1106,7 +1799,10 @@ class FailurePromptBar(QWidget):
         if actual or expected:
             detail = f"  Actual {actual or '—'} · Expected {expected or '—'}"
         self.message_label.setText(f"{message}{detail}")
+        self.sync_height()  # the label wraps, so the bar has to grow with it (packet 40b)
         self.show()
+        # The staged Run view may still be hidden when a prompt first arrives.
+        self._buttons.layout().activate()
 
     def _on_choice(self, choice: str) -> None:
         """A button was clicked: hide the bar first, then hand the choice to the layout."""
@@ -1534,6 +2230,14 @@ class StepRowDelegate(QStyledItemDelegate):
     #: badge on a narrow list never pushes the step's name out of view.
     NAME_MIN_WIDTH = 40
 
+    #: The detail line's font: the row's own text uses the item's font, the Actual/Expected
+    #: line the mono font it is painted in (packet 40b measures the wrap with the same font).
+    DETAIL_FONT_PX = 11
+
+    def _detail_font(self):
+        """The mono font the detail line is painted in — shared with the row-height sizing."""
+        return mono_font(self.DETAIL_FONT_PX)
+
     def _badge_width(self, word: str, rect) -> int:
         """How much of the row the badge for ``word`` may take.
 
@@ -1580,15 +2284,155 @@ class StepRowDelegate(QStyledItemDelegate):
         text_rect = QRect(left, rect.top() + 4, max(0, rect.width() - left - badge_width - 6), rect.height())
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
         if result:
+            # The badge sits at the right edge, top-aligned with the step name; `_step_row_height`
+            # has grown the row for the detail lines below it, so a wrapped row keeps the badge
+            # level with the name rather than floating off the row (packet 40b).
             badge = QRect(rect.right() - badge_width - 2, rect.top() + 4, badge_width, 18)
             paint_result_badge(painter, badge, result, word=result)
         detail = item.data(STEP_DETAIL_ROLE) or ""
         if detail:
-            painter.setFont(mono_font(11))
+            font = self._detail_font()
+            painter.setFont(font)
             painter.setPen(_detail_pen(fill))
-            detail_rect = QRect(left, rect.top() + 22, max(0, rect.width() - left - badge_width - 6), 12)
-            painter.drawText(detail_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, detail)
+            # Packet 40b (issue #3): the stage layout printed only the first line of a
+            # multiline Actual/Expected. Pre-wrapping the detail at the width the row leaves
+            # beside the badge and drawing the joined lines paints every line, and the row's
+            # size hint (`_step_row_height`) grows to make room for them.
+            wrapped = "\n".join(_wrap_lines(detail, font, max(0, rect.width() - left - badge_width - 6)))
+            detail_rect = QRect(left, rect.top() + 22, max(0, rect.width() - left - badge_width - 6),
+                                max(12, rect.height() - 22))
+            painter.drawText(detail_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, wrapped)
         painter.restore()
+
+
+#: Width assumed for a step list that has not been laid out yet when the row hints are
+#: computed: Qt reports a viewport that has never been sized as 0 px wide, and a wrapped row
+#: cannot be measured against nothing. This is only a stand-in for the first paint —
+#: `_RefitStepRows` re-measures every row as soon as the viewport has a width. (Packet 40b
+#: review: the earlier claim that the Run view never makes the step list narrower than this
+#: was wrong — a narrow window puts the list at 240 px, and rows sized for 500 px clipped
+#: their detail.)
+_STEP_LIST_FALLBACK_WIDTH = 500
+
+
+def _step_row_height(result: str, detail: str, list_width: int) -> int:
+    """The height a staged step row needs: 30 px without a detail line, 38 px with a single
+    wrapped line, plus one more line of wrapped detail on top (packet 40b).
+
+    The badge and the emphasis bar take room off the row, so the detail is measured as it
+    will be painted — wrapped into the width left beside the badge, with long words broken
+    inside the word. A list not sized yet falls back to ``_STEP_LIST_FALLBACK_WIDTH`` until
+    the viewport reports its real width."""
+    if not detail:
+        return 30
+    badge = max(StepRowDelegate.BADGE_MIN_WIDTH, badge_width_for(result)) if result else StepRowDelegate.BADGE_MIN_WIDTH
+    width = (list_width if list_width > 0 else _STEP_LIST_FALLBACK_WIDTH) - 4 - badge - 6
+    return 22 + _wrapped_height(detail, mono_font(StepRowDelegate.DETAIL_FONT_PX), max(40, width)) + 3
+
+
+class _IncrementalRowFit(QObject):
+    """Fit visible rows on scroll; drain width-invalidated rows eight per timer turn.
+
+    A new width discards the previous generation's backlog. Both the timer and the
+    resize filter belong to the view, so neither can outlive it. The margin readies
+    adjacent rows before a small scroll; the scroll hook also handles arbitrary jumps.
+    """
+
+    CHUNK = 8
+    MARGIN = 2
+
+    def __init__(self, view, fit_row):
+        super().__init__(view)
+        self.view = view
+        self.fit_row = fit_row
+        self._cursor = 0
+        self._generation = 0
+        self._done = set()
+        self._busy = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(0)
+        self._timer.timeout.connect(self.tick)
+        view.viewport().installEventFilter(self)
+        view.verticalScrollBar().valueChanged.connect(self.fit_visible)
+
+    def restart(self):
+        self._generation += 1
+        self._cursor = 0
+        self._done.clear()
+        self._timer.start()
+        self.view.viewport().update()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QEvent.Type.Resize:
+            self.restart()
+        elif event.type() == QEvent.Type.Paint:
+            # A queued zero-delay timer can run after the first resized paint.
+            self.fit_visible()
+        return False
+
+    def _fit(self, row):
+        if row not in self._done:
+            self._done.add(row)
+            self.fit_row(row)
+
+    def fit_visible(self):
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            model = self.view.model()
+            count = model.rowCount()
+            first = max(0, self.view.indexAt(QPoint(1, 0)).row())
+            # Re-evaluate after fitting: shrinking a row can expose another row.
+            row = max(0, first - self.MARGIN)
+            while row < count:
+                rect = self.view.visualRect(model.index(row, 0))
+                if rect.top() > self.view.viewport().height():
+                    for extra in range(row, min(count, row + self.MARGIN)):
+                        self._fit(extra)
+                    break
+                self._fit(row)
+                row += 1
+        finally:
+            self._busy = False
+
+    def tick(self):
+        generation = self._generation
+        self.fit_visible()
+        if generation != self._generation:
+            return
+        count = self.view.model().rowCount()
+        end = min(count, self._cursor + self.CHUNK)
+        for row in range(self._cursor, end):
+            self._fit(row)
+        if generation != self._generation:
+            return
+        self._cursor = end
+        if end < count:
+            self._timer.start()
+
+
+class _RefitStepRows(_IncrementalRowFit):
+    """Bounded width refits for the staged list, using its laid-out viewport width."""
+
+    def __init__(self, run_view):
+        self._sizes = {}
+        super().__init__(run_view.step_list, self._fit_row)
+
+    def _fit_row(self, index):
+        widget = self.view
+        item = widget.item(index)
+        if widget.itemWidget(item) is not None:
+            return
+        detail = item.data(STEP_DETAIL_ROLE) or ""
+        result = item.data(STEP_RESULT_ROLE) or ""
+        signature = (detail, result, widget.viewport().width())
+        if self._sizes.get(index) == signature:
+            return
+        self._sizes[index] = signature
+        if detail:
+            item.setSizeHint(QSize(0, _step_row_height(result, detail, signature[2])))
 
 
 class ResultBadgeDelegate(QStyledItemDelegate):
@@ -1619,29 +2463,6 @@ class ResultBadgeDelegate(QStyledItemDelegate):
         )
         paint_result_badge(painter, badge, kind, word=text)
         painter.restore()
-
-
-def build_summary(nodes: list[dict], attempts: list[dict], run: Optional[dict] = None, running: bool = False) -> str:
-    """The Summary tab's text: the run's verdict, then one line per Test Step.
-
-    Ticket 39 review: the verdict is the one the engine recorded — the ``result`` and
-    ``end_reason`` on the run row written by ``update_run_end`` — never a recomputation
-    from the step rows. A run that ended PRETEST_FAILED, STOPPED_ON_FAIL or ABORTED is
-    FAIL whatever the steps say, and a step that ran without reporting (``NOREPORT``)
-    does not by itself decide the run: the engine does, and the Summary says what the
-    engine wrote. While the run is still up there is no final result to show, so the
-    tab lists the steps without a verdict line."""
-    verdict = str((run or {}).get("result") or "")
-    if not verdict:
-        # No run row with a result: the run is still going, or never started.
-        verdict = "RUNNING" if running else "NOTRUN"
-    reason = str((run or {}).get("end_reason") or "")
-    lines = [f"Result: {verdict}" + (f" ({reason})" if reason else "")]
-    for node in nodes:
-        if node.get("kind") != "step":
-            continue
-        lines.append(f"{node.get('step_number', '')}  {node.get('step_name') or ''}  →  {node.get('result', '')}")
-    return "\n".join(lines)
 
 
 class RunScreenMixin:
@@ -1683,6 +2504,11 @@ class RunScreenMixin:
     #: while the run is up, so it is read once per run and re-read when the run's row changes.
     _run_row_cache: Optional[dict] = None
     _run_row_cache_uuid: Optional[str] = None
+
+    #: The refusal the session gave the last Start clicked here, "" when there is none. A refusal is
+    #: about the inputs it was refused with: it keeps Start off until one of them moves (packet 41
+    #: fix2 review), and every refresh that runs because an input did drops it.
+    _refusal = ""
 
     def stop_run_timers(self) -> None:
         """Stop this layout's one-second header timer and mark it released.
@@ -1861,7 +2687,122 @@ class RunScreenMixin:
         self.stop_on_fail_radio.setChecked(value)
         self.continue_all_radio.setChecked(not value)
 
-    def new_run(self) -> Optional[str]:
+    def _runnable_selection(self) -> bool:
+        """Whether a Test Schedule is selected and can run (packet 41).
+
+        The picker's current row is the Operator's pick, and a broken row carries no name, so a
+        selection made there is dropped before it ever reaches the session (packet 05b). When the
+        layout never picked through the picker — a session handed a schedule by History, or a test
+        that selects one directly — the session's own selection is what `start()` uses, so it counts.
+        """
+        name = self.session.selected_schedule
+        if not name:
+            return False
+        picked = self.picker.selected_name()
+        return picked is None or picked == name
+
+    def can_start(self) -> bool:
+        """Whether a Test Run can start from this layout right now (packet 41).
+
+        Three things have to hold at once: every required field — Project, Operator, UUT Type,
+        Serial — has something in it after `strip()`; a Test Schedule is selected and it is not a
+        broken row (packet 05b); and no run is in progress. A checksum mismatch is not settled
+        here: the confirmation dialog in :meth:`begin_run` is the select/confirm flow that already
+        exists, and a cancelled one starts nothing. A run that has FINISHED is not in progress, so
+        the next one may begin as soon as the fields and the schedule are good again — which they
+        are, because starting a run never clears a field (spec 37). A session refusal is a
+        message, not a lock: retrying asks the session to validate the schedule again."""
+        session = getattr(self, "session", None)
+        if session is None:
+            return False
+        if getattr(self, "state", SessionState.IDLE) == SessionState.STARTED or session.state == SessionState.STARTED:
+            return False
+        if self.fields.blank_fields():
+            return False
+        return self._runnable_selection()
+
+    def _missing_field_phrase(self, missing: list[str]) -> str:
+        """The blank fields named in the order the form shows them: one name, or "A, B and C".
+
+        Packet 41 fix2 review: the two messages a layout shows — why Start is off, and why the fields
+        stage cannot move on — repeat this list, so its wording lives in one place."""
+        if len(missing) == 1:
+            return missing[0]
+        return f"{', '.join(missing[:-1])} and {missing[-1]}"
+
+    def _start_problem(self) -> str:
+        """What the Start line says in the words the Operator sees; "" when there is nothing to say.
+
+        Packet 41: every reason a run cannot start names itself, so a greyed Start is never just
+        grey. One blank field reads as the Project message the layouts have carried since packet
+        30a r3; several blanks name them in the order the form shows them; a schedule that cannot
+        run, or none at all, says so. A refusal the session gave the Start just clicked is said
+        until an input moves (packet 41 fix2 review): it is a message about an attempt, not a
+        lock — Start can be enabled and still carry it. A run already going is not written
+        here: it is not an error, and the faded Start already says it (packet 41 fix2 review)."""
+        if self._refusal:
+            return self._refusal
+        missing = self.fields.blank_fields()
+        if missing:
+            verb = "is" if len(missing) == 1 else "are"
+            return f"{BROKEN_MARKER} {self._missing_field_phrase(missing)} {verb} required before a Test Run can start"
+        if not self._runnable_selection():
+            return f"{BROKEN_MARKER} No runnable Test Schedule is selected"
+        return ""
+
+    def _fields_problem(self) -> str:
+        """Why the fields stage cannot move on, in the words the Operator sees (packet 41 review).
+
+        The fields stage has no Start to fade: its forward control is Next, and a greyed Next on its
+        own says nothing. This is the same list of blanks `_start_problem` names, worded for the
+        stage the Operator is actually on — the field to fill, not the run to start."""
+        missing = self.fields.blank_fields()
+        if not missing:
+            return ""
+        return f"{BROKEN_MARKER} Fill in {self._missing_field_phrase(missing)} to continue"
+
+    def _start_inputs_changed(self) -> None:
+        """One of the inputs a Start depends on moved, so the last refusal explains nothing.
+
+        Packet 41 fix2 review: the session's "schedule 'Passing schedule' is not available" sat on the
+        error line and kept Start disabled forever — only a run that actually started cleared it — so
+        after one keystroke Start was live under a message about a schedule the Operator had already
+        moved on from, a blank field was still blamed on that schedule, and a Rescan that brought the
+        file back changed nothing. A field typed, a schedule picked, a Rescan or a state change is the
+        Operator moving the very inputs the refusal answered, so the refusal goes and the layout's
+        normal refresh shows what those inputs now say the start problem is, which may be nothing."""
+        if self._refusal:
+            self._refusal = ""
+            # The line holds another path's message; only that path can write over it, so clear it
+            # here before the refresh writes the current reason.
+            if self.error_label.text() and self.error_label.property("error_owner") != "start":
+                self._show_error("", "refused")
+        self._refresh_start_state()
+
+    def _refresh_start_state(self) -> None:
+        """Re-run this layout's Start refresh, under one name (packet 41 fix2).
+
+        The three-pane layout calls it `_update_start_button` and the staged one `_update_run_button`;
+        code that does not know which layout is in front — a layout switch, for one — needs a single
+        name for the same action. Every layout using this mixin supplies its own."""
+        raise NotImplementedError("a run layout must implement its own Start refresh")
+
+    def _show_error(self, message: str, owner: str) -> None:
+        """Write ``message`` on the pane's error line, unless another path's message is there.
+
+        Packet 41 review: the layout refreshes this line on every keystroke and every state change,
+        and it used to write its own reason unconditionally — erasing a message another path put
+        there, such as the session's refusal when the picked schedule broke (packet 05b). The line
+        remembers who wrote it, so a refresh only overwrites text it wrote itself and clears only
+        that. A message from another path stays until that path replaces it, a run starts, or the
+        inputs change (packet 41 fix2 review): see :meth:`_start_inputs_changed`."""
+        label = self.error_label
+        if label.text() and label.property("error_owner") != owner:
+            return
+        label.setProperty("error_owner", owner if message else "")
+        label.setText(message)
+
+    def new_run(self) -> bool:
         """The Operator's "New run": unlock the session for the next run, clearing nothing.
 
         A session stays FINISHED after a run, and a FINISHED session has its step boxes locked and
@@ -1870,16 +2811,26 @@ class RunScreenMixin:
         FINISHED → SELECTING and keeps the step-enable overrides, because ``select_schedule`` drops
         overrides only for a *different* schedule. Nothing here writes the setup fields, so Project,
         Operator, UUT Type, serial and schedule all carry over. Re-selecting does re-read the
-        schedule's own :setStopOnFail default, so the choice the Operator made is put back after it."""
-        if not self.is_active():
-            return None  # the layout not showing cannot start the next run (packet 25b)
+        schedule's own :setStopOnFail default, so the choice the Operator made is put back after it.
+
+        The message a refused Start left on the error line survives all of that (packet 41 review).
+        It is replaced only when something an Operator could act on moves — a setup field, the
+        schedule, the On-failure choice, or an attempted Start — never by New run, which changes no
+        input and picks no schedule nobody already had. Re-checking Start reads the current inputs
+        without erasing that message."""
+        if not self.is_active() or self.session.state == SessionState.STARTED or self.state == SessionState.STARTED:
+            return False
         schedule = self.session.selected_schedule
-        if not schedule:
-            return None
-        stop_on_fail = self.stop_on_fail_radio.isChecked()
-        self.session.select_schedule(schedule)
-        self._set_stop_on_fail(stop_on_fail)
-        return schedule
+        if schedule:
+            stop_on_fail = self.stop_on_fail_radio.isChecked()
+            self.session.select_schedule(schedule)
+            self._set_stop_on_fail(stop_on_fail)
+        # Packet 41 review: New run changes no field and picks no schedule the Operator did not
+        # already have, so it is not an input change — the refusal the last Start wrote stays on
+        # the line until an input moves or a Start is attempted. Re-checking Start shows what the
+        # inputs say now without erasing that message.
+        self._refresh_start_state()
+        return True
 
     def start_new_run(self) -> None:
         """The layout's "New run" control (packet 30b review): unlock the session for the next run.
@@ -1894,9 +2845,15 @@ class RunScreenMixin:
         Operator, UUT Type and Serial are only pushed when the field is non-empty, so a new run keeps
         every field it did not change; Project is pushed as typed, because a blank Project must
         refuse the run rather than carry an earlier one (spec 08). The run then starts through
-        `session.start()`, which queues its signals and returns immediately."""
+        `session.start()`, which queues its signals and returns immediately.
+
+        Packet 41: `can_start()` guards the whole path before anything is written. A blank field, no
+        runnable schedule, or a run already going means no run starts — whether the call came from
+        the button, a shortcut, or a test calling the slot directly."""
         if not self.is_active():
             return  # the layout that is not showing must not start a run (packet 25b)
+        if not self.can_start():
+            return  # packet 41: nothing is written and nothing starts while a requirement is missing
         operator = self.fields.operator_edit.text().strip()
         project = self.fields.project_edit.text().strip()
         uut_type = self.fields.uut_type_edit.text().strip()
@@ -1912,18 +2869,24 @@ class RunScreenMixin:
         if serial:
             self.session.set_uut_serial(serial)
 
-        mismatches = self.session.pending_mismatches()
-        store = self._confirm_store_choice(mismatches)
-        if mismatches and store is None:
-            return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
         try:
+            # `pending_mismatches` re-reads the selected release, so a Test Definition broken since
+            # the scan is refused before the confirmation is asked (packet 43 review fix 3).
+            mismatches = self.session.pending_mismatches()
+            store = self._confirm_store_choice(mismatches)
+            if mismatches and store is None:
+                return  # the Operator cancelled the confirmation: nothing started, nothing cleared.
             self._engine = self.session.start(store_mismatched=store)
+            self._refusal = ""
+            self._show_error("", "refused")  # a run started: whatever refusal was on the line is over
         except SessionError as exc:
             # The schedule picked before this Start broke in the meantime (packet 05b review): name
             # the reason on the pane the Operator is looking at rather than raising out of the
-            # button handler, and take Start away so it cannot be clicked again.
-            self.error_label.setText(f"{BROKEN_MARKER} {exc}")
-            self.start_button.setEnabled(False)
+            # button handler. Keep the current reason until inputs change or another attempt
+            # replaces it; Start remains available to retry if the real conditions still hold.
+            self._refusal = f"{BROKEN_MARKER} {exc}"
+            self._show_error(self._refusal, "refused")
+            self._refresh_start_state()
 
     def _on_action_started(self, phase: str, done: int, total: int) -> None:
         """A Pre-/Post-test Action has begun: move its tally, restart the current-item timer, and
@@ -1934,6 +2897,10 @@ class RunScreenMixin:
         else:
             self._post_counts = (done, total)
             self._post_test_started = True  # the header chip reads POST-TEST (D4)
+        # Packet 40a review, item 4: the Action's own row is only written when it ends, so the
+        # phase the session just announced is what puts its lines in the right group as they land.
+        self._live_phase = phase
+        self._live_run_order = done - 1  # the engine numbers each phase's Actions from 0: `done` is one past it
         self._item_started_at = now
         self._refresh_log()
         self._update_header(now=now)
@@ -1956,7 +2923,7 @@ class RunScreenMixin:
         self._mark_current_step(node_seq)
         for widget in self.step_input_widgets().get(node_seq, ()):
             widget.set_summary(False)
-        self._refresh_log()
+        self._arm_log_refresh()  # its note changes from "Not run yet." even if it logs nothing (item 5)
         self._update_header(now=now)
 
     def _enabled_step_count(self, steps: list[object]) -> int:
@@ -2051,18 +3018,6 @@ class RunScreenMixin:
             return
         window.toggle()
 
-    def _update_summary(self, nodes: list[dict], attempts: list[dict]) -> None:
-        """The Summary tab of the Log band (R3), shared by both layouts.
-
-        Ticket 39 review: the verdict line is the run's stored result, not a guess from
-        the step rows, and while the run is still up the tab has no final verdict to
-        print."""
-        pane = getattr(self, "summary_pane", None)
-        if pane is None or not self._store_open():
-            return
-        run = self._run_row_for_header()  # the cached run row, not a query per refresh
-        pane.setText(build_summary(nodes, attempts, run=run, running=self.state == SessionState.STARTED))
-
     def _mark_current_step(self, node_seq: int) -> None:
         """Layout hook: emphasise the step that just started (R4). Layouts without a
         step list that can be emphasised do nothing."""
@@ -2087,32 +3042,165 @@ class RunScreenMixin:
         getattr(self, "_waiting_inputs", set()).discard((node_seq, index))
         self._refresh_run_header()  # the chip leaves INPUT NEEDED the moment the answer lands
 
-    def _show_log(self, log_lines: list[dict]) -> None:
-        """The log pane shows INFO and above; the debug window keeps every level (ticket 08).
+    #: Packet 40a review, item 3: how long a layout waits before reading the log it was told
+    #: about, so a burst of lines becomes one refresh per interval instead of one per line.
+    LOG_COALESCE_MS = 100
 
-        Ticket 39 review: both panes are live, and every refresh is handed the whole log
-        the store has. They are not cleared here — :meth:`LogPane.add_lines` renders only
-        the rows after the highest seq it already drew — because clearing on every line
-        logged threw the Operator back to the top of the log and reset the tail they were
-        reading. A run's own lines start from the clears at its start."""
-        info_and_above = [ln for ln in log_lines if str(ln.get("level")) != "DEBUG"]
-        self.log_pane.add_lines(info_and_above)
-        self.debug_window.add_lines(log_lines)
+    #: The Action the worker is inside (packet 40a review, item 4): the phase the session announced with
+    #: `action_started`. A log row carrying an instance's `action_seq` that no Action row has claimed
+    #: yet belongs to it. Cleared when that Action's own row lands, and at the start and end of a run.
+    _live_phase: Optional[str] = None
+    #: That Action's run order within its phase (the `run_order` its row will carry).
+    _live_run_order: Optional[int] = None
 
-    def _refresh_log(self) -> None:
-        """Render whatever the store has recorded so far (packet 25a: the log panes are live).
+    def _on_log_appended(self, run_uuid: str) -> None:
+        """The worker just recorded log rows (packet 40a): the visible layout reads them soon.
 
-        The worker flushes every ATE log call into the store as it happens, so a line logged before
-        a step blocks on an input is already readable when the ask is announced. The panes hold no
-        buffer of their own: they show only these rows. A layout that is not showing defers the read
-        (packet 25b review) and picks it up when it becomes the visible one."""
+        The notification is explicit — the panes are told a line landed rather than guessing from a
+        step finishing or polling the store. A layout that is not on screen defers the read, exactly
+        as it defers every other store refresh (packet 25b review). The read is throttled (packet 40a
+        fix 2, item 3): the timer is armed by the first notification of an interval and not restarted by
+        the rest, so a steady stream of lines refreshes about every :attr:`LOG_COALESCE_MS` instead of
+        never, and a burst still lands in one read. A finished run refreshes at once."""
+        if not self.is_active():
+            self.mark_store_dirty()
+            return
+        if getattr(self, "state", None) == SessionState.FINISHED:
+            self._refresh_log()
+            return
+        self._arm_log_refresh()
+
+    def _arm_log_refresh(self) -> None:
+        """Read the log within :attr:`LOG_COALESCE_MS`, unless a read is already on its way."""
+        timer = getattr(self, "_log_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self.LOG_COALESCE_MS)
+            timer.timeout.connect(self._refresh_log)
+            self._log_timer = timer
+        if not timer.isActive():
+            timer.start()
+
+    def _stop_log_timer(self) -> None:
+        """Cancel a coalesced read that is still waiting (packet 40a review, item 3).
+
+        The timer fires :meth:`_refresh_log` some time after the notification that started it. If a
+        new run has begun in the meantime, its panes were emptied (packet 30b review) and a deferred
+        read would paint the *previous* run's lines back into them. Only the visible layout's timer
+        is running, so stopping it is enough for both layouts."""
+        timer = getattr(self, "_log_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _reset_live_log_state(self) -> None:
+        """Forget the Action and the phase of the run before this one (packet 40a fix 2, item 5).
+
+        Called when a run starts and when it ends: a phase left behind would draw a Post-test group the
+        next run never had."""
+        self._live_phase = None
+        self._live_run_order = None
+
+    def _settle_live_phase(self, actions: list[dict]) -> None:
+        """Drop the running Action once its own row has landed (packet 40a fix 2, item 4).
+
+        Matched on its phase and run order, not on the phase alone: a second Action of the same phase
+        is still running after the first one's row lands."""
+        if self._live_phase is None:
+            return
+        if any(a.get("phase") == self._live_phase and a.get("run_order") == self._live_run_order for a in actions):
+            self._live_phase = None
+            self._live_run_order = None
+
+    def _loaded_schedule_steps(self) -> list[object]:
+        """The expanded schedule rows this layout loaded for the run, in runner order.
+
+        The store only gets a node row once the worker has walked that tree row (packet 15b), so a
+        live Log pane grouping purely by `store.nodes()` would list only the steps it has reached.
+        Each layout already keeps the loaded tree it painted its step list from, and that is what
+        lets the Log name every scheduled step, including the ones not run yet."""
+        return []
+
+    def _log_group_rows(self) -> list[dict]:
+        """The tree rows the Log pane groups by, in schedule order (packet 40a).
+
+        Recorded rows are used as they are; a scheduled step the worker has not reached yet gets a
+        row built from the loaded schedule so it still appears, with a note ("Not run yet." while
+        the run is up, packet 40a review item 5) under its label. A layout whose step list nobody
+        filled — a run started straight on the session — reads the same expanded tree the picker
+        reads, once, and caches it."""
+        run_uuid = self.session.run_uuid
+        recorded = {node.get("node_seq"): node for node in (self.session.store.nodes(run_uuid) if run_uuid else [])}
+        steps = self._loaded_schedule_steps()
+        if not steps:
+            name = self.session.selected_schedule or ""
+            if name and getattr(self, "_log_steps_name", None) != name:
+                self._log_steps_name = name
+                self._log_steps_cache = load_schedule_steps(self.session, name)
+            steps = getattr(self, "_log_steps_cache", [])
+        overrides = self.session.node_enables or {}
+        rows: list[dict] = []
+        for seq, step in enumerate(steps):
+            node = recorded.get(seq)
+            if node is not None:
+                rows.append(node)
+                continue
+            rows.append({
+                "node_seq": seq,
+                "kind": "header" if getattr(step, "is_header", False) else "step",
+                "step_number": getattr(step, "step_no", "") or "",
+                "step_name": getattr(step, "name", "") or "",
+                # An Operator toggle beats the row's :setEnable() default, as RunEngine._enabled decides.
+                "enabled": bool(overrides.get(seq, getattr(step, "default_enabled", getattr(step, "enabled", True)))),
+            })
+        return rows or list(recorded.values())
+
+    def _log_panes_context(self, nodes: list[dict], actions: list[dict]) -> dict[str, Any]:
+        """What the log grouping needs to know about the run right now (packet 40a, items 4 and 5)."""
+        return {
+            "nodes": nodes,
+            "actions": actions,
+            "live_phase": self._live_phase,
+            "run_finished": getattr(self, "state", None) == SessionState.FINISHED,
+            "started_steps": getattr(self, "_started_steps", set()),
+        }
+
+    def _refresh_log(self, incremental: bool = True) -> None:
+        """Bring both log panes up to date with the store (packet 25a: the log panes are live).
+
+        Two paths. The live path reads only the rows recorded after the Debug window's last drawn
+        seq (`log_lines_after`), and each pane takes its share of them: the Log tab keeps the INFO-and-
+        above ones. The recovery path — a pane with nothing drawn yet, activation, a restored run, a
+        run start, ``incremental=False`` — draws the newest :data:`LOG_PANE_LIMIT` rows of each level
+        through :func:`draw_log_panes`. Neither path reads the whole log (packet 40a fix 2, item 2).
+        A layout that is not showing defers the read (packet 25b review)."""
         if not self.is_active():
             self.mark_store_dirty()
             return
         if not self._store_open():
             return  # ticket 39 review: the window released the session, so there is nothing to read
         run_uuid = self.session.run_uuid
-        self._show_log(self.session.store.log_lines(run_uuid) if run_uuid else [])
+        if not run_uuid:
+            return
+        store = self.session.store
+        nodes = self._log_group_rows()
+        actions = store.actions(run_uuid)
+        self._settle_live_phase(actions)
+        context = self._log_panes_context(nodes, actions)
+        after = self.debug_window.last_seq()
+        if not incremental or after < 0 or not (self.log_pane.is_drawn() and self.debug_window.is_drawn()):
+            draw_log_panes(self.log_pane, self.debug_window, store, run_uuid, nodes, actions,
+                           live_phase=context["live_phase"], run_finished=context["run_finished"],
+                           started_steps=context["started_steps"])
+            return
+        # Each pane has its own cursor: the Debug window is shared by both layouts, so the other layout may
+        # have advanced it while this one was hidden. The Log tab's read filters DEBUG in the store.
+        info_rows = store.log_lines_after(run_uuid, self.log_pane.last_seq(), min_level="INFO")
+        self.log_pane.append_rows(info_rows, nodes, actions, live_phase=context["live_phase"],
+                                  run_finished=context["run_finished"], started_steps=context["started_steps"])
+        self.debug_window.append_rows(store.log_lines_after(run_uuid, after), nodes, actions,
+                                      live_phase=context["live_phase"], run_finished=context["run_finished"],
+                                      started_steps=context["started_steps"])
 
 
 class MismatchConfirmation(QDialog):

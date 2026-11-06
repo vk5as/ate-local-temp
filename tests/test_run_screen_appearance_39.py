@@ -89,7 +89,7 @@ from ate.ui.theme import (
 )
 from ate.ui.three_pane_run_screen import ThreePaneRunScreen
 
-from ._fixtures import add_long_schedule, write_ate_env
+from ._fixtures import add_long_schedule, fill_operator_fields, fill_run_fields, write_ate_env
 
 #: The screen size the review measured against: a Station on a netbook.
 NETBOOK = (1366, 768)
@@ -192,6 +192,7 @@ def test_the_three_pane_result_column_paints_its_badge(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(900, 600)
     screen.show()
     qapp.processEvents()
@@ -230,6 +231,7 @@ def test_the_result_column_widens_for_the_widest_result_the_run_shows(qapp, tmp_
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     screen.table.load_steps(load_schedule_steps(session, "Logging schedule"))
@@ -255,6 +257,7 @@ def test_a_live_refresh_keeps_the_steps_the_run_has_not_reached(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     screen.uut_operator_stage.operator_edit.setText("Ada")
@@ -303,6 +306,7 @@ def test_the_summary_label_is_inside_its_input_widget(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     screen.uut_operator_stage.operator_edit.setText("Ada")
@@ -338,6 +342,7 @@ def test_closing_the_window_stops_the_header_timer_before_the_store_closes(qapp,
     alerts: list[str] = []
     outcome = launch(["--config", str(env["config"])], exec_=False, prompt=lambda path: True, alert=alerts.append)
     window = outcome.window
+    fill_run_fields(window)
     screen = window.run_screen
     assert screen._timer.isActive(), "the header timer runs while the window is open"
 
@@ -371,6 +376,7 @@ def test_the_window_still_fits_a_1366x768_screen(qapp, tmp_path):
     alerts: list[str] = []
     outcome = launch(["--config", str(env["config"])], exec_=False, prompt=lambda path: True, alert=alerts.append)
     window = outcome.window
+    fill_run_fields(window)
     hint = window.minimumSizeHint()
     assert hint.width() <= NETBOOK[0] and hint.height() <= NETBOOK[1], f"the window needs {hint.width()}x{hint.height()}"
 
@@ -411,10 +417,9 @@ def _fonts_drawn_px_taller(px: int):
         theme.STYLESHEET,
         run_widgets.ui_font,
         run_widgets.mono_font,
-        three_pane_run_screen.mono_font,
     )
     theme.ui_font = run_widgets.ui_font = taller(theme.ui_font)
-    theme.mono_font = run_widgets.mono_font = three_pane_run_screen.mono_font = taller(theme.mono_font)
+    theme.mono_font = run_widgets.mono_font = taller(theme.mono_font)
     theme.STYLESHEET = re.sub(r"font-size: (\d+)px", lambda m: f"font-size: {int(m.group(1)) + px}px", theme.STYLESHEET)
     return original
 
@@ -422,7 +427,7 @@ def _fonts_drawn_px_taller(px: int):
 def _restore_theme(original) -> None:
     """Put the patched theme back; the caller re-applies it to `qapp`, which pytest-qt shares across
     the whole session."""
-    (theme.ui_font, theme.mono_font, theme.STYLESHEET, run_widgets.ui_font, run_widgets.mono_font, three_pane_run_screen.mono_font) = original
+    (theme.ui_font, theme.mono_font, theme.STYLESHEET, run_widgets.ui_font, run_widgets.mono_font) = original
 
 
 def _settle_window_layout(qapp, window) -> None:
@@ -473,6 +478,7 @@ def test_the_window_still_fits_1280x800_when_the_platform_font_is_taller(qapp, t
         config.write_text(json.dumps(data), encoding="utf-8", newline="\n")
         outcome = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[])
         window = outcome.window
+        fill_run_fields(window)
         window.resize(*TARGET_WINDOW)
         window.show()
         _settle_window_layout(qapp, window)
@@ -541,6 +547,7 @@ def test_a_finished_refresh_appends_to_the_log_it_was_reading(qapp, tmp_path):
     add_long_schedule(tmp_path, steps=40, fail_at=10)
     session = HeadlessRunSession(env["config"])
     screen = StagedRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     screen.uut_operator_stage.operator_edit.setText("Ada")
@@ -558,7 +565,6 @@ def test_a_finished_refresh_appends_to_the_log_it_was_reading(qapp, tmp_path):
     screen.run_view.refresh(
         session.store.nodes(session.run_uuid),
         session.store.attempts(session.run_uuid),
-        session.store.log_lines(session.run_uuid),
     )
     assert log_pane.rendered_lines() == before, "the finished refresh rewrote the Log pane"
     assert bar.value() == where, f"the finished refresh moved the reader from {where} to {bar.value()}"
@@ -723,6 +729,7 @@ def test_the_prompt_bar_has_three_buttons_of_the_same_width(qapp, tmp_path):
     buttons, and the fix is measured here off the widgets in the bar as it is actually laid out."""
     config, _env = _layout_config(tmp_path, "staged")
     window = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[]).window
+    fill_run_fields(window)
     window.resize(1280, 800)
     window.show()
     qapp.processEvents()
@@ -760,6 +767,7 @@ def test_a_pause_keeps_the_failed_step_badge_across_a_layout_switch(qapp, tmp_pa
     badge, while the prompt bar still said `Step 1. FAIL`."""
     config, _env = _layout_config(tmp_path, "staged")
     window = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[]).window
+    fill_run_fields(window)
     window.resize(1280, 800)
     window.show()
     qapp.processEvents()
@@ -811,6 +819,7 @@ def test_a_new_run_replaces_the_deferred_finished_run(qapp, tmp_path):
     the current run was waiting on could not be answered."""
     config, _env = _layout_config(tmp_path, "threePane")
     window = launch(["--config", str(config)], exec_=False, prompt=lambda path: True, alert=[]).window
+    fill_run_fields(window)
     window.resize(1280, 800)
     window.show()
     qapp.processEvents()
@@ -870,6 +879,10 @@ def test_a_new_run_replaces_the_deferred_finished_run(qapp, tmp_path):
     while time.monotonic() < deadline and (1, 1) not in asked:
         qapp.processEvents()
     assert (1, 1) in asked, "answering the staged layout's input did not let the run go on"
-    _wait_finished(qapp, staged.session)
+    # The run can never reach FINISHED here: its second step blocks on an input this test never
+    # answers. The old `_wait_finished` call just burned its full 20 s deadline (packet 44), so
+    # close with a short event flush instead.
+    for _ in range(20):
+        qapp.processEvents()
     window.close()
     qapp.processEvents()

@@ -24,9 +24,15 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
-from ..catalog import definition_mismatches, include_map, module_map, resolve_schedule, resolve_schedule_definition, resolve_schedule_path
+from ..catalog import (
+    chain_defects,
+    definition_mismatches,
+    find_definitions,
+    find_schedule,
+    module_map,
+    refresh_definition,
+)
 from .._version import __version__  # packet 06d: the version written to test_run.ate_version
-from ..engine.lua_host import LuaHost
 from ..config import Config, read_config
 from ..engine.run_engine import RunEngine, RunStatus
 from ..engine.step_inputs import value_error
@@ -59,6 +65,19 @@ def _map_run_status(status: RunStatus) -> SessionState:
     }[status.value]
 
 
+def _refuse_broken_release(definition) -> None:
+    """Refuse a run whose selected release, or any release it depends on, is broken on disk.
+
+    Packet 43 review fix 3: Start re-reads the chain from each release's own `.atedef`, and a file
+    corrupted since the scan reads back with `broken` set and no files, so the checksum check would
+    quietly vanish and the run would record nothing. Naming the release is what tells the Operator
+    which Test Definition to fix; the refusal line the Run screen shows is this message."""
+    for member in chain_defects(definition):
+        reason = member.broken or "no mediaNumber in its .atedef"
+        label = f"{member.media_number} ({member.atedef_path})" if member.media_number else str(member.atedef_path or member.path)
+        raise SessionError(f"Test Definition {label} is broken: {reason}")
+
+
 class HeadlessRunSession(QObject):
     """Drives a one-step Test Schedule headlessly and records it through the store."""
 
@@ -74,6 +93,10 @@ class HeadlessRunSession(QObject):
     prompt_answered = Signal(int, int, str)
     action_started = Signal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is starting (packet 14d)
     step_started = Signal(int)  # node_seq: a Test Step Attempt is starting (packet 14d)
+    # run_uuid: the worker recorded log lines (packet 40a). Every Run layout listens to this so an
+    # `ATE.log` line reaches the Log tab the moment it is written, not when the step ends; the panes
+    # then read the new rows from the store, which is their only source of log content.
+    log_appended = Signal(str)
     report_written = Signal(str, str)  # (html_path, pdf_path): the run-end PDF worker finished; pdf_path is "" on failure
 
     def __init__(
@@ -92,6 +115,12 @@ class HeadlessRunSession(QObject):
         # privileged session skips its PDF rather than silently disabling the sandbox.
         self._pdf_choice = pdf_choice or pdf_sandbox_choice()
         self._selected_name: Optional[str] = None
+        # Packet 43: the catalogue scan a Run screen holds for this session. `SchedulePicker.refresh`
+        # (first load and every Rescan) hands it here, so picking a schedule reads the scan it
+        # already has instead of walking the Test Definition directories again. ``None`` until a
+        # layout refreshes a picker: a session used headlessly has no held scan and selects the
+        # way it always has, straight from disk.
+        self._scan: Optional[list] = None
         # The selected schedule's declared Stop on Fail default, captured when it is chosen;
         # ``None`` until a schedule has been selected. Prefills the Steps stage radio (True when
         # unset) and is what a run records unless the Operator overrides it via set_stop_on_fail.
@@ -187,6 +216,27 @@ class HeadlessRunSession(QObject):
         """The schedule name the Operator last selected, if any."""
         return self._selected_name
 
+    def set_catalog_scan(self, definitions: list) -> None:
+        """Adopt the catalogue scan a Run screen just made as this session's held scan (packet 43).
+
+        The Test Schedule catalogue is read from disk when a layout loads and when the Operator
+        presses Rescan; every selection afterwards reads the rows from this scan. The picker's
+        rows, mismatch flags and release labels, and the session's step preview, all come from
+        the same held scan, so they agree without another walk of the directories."""
+        self._scan = list(definitions)
+
+    def schedule_for(self, name: str):
+        """``(definition, path, loaded host)`` for the schedule ``name``, or ``None`` if it can't run.
+
+        Searched in the scan the picker holds (packet 43): no Test Definition directory is
+        walked, only the schedules in the already-read releases are loaded. A session no Run
+        screen ever refreshed has no held scan and resolves straight from disk, as it always did."""
+        if self._scan is not None:
+            return find_schedule(self._scan, name)
+        if self._config is None:
+            return None
+        return find_schedule(find_definitions(*self._config.test_definition_dirs), name)
+
     def pending_mismatches(self) -> list[tuple[str, Optional[str], str, str]]:
         """Every checksum mismatch a run of the selected schedule can load (its own ``.tslua`` and its
         release's modules; not sibling schedules' files).
@@ -194,13 +244,20 @@ class HeadlessRunSession(QObject):
         Each entry is ``(rel_path, expected_sha256, computed_sha256, media_number)`` for a file the
         run would load whose bytes on disk differ from what its Test Definition recorded — the set
         the Run screen flags with ⚠ and the confirmation lists before the run starts (ticket 06c).
-        Empty when nothing is selected or everything matches."""
-        config = self._config
-        if config is None or self._selected_name is None:
+        Empty when nothing is selected or everything matches.
+
+        Packet 43 review fix: the selected schedule's release is re-read and re-hashed here, so the
+        answer is the bytes on disk right now rather than the ones the held scan saw. Only that
+        schedule's release and its resolved chain are read, never the whole catalogue. A release, or a
+        chain member, that is broken on disk now raises :class:`SessionError`: there are no checksums
+        left to confirm, and a run must not start without them."""
+        if self._selected_name is None:
             return []
-        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=self._selected_name)
-        if definition is None:
+        found = self.schedule_for(self._selected_name)
+        if found is None:
             return []
+        definition = refresh_definition(found[0])
+        _refuse_broken_release(definition)
         return definition_mismatches(definition, self._selected_name)
 
     def store_mismatched_files(self, choice: Optional[bool], mismatches: Optional[list[tuple[str, Optional[str], str, str]]] = None) -> bool:
@@ -377,10 +434,11 @@ class HeadlessRunSession(QObject):
     def select_schedule(self, name: str) -> None:
         """Select a schedule by its loaded name and remember its Stop on Fail default.
 
-        Loads the schedule once (the same host that runs it later) so the Steps stage can prefill
-        its radio from the declared default; a broken or unreadable schedule falls back to True.
-        Re-selecting from FINISHED returns to SELECTING so the step boxes unlock again (spec 37);
-        while a run is in progress the selection is remembered but not announced."""
+        Reads the schedule once from the scan the picker holds (packet 43) — the same host that
+        runs it later — so the Steps stage can prefill its radio from the declared default; a
+        broken or unreadable schedule falls back to True. Re-selecting from FINISHED returns to
+        SELECTING so the step boxes unlock again (spec 37); while a run is in progress the
+        selection is remembered but not announced."""
         if not name or name == "":
             raise SessionError("a schedule name is required to select one")
         # Switching schedules drops the previous schedule's step overrides and its On failure
@@ -390,18 +448,12 @@ class HeadlessRunSession(QObject):
             self._pending_stop_on_fail = None
         self._selected_name = name
         stop_on_fail = True  # spec default when unset, unknown, or the schedule fails to load
-        config = self._config
-        if config is not None:
-            try:
-                definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=name)
-                if definition is not None:
-                    modules = module_map(definition)
-                    path = resolve_schedule_path(definition, name)
-                    if path is not None:
-                        host = LuaHost(path, modules=modules, includes=include_map(definition))
-                        stop_on_fail = bool(host.schedule.stop_on_fail)
-            except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
-                print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
+        try:
+            found = self.schedule_for(name)
+            if found is not None:
+                stop_on_fail = bool(found[2].schedule.stop_on_fail)
+        except Exception:  # noqa: BLE001 - any load failure keeps the run startable at True
+            print(f"WARNING: could not read Stop on Fail default from '{name}', using True")
         self._selected_stop_on_fail = stop_on_fail
         # Announce selection while idle or just finished; the FINISHED release (engine cleared in
         # _set_state) lets a re-select return to SELECTING, which unlocks the step boxes.
@@ -591,11 +643,24 @@ class HeadlessRunSession(QObject):
 
         config = self._config
         assert config is not None, "session was constructed without a config"
-        definition = resolve_schedule_definition(*config.test_definition_dirs, schedule_name=self._selected_name)
-        if definition is None:
+        # Packet 43: the schedule to run comes from the scan the session holds, never from a fresh
+        # walk of the whole catalogue. The run-start read of the schedule itself stays: its file
+        # must be on disk right now, and the engine reads its actual bytes and records the
+        # checksums of everything the run loads (packets 06b, 06c).
+        found = self.schedule_for(self._selected_name)
+        if found is None:
             raise SessionError(f"schedule '{self._selected_name}' is not available")
-        path = resolve_schedule_path(definition, self._selected_name)
-        assert path is not None, "resolved schedule has no matching file"
+        definition, path, _host = found
+        if not path.exists():
+            raise SessionError(f"schedule '{self._selected_name}' is not available")
+        # Packet 43 review fix: the held scan is the picker's view; Start's decision is made against
+        # the files as they are on disk now. One re-read of this release and its chain, no catalogue
+        # walk: an edit after the last Rescan is confirmed, a file the Operator fixed is not. The
+        # engine's definition and the store answer come from this read; the confirmation the Run screen
+        # shows is a separate read of the same schedule by `pending_mismatches` (packet 43 review note),
+        # and both refuse a release that is broken on disk now rather than run without checksums.
+        definition = refresh_definition(definition)
+        _refuse_broken_release(definition)
         modules = module_map(definition)  # packet 06a: forward the release's require'd module map to the run
         # Packet 06c: the Operator's answer to the run-start confirmation decides whether the bytes of
         # a file whose checksum differs are recorded on its run_file row.
@@ -664,6 +729,9 @@ class HeadlessRunSession(QObject):
         # count Pre-/Post-test Actions and restart its current-item timer without polling the worker.
         self._engine.action_started.connect(self._on_action_started)
         self._engine.step_started.connect(self._on_step_started)
+        # The worker's freshly recorded log lines (packet 40a): relayed like every other signal so
+        # each layout reads the new rows from the store as soon as they land.
+        self._engine.log_lines_recorded.connect(self._on_log_lines_recorded)
 
         self._engine.start()
         return self._engine
@@ -712,3 +780,11 @@ class HeadlessRunSession(QObject):
         Emitted on the owning thread; delivery rides the event loop like every other queued signal."""
         if not self._closed:
             self.step_started.emit(node_seq)
+
+    def _on_log_lines_recorded(self, run_uuid: str) -> None:
+        """Forward the worker's "log rows just landed" so the live Log panes read them at once.
+
+        Emitted on the owning thread like the other forwards; delivery is queued to this session's
+        thread, and it stops at ``close()`` for the same reason the input asks do."""
+        if not self._closed:
+            self.log_appended.emit(run_uuid)

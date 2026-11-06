@@ -39,6 +39,7 @@ from ._fixtures import (
     add_header_schedule,
     add_logging_input_schedule,
     add_long_schedule,
+    fill_operator_fields,
     write_ate_env,
 )
 
@@ -211,15 +212,14 @@ def test_a_sixty_step_run_finishes_through_both_layouts(qapp, tmp_path):
         session = HeadlessRunSession(env["config"])
         session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
         screen = build(session)
+        fill_operator_fields(screen)  # packet 41: no run starts with a required field left blank
         screen.resize(1280, 800)
         screen.show()
         qapp.processEvents()
         if build is ThreePaneRunScreen:
             _pick(screen, name)
-            screen.fields.operator_edit.setText("Ada")
             screen.start_button.click()
         else:
-            screen.uut_operator_stage.operator_edit.setText("Ada")
             screen._advance(1)
             _start_staged_run(screen, name)
 
@@ -246,6 +246,7 @@ def test_three_panes_are_built_and_split_25_50_25(qapp, tmp_path):
     """The screen is a QSplitter of three panes with the status bar beneath them."""
     env = write_ate_env(tmp_path)
     screen = ThreePaneRunScreen(HeadlessRunSession(env["config"]))
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -293,6 +294,7 @@ def test_left_pane_shows_fields_counts_and_a_filterable_list(qapp, tmp_path):
     """Project prefills from defaultProject; the filter narrows the list; Start needs both."""
     env = write_ate_env(tmp_path)
     screen = ThreePaneRunScreen(HeadlessRunSession(env["config"]))
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
 
@@ -336,6 +338,7 @@ def test_a_broken_row_shows_its_error_inline_and_cannot_be_started(qapp, tmp_pat
     name = _break_a_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
 
@@ -366,6 +369,7 @@ def test_a_mismatched_schedule_flags_its_files_inside_its_row(qapp, tmp_path):
     bad_file = _flag_a_mismatch(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
 
@@ -391,6 +395,7 @@ def test_running_a_schedule_through_the_widgets_finishes(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -437,6 +442,7 @@ def test_the_table_reports_result_attempts_actual_expected_message(qapp, tmp_pat
     session = HeadlessRunSession(env["config"])
     session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Failing schedule")
@@ -452,6 +458,7 @@ def test_the_table_reports_result_attempts_actual_expected_message(qapp, tmp_pat
 
     session2 = HeadlessRunSession(env["config"])
     screen2 = ThreePaneRunScreen(session2)
+    fill_operator_fields(screen2)
     screen2.show()
     qapp.processEvents()
     _pick(screen2, "Passing schedule")
@@ -477,6 +484,7 @@ def test_a_retry_shows_the_attempt_count_in_the_table(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
 
@@ -502,6 +510,7 @@ def test_unrun_steps_have_a_blank_attempts_cell(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Fail then pass schedule")
@@ -530,6 +539,7 @@ def test_counts_are_live_and_the_log_shows_info_and_above(qapp, tmp_path):
     _add_debug_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
 
@@ -564,6 +574,7 @@ def test_stop_on_fail_pause_shows_the_inline_prompt_and_banner(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -629,6 +640,7 @@ def test_abort_answers_a_pending_prompt_from_the_left_pane(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Fail then pass schedule")
@@ -659,6 +671,7 @@ def test_boxes_toggle_steps_and_headers_before_a_run_and_lock_during_one(qapp, t
     name = add_header_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, name)
@@ -718,6 +731,7 @@ def test_no_visible_text_overlaps_and_every_pane_holds_its_own_widgets(qapp, tmp
     session = HeadlessRunSession(env["config"])
     session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -777,6 +791,7 @@ def test_a_finished_run_closes_every_step_input(qapp, tmp_path):
     name = add_logging_input_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, name)
@@ -815,6 +830,7 @@ def test_supplying_an_input_after_a_run_is_refused_not_raised(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Blocking input schedule")
@@ -826,6 +842,9 @@ def test_supplying_an_input_after_a_run_is_refused_not_raised(qapp, tmp_path):
         if widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled():
             break
         time.sleep(0.01)
+    assert widget is not None and widget.line_edit is not None and widget.line_edit.isEnabled(), (
+        "the blocking input was not offered within 10 s"
+    )
     widget.line_edit.setText("7")
     widget.ok_button.click()
     assert _wait_finished(qapp, session)
@@ -845,6 +864,7 @@ def test_picking_another_schedule_mid_run_leaves_the_running_table_alone(qapp, t
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Fail then pass schedule")
@@ -882,6 +902,7 @@ def test_the_log_panes_are_live_while_a_step_waits_on_an_input(qapp, tmp_path):
     name = add_logging_input_schedule(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, name)
@@ -915,6 +936,7 @@ def test_a_second_run_starts_with_the_counts_zeroed(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     session.failure_prompt.connect(lambda *_seen: session.choose("CONTINUE"))
@@ -945,6 +967,7 @@ def test_the_step_table_has_no_row_numbers(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.show()
     qapp.processEvents()
     _pick(screen, "Enable/disable schedule")
@@ -973,6 +996,7 @@ def test_a_mismatch_is_flagged_once_and_the_left_pane_never_scrolls_sideways(qap
     bad_file = _flag_a_mismatch(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -1038,6 +1062,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
 
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -1069,6 +1094,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
 
     session2 = HeadlessRunSession(env["config"])
     screen2 = ThreePaneRunScreen(session2)
+    fill_operator_fields(screen2)
     screen2.resize(1280, 800)
     screen2.show()
     qapp.processEvents()
@@ -1093,6 +1119,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
 
     session3 = HeadlessRunSession(env["config"])
     screen3 = ThreePaneRunScreen(session3)
+    fill_operator_fields(screen3)
     screen3.resize(1280, 800)
     screen3.show()
     qapp.processEvents()
@@ -1111,6 +1138,7 @@ def test_the_five_states_are_captured_as_screenshots(qapp, tmp_path):
 
     session4 = HeadlessRunSession(env["config"])
     screen4 = ThreePaneRunScreen(session4)
+    fill_operator_fields(screen4)
     screen4.resize(1280, 800)
     screen4.show()
     qapp.processEvents()
@@ -1155,6 +1183,7 @@ def test_the_four_states_are_captured_as_screenshots(qapp, tmp_path):
     env = write_ate_env(tmp_path)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
+    fill_operator_fields(screen)
     screen.resize(1280, 800)
     screen.show()
     qapp.processEvents()
@@ -1178,6 +1207,7 @@ def test_the_four_states_are_captured_as_screenshots(qapp, tmp_path):
 
     session2 = HeadlessRunSession(env["config"])
     screen2 = ThreePaneRunScreen(session2)
+    fill_operator_fields(screen2)
     screen2.resize(1280, 800)
     screen2.show()
     qapp.processEvents()

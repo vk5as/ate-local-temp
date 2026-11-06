@@ -102,6 +102,10 @@ class RunEngine(QThread):
     prompt_answered = Signal(int, int, str)
     action_started = Signal(str, int, int)  # (phase "pre"/"post", completed, total): a Pre-/Post-test Action is about to run (packet 14d)
     step_started = Signal(int)  # node_seq: a Test Step Attempt is about to run, again on each Retry (packet 14d)
+    # run_uuid: rows have just landed in the log_line table (packet 40a). The log panes read the
+    # store on this instead of polling or waiting for the step to end, so an `ATE.log` line shows
+    # up while the step that emitted it is still running.
+    log_lines_recorded = Signal(str)
 
     def __init__(
         self,
@@ -552,6 +556,18 @@ class RunEngine(QThread):
             return [actions]
         return [a for a in actions if a is not None]
 
+    def _record_log_lines(self, run_uuid: str, lines: list[dict], **ownership: Any) -> None:
+        """Write log rows and announce the write (packet 40a).
+
+        Every insert of log lines goes through here so the UI hears about it on
+        :attr:`log_lines_recorded` the moment the rows are in the store — no layout has to poll or
+        guess from other signals that the worker logged something. An empty batch is a no-op:
+        nothing landed, so nothing is announced."""
+        if not lines:
+            return
+        self._store.insert_log_lines(run_uuid, 0, lines, **ownership)
+        self.log_lines_recorded.emit(run_uuid)
+
     def _flush_device_warnings(self, host: "LuaHost", run_uuid: str, *, in_window: tuple[float, float] | None = None,
                                log_from: int | None = None, node_seq: int | None = None,
                                attempt_no: int | None = None, action_seq: int | None = None) -> None:
@@ -593,12 +609,12 @@ class RunEngine(QThread):
         batch_owned = False
         for t, line, is_owned in sorted(logs + warnings, key=lambda entry: entry[0]):
             if batch and is_owned != batch_owned:
-                self._store.insert_log_lines(run_uuid, 0, batch, **(ownership if batch_owned else {}))
+                self._record_log_lines(run_uuid, batch, **(ownership if batch_owned else {}))
                 batch = []
             batch_owned = is_owned
             at = datetime.fromtimestamp(t + wall_offset, timezone.utc).isoformat(timespec="milliseconds")
             batch.append({**line, "at": at})
-        self._store.insert_log_lines(run_uuid, 0, batch, **(ownership if batch_owned else {}))
+        self._record_log_lines(run_uuid, batch, **(ownership if batch_owned else {}))
 
     def _flush_equipment(self, host: "_LuaHost", run_uuid: str, *, node_seq: int | None = None,
                          attempt_no: int | None = None, action_seq: int | None = None) -> None:
@@ -829,9 +845,8 @@ class RunEngine(QThread):
                 close(device)
             if hasattr(device, "describe"):
                 warnings.append(f"device {device.describe()} left open at end of run")
-        self._store.insert_log_lines(
+        self._record_log_lines(
             run_uuid,
-            0,
             [{"level": "WARNING", "source": "ate", "text": text} for text in warnings],
         )
 
@@ -868,8 +883,8 @@ class RunEngine(QThread):
         run_uuid, host = self._run_uuid, self._host
         if run_uuid is not None:
             attempt(self._drain_device_warnings)
-            attempt(lambda: self._store.insert_log_lines(
-                run_uuid, 0, [{"level": "ERROR", "source": "ate", "text": message}]
+            attempt(lambda: self._record_log_lines(
+                run_uuid, [{"level": "ERROR", "source": "ate", "text": message}]
             ))
             if host is not None:
                 attempt(lambda: self._close_open_devices(host, run_uuid))
@@ -953,8 +968,8 @@ class RunEngine(QThread):
                     try:
                         atedef_sha = _sha256_hex(atedef_path.read_bytes())
                     except Exception as exc:  # any read failure: the row is still recorded, the run carries on
-                        self._store.insert_log_lines(
-                            run_uuid, 0,
+                        self._record_log_lines(
+                            run_uuid,
                             [{"level": "WARNING", "source": "ate", "text": f"could not read .atedef for {member.media_number or member.name} ({atedef_path}): {exc}"}],
                         )
                 self._store.insert_media_release(
@@ -1176,9 +1191,8 @@ class RunEngine(QThread):
                 # The Attempt's own log lines are already written (drained above, in emission order);
                 # an Attempt that never reported adds its own warning (source "ate") after them.
                 if not new_reports:
-                    self._store.insert_log_lines(
+                    self._record_log_lines(
                         run_uuid,
-                        seq,
                         [{"level": "WARNING", "source": "ate", "text": f"step '{step.name}' never reported"}],
                         node_seq=seq,
                         attempt_no=attempt_count,
@@ -1382,7 +1396,7 @@ class RunEngine(QThread):
                 mismatches.append((entry.rel_path, entry.expected_sha256, computed, content is not None))
         for rel_path, expected, computed, stored in mismatches:
             note = " (file stored with this Test Run)" if stored else ""
-            self._store.insert_log_lines(
-                run_uuid, 0,
+            self._record_log_lines(
+                run_uuid,
                 [{"level": "WARNING", "source": "ate", "text": f"checksum mismatch for {rel_path} (expected {expected}, got {computed}){note}"}],
             )

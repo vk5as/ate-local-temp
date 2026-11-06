@@ -74,3 +74,28 @@ def test_history_blocked_while_run_in_progress(qapp, tmp_path):
     qapp.processEvents()
     assert "A Test Run is in progress" not in screen._status_label.text()
     assert screen.table_view.isEnabled() is True
+
+
+def test_new_run_for_this_uut_is_off_while_a_run_is_going(qapp, tmp_path):
+    """Packet 41 review: History's "New run for this UUT" answered silently during a run.
+
+    The action is now unavailable while a run is in progress — whatever `allowHistoryDuringRun`
+    says about browsing — and returns when the run ends, so the Operator never clicks a button that
+    does nothing."""
+    store = RunStore(tmp_path / "ate.db")
+    _running_row(store)
+    screen = HistoryScreen(HistorySession(store))
+    emitted: list[dict] = []
+    screen.new_run_requested.connect(lambda prefill: emitted.append(prefill))
+
+    assert screen.new_run_button.isEnabled() is True, "History's New run is off before any run starts"
+    screen.set_run_in_progress(True)
+    qapp.processEvents()
+    assert screen.new_run_button.isEnabled() is False, "History offered a new run while one was going"
+    screen.new_run_button.click()
+    qapp.processEvents()
+    assert not emitted, "the disabled New run still emitted a prefill"
+
+    screen.set_run_in_progress(False)
+    qapp.processEvents()
+    assert screen.new_run_button.isEnabled() is True, "History's New run stayed off after the run ended"
