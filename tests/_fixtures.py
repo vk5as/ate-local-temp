@@ -1231,8 +1231,8 @@ def add_grouped_log_schedule(tmp_path: Path) -> str:
     return "Grouped log schedule"
 
 
-def add_bulky_log_schedule(tmp_path: Path) -> str:
-    """Add a schedule whose single Test Step logs 5,000 lines, then waits for the latch.
+def add_bulky_log_schedule(tmp_path: Path, count: int = 5000) -> str:
+    """Add a schedule whose single Test Step logs ``count`` lines, then waits for the latch.
 
     Packet 40a review, item 3: this is the chatty run the Log pane has to survive — 5,000 rows
     written one at a time by the worker, each announced on ``log_appended``. The step then waits
@@ -1246,7 +1246,7 @@ def add_bulky_log_schedule(tmp_path: Path) -> str:
         "  :setSchedule({\n"
         '    StepParams("stream"):setStepNo("1.")\n'
         '      :setAction(function()\n'
-        '        for i = 1, 5000 do\n'
+        f'        for i = 1, {count} do\n'
         '          ATE.log(Log.INFO, "burst line " .. i)\n'
         '        end\n'
         '        for _ = 1, 200 do\n'

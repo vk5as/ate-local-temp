@@ -1121,7 +1121,7 @@ def test_the_finished_staged_run_passes_the_run_context_to_the_panes(qapp, tmp_p
 
 
 def test_a_real_run_keeps_the_newest_rows_in_the_log_and_the_debug_window(qapp, tmp_path, fake_pdf, monkeypatch):
-    """Packet 40a fix 2, item 1 and fix 3, item 1 in both panes of a real run: 5,000 lines logged, a window of 50.
+    """Packet 40a fix 2, item 1 and fix 3, item 1 in both panes of a real run: 200 lines logged, a window of 50.
 
     Each pane keeps at most the newest 50 rows of its own level filter. Both say so on their first line; the
     step keeps its heading with the count of the lines left out; the Pre-test heading stays although its
@@ -1130,7 +1130,8 @@ def test_a_real_run_keeps_the_newest_rows_in_the_log_and_the_debug_window(qapp, 
     monkeypatch.setattr(run_widgets, "LOG_PANE_SLACK", 10, raising=False)
     monkeypatch.setenv("ATE_LATCH_OPEN", "1")  # the step's wait ends at once: the run is quick
     env = write_ate_env(tmp_path)
-    name = add_bulky_log_schedule(tmp_path)
+    # Four windows exercise dropping and tail retention without 5,000 durable writes.
+    name = add_bulky_log_schedule(tmp_path, count=200)
     session = HeadlessRunSession(env["config"])
     screen = ThreePaneRunScreen(session)
     fill_operator_fields(screen)
@@ -1150,7 +1151,7 @@ def test_a_real_run_keeps_the_newest_rows_in_the_log_and_the_debug_window(qapp, 
                              screen._log_group_rows(), actions)
     window_rows = run_widgets.LOG_PANE_LIMIT
     assert log[-1].endswith("posttest teardown"), log[-3:]
-    assert _count(log, "burst line") <= window_rows - 1 and any(line.endswith("burst line 5000") for line in log), log[-3:]
+    assert _count(log, "burst line") <= window_rows - 1 and any(line.endswith("burst line 200") for line in log), log[-3:]
     assert not any(line.endswith(" burst line 1") for line in log), "a line older than the window was drawn"
     assert PRE_HEADING in log and _line_after(log, PRE_HEADING) == run_widgets._dropped_note(1), log[:4]
     _settle(qapp, session)

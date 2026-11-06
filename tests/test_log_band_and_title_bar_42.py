@@ -355,6 +355,7 @@ def test_the_colour_is_set_on_show_and_again_when_the_window_is_shown_again(qapp
 
 def test_showing_a_window_on_linux_touches_nothing(qapp, tmp_path, monkeypatch):
     """The show hook runs on every launch, so on the Linux CI it must be inert."""
+    monkeypatch.setattr(sys, "platform", "linux")
     window = _window(tmp_path)
     calls: list[tuple[int, int, int]] = []
     monkeypatch.setattr("ate.app._dwm_set_window_attribute", lambda hwnd, attribute, value: calls.append((attribute, value)) or 0)

@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytest
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QRect
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QMouseEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QRect, QRectF
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QMouseEvent, QTextLayout, QTextOption
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -225,7 +225,7 @@ def _reference_lines(text: str, font, width: int) -> list[str]:
     return lines
 
 
-def _paint_text(font, text: str, width: int, height: int, pen: QColor | None = None) -> QImage:
+def _paint_text(font, text: str, width: int, height: int, pen: QColor | None = None, *, wrap: bool = True) -> QImage:
     """Qt painting ``text`` with ordinary word wrap in a ``width`` x ``height`` box: the
     reference a cell is compared with.
 
@@ -240,8 +240,8 @@ def _paint_text(font, text: str, width: int, height: int, pen: QColor | None = N
     if pen is not None:
         painter.setPen(pen)
     painter.drawText(QRect(0, 0, max(1, width), max(1, height)),
-                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
-                     text)
+                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                     | (Qt.TextFlag.TextWordWrap if wrap else Qt.TextFlag(0)), text)
     painter.end()
     return image
 
@@ -309,6 +309,11 @@ def _modal_ink(image: QImage, rect: QRect) -> int:
 
     The modal colour of a rect is its background whatever the stylesheet says, so the reference
     never depends on the code under test painting the right colour."""
+    # Widget geometry uses logical pixels; grab() returns physical pixels at
+    # the screen's device ratio (including fractional Windows display scaling).
+    ratio = image.devicePixelRatio()
+    rect = QRectF(rect.x() * ratio, rect.y() * ratio,
+                  rect.width() * ratio, rect.height() * ratio).toAlignedRect()
     colours = [(image.pixelColor(x, y).red(), image.pixelColor(x, y).green(), image.pixelColor(x, y).blue())
                for y in range(max(0, rect.top()), min(rect.bottom() + 1, image.height()))
                for x in range(max(0, rect.left()), min(rect.right() + 1, image.width()))]
@@ -418,8 +423,8 @@ def test_a_prose_value_is_never_cut_inside_a_word(qapp, tmp_path):
     The delegate painted with `TextWordWrap | TextWrapAnywhere`, and "break anywhere" means
     "break where the line runs out": a 74 px Actual column read "c/hannel", "wi/ndow" and
     "me/asured". The ink the cell paints has to be exactly the ink Qt's own word wrap paints for
-    the same text in the same rect, and no line may end flush against the edge of the text rect,
-    which is what a word cut in half looks like."""
+    the same text in the same rect. Line boundaries are checked against Qt word wrap;
+    glyph ink may legitimately reach the edge with some fonts."""
     screen = _three_pane_screen(qapp, tmp_path, width=1280)
     table = screen.table.table
     nodes, attempts = _long_state()
@@ -444,10 +449,21 @@ def test_a_prose_value_is_never_cut_inside_a_word(qapp, tmp_path):
         f"{len(painted ^ expected)} of them are in the wrong place, on rows "
         f"{sorted({y for _, y in painted ^ expected})[:8]}"
     )
-    for top, bottom, first, last in _line_blocks(cell, rect):
-        assert last < rect.right() - 1, (
-            f"the line at y {top}..{bottom} runs to the edge of the {rect.width()} px text rect: a word was cut"
-        )
+    wrapped = delegate._wrapped_text(LONG_ACTUAL, font, rect.width())
+    layout = QTextLayout(wrapped.replace("\n", "\u2028"), font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.NoWrap)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    lines = []
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(rect.width())
+        lines.append(wrapped[line.textStart():line.textStart() + line.textLength()].strip())
+    layout.endLayout()
+    assert " ".join(lines) == LONG_ACTUAL, "a painted line boundary splits a source word"
 
 
 def test_a_row_is_measured_at_the_width_qt_paints_the_cell_in(qapp, tmp_path):
@@ -824,17 +840,31 @@ def test_a_staged_row_wraps_an_unbroken_token(qapp, tmp_path):
     qapp.processEvents()
     row = view._step_rows[0]
     item = view.step_list.item(row)
+    item.setText("")  # isolate detail ink from the name, whose descenders may reach it
     delegate = view.step_list.itemDelegate()
     index = view.step_list.model().index(row)
     width = view.step_list.viewport().width()
     shown = _ink(_paint(delegate, index, width, item.sizeHint().height(), view.step_list))
     roomier = _ink(_paint(delegate, index, width, 2000, view.step_list))
     assert shown == roomier, f"the {item.sizeHint().height()} px row clipped {roomier - shown} ink pixels"
-    needed = _reference_ink(item.data(STEP_DETAIL_ROLE), StepRowDelegate()._detail_font(),
-                            width - StepRowDelegate.BADGE_MIN_WIDTH - 10)
-    assert shown >= 0.9 * needed, (
-        f"the unbroken value painted {shown} ink pixels where Qt's wrap needs {needed}"
-    )
+    # Compare detail alone: the delegate uses muted ink, not the reference's default
+    # black. Thresholded ink counts differ substantially between those on Windows.
+    from ate.ui.run_widgets import STEP_EMPHASIS_ROLE, STEP_RESULT_ROLE
+    from ate.ui.run_widgets import _detail_pen, _row_fill
+    emphasis = item.data(STEP_EMPHASIS_ROLE)
+    left = 5 if emphasis else 4
+    badge = delegate._badge_width(item.data(STEP_RESULT_ROLE), QRect(0, 0, width, 2000))
+    text_width = width - left - badge - 6
+    font = delegate._detail_font()
+    fill = TOKENS["failed_tint"] if emphasis == "failed" else _row_fill(index).color()
+    reference = _paint_text(font, "\n".join(_reference_lines(item.data(STEP_DETAIL_ROLE), font, text_width)),
+                            text_width, 2000, _detail_pen(fill), wrap=False)
+    cell = _paint(delegate, index, width, item.sizeHint().height(), view.step_list)
+    rect = QRect(left, 22, text_width, cell.height() - 22)
+    painted = _ink_positions(cell, rect)
+    expected = {(x + left, y + 22) for x, y in _ink_positions(
+        reference, QRect(0, 0, text_width, reference.height()))}
+    assert painted == expected, "the staged detail differs from the complete wrapped value"
 
 
 def test_staged_rows_are_measured_at_the_width_the_list_actually_has(qapp, tmp_path):

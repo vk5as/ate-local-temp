@@ -2315,7 +2315,7 @@ class StepRowDelegate(QStyledItemDelegate):
 _STEP_LIST_FALLBACK_WIDTH = 500
 
 
-def _step_row_height(result: str, detail: str, list_width: int) -> int:
+def _step_row_height(result: str, detail: str, list_width: int, emphasis: str = "") -> int:
     """The height a staged step row needs: 30 px without a detail line, 38 px with a single
     wrapped line, plus one more line of wrapped detail on top (packet 40b).
 
@@ -2325,9 +2325,19 @@ def _step_row_height(result: str, detail: str, list_width: int) -> int:
     the viewport reports its real width."""
     if not detail:
         return 30
-    badge = max(StepRowDelegate.BADGE_MIN_WIDTH, badge_width_for(result)) if result else StepRowDelegate.BADGE_MIN_WIDTH
-    width = (list_width if list_width > 0 else _STEP_LIST_FALLBACK_WIDTH) - 4 - badge - 6
-    return 22 + _wrapped_height(detail, mono_font(StepRowDelegate.DETAIL_FONT_PX), max(40, width)) + 3
+    list_width = list_width if list_width > 0 else _STEP_LIST_FALLBACK_WIDTH
+    delegate = StepRowDelegate()
+    badge = delegate._badge_width(result, QRect(0, 0, list_width, 0)) if result else delegate.BADGE_MIN_WIDTH
+    width = list_width - (5 if emphasis else 4) - badge - 6
+    font = delegate._detail_font()
+    wrapped = "\n".join(_wrap_lines(detail, font, max(1, width)))
+    # Measure the explicit lines with the same flags as paint(), rather than
+    # assuming lineSpacing() is the height drawText() uses on every platform.
+    height = QFontMetrics(font).boundingRect(
+        QRect(0, 0, max(1, width), 10000),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, wrapped,
+    ).height()
+    return max(38, 22 + height + 3)
 
 
 class _IncrementalRowFit(QObject):
@@ -2427,12 +2437,12 @@ class _RefitStepRows(_IncrementalRowFit):
             return
         detail = item.data(STEP_DETAIL_ROLE) or ""
         result = item.data(STEP_RESULT_ROLE) or ""
-        signature = (detail, result, widget.viewport().width())
+        signature = (detail, result, widget.viewport().width(), item.data(STEP_EMPHASIS_ROLE) or "")
         if self._sizes.get(index) == signature:
             return
         self._sizes[index] = signature
         if detail:
-            item.setSizeHint(QSize(0, _step_row_height(result, detail, signature[2])))
+            item.setSizeHint(QSize(0, _step_row_height(result, detail, signature[2], signature[3])))
 
 
 class ResultBadgeDelegate(QStyledItemDelegate):

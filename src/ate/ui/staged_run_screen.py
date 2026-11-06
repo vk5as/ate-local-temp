@@ -653,7 +653,7 @@ class RunView(QWidget):
             if widget is None:
                 # Packet 40b: a multiline or long detail wraps into more lines, and the row
                 # grows to show all of them; a single line is still the 38 px it always was.
-                item.setSizeHint(QSize(0, _step_row_height(result, detail, self.step_list.viewport().width())))
+                item.setSizeHint(QSize(0, _step_row_height(result, detail, self.step_list.viewport().width(), emphasis)))
             else:
                 # Not selectable: clicking the row itself means nothing; the controls inside it are
                 # the point. The indent is the widget's own left margin (the mockup's `.inputs`).
